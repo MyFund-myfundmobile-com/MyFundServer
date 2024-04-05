@@ -1132,7 +1132,7 @@ def autosave(request):
                 Transaction.objects.create(
                     user=user,
                     transaction_type="credit",
-                    amount=int(amount),
+                    amount=int(0),
                     date=timezone.now().date(),
                     time=timezone.now().time(),
                     description=f"AutoSave",
@@ -1415,7 +1415,7 @@ def autoinvest(request):
                 Transaction.objects.create(
                     user=user,
                     transaction_type="credit",
-                    amount=int(amount),
+                    amount=int(0),
                     date=timezone.now().date(),
                     time=timezone.now().time(),
                     description=f"AutoInvest",
