@@ -2740,7 +2740,7 @@ def paystack_webhook(request):
 
             amount = transaction.amount
 
-            if description == "QuickInvest":
+            if description[0] == "QuickInvest":
                 user.investment += int(amount)
 
                 subject = "QuickInvest Successful!"
@@ -2752,12 +2752,24 @@ def paystack_webhook(request):
                     subject, message, from_email, recipient_list, fail_silently=False
                 )
 
-            if description == "QuickSave" or description == "Card":
+            if description[0] == "QuickSave" or description[0] == "Card":
                 user.savings += int(amount)
 
+            if description[0] == "QuickSave":
                 # Send a confirmation email
                 subject = "QuickSave Successful!"
                 message = f"Well done {user.first_name},\n\nYour QuickInvest was successful and ₦{amount} has been successfully added to your INVESTMENTS account. \n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+                from_email = "MyFund <info@myfundmobile.com>"
+                recipient_list = [user.email]
+
+                send_mail(
+                    subject, message, from_email, recipient_list, fail_silently=False
+                )
+
+            if description[0] == "Card":
+                # Send a confirmation email
+                subject = "New Card Added Successfully"
+                message = f"Well done {user.first_name},\n\nYour card has been successfully added to your account. \n\nKeep growing your funds.🥂\n\nMyFund"
                 from_email = "MyFund <info@myfundmobile.com>"
                 recipient_list = [user.email]
 
