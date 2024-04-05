@@ -181,4 +181,6 @@ urlpatterns = [
     path("update-myfundpin/", views.update_myfund_pin, name="update-myfundpin"),
     path("has-myfundpin/", views.has_myfund_pin, name="has-myfundpin"),
     path("validate-myfundpin/", views.validate_myfund_pin, name="validate_myfundpin"),
+    path("submit_otp/", views.paystack_submit_otp, name="submit_otp"),
+    path("paystack-webhook/", views.paystack_webhook, name="paystack-webhook"),
 ]

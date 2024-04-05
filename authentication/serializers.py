@@ -233,6 +233,7 @@ class CardSerializer(serializers.ModelSerializer):
         card_number = validated_data["card_number"]
         cvv = validated_data["cvv"]
         validated_data["expiry_date"] = expiry_date  # Add this line
+        validated_data["pin"] = pin
 
         paystack_url = "https://api.paystack.co/charge"
         payload = {
@@ -253,9 +254,7 @@ class CardSerializer(serializers.ModelSerializer):
         }
 
         response = requests.post(paystack_url, json=payload, headers=headers)
-        print(response)
         paystack_response = response.json()
-        print("Paystack Response:", paystack_response)
 
         if paystack_response.get("status"):
             # Paystack payment successful

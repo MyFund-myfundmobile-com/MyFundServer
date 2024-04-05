@@ -13,6 +13,9 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 from pathlib import Path
 from datetime import timedelta
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # from channels_redis.core import RedisChannelLayer
 # import redis
@@ -31,7 +34,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/4.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = "django-insecure-rct_mdzr=x!99kwy+xy1$#x=5_+!_-dynu%z&!jx_-qkj7*%*%"
+SECRET_KEY = os.getenv("SECRET_KEY")
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = "RENDER" not in os.environ
@@ -182,6 +185,22 @@ DATABASES = {
         "PORT": "5432",
     }
 }
+
+
+# DATABASES = {
+#     "default": {
+#         "ENGINE": "mssql",
+#         "NAME": os.getenv("AZURE_DATABASE"),
+#         "USER": os.getenv("AZURE_USER"),
+#         "PASSWORD": os.getenv("AZURE_PASSWORD"),
+#         "HOST": os.getenv("AZURE_SERVER"),
+#         "PORT": os.getenv("AZURE_PORT"),
+#         "OPTIONS": {
+#             "driver": "ODBC Driver 18 for SQL Server",
+#         },
+#     }
+# }
+
 
 # DATABASES = {
 #     "default": dj_database_url.config(

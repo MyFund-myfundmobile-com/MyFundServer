@@ -513,6 +513,7 @@ class Transaction(models.Model):
         ("debit", "Debit"),
         ("pending", "Pending"),
         ("confirmed", "Confirmed"),
+        ("failed", "Failed"),
     )
 
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
