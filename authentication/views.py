@@ -2679,9 +2679,58 @@ def paystack_submit_otp(request):
         }
 
         response = requests.post(paystack_url, json=payload, headers=headers)
-        print(response)
         paystack_response = response.json()
-        print(paystack_response)
+
+        if paystack_response["data"]["status"] == "success":
+            transaction = Transaction.objects.get(transaction_id=reference)
+            description = transaction.description
+            description = description.split(" ")
+            user = transaction.user
+
+            transaction.transaction_type = "credit"
+            transaction.description = description[0] + "(successful)"
+            transaction.save()
+
+            amount = transaction.amount
+
+            if description[0] == "QuickInvest":
+                user.investment += int(amount)
+
+                subject = "QuickInvest Successful!"
+                message = f"Well done {user.first_name},\n\nYour QuickInvest was successful and ₦{amount} has been successfully added to your INVESTMENTS account. \n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+                from_email = "MyFund <info@myfundmobile.com>"
+                recipient_list = [user.email]
+
+                send_mail(
+                    subject,
+                    message,
+                    from_email,
+                    recipient_list,
+                    fail_silently=False,
+                )
+
+            if description[0] == "QuickSave":
+                user.savings += int(amount)
+
+                # Send a confirmation email
+                subject = "QuickSave Successful!"
+                message = f"Well done {user.first_name},\n\nYour QuickInvest was successful and ₦{amount} has been successfully added to your INVESTMENTS account. \n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+                from_email = "MyFund <info@myfundmobile.com>"
+                recipient_list = [user.email]
+
+                send_mail(
+                    subject,
+                    message,
+                    from_email,
+                    recipient_list,
+                    fail_silently=False,
+                )
+
+            user.confirm_referral_rewards(is_referrer=True)
+            user.update_total_savings_and_investment_this_month()
+            user.save()
+
+            return JsonResponse(paystack_response, status=status.HTTP_200_OK)
 
         return JsonResponse(paystack_response, status=status.HTTP_200_OK)
 
@@ -2752,24 +2801,11 @@ def paystack_webhook(request):
                     subject, message, from_email, recipient_list, fail_silently=False
                 )
 
-            if description[0] == "QuickSave" or description[0] == "Card":
+            if description[0] == "QuickSave":
                 user.savings += int(amount)
 
-            if description[0] == "QuickSave":
-                # Send a confirmation email
                 subject = "QuickSave Successful!"
                 message = f"Well done {user.first_name},\n\nYour QuickInvest was successful and ₦{amount} has been successfully added to your INVESTMENTS account. \n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-                from_email = "MyFund <info@myfundmobile.com>"
-                recipient_list = [user.email]
-
-                send_mail(
-                    subject, message, from_email, recipient_list, fail_silently=False
-                )
-
-            if description[0] == "Card":
-                # Send a confirmation email
-                subject = "New Card Added Successfully"
-                message = f"Well done {user.first_name},\n\nYour card has been successfully added to your account. \n\nKeep growing your funds.🥂\n\nMyFund"
                 from_email = "MyFund <info@myfundmobile.com>"
                 recipient_list = [user.email]
 

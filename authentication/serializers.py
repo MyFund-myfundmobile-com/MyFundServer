@@ -247,7 +247,6 @@ class CardSerializer(serializers.ModelSerializer):
             },
             "email": user.email,
             "amount": 50 * 100,  # Amount in kobo (N50)
-            "pin": pin,
             "reference": unique_reference,  # You need to generate a unique reference
         }
         headers = {
@@ -260,44 +259,26 @@ class CardSerializer(serializers.ModelSerializer):
         print(paystack_response)
 
         if paystack_response.get("status"):
-            # Paystack payment successful
-            # Update user's savings
-
-            paystack_message = paystack_response["message"]
-            paystack_reference = paystack_response["data"]["reference"]
-            paystack_display_text = paystack_response["data"]["display_text"]
-            paystack_status = paystack_response["data"]["status"]
-
             validated_data["user"] = user
             card = Card.objects.create(**validated_data)
 
-            # Create a Transaction object
-            now = timezone.now()
-            transaction_id = (
-                unique_reference  # Use the same reference as for the payment
-            )
-            transaction_data = {
-                "user": user,
-                "transaction_type": "pending",
-                "amount": 50,  # The amount of the successful payment
-                "date": now.date(),  # Use DateField for date
-                "time": now.time(),  # Use TimeField for time
-                "transaction_id": transaction_id,
-                "description": "Card (pending)",  # You can set any description you want
+            subject = "New Card Added Successfully"
+            message = f"Well done {user.first_name},\n\nYour card has been successfully added to your account. \n\nKeep growing your funds.🥂\n\nMyFund"
+            from_email = "MyFund <info@myfundmobile.com>"
+            recipient_list = [user.email]
+
+            send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+
+            return {
+                "id": card.id,
+                "bank_name": card.bank_name,
+                "card_number": card.card_number,
+                "expiry_date": expiry_date,  # Return the parsed expiry_date
+                "cvv": card.cvv,
+                "pin": card.pin,
+                "is_default": card.is_default,
+                "reference": paystack_response.get("data", {}).get("reference"),
             }
-            transaction = Transaction.objects.create(**transaction_data)
-
-            # Notify the WebSocket consumer about the successful transaction
-
-            return JsonResponse(
-                {
-                    "message": paystack_message,
-                    "reference": paystack_reference,
-                    "display_text": paystack_display_text,
-                    "status": paystack_status,
-                },
-                status=status.HTTP_200_OK,
-            )
 
         else:
             print(
