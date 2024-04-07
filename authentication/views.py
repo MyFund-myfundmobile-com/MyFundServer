@@ -1035,7 +1035,7 @@ def quicksave(request):
                 "message": paystack_response["data"]["message"],
                 "error": "QuickSave failed",
             },
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status=status.HTTP_400_BAD_REQUEST,
         )
 
 
@@ -1311,7 +1311,7 @@ def quickinvest(request):
                 "message": paystack_response["data"]["message"],
                 "error": "QuickInvest failed",
             },
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status=status.HTTP_400_BAD_REQUEST,
         )
 
 
