@@ -1012,7 +1012,6 @@ def quicksave(request):
         user = request.user
         paystack_message = paystack_response["message"]
         paystack_reference = paystack_response["data"]["reference"]
-        paystack_display_text = paystack_response["data"]["display_text"]
         paystack_status = paystack_response["data"]["status"]
 
         #     Create a transaction record
@@ -1026,15 +1025,29 @@ def quicksave(request):
             transaction_id=paystack_reference,
         )
 
-        return Response(
-            {
-                "message": paystack_message,
-                "reference": paystack_reference,
-                "display_text": paystack_display_text,
-                "status": paystack_status,
-            },
-            status=status.HTTP_200_OK,
-        )
+        if paystack_response["data"]["status"] == "open_url":
+            paystack_otp_url = paystack_response["data"]["url"]
+            return Response(
+                {
+                    "message": paystack_message,
+                    "reference": paystack_reference,
+                    "open_url": paystack_otp_url,
+                    "status": paystack_status,
+                },
+                status=status.HTTP_200_OK,
+            )
+        else:
+            paystack_display_text = paystack_response["data"]["display_text"]
+
+            return Response(
+                {
+                    "message": paystack_message,
+                    "reference": paystack_reference,
+                    "display_text": paystack_display_text,
+                    "status": paystack_status,
+                },
+                status=status.HTTP_200_OK,
+            )
     else:
         # Payment failed, return an error response
         return JsonResponse(
