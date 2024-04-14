@@ -972,7 +972,7 @@ def quicksave(request):
 
     if amount == None:
         return Response(
-            { "error": "Amount not inputted"},
+            {"error": "Amount not inputted"},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
@@ -1006,6 +1006,7 @@ def quicksave(request):
 
     response = requests.post(paystack_url, json=payload, headers=headers)
     paystack_response = response.json()
+    print(paystack_response)
 
     if paystack_response.get("status"):
         user = request.user
