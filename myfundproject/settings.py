@@ -183,6 +183,9 @@ DATABASES = {
         "PASSWORD": "O2ZGNXqyYK6B",
         "HOST": "ep-white-sun-a2b25jzt.eu-central-1.aws.neon.fl0.io",
         "PORT": "5432",
+        "OPTIONS": {
+            "sslmode": "require",
+        },
     }
 }
 # DATABASES = {

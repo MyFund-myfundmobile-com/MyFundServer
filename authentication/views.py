@@ -970,6 +970,12 @@ def quicksave(request):
     card_id = request.data.get("card_id")
     amount = request.data.get("amount")
 
+    if amount == None:
+        return Response(
+            { "error": "Amount not inputted"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
     # Retrieve the card details from your database
     try:
         card = Card.objects.get(id=card_id)
