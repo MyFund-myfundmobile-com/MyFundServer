@@ -2687,6 +2687,7 @@ def paystack_submit_otp(request):
 
         response = requests.post(paystack_url, json=payload, headers=headers)
         paystack_response = response.json()
+        print(paystack_response)
 
         if paystack_response["data"]["status"] == "success":
             transaction = Transaction.objects.get(transaction_id=reference)
