@@ -2763,7 +2763,7 @@ def paystack_submit_otp(request):
 
 def verify(event_data, signature, api_secret_key):
     expected_signature = hmac.new(
-        api_secret_key.encode(), event_data.encode(), hashlib.sha512
+        api_secret_key.encode(), str(event_data).encode(), hashlib.sha512
     ).hexdigest()
     return expected_signature == signature
 
