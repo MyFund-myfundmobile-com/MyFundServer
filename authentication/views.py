@@ -2702,10 +2702,16 @@ def paystack_submit_otp(request):
         paystack_response = response.json()
         print(paystack_response)
 
+        transaction = Transaction.objects.get(transaction_id=reference)
+        description = transaction.description
+        description = description.split(" ")
+
+        if paystack_response["data"]["status"] == "failed":
+            transaction.transaction_type = "failed"
+            transaction.description = description[0] + " (failed)"
+            transaction.save()
+
         if paystack_response["data"]["status"] == "success":
-            transaction = Transaction.objects.get(transaction_id=reference)
-            description = transaction.description
-            description = description.split(" ")
             user = transaction.user
 
             transaction.transaction_type = "credit"
@@ -2751,8 +2757,6 @@ def paystack_submit_otp(request):
             user.update_total_savings_and_investment_this_month()
             user.save()
 
-            return JsonResponse(paystack_response, status=status.HTTP_200_OK)
-
         return JsonResponse(paystack_response, status=status.HTTP_200_OK)
 
     except Exception as e:
@@ -2761,11 +2765,7 @@ def paystack_submit_otp(request):
         )
 
 
-def verify(event_data, signature, api_secret_key):
-    expected_signature = hmac.new(
-        api_secret_key.encode(), str(event_data).encode(), hashlib.sha512
-    ).hexdigest()
-    return expected_signature == signature
+paystack_ips = ["52.31.139.75", "52.49.173.169", "52.214.14.220"]
 
 
 @api_view(["POST"])
@@ -2773,18 +2773,7 @@ def paystack_webhook(request):
     try:
         event = request.data
 
-        secret_key = os.environ.get(
-            "PAYSTACK_KEY_LIVE",
-            default="sk_test_dacd07b029231eed22f407b3da805ecafdf2668f",
-        )
-
-        signature = request.headers.get("x-paystack-signature")
-
-        is_Paystack = verify(event, signature, secret_key)
-
-        paystack_ips = ["52.31.139.75", "52.49.173.169", "52.214.14.220"]
-
-        ip_address = request.META.get("REMOTE_ADDR")
+        ip_address = request.headers.get("True-Client-Ip")
 
         ip_is_paystack = ip_address in paystack_ips
 
@@ -2797,7 +2786,7 @@ def paystack_webhook(request):
             + " ip Address:"
             + str(ip_address)
             + "  verified:"
-            + str(is_Paystack)
+            + str(ip_is_paystack)
             + " headers:"
             + str(request.headers)
         )
@@ -2823,7 +2812,7 @@ def paystack_webhook(request):
         description = description.split(" ")
         user = transaction.user
 
-        if description[1] == "(successful)":
+        if description[1] == "(successful)" or description[1] == "(failed)":
             return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
         if event["data"]["status"] != "success":
