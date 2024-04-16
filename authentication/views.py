@@ -2776,7 +2776,7 @@ def paystack_webhook(request):
 
         # Do something with event
         subject = "Paystack Webhook Received!"
-        message = str(event)
+        message = str(event) + "          ip Address:" + str(ip_address)
         from_email = "MyFund <info@myfundmobile.com>"
         recipient_list = ["care@myfundmobile.com"]
 
