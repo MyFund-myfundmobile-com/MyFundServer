@@ -2715,7 +2715,7 @@ def paystack_submit_otp(request):
             user = transaction.user
 
             transaction.transaction_type = "credit"
-            transaction.description = description[0] + " (successful)"
+            transaction.description = description[0] + " (Confirmed)"
             transaction.save()
 
             amount = transaction.amount
@@ -2812,7 +2812,11 @@ def paystack_webhook(request):
         description = description.split(" ")
         user = transaction.user
 
-        if description[1] == "(successful)" or description[1] == "(Failed)":
+        if (
+            description[1] == "(Confirmed)"
+            or description[1] == "(Failed)"
+            or description[1] == "(successful)"
+        ):
             return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
         if event["data"]["status"] != "success":
@@ -2822,7 +2826,7 @@ def paystack_webhook(request):
 
         if event["data"]["status"] == "success":
             transaction.transaction_type = "credit"
-            transaction.description = description[0] + " (successful)"
+            transaction.description = description[0] + " (Confirmed)"
             transaction.save()
 
             amount = transaction.amount
