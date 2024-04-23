@@ -1021,7 +1021,7 @@ def quicksave(request):
             amount=int(amount),
             date=timezone.now().date(),
             time=timezone.now().time(),
-            description="QuickSave pending",
+            description="QuickSave (pending)",
             transaction_id=paystack_reference,
         )
 
@@ -1310,7 +1310,7 @@ def quickinvest(request):
             amount=int(amount),
             date=timezone.now().date(),
             time=timezone.now().time(),
-            description="QuickInvest pending",
+            description="QuickInvest (pending)",
             transaction_id=paystack_reference,
         )
 
@@ -2708,7 +2708,7 @@ def paystack_submit_otp(request):
 
         if paystack_response["data"]["status"] == "failed":
             transaction.transaction_type = "failed"
-            transaction.description = description[0] + " (failed)"
+            transaction.description = description[0] + " (Failed)"
             transaction.save()
 
         if paystack_response["data"]["status"] == "success":
@@ -2812,12 +2812,12 @@ def paystack_webhook(request):
         description = description.split(" ")
         user = transaction.user
 
-        if description[1] == "(successful)" or description[1] == "(failed)":
+        if description[1] == "(successful)" or description[1] == "(Failed)":
             return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
         if event["data"]["status"] != "success":
             transaction.transaction_type = "failed"
-            transaction.description = description[0] + " (failed)"
+            transaction.description = description[0] + " (Failed)"
             transaction.save()
 
         if event["data"]["status"] == "success":
