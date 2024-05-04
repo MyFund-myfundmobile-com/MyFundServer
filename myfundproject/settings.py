@@ -180,7 +180,7 @@ DATABASES = {
         "ENGINE": "django.db.backends.postgresql",
         "NAME": "defaultdb",
         "USER": "avnadmin",
-        "PASSWORD": "AVNS_ZUuv1HH07NMTbGZsZCS",
+        "PASSWORD": os.getenv("DATABASE_PASSWORD"),
         "HOST":"myfunddb-myfund.d.aivencloud.com",
         "PORT": "28122",
         "OPTIONS": {
