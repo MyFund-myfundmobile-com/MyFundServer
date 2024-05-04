@@ -178,16 +178,29 @@ WSGI_APPLICATION = "myfundproject.wsgi.application"
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
-        "NAME": "myFund",
-        "USER": "fl0user",
-        "PASSWORD": "O2ZGNXqyYK6B",
-        "HOST": "ep-white-sun-a2b25jzt.eu-central-1.aws.neon.fl0.io",
-        "PORT": "5432",
+        "NAME": "defaultdb",
+        "USER": "avnadmin",
+        "PASSWORD": "AVNS_ZUuv1HH07NMTbGZsZCS",
+        "HOST":"myfunddb-myfund.d.aivencloud.com",
+        "PORT": "28122",
         "OPTIONS": {
             "sslmode": "require",
         },
     }
 }
+# DATABASES = {
+#     "default": {
+#         "ENGINE": "django.db.backends.postgresql",
+#         "NAME": "myFund",
+#         "USER": "myFund",
+#         "PASSWORD": "O2ZGNXqyYK6B",
+#         "HOST": "ep-white-sun-a2b25jzt.eu-central-1.aws.neon.fl0.io",
+#         "PORT": "5432",
+#         "OPTIONS": {
+#             "sslmode": "require",
+#         },
+#     }
+# }
 # DATABASES = {
 #     "default": {
 #         "ENGINE": "django.db.backends.postgresql",
