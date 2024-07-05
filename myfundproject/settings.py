@@ -291,7 +291,7 @@ EMAIL_USE_SSL = True  # Use SSL for secure connection
 
 # For SMTP authentication
 EMAIL_HOST_USER = "info@myfundmobile.com"
-EMAIL_HOST_PASSWORD = "Reproduce1.."
+EMAIL_HOST_PASSWORD = "Reproduction1..."
 
 # Other settings
 DEFAULT_FROM_EMAIL = (
