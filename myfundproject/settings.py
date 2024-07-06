@@ -37,7 +37,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = os.getenv("SECRET_KEY")
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = "RENDER" not in os.environ
+DEBUG = False if os.environ.get("KOYEB_PUBLIC_DOMAIN") else True
 
 ALLOWED_HOSTS = [
     "127.0.0.1",
@@ -50,14 +50,12 @@ ALLOWED_HOSTS = [
     "10.10.4.174",
     "192.168.84.34",
     "10.10.4.174",
-    "192.168.0.148",
-    "192.168.137.1"
 ]
 
 
-RENDER_EXTERNAL_HOSTNAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
-if RENDER_EXTERNAL_HOSTNAME:
-    ALLOWED_HOSTS.append(RENDER_EXTERNAL_HOSTNAME)
+KOYEB_EXTERNAL_HOSTNAME = os.environ.get("KOYEB_PUBLIC_DOMAIN")
+if KOYEB_EXTERNAL_HOSTNAME:
+    ALLOWED_HOSTS.append(KOYEB_EXTERNAL_HOSTNAME)
 
 
 # Application definition
@@ -139,6 +137,8 @@ CORS_ALLOWED_ORIGINS = [
     "https://myfund.onrender.com",
 ]
 
+if KOYEB_EXTERNAL_HOSTNAME:
+    CORS_ALLOWED_ORIGINS.append(KOYEB_EXTERNAL_HOSTNAME)
 
 # Excluding CSRF middleware for password reset endpoints
 CSRF_EXCLUDE_URLS = [
@@ -183,7 +183,7 @@ DATABASES = {
         "NAME": "defaultdb",
         "USER": "avnadmin",
         "PASSWORD": os.getenv("DATABASE_PASSWORD"),
-        "HOST":"myfunddb-myfund.d.aivencloud.com",
+        "HOST": "myfunddb-myfund.d.aivencloud.com",
         "PORT": "28122",
         "OPTIONS": {
             "sslmode": "require",
@@ -291,7 +291,7 @@ EMAIL_USE_SSL = True  # Use SSL for secure connection
 
 # For SMTP authentication
 EMAIL_HOST_USER = "info@myfundmobile.com"
-EMAIL_HOST_PASSWORD = "Reproduce1.."
+EMAIL_HOST_PASSWORD = "Reproduction1..."
 
 # Other settings
 DEFAULT_FROM_EMAIL = (
