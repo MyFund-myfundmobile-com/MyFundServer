@@ -45,11 +45,10 @@ ALLOWED_HOSTS = [
     "10.0.101.10",
     "myfund.onrender.com",
     "localhost",
-    "192.168.226.34",
-    "192.168.176.34",
-    "10.10.4.174",
-    "192.168.84.34",
-    "10.10.4.174",
+    "10.10.10.226",
+    "192.168.64.60",
+    "192.168.226.60",
+    "192.168.14.60",
 ]
 
 
@@ -83,8 +82,6 @@ ADMIN_URL = "admin/"
 
 
 # Celery settings
-# CELERY_BROKER_URL = 'redis://localhost:6379/0'  # Use the appropriate broker URL for your environment.
-# CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'  # Use the appropriate result backend URL for your environment.
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
@@ -285,18 +282,16 @@ AUTH_USER_MODEL = "authentication.CustomUser"
 
 # EMAIL SETTINGS
 EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
-EMAIL_HOST = "premium70.web-hosting.com"
+EMAIL_HOST = "myfundmobile.com"
 EMAIL_PORT = 465
 EMAIL_USE_SSL = True  # Use SSL for secure connection
 
 # For SMTP authentication
 EMAIL_HOST_USER = "info@myfundmobile.com"
-EMAIL_HOST_PASSWORD = "Reproduce1.."
+EMAIL_HOST_PASSWORD = "Reproduction1..."
 
 # Other settings
-DEFAULT_FROM_EMAIL = (
-    "MyFund <info@myfundmobile.com>"  # Set the default sender email address
-)
+DEFAULT_FROM_EMAIL = "MyFund <info@myfundmobile.com>"
 
 APPEND_SLASH = True
 
