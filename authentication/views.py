@@ -85,7 +85,7 @@ def signup(request):
                 user=user.referral,
                 referral_email=user.email,  # Include the referral email
                 transaction_type="pending",
-                amount=1000,
+                amount=500,
                 description="Referral Reward (Pending)",
                 transaction_id=transaction_id,
             )
@@ -98,15 +98,15 @@ def signup(request):
                 user=user,
                 referral_email=user.referral.email,  # Include the referrer's email
                 transaction_type="pending",
-                amount=1000,
+                amount=500,
                 description="Referral Reward (Pending)",
                 transaction_id=transaction_id,
             )
             credit_transaction_referred.save()
 
             # Update the user and referrer's pending reward
-            user.referral.pending_referral_reward = F("pending_referral_reward") + 1000
-            user.pending_referral_reward = F("pending_referral_reward") + 1000
+            user.referral.pending_referral_reward = F("pending_referral_reward") + 500
+            user.pending_referral_reward = F("pending_referral_reward") + 500
 
             user.referral.save()
 
