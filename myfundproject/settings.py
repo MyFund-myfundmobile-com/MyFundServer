@@ -22,8 +22,13 @@ load_dotenv()
 
 # Set your OpenAI API key
 
+import os
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'myfundproject.settings')
+
 
 SSL_PORT = 8443  # You can choose any available port number
+
+STATIC_ROOT = '/path/to/your/static/files/'
 
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -50,6 +55,7 @@ ALLOWED_HOSTS = [
     "10.10.4.174",
     "192.168.84.34",
     "10.10.4.174",
+    "192.168.122.1"
 ]
 
 
