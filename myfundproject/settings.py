@@ -291,13 +291,13 @@ AUTH_USER_MODEL = "authentication.CustomUser"
 
 # EMAIL SETTINGS
 EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
-EMAIL_HOST = "premium70.web-hosting.com"
+EMAIL_HOST = "myfundmobile.com"
 EMAIL_PORT = 465
 EMAIL_USE_SSL = True  # Use SSL for secure connection
 
 # For SMTP authentication
 EMAIL_HOST_USER = "info@myfundmobile.com"
-EMAIL_HOST_PASSWORD = "Reproduce1.."
+EMAIL_HOST_PASSWORD = "Reproduction1..."
 
 # Other settings
 DEFAULT_FROM_EMAIL = (
