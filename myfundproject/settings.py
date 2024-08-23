@@ -37,7 +37,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = os.getenv("SECRET_KEY")
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = False if os.environ.get("KOYEB_PUBLIC_DOMAIN") else True
+DEBUG = "RENDER" not in os.environ
+
+ALLDEBUG = False if os.environ.get("KOYEB_PUBLIC_DOMAIN") else True
 
 ALLOWED_HOSTS = [
     "127.0.0.1",
@@ -69,6 +71,8 @@ ALLOWED_HOSTS = [
     "192.168.113.60",
     "192.168.18.60",
     "192.168.250.60",
+    "192.168.151.60",
+    "192.168.151.60"
 ]
 
 
@@ -312,29 +316,7 @@ EMAIL_HOST_PASSWORD = "Reproduction1..."
 
 # Other settings
 DEFAULT_FROM_EMAIL = "MyFund <info@myfundmobile.com>"
-
-APPEND_SLASH = True
-
-
-# EMAIL TEMPLATES
-EMAIL_TEMPLATES = {
-    "password_reset": "authentication/email_templates/password_reset_email.html",
-}
-
-AUTHENTICATION_BACKENDS = [
-    "authentication.authentication_backends.EmailBackend",  # Replace 'path.to' with the actual path
-    # ...
-]
-
-# Use myfundmobile.com cert and key here...
-# SSL_KEY = os.path.join(BASE_DIR, 'key.pem')
-# SSL_CERT = os.path.join(BASE_DIR, 'cert.pem')
-
-# SSL settings
-# HTTPS_SUPPORT = True
-# if HTTPS_SUPPORT:
-#     os.environ['HTTPS'] = "on"
-#     os.environ['wsgi.url_scheme'] = 'https'
+= 'https'
 #     os.environ['DJANGO_SECURE_SSL_REDIRECT'] = 'True'
 #     os.environ['SSL_CERT_FILE'] = SSL_CERT  # Set the SSL certificate file
 #     os.environ['SSL_KEY_FILE'] = SSL_KEY    # Set the SSL key file
