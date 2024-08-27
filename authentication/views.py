@@ -107,6 +107,8 @@ def signup(request):
             # Update the user and referrer's pending reward
             user.referral.pending_referral_reward = F("pending_referral_reward") + 500
             user.pending_referral_reward = F("pending_referral_reward") + 500
+            user.referral.pending_referral_reward = F("pending_referral_reward") + 500
+            user.pending_referral_reward = F("pending_referral_reward") + 500
 
             user.referral.save()
 
