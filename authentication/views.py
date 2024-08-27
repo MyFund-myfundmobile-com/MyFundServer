@@ -107,6 +107,8 @@ def signup(request):
             # Update the user and referrer's pending reward
             user.referral.pending_referral_reward = F("pending_referral_reward") + 500
             user.pending_referral_reward = F("pending_referral_reward") + 500
+            user.referral.pending_referral_reward = F("pending_referral_reward") + 500
+            user.pending_referral_reward = F("pending_referral_reward") + 500
 
             user.referral.save()
 
@@ -1799,13 +1801,13 @@ def withdraw_to_local_bank(request):
     # Calculate the service charge based on the source account
     service_charge_percentage = 0.0
     if source_account == "savings":
-        service_charge_percentage = 5
-    elif source_account == "investment":
         service_charge_percentage = 10
+    elif source_account == "investment":
+        service_charge_percentage = 15
 
     # Calculate the service charge and total withdrawal amount
     service_charge = (service_charge_percentage / 100) * float(amount)
-    total_amount = float(amount) + service_charge
+    withdrawal_amount = float(amount) - service_charge
 
     # Generate a unique transaction ID
     transaction_id = str(uuid.uuid4())[:16]
@@ -1815,9 +1817,9 @@ def withdraw_to_local_bank(request):
         transaction = Transaction(
             user=user,
             transaction_type="debit",
-            amount=amount,
+            amount=withdrawal_amount,
             service_charge=service_charge,
-            total_amount=total_amount,
+            total_amount=amount,
             date=timezone.now().date(),
             time=timezone.now().time(),
             description=f"Withdrawal ({source_account.capitalize()} > Bank)",
@@ -1827,14 +1829,14 @@ def withdraw_to_local_bank(request):
 
         # Perform the withdrawal to the local bank using Paystack API
         paystack_response = make_withdrawal_to_local_bank(
-            user, target_bank_account, total_amount
+            user, target_bank_account, withdrawal_amount
         )
         print("Paystack API Response:", paystack_response)
 
         if paystack_response.get("data", {}).get("status") == "success":
             # Deduct the total amount (including service charge) from the source account
             # Convert total_amount to Decimal
-            total_amount_decimal = Decimal(total_amount)
+            total_amount_decimal = Decimal(amount)
             print(
                 f"Before deduction - {source_account.capitalize()} balance: {user.savings if source_account == 'savings' else user.investment if source_account == 'investment' else user.wallet}"
             )
