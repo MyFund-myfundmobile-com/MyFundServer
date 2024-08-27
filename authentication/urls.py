@@ -48,7 +48,7 @@ urlpatterns = [
         views.profile_picture_update,
         name="profile-picture-update",
     ),
-    # Savings-related APIs
+    # Savings goal-related APIs
     path("update-savings-goal/", views.update_savings_goal, name="update-savings-goal"),
     # Admin-related APIs
     path("send-message/<int:recipient_id>/", views.send_message, name="send-message"),

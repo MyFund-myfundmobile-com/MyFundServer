@@ -42,7 +42,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = os.getenv("SECRET_KEY")
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = False if os.environ.get("KOYEB_PUBLIC_DOMAIN") else True
+DEBUG = "RENDER" not in os.environ
+
+ALLDEBUG = False if os.environ.get("KOYEB_PUBLIC_DOMAIN") else True
 
 ALLOWED_HOSTS = [
     "127.0.0.1",
@@ -50,12 +52,12 @@ ALLOWED_HOSTS = [
     "10.0.101.10",
     "myfund.onrender.com",
     "localhost",
-    "192.168.226.34",
-    "192.168.176.34",
-    "10.10.4.174",
-    "192.168.84.34",
-    "10.10.4.174",
-    "172.18.0.1"
+    "10.10.10.226",
+    "192.168.10.60",
+    "192.168.136.60",
+    "192.168.170.60",
+    "192.168.22.60",
+    "192.168.235.60",
 ]
 
 
@@ -89,8 +91,6 @@ ADMIN_URL = "admin/"
 
 
 # Celery settings
-# CELERY_BROKER_URL = 'redis://localhost:6379/0'  # Use the appropriate broker URL for your environment.
-# CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'  # Use the appropriate result backend URL for your environment.
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
@@ -292,40 +292,19 @@ AUTH_USER_MODEL = "authentication.CustomUser"
 # EMAIL SETTINGS
 EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
 EMAIL_HOST = "myfundmobile.com"
+EMAIL_HOST = "myfundmobile.com"
 EMAIL_PORT = 465
 EMAIL_USE_SSL = True  # Use SSL for secure connection
 
 # For SMTP authentication
 EMAIL_HOST_USER = "info@myfundmobile.com"
 EMAIL_HOST_PASSWORD = "Reproduction1..."
+EMAIL_HOST_PASSWORD = "Reproduction1..."
 
 # Other settings
-DEFAULT_FROM_EMAIL = (
-    "MyFund <info@myfundmobile.com>"  # Set the default sender email address
-)
+DEFAULT_FROM_EMAIL = "MyFund <info@myfundmobile.com>"
+PROTOCOL = "https"
 
-APPEND_SLASH = True
-
-
-# EMAIL TEMPLATES
-EMAIL_TEMPLATES = {
-    "password_reset": "authentication/email_templates/password_reset_email.html",
-}
-
-AUTHENTICATION_BACKENDS = [
-    "authentication.authentication_backends.EmailBackend",  # Replace 'path.to' with the actual path
-    # ...
-]
-
-# Use myfundmobile.com cert and key here...
-# SSL_KEY = os.path.join(BASE_DIR, 'key.pem')
-# SSL_CERT = os.path.join(BASE_DIR, 'cert.pem')
-
-# SSL settings
-# HTTPS_SUPPORT = True
-# if HTTPS_SUPPORT:
-#     os.environ['HTTPS'] = "on"
-#     os.environ['wsgi.url_scheme'] = 'https'
 #     os.environ['DJANGO_SECURE_SSL_REDIRECT'] = 'True'
 #     os.environ['SSL_CERT_FILE'] = SSL_CERT  # Set the SSL certificate file
 #     os.environ['SSL_KEY_FILE'] = SSL_KEY    # Set the SSL key file

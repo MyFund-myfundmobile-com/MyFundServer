@@ -295,8 +295,12 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                     # Deduct the credited amount from the pending referral rewards
                     self.pending_referral_reward -= 500
                     self.referral.pending_referral_reward -= 500
+                    self.pending_referral_reward -= 500
+                    self.referral.pending_referral_reward -= 500
 
                     # Update the wallets of both users
+                    self.wallet += 500
+                    self.referral.wallet += 500
                     self.wallet += 500
                     self.referral.wallet += 500
 
