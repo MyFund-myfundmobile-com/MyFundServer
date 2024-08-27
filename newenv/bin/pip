@@ -1,5 +1,5 @@
 #!/bin/sh
-'''exec' "/Users/Downloads/MY PROJECTS/PUNCH-1/MyFundServer/newenv/bin/python3" "$0" "$@"
+'''exec' "/Users/Downloads/MY PROJECTS/PUNCH-1/MyFundServer/newenv/bin/python3.12" "$0" "$@"
 ' '''
 # -*- coding: utf-8 -*-
 import re

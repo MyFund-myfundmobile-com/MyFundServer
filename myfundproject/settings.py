@@ -51,28 +51,8 @@ ALLOWED_HOSTS = [
     "192.168.10.60",
     "192.168.136.60",
     "192.168.170.60",
-    "192.168.50.60",
-    "192.168.144.60",
-    "192.168.21.60",
-    "192.168.1.178",
-    "192.168.156.60",
-    "192.168.225.60",
-    "192.168.71.60",
-    "172.20.10.2",
-    "192.168.31.60",
-    "192.168.70.60",
-    "172.20.10.2",
-    "192.168.164.60",
-    "192.168.5.60",
-    "192.168.213.60",
-    "192.168.213.60",
-    "192.168.52.60",
-    "192.168.125.60",
-    "192.168.113.60",
-    "192.168.18.60",
-    "192.168.250.60",
-    "192.168.151.60",
-    "192.168.151.60"
+    "192.168.22.60",
+    "192.168.235.60",
 ]
 
 
@@ -316,7 +296,8 @@ EMAIL_HOST_PASSWORD = "Reproduction1..."
 
 # Other settings
 DEFAULT_FROM_EMAIL = "MyFund <info@myfundmobile.com>"
-= 'https'
+PROTOCOL = "https"
+
 #     os.environ['DJANGO_SECURE_SSL_REDIRECT'] = 'True'
 #     os.environ['SSL_CERT_FILE'] = SSL_CERT  # Set the SSL certificate file
 #     os.environ['SSL_KEY_FILE'] = SSL_KEY    # Set the SSL key file
