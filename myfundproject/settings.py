@@ -23,12 +23,13 @@ load_dotenv()
 # Set your OpenAI API key
 
 import os
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'myfundproject.settings')
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "myfundproject.settings")
 
 
 SSL_PORT = 8443  # You can choose any available port number
 
-STATIC_ROOT = '/path/to/your/static/files/'
+STATIC_ROOT = "/path/to/your/static/files/"
 
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -196,44 +197,7 @@ DATABASES = {
         },
     }
 }
-# DATABASES = {
-#     "default": {
-#         "ENGINE": "django.db.backends.postgresql",
-#         "NAME": "myFund",
-#         "USER": "myFund",
-#         "PASSWORD": "O2ZGNXqyYK6B",
-#         "HOST": "ep-white-sun-a2b25jzt.eu-central-1.aws.neon.fl0.io",
-#         "PORT": "5432",
-#         "OPTIONS": {
-#             "sslmode": "require",
-#         },
-#     }
-# }
-# DATABASES = {
-#     "default": {
-#         "ENGINE": "django.db.backends.postgresql",
-#         "NAME": "myfund_db_6l04",
-#         "USER": "myfund_db_6l04_user",
-#         "PASSWORD": "9fGOA4kijCHJznvawsmtR6fnS8ef5qmM",
-#         "HOST": "dpg-cmg4v4qcn0vc73abh52g-a.frankfurt-postgres.render.com",
-#         "PORT": "5432",
-#     }
-# }
 
-
-# DATABASES = {
-#     "default": {
-#         "ENGINE": "mssql",
-#         "NAME": os.getenv("AZURE_DATABASE"),
-#         "USER": os.getenv("AZURE_USER"),
-#         "PASSWORD": os.getenv("AZURE_PASSWORD"),
-#         "HOST": os.getenv("AZURE_SERVER"),
-#         "PORT": os.getenv("AZURE_PORT"),
-#         "OPTIONS": {
-#             "driver": "ODBC Driver 18 for SQL Server",
-#         },
-#     }
-# }
 
 # Password validation
 # https://docs.djangoproject.com/en/4.2/ref/settings/#auth-password-validators
