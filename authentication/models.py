@@ -28,6 +28,7 @@ class CustomUserManager(BaseUserManager):
         user = self.model(email=email, **extra_fields)
         user.set_password(password)
         user.save(using=self._db)
+        user.date_joined = timezone.now()
 
         return user
 
@@ -59,7 +60,11 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     reset_token_expires = models.DateTimeField(null=True, blank=True)
     profile_picture = models.CharField(max_length=200, null=True, blank=True)
     is_confirmed = models.BooleanField(default=False)
+<<<<<<< HEAD
     date_joined = models.DateTimeField(auto_now_add=True)
+=======
+    date_joined = models.DateTimeField(default=timezone.now)
+>>>>>>> c945788c273773a48c0d03d5a6151ef688dd1612
 
     referral = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True

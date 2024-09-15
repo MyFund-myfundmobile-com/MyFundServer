@@ -43,9 +43,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = os.getenv("SECRET_KEY")
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = "RENDER" not in os.environ
-
-ALLDEBUG = False if os.environ.get("KOYEB_PUBLIC_DOMAIN") else True
+DEBUG = False if os.environ.get("KOYEB_PUBLIC_DOMAIN") else True
 
 ALLOWED_HOSTS = [
     "127.0.0.1",
@@ -104,6 +102,8 @@ ADMIN_URL = "admin/"
 
 
 # Celery settings
+# CELERY_BROKER_URL = 'redis://localhost:6379/0'  # Use the appropriate broker URL for your environment.
+# CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'  # Use the appropriate result backend URL for your environment.
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
@@ -210,44 +210,6 @@ DATABASES = {
         },
     }
 }
-# DATABASES = {
-#     "default": {
-#         "ENGINE": "django.db.backends.postgresql",
-#         "NAME": "myFund",
-#         "USER": "myFund",
-#         "PASSWORD": "O2ZGNXqyYK6B",
-#         "HOST": "ep-white-sun-a2b25jzt.eu-central-1.aws.neon.fl0.io",
-#         "PORT": "5432",
-#         "OPTIONS": {
-#             "sslmode": "require",
-#         },
-#     }
-# }
-# DATABASES = {
-#     "default": {
-#         "ENGINE": "django.db.backends.postgresql",
-#         "NAME": "myfund_db_6l04",
-#         "USER": "myfund_db_6l04_user",
-#         "PASSWORD": "9fGOA4kijCHJznvawsmtR6fnS8ef5qmM",
-#         "HOST": "dpg-cmg4v4qcn0vc73abh52g-a.frankfurt-postgres.render.com",
-#         "PORT": "5432",
-#     }
-# }
-
-
-# DATABASES = {
-#     "default": {
-#         "ENGINE": "mssql",
-#         "NAME": os.getenv("AZURE_DATABASE"),
-#         "USER": os.getenv("AZURE_USER"),
-#         "PASSWORD": os.getenv("AZURE_PASSWORD"),
-#         "HOST": os.getenv("AZURE_SERVER"),
-#         "PORT": os.getenv("AZURE_PORT"),
-#         "OPTIONS": {
-#             "driver": "ODBC Driver 18 for SQL Server",
-#         },
-#     }
-# }
 
 # Password validation
 # https://docs.djangoproject.com/en/4.2/ref/settings/#auth-password-validators
