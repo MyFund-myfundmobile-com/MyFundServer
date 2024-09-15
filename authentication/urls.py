@@ -15,11 +15,18 @@ from .views import (
     UserTransactionListView,
     UserCardListView,
     AccountBalancesAPIView,
+    send_email,
+    UsersByDateRangeView,
+    save_template,
+    delete_template,
+    get_template,
+    update_template,
 )
 from django.views.decorators.csrf import csrf_exempt
 from authentication.views import CustomGraphQLView
 from authentication.schema import schema  # Adjust the import path
 from graphql_jwt.decorators import jwt_cookie
+
 
 router = DefaultRouter()
 router.register(r"bank-accounts", views.BankAccountViewSet, basename="bank-account")
@@ -183,4 +190,15 @@ urlpatterns = [
     path("validate-myfundpin/", views.validate_myfund_pin, name="validate_myfundpin"),
     path("submit_otp/", views.paystack_submit_otp, name="submit_otp"),
     path("paystack-webhook/", views.paystack_webhook, name="paystack-webhook"),
+    # Admin Related APIs
+    path("get-all-users/", views.get_all_users, name="get_all_users"),
+    path("send-email/", send_email, name="send_email"),
+    path("users-by-date/", UsersByDateRangeView.as_view(), name="users_by_date_range"),
+    path("save-template/", save_template, name="save_template"),
+    path("get-templates/", views.get_templates, name="get_templates"),
+    path("delete-template/<str:template_id>/", delete_template, name="delete_template"),
+    path("edit-template/<int:template_id>/", get_template, name="get_template"),
+    path(
+        "updated-template/<int:template_id>/", update_template, name="update_template"
+    ),
 ]
