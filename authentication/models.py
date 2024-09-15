@@ -59,6 +59,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     reset_token_expires = models.DateTimeField(null=True, blank=True)
     profile_picture = models.CharField(max_length=200, null=True, blank=True)
     is_confirmed = models.BooleanField(default=False)
+    date_joined = models.DateTimeField(auto_now_add=True)
 
     referral = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True
@@ -631,3 +632,16 @@ class InvestTransferRequest(models.Model):
     is_approved = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     transaction_id = models.CharField(max_length=10, unique=False, default="")
+
+
+from django.db import models
+
+
+class EmailTemplate(models.Model):
+    title = models.CharField(max_length=255, unique=True)  # Ensure title is unique
+    design_body = models.TextField()
+    design_html = models.TextField()
+    last_update = models.DateTimeField()
+
+    def __str__(self):
+        return self.title

@@ -22,8 +22,14 @@ load_dotenv()
 
 # Set your OpenAI API key
 
+import os
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "myfundproject.settings")
+
 
 SSL_PORT = 8443  # You can choose any available port number
+
+STATIC_ROOT = "/path/to/your/static/files/"
 
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -56,6 +62,14 @@ ALLOWED_HOSTS = [
     "192.168.254.60",
     "192.168.90.60",
     "192.168.92.60",
+    "192.168.71.60",
+    "192.168.121.60",
+    "192.168.212.60",
+    "192.168.239.60",
+    "192.168.92.60",
+    "192.168.88.60",
+    "192.168.58.60",
+    "192.168.111.60",
 ]
 
 
@@ -139,6 +153,7 @@ CORS_ALLOWED_ORIGINS = [
     "https://www.myfundmobile.com",  # Add your domain here
     "http://192.168.238.34:8000",
     "https://myfund.onrender.com",
+    "http://localhost:3000",
 ]
 
 if KOYEB_EXTERNAL_HOSTNAME:
@@ -287,19 +302,24 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 AUTH_USER_MODEL = "authentication.CustomUser"
 
+
 # EMAIL SETTINGS
 EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
-EMAIL_HOST = "myfundmobile.com"
 EMAIL_HOST = "myfundmobile.com"
 EMAIL_PORT = 465
 EMAIL_USE_SSL = True  # Use SSL for secure connection
 
-# For SMTP authentication
+# SMTP Authentication
 EMAIL_HOST_USER = "info@myfundmobile.com"
-EMAIL_HOST_PASSWORD = "Reproduction1..."
-EMAIL_HOST_PASSWORD = "Reproduction1..."
+EMAIL_HOST_PASSWORD = "Reproduction1..."  # Make sure this is your actual email password
 
-# Other settings
+# # SMTP Authentication
+# EMAIL_HOST_USER = "company@myfundmobile.com"
+# EMAIL_HOST_PASSWORD = (
+#     "AdminSecure123..."  # Make sure this is your actual email password
+# )
+
+# Default email settings
 DEFAULT_FROM_EMAIL = "MyFund <info@myfundmobile.com>"
 PROTOCOL = "https"
 
