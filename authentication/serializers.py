@@ -48,10 +48,13 @@ class ConfirmOTPSerializer(serializers.Serializer):
     otp = serializers.CharField(max_length=6)  # Assuming OTP is a 6-digit string
 
 
+from django.conf import settings  # Import settings to get the MEDIA_URL
+
+
 class UserSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True)
     is_confirmed = serializers.BooleanField(read_only=True)
-    profile_picture = serializers.SerializerMethodField()
+    profile_picture = serializers.ImageField(required=False)
 
     class Meta:
         model = CustomUser
@@ -65,13 +68,18 @@ class UserSerializer(serializers.ModelSerializer):
             "referral",
             "profile_picture",
             "how_did_you_hear",
+            "is_confirmed",
         ]
 
     def get_profile_picture(self, obj):
         if obj.profile_picture:
-            return obj.profile_picture
-        else:
-            return None
+            if "http" not in obj.profile_picture.url:
+                # Prepend MEDIA_URL if it's a local file
+                return f"{settings.MEDIA_URL}{obj.profile_picture.url}"
+            return (
+                obj.profile_picture.url
+            )  # Return the full URL if it is already correct
+        return None
 
     def create(self, validated_data):
         user = CustomUser.objects.create_user(
@@ -349,14 +357,7 @@ class CustomUserSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = CustomUser
-        fields = [
-            "id",
-            "first_name",
-            "last_name",
-            "email",
-            "profile_picture",
-            "individual_percentage",
-        ]
+        fields = "__all__"
 
     def get_individual_percentage(self, obj):
         total_savings_this_month = obj.total_savings_and_investments_this_month
@@ -386,4 +387,14 @@ from .models import AlertMessage
 class AlertMessageSerializer(serializers.ModelSerializer):
     class Meta:
         model = AlertMessage
+        fields = "__all__"
+
+
+from rest_framework import serializers
+from .models import EmailTemplate
+
+
+class EmailTemplateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = EmailTemplate
         fields = "__all__"

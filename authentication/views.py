@@ -85,7 +85,7 @@ def signup(request):
                 user=user.referral,
                 referral_email=user.email,  # Include the referral email
                 transaction_type="pending",
-                amount=1000,
+                amount=500,
                 description="Referral Reward (Pending)",
                 transaction_id=transaction_id,
             )
@@ -98,15 +98,17 @@ def signup(request):
                 user=user,
                 referral_email=user.referral.email,  # Include the referrer's email
                 transaction_type="pending",
-                amount=1000,
+                amount=500,
                 description="Referral Reward (Pending)",
                 transaction_id=transaction_id,
             )
             credit_transaction_referred.save()
 
             # Update the user and referrer's pending reward
-            user.referral.pending_referral_reward = F("pending_referral_reward") + 1000
-            user.pending_referral_reward = F("pending_referral_reward") + 1000
+            user.referral.pending_referral_reward = F("pending_referral_reward") + 500
+            user.pending_referral_reward = F("pending_referral_reward") + 500
+            user.referral.pending_referral_reward = F("pending_referral_reward") + 500
+            user.pending_referral_reward = F("pending_referral_reward") + 500
 
             user.referral.save()
 
@@ -229,7 +231,7 @@ def send_otp_email(user, otp):
 
 
 def send_otp_reset_email(user, otp):
-    subject = "[OTP] Password Reset"
+    subject = "[OTP] Password Reset - {otp}"
     current_year = datetime.now().year
     logo_url = (
         "https://drive.google.com/uc?export=view&id=1MorbW_xLg4k2txNQdhUnBVxad8xeni-N"
@@ -1799,13 +1801,13 @@ def withdraw_to_local_bank(request):
     # Calculate the service charge based on the source account
     service_charge_percentage = 0.0
     if source_account == "savings":
-        service_charge_percentage = 5
-    elif source_account == "investment":
         service_charge_percentage = 10
+    elif source_account == "investment":
+        service_charge_percentage = 15
 
     # Calculate the service charge and total withdrawal amount
     service_charge = (service_charge_percentage / 100) * float(amount)
-    total_amount = float(amount) + service_charge
+    withdrawal_amount = float(amount) - service_charge
 
     # Generate a unique transaction ID
     transaction_id = str(uuid.uuid4())[:16]
@@ -1815,9 +1817,9 @@ def withdraw_to_local_bank(request):
         transaction = Transaction(
             user=user,
             transaction_type="debit",
-            amount=amount,
+            amount=withdrawal_amount,
             service_charge=service_charge,
-            total_amount=total_amount,
+            total_amount=amount,
             date=timezone.now().date(),
             time=timezone.now().time(),
             description=f"Withdrawal ({source_account.capitalize()} > Bank)",
@@ -1825,59 +1827,60 @@ def withdraw_to_local_bank(request):
         )
         transaction.save()
 
+        total_amount_decimal = Decimal(amount)
+        print(
+            f"Before deduction - {source_account.capitalize()} balance: {user.savings if source_account == 'savings' else user.investment if source_account == 'investment' else user.wallet}"
+        )
+
+        if source_account == "savings":
+            if user.savings >= total_amount_decimal:
+                user.savings -= total_amount_decimal
+                user.save()
+            else:
+                return Response(
+                    {"error": "Insufficient savings balance."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        elif source_account == "investment":
+            if user.investment >= total_amount_decimal:
+                user.investment -= total_amount_decimal
+                user.save()
+            else:
+                return Response(
+                    {"error": "Insufficient investment balance."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        elif source_account == "wallet":
+            if user.wallet >= total_amount_decimal:
+                user.wallet -= total_amount_decimal
+                user.save()
+            else:
+                return Response(
+                    {"error": "Insufficient wallet balance."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        print(
+            f"After deduction - {source_account.capitalize()} balance: {user.savings if source_account == 'savings' else user.investment if source_account == 'investment' else user.wallet}"
+        )
+
+        updated_balance = {
+            "savings": user.savings,
+            "investment": user.investment,
+            "wallet": user.wallet,
+        }
+
+        user.save()
+
         # Perform the withdrawal to the local bank using Paystack API
         paystack_response = make_withdrawal_to_local_bank(
-            user, target_bank_account, total_amount
+            user, target_bank_account, withdrawal_amount
         )
         print("Paystack API Response:", paystack_response)
 
         if paystack_response.get("data", {}).get("status") == "success":
             # Deduct the total amount (including service charge) from the source account
             # Convert total_amount to Decimal
-            total_amount_decimal = Decimal(total_amount)
-            print(
-                f"Before deduction - {source_account.capitalize()} balance: {user.savings if source_account == 'savings' else user.investment if source_account == 'investment' else user.wallet}"
-            )
-
-            if source_account == "savings":
-                if user.savings >= total_amount_decimal:
-                    user.savings -= total_amount_decimal
-                    user.save()
-                else:
-                    return Response(
-                        {"error": "Insufficient savings balance."},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
-            elif source_account == "investment":
-                if user.investment >= total_amount_decimal:
-                    user.investment -= total_amount_decimal
-                    user.save()
-                else:
-                    return Response(
-                        {"error": "Insufficient investment balance."},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
-            elif source_account == "wallet":
-                if user.wallet >= total_amount_decimal:
-                    user.wallet -= total_amount_decimal
-                    user.save()
-                else:
-                    return Response(
-                        {"error": "Insufficient wallet balance."},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
-
-            print(
-                f"After deduction - {source_account.capitalize()} balance: {user.savings if source_account == 'savings' else user.investment if source_account == 'investment' else user.wallet}"
-            )
-
-            updated_balance = {
-                "savings": user.savings,
-                "investment": user.investment,
-                "wallet": user.wallet,
-            }
-
-            user.save()
 
             bank_name = target_bank_account.bank_name
             # Send a confirmation email to the user
@@ -2368,7 +2371,7 @@ class KYCUpdateView(generics.UpdateAPIView):
         # Notify admin that a KYC update is pending approval
         admin_email = ["info@myfundmobile.com", "company@myfundmobile.com"]
         subject = f"KYC Update for {user.first_name} Pending Approval"
-        message = f"Hello Admin, \n\n{user.first_name} ({user.email}) has submitted a KYC update for approval. Please review it in the admin panel.\n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+        message = f"Hello Admin, \n\n{user.first_name} {user.last_name} ({user.email}) has submitted a KYC update for approval. Please review it in the <a href='https://myfundapi-myfund-07ce351a.koyeb.app/admin/login/?next=/admin/'>admin panel</a>.\n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
         from_email = "MyFund <info@myfundmobile.com>"
 
         send_mail(subject, message, from_email, admin_email, fail_silently=False)
@@ -2467,12 +2470,12 @@ def initiate_bank_transfer(request):
 
         # Send an email to admin
         subject = f"[CHECK] {user.first_name} Made A QuickSave Request"
-        message = f"Hi Admin, \n\nA bank transfer request of ₦{amount} has just been initiated by {user.first_name} ({user.email}).\n\nPlease log in to the admin panel for review.\n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+        message = f"Hi Admin, \n\nA bank transfer request of ₦{amount} has just been initiated by {user.first_name} {user.last_name} ({user.email}).\n\nPlease log in to the admin panel for review: https://myfundapi-myfund-07ce351a.koyeb.app/admin/login/?next=/admin/\n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
         from_email = "MyFund <info@myfundmobile.com>"
         recipient_list = [
             "company@myfundmobile.com",
             "info@myfundmobile.com",
-        ]  # Replace with the admin's email address
+        ]
 
         send_mail(subject, message, from_email, recipient_list, fail_silently=False)
 
@@ -2864,3 +2867,233 @@ def paystack_webhook(request):
         return JsonResponse(
             {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+
+
+# ------------------------------ ADMIN SECTION FUNCTIONS
+
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework import status, generics
+from .models import CustomUser
+from .serializers import CustomUserSerializer
+from django.core.mail import EmailMessage
+from datetime import datetime, timedelta
+
+
+@api_view(["GET"])
+@permission_classes(
+    [IsAuthenticated]
+)  # You can adjust this based on who should access this API
+def get_all_users(request):
+    users = CustomUser.objects.all()
+    serializer = UserSerializer(users, many=True)
+    return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+import logging
+from django.core.mail import EmailMultiAlternatives
+from django.conf import settings
+from rest_framework.response import Response
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework import status
+
+BATCH_SIZE = 30  # Number of emails per batch
+
+# Set up logging
+logger = logging.getLogger(__name__)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def send_email(request):
+    sender = request.data.get("sender")
+    subject = request.data.get("subject")
+    body = request.data.get("body")
+    recipients = request.data.get("recipients", [])
+
+    # Ensure all fields are present and valid
+    if not all([sender, subject, body, recipients]):
+        return Response(
+            {"message": "All fields are required."}, status=status.HTTP_400_BAD_REQUEST
+        )
+
+    failed_recipients = []  # To track recipients that failed
+
+    try:
+        total_recipients = len(recipients)
+        logger.info(f"Total recipients: {total_recipients}")
+
+        for i in range(0, total_recipients, BATCH_SIZE):
+            batch_recipients = recipients[i : i + BATCH_SIZE]
+            logger.info(
+                f"Processing batch {i // BATCH_SIZE + 1} with {len(batch_recipients)} recipients"
+            )
+
+            for recipient in batch_recipients:
+                email = EmailMultiAlternatives(
+                    subject=subject,
+                    body=body,
+                    from_email=sender,
+                    to=[recipient],
+                )
+                email.attach_alternative(body, "text/html")
+
+                try:
+                    email.send(fail_silently=False)
+                    logger.info(f"Email sent to {recipient}")
+                except Exception as e:
+                    logger.error(f"Error sending email to {recipient}: {str(e)}")
+                    failed_recipients.append(
+                        recipient
+                    )  # Keep track of failed recipients
+
+        # Return success, but include information about failed recipients
+        if failed_recipients:
+            return Response(
+                {
+                    "message": "Emails sent with some failures.",
+                    "failed_recipients": failed_recipients,
+                },
+                status=status.HTTP_207_MULTI_STATUS,  # Indicates partial success
+            )
+        else:
+            return Response(
+                {"message": "All emails sent successfully!"}, status=status.HTTP_200_OK
+            )
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}")
+        return Response(
+            {"message": f"Error: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+from django.utils import timezone
+from rest_framework import generics
+from .models import CustomUser
+from .serializers import CustomUserSerializer
+from datetime import datetime, timedelta
+
+
+class UsersByDateRangeView(generics.ListAPIView):
+    serializer_class = CustomUserSerializer
+
+    def get_queryset(self):
+        date_range = self.request.query_params.get("date_range", "daily")
+        today = timezone.now().date()  # Use timezone-aware datetime
+        if date_range == "daily":
+            start_date = today
+            end_date = today
+        elif date_range == "weekly":
+            start_date = today - timedelta(days=today.weekday())
+            end_date = start_date + timedelta(days=6)
+        elif date_range == "monthly":
+            start_date = today.replace(day=1)
+            next_month = start_date + timedelta(days=31)
+            end_date = next_month.replace(day=1) - timedelta(days=1)
+        else:
+            start_date = end_date = today  # Default to daily if unknown range
+
+        return CustomUser.objects.filter(
+            date_joined__date__range=[start_date, end_date]
+        )
+
+
+from .models import EmailTemplate
+from .serializers import EmailTemplateSerializer
+from django.views.decorators.http import require_http_methods
+
+import logging
+
+
+logger = logging.getLogger(__name__)
+
+
+@api_view(["POST"])
+def save_template(request):
+    try:
+        data = request.data
+        title = data.get("title")
+        design_body = data.get("designBody")
+        design_html = data.get("designHTML")
+        last_update = data.get("lastUpdate")
+
+        # Create or update template
+        template, created = EmailTemplate.objects.update_or_create(
+            title=title,
+            defaults={
+                "design_body": design_body,
+                "design_html": design_html,
+                "last_update": last_update,
+            },
+        )
+
+        serializer = EmailTemplateSerializer(template)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    except Exception as e:
+        logger.error(f"Error saving template: {str(e)}")
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(["GET"])
+def get_templates(request):
+    try:
+        templates = EmailTemplate.objects.all()
+        serializer = EmailTemplateSerializer(templates, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    except Exception as e:
+        logger.error(f"Error fetching templates: {str(e)}")
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(["DELETE"])
+def delete_template(request, template_id):
+    try:
+        template = EmailTemplate.objects.get(id=template_id)
+        template.delete()
+        return Response(
+            {"message": "Template deleted successfully"}, status=status.HTTP_200_OK
+        )
+    except EmailTemplate.DoesNotExist:
+        return Response(
+            {"error": "Template not found"}, status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        logger.error(f"Error deleting template: {str(e)}")
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+@require_http_methods(["GET"])
+def get_template(request, template_id):
+    try:
+        template = EmailTemplate.objects.get(id=template_id)
+        return JsonResponse(
+            {
+                "id": template.id,
+                "title": template.title,
+                "design": template.design_body,  # Return JSON
+            },
+            safe=False,
+        )
+    except EmailTemplate.DoesNotExist:
+        return JsonResponse({"error": "Template not found"}, status=404)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def update_template(request, template_id):
+    try:
+        template = EmailTemplate.objects.get(id=template_id)
+        data = json.loads(request.body)
+        template.title = data.get("title", template.title)
+        template.design_body = data.get(
+            "design", template.design_body
+        )  # Update this field
+        template.save()
+        return JsonResponse({"message": "Template updated successfully"})
+    except EmailTemplate.DoesNotExist:
+        return JsonResponse({"error": "Template not found"}, status=404)
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
