@@ -22,8 +22,14 @@ load_dotenv()
 
 # Set your OpenAI API key
 
+import os
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "myfundproject.settings")
+
 
 SSL_PORT = 8443  # You can choose any available port number
+
+STATIC_ROOT = "/path/to/your/static/files/"
 
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -45,11 +51,24 @@ ALLOWED_HOSTS = [
     "10.0.101.10",
     "myfund.onrender.com",
     "localhost",
-    "192.168.226.34",
-    "192.168.176.34",
-    "10.10.4.174",
-    "192.168.84.34",
-    "10.10.4.174",
+    "10.10.10.226",
+    "192.168.10.60",
+    "192.168.136.60",
+    "192.168.170.60",
+    "192.168.22.60",
+    "192.168.235.60",
+    "192.168.254.60",
+    "192.168.90.60",
+    "192.168.92.60",
+    "192.168.71.60",
+    "192.168.121.60",
+    "192.168.212.60",
+    "192.168.239.60",
+    "192.168.92.60",
+    "192.168.88.60",
+    "192.168.58.60",
+    "192.168.111.60",
+    "192.168.251.60",
 ]
 
 
@@ -135,6 +154,7 @@ CORS_ALLOWED_ORIGINS = [
     "https://www.myfundmobile.com",  # Add your domain here
     "http://192.168.238.34:8000",
     "https://myfund.onrender.com",
+    "http://localhost:3000",
 ]
 
 if KOYEB_EXTERNAL_HOSTNAME:
@@ -190,44 +210,6 @@ DATABASES = {
         },
     }
 }
-# DATABASES = {
-#     "default": {
-#         "ENGINE": "django.db.backends.postgresql",
-#         "NAME": "myFund",
-#         "USER": "myFund",
-#         "PASSWORD": "O2ZGNXqyYK6B",
-#         "HOST": "ep-white-sun-a2b25jzt.eu-central-1.aws.neon.fl0.io",
-#         "PORT": "5432",
-#         "OPTIONS": {
-#             "sslmode": "require",
-#         },
-#     }
-# }
-# DATABASES = {
-#     "default": {
-#         "ENGINE": "django.db.backends.postgresql",
-#         "NAME": "myfund_db_6l04",
-#         "USER": "myfund_db_6l04_user",
-#         "PASSWORD": "9fGOA4kijCHJznvawsmtR6fnS8ef5qmM",
-#         "HOST": "dpg-cmg4v4qcn0vc73abh52g-a.frankfurt-postgres.render.com",
-#         "PORT": "5432",
-#     }
-# }
-
-
-# DATABASES = {
-#     "default": {
-#         "ENGINE": "mssql",
-#         "NAME": os.getenv("AZURE_DATABASE"),
-#         "USER": os.getenv("AZURE_USER"),
-#         "PASSWORD": os.getenv("AZURE_PASSWORD"),
-#         "HOST": os.getenv("AZURE_SERVER"),
-#         "PORT": os.getenv("AZURE_PORT"),
-#         "OPTIONS": {
-#             "driver": "ODBC Driver 18 for SQL Server",
-#         },
-#     }
-# }
 
 # Password validation
 # https://docs.djangoproject.com/en/4.2/ref/settings/#auth-password-validators
@@ -283,43 +265,27 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 AUTH_USER_MODEL = "authentication.CustomUser"
 
+
 # EMAIL SETTINGS
 EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
 EMAIL_HOST = "myfundmobile.com"
 EMAIL_PORT = 465
 EMAIL_USE_SSL = True  # Use SSL for secure connection
 
-# For SMTP authentication
+# SMTP Authentication
 EMAIL_HOST_USER = "info@myfundmobile.com"
-EMAIL_HOST_PASSWORD = "Reproduction1..."
+EMAIL_HOST_PASSWORD = "Reproduction1..."  # Make sure this is your actual email password
 
-# Other settings
-DEFAULT_FROM_EMAIL = (
-    "MyFund <info@myfundmobile.com>"  # Set the default sender email address
-)
+# # SMTP Authentication
+# EMAIL_HOST_USER = "company@myfundmobile.com"
+# EMAIL_HOST_PASSWORD = (
+#     "AdminSecure123..."  # Make sure this is your actual email password
+# )
 
-APPEND_SLASH = True
+# Default email settings
+DEFAULT_FROM_EMAIL = "MyFund <info@myfundmobile.com>"
+PROTOCOL = "https"
 
-
-# EMAIL TEMPLATES
-EMAIL_TEMPLATES = {
-    "password_reset": "authentication/email_templates/password_reset_email.html",
-}
-
-AUTHENTICATION_BACKENDS = [
-    "authentication.authentication_backends.EmailBackend",  # Replace 'path.to' with the actual path
-    # ...
-]
-
-# Use myfundmobile.com cert and key here...
-# SSL_KEY = os.path.join(BASE_DIR, 'key.pem')
-# SSL_CERT = os.path.join(BASE_DIR, 'cert.pem')
-
-# SSL settings
-# HTTPS_SUPPORT = True
-# if HTTPS_SUPPORT:
-#     os.environ['HTTPS'] = "on"
-#     os.environ['wsgi.url_scheme'] = 'https'
 #     os.environ['DJANGO_SECURE_SSL_REDIRECT'] = 'True'
 #     os.environ['SSL_CERT_FILE'] = SSL_CERT  # Set the SSL certificate file
 #     os.environ['SSL_KEY_FILE'] = SSL_KEY    # Set the SSL key file
