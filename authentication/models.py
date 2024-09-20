@@ -28,6 +28,7 @@ class CustomUserManager(BaseUserManager):
         user = self.model(email=email, **extra_fields)
         user.set_password(password)
         user.save(using=self._db)
+        user.date_joined = timezone.now()
 
         return user
 
@@ -59,6 +60,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     reset_token_expires = models.DateTimeField(null=True, blank=True)
     profile_picture = models.CharField(max_length=200, null=True, blank=True)
     is_confirmed = models.BooleanField(default=False)
+    date_joined = models.DateTimeField(auto_now_add=True)
 
     referral = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True
@@ -272,7 +274,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                             self.referral.email if self.referral else ""
                         ),  # Save the referral email if it exists
                         transaction_type="credit",
-                        amount=1000,
+                        amount=500,
                         description="Referral Reward (Confirmed)",
                         transaction_id=referrer_transaction_id,
                     )
@@ -286,19 +288,23 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                         user=self.referral,
                         referral_email=self.email,  # Save the referrer's email
                         transaction_type="credit",
-                        amount=1000,
+                        amount=500,
                         description="Referral Reward (Confirmed)",
                         transaction_id=referred_transaction_id,
                     )
                     credit_transaction_referred.save()
 
                     # Deduct the credited amount from the pending referral rewards
-                    self.pending_referral_reward -= 1000
-                    self.referral.pending_referral_reward -= 1000
+                    self.pending_referral_reward -= 500
+                    self.referral.pending_referral_reward -= 500
+                    self.pending_referral_reward -= 500
+                    self.referral.pending_referral_reward -= 500
 
                     # Update the wallets of both users
-                    self.wallet += 1000
-                    self.referral.wallet += 1000
+                    self.wallet += 500
+                    self.referral.wallet += 500
+                    self.wallet += 500
+                    self.referral.wallet += 500
 
                     # Save the changes to the database for both users
                     self.save()
@@ -627,3 +633,16 @@ class InvestTransferRequest(models.Model):
     is_approved = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     transaction_id = models.CharField(max_length=10, unique=False, default="")
+
+
+from django.db import models
+
+
+class EmailTemplate(models.Model):
+    title = models.CharField(max_length=255, unique=True)  # Ensure title is unique
+    design_body = models.TextField()
+    design_html = models.TextField()
+    last_update = models.DateTimeField()
+
+    def __str__(self):
+        return self.title
