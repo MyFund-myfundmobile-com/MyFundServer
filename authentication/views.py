@@ -1776,7 +1776,7 @@ def withdraw_to_local_bank(request):
             {"error": "Insufficient savings balance."},
             status=status.HTTP_400_BAD_REQUEST,
         )
-    elif source_account == "investment" and user.investment < amount:
+    if source_account == "investment" and user.investment < amount:
         return Response(
             {"error": "Insufficient investment balance."},
             status=status.HTTP_400_BAD_REQUEST,
@@ -1878,9 +1878,10 @@ def withdraw_to_local_bank(request):
         )
         print("Paystack API Response:", paystack_response)
 
-        if paystack_response.get("data", {}).get("status") == "success":
+        if paystack_response.get("status"):  # This checks if it's truthy
             # Deduct the total amount (including service charge) from the source account
             # Convert total_amount to Decimal
+            print("Paystack API Response:", paystack_response)
 
             bank_name = target_bank_account.bank_name
             # Send a confirmation email to the user
@@ -1893,14 +1894,15 @@ def withdraw_to_local_bank(request):
 
             return Response(
                 {
+                    "success": True,
                     "message": "Withdrawal to local bank successful.",
                     "transaction_id": transaction_id,
-                    "updated_balance": updated_balance,  # Include the updated balance here
+                    "updated_balance": updated_balance,
                 },
                 status=status.HTTP_200_OK,
             )
         else:
-            # Handle Paystack withdrawal failure
+            print("Paystack withdrawal failed:", paystack_response)
             return Response(
                 {"error": "Withdrawal to local bank failed. Please try again later."},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -3051,12 +3053,18 @@ def get_templates(request):
 @api_view(["DELETE"])
 def delete_template(request, template_id):
     try:
+        logger.info(
+            f"Attempting to delete template with ID: {template_id}"
+        )  # Add logging
         template = EmailTemplate.objects.get(id=template_id)
         template.delete()
         return Response(
             {"message": "Template deleted successfully"}, status=status.HTTP_200_OK
         )
     except EmailTemplate.DoesNotExist:
+        logger.warning(
+            f"Template with ID {template_id} does not exist."
+        )  # Log if template doesn't exist
         return Response(
             {"error": "Template not found"}, status=status.HTTP_404_NOT_FOUND
         )
@@ -3073,7 +3081,8 @@ def get_template(request, template_id):
             {
                 "id": template.id,
                 "title": template.title,
-                "design": template.design_body,  # Return JSON
+                "design": template.design_body,  # JSON version
+                "design_html": template.design_html,  # HTML version
             },
             safe=False,
         )
