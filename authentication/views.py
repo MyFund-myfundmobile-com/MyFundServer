@@ -1895,7 +1895,7 @@ def withdraw_to_local_bank(request):
             return Response(
                 {
                     "success": True,
-                    "message": "Withdrawal to local bank successful.",
+                    "message": paystack_response.get("message"),
                     "transaction_id": transaction_id,
                     "updated_balance": updated_balance,
                 },
