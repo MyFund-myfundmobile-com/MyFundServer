@@ -199,6 +199,6 @@ urlpatterns = [
     path("delete-template/<str:template_id>/", delete_template, name="delete_template"),
     path("edit-template/<int:template_id>/", get_template, name="get_template"),
     path(
-        "updated-template/<int:template_id>/", update_template, name="update_template"
+        "update-template/<int:template_id>/", update_template, name="update_template"
     ),
 ]
