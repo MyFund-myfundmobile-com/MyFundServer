@@ -16,11 +16,11 @@ from .views import (
     UserCardListView,
     AccountBalancesAPIView,
     send_email,
-    UsersByDateRangeView,
     save_template,
     delete_template,
     get_template,
     update_template,
+    get_all_users, unsubscribe_user, resubscribe_user
 )
 from django.views.decorators.csrf import csrf_exempt
 from authentication.views import CustomGraphQLView
@@ -193,12 +193,12 @@ urlpatterns = [
     # Admin Related APIs
     path("get-all-users/", views.get_all_users, name="get_all_users"),
     path("send-email/", send_email, name="send_email"),
-    path("users-by-date/", UsersByDateRangeView.as_view(), name="users_by_date_range"),
     path("save-template/", save_template, name="save_template"),
     path("get-templates/", views.get_templates, name="get_templates"),
     path("delete-template/<str:template_id>/", delete_template, name="delete_template"),
     path("edit-template/<int:template_id>/", get_template, name="get_template"),
-    path(
-        "update-template/<int:template_id>/", update_template, name="update_template"
-    ),
+    path("update-template/<int:template_id>/", update_template, name="update_template"),
+    path("users/", get_all_users, name="get_all_users"),
+    path("unsubscribe/", unsubscribe_user, name="unsubscribe_user"),
+    path("resubscribe/", resubscribe_user, name="resubscribe_user"),
 ]
