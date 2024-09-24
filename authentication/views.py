@@ -59,6 +59,7 @@ def signup(request):
         how_did_you_hear = serializer.validated_data.get("how_did_you_hear", "OTHER")
         user.how_did_you_hear = how_did_you_hear
         user.save()
+        print("Received data:", request.data)
 
         # Check if it's a resend request
         is_resend = request.data.get("resend", False)
@@ -139,7 +140,7 @@ def signup(request):
 
 def send_referrer_pending_reward_email(referrer, referred_email):
     subject = f"{referrer.first_name}, Your Referral Reward is Pending..."
-    message = f"Hi {referrer.first_name},\n\nYour referral reward is pending. When your friend ({referred_email}) becomes active by making their first savings/investment, your reward will be confirmed in your wallet.\n\nThank you for using MyFund!\n\nKeep growing your funds.🥂\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+    message = f"Hi {referrer.first_name},\n\nYour referral reward of ₦500.00 is pending. When your friend ({referred_email}) becomes active by making their first savings/investment, your reward will be confirmed in your wallet.\n\nThank you for using MyFund!\n\nKeep growing your funds.🥂\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
 
     from_email = "MyFund <info@myfundmobile.com>"
     recipient_list = [referrer.email]
@@ -148,13 +149,18 @@ def send_referrer_pending_reward_email(referrer, referred_email):
 
 
 def send_referred_pending_reward_email(user):
-    subject = f"{user.first_name}, Your Referral Reward is Pending"
-    message = f"Hi {user.first_name},\n\nYou have received a referral reward for signing up with a referral. It will be confirmed in your wallet when you make your first savings of up to ₦20,000.\n\nThank you for using MyFund!\n\nKeep growing your funds.🥂\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+    subject = f"{user.first_name}, Your N500 Referral Reward is Pending"
+    message = f"Hi {user.first_name},\n\nYou have received a welcome referral reward bonus of ₦500.00 for signing up with a referral email. It will be confirmed in your Wallet when you make your first savings of up to ₦20,000.\n\nThank you for using MyFund!\n\nKeep growing your funds.🥂\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
 
     from_email = "MyFund <info@myfundmobile.com>"
     recipient_list = [user.email]
+    bcc_list = ["newusers@myfundmobile.com"]
 
-    send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+    # Combine recipient list and BCC list
+    all_recipients = recipient_list + bcc_list
+
+    # Send the email without the bcc argument
+    send_mail(subject, message, from_email, all_recipients, fail_silently=False)
 
 
 @api_view(["POST"])
@@ -2873,24 +2879,76 @@ def paystack_webhook(request):
 
 # ------------------------------ ADMIN SECTION FUNCTIONS
 
+from datetime import timedelta
+from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.response import Response
-from rest_framework import status, generics
-from .models import CustomUser
-from .serializers import CustomUserSerializer
-from django.core.mail import EmailMessage
-from datetime import datetime, timedelta
+from .serializers import UserSerializer
+from django.shortcuts import get_object_or_404
 
 
 @api_view(["GET"])
-@permission_classes(
-    [IsAuthenticated]
-)  # You can adjust this based on who should access this API
+@permission_classes([IsAuthenticated])
 def get_all_users(request):
-    users = CustomUser.objects.all()
+    date_range = request.query_params.get("date_range", None)
+    now = timezone.now()
+    start_date = None
+
+    # Determine date range
+    if date_range == "daily":
+        start_date = now - timedelta(days=1)
+    elif date_range == "weekly":
+        start_date = now - timedelta(weeks=1)
+    elif date_range == "monthly":
+        start_date = now - timedelta(weeks=4)
+    elif date_range == "quarterly":
+        start_date = now - timedelta(weeks=13)
+    elif date_range == "6months":
+        start_date = now - timedelta(days=182)
+    elif date_range == "yearly":
+        start_date = now - timedelta(days=365)
+
+    # Filter users based on the date range and exclude unsubscribed users
+    if start_date:
+        users = CustomUser.objects.filter(
+            date_joined__gte=start_date, is_subscribed=True
+        )
+    else:
+        users = CustomUser.objects.filter(is_subscribed=True)
+
     serializer = UserSerializer(users, many=True)
     return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+@api_view(["POST"])
+def unsubscribe_user(request):
+    user_email = request.data.get("email", None)
+    if user_email:
+        user = get_object_or_404(CustomUser, email=user_email)
+        user.is_subscribed = False
+        user.save()
+        return Response(
+            {"message": "You have been unsubscribed."}, status=status.HTTP_200_OK
+        )
+    return Response({"error": "Email not provided"}, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(["POST"])
+def resubscribe_user(request):
+    print("Resubscribe endpoint hit")  # Add this for debugging
+    user_email = request.data.get("email", None)
+    if user_email:
+        user = get_object_or_404(CustomUser, email=user_email)
+        if not user.is_subscribed:
+            user.is_subscribed = True
+            user.save()
+            return Response(
+                {"message": "You have been resubscribed."}, status=status.HTTP_200_OK
+            )
+        return Response(
+            {"message": "You are already subscribed."}, status=status.HTTP_200_OK
+        )
+    return Response({"error": "Email not provided"}, status=status.HTTP_400_BAD_REQUEST)
 
 
 import logging
@@ -2969,37 +3027,6 @@ def send_email(request):
         return Response(
             {"message": f"Error: {str(e)}"},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
-
-
-from django.utils import timezone
-from rest_framework import generics
-from .models import CustomUser
-from .serializers import CustomUserSerializer
-from datetime import datetime, timedelta
-
-
-class UsersByDateRangeView(generics.ListAPIView):
-    serializer_class = CustomUserSerializer
-
-    def get_queryset(self):
-        date_range = self.request.query_params.get("date_range", "daily")
-        today = timezone.now().date()  # Use timezone-aware datetime
-        if date_range == "daily":
-            start_date = today
-            end_date = today
-        elif date_range == "weekly":
-            start_date = today - timedelta(days=today.weekday())
-            end_date = start_date + timedelta(days=6)
-        elif date_range == "monthly":
-            start_date = today.replace(day=1)
-            next_month = start_date + timedelta(days=31)
-            end_date = next_month.replace(day=1) - timedelta(days=1)
-        else:
-            start_date = end_date = today  # Default to daily if unknown range
-
-        return CustomUser.objects.filter(
-            date_joined__date__range=[start_date, end_date]
         )
 
 

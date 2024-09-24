@@ -10,6 +10,18 @@ class SignupSerializer(serializers.ModelSerializer):
     referral = serializers.CharField(
         max_length=40, required=False
     )  # Allow referral code to be optional
+    how_did_you_hear = serializers.ChoiceField(
+        choices=[
+            ("SM", "Social Media - Facebook, Instagram, etc."),
+            ("IMs", "Instant Messaging - WhatsApp, Telegram, etc."),
+            ("FF", "Family and Friend"),
+            ("GS", "Google Search"),
+            ("REC", "Recommended"),
+            ("CFG", "Cashflow Game"),
+            ("OTHER", "Other"),
+        ],
+        default="OTHER",
+    )
 
     class Meta:
         model = CustomUser
@@ -20,7 +32,15 @@ class SignupSerializer(serializers.ModelSerializer):
             "phone_number",
             "password",
             "referral",
+            "how_did_you_hear",
         ]
+
+    def to_representation(self, instance):
+        representation = super().to_representation(instance)
+        representation["how_did_you_hear"] = dict(
+            self.fields["how_did_you_hear"].choices
+        ).get(instance.how_did_you_hear)
+        return representation
 
     def create(self, validated_data):
         # Extract the referral code and remove it from the data dictionary
@@ -54,7 +74,9 @@ from django.conf import settings  # Import settings to get the MEDIA_URL
 class UserSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True)
     is_confirmed = serializers.BooleanField(read_only=True)
-    profile_picture = serializers.ImageField(required=False)
+    profile_picture = serializers.SerializerMethodField()
+    date_joined = serializers.DateTimeField(format="%d %b. %Y   |   %I:%M%p")
+    is_subscribed = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = CustomUser
@@ -69,16 +91,29 @@ class UserSerializer(serializers.ModelSerializer):
             "profile_picture",
             "how_did_you_hear",
             "is_confirmed",
+            "date_joined",
+            "is_subscribed",
         ]
 
+    def get_date_joined(self, obj):
+        return obj.date_joined.strftime("%d %b. %Y   |   %I:%M%p")
+
     def get_profile_picture(self, obj):
-        if obj.profile_picture:
+        # If the profile_picture is a string (file path), return it directly
+        if isinstance(obj.profile_picture, str):
+            if "http" not in obj.profile_picture:
+                # Prepend MEDIA_URL if it's a local file path
+                return f"{settings.MEDIA_URL}{obj.profile_picture}"
+            return obj.profile_picture  # If it's already a full URL, return it
+
+        # If the profile_picture is an image field (with `.url`), handle as before
+        if obj.profile_picture and hasattr(obj.profile_picture, "url"):
             if "http" not in obj.profile_picture.url:
                 # Prepend MEDIA_URL if it's a local file
                 return f"{settings.MEDIA_URL}{obj.profile_picture.url}"
-            return (
-                obj.profile_picture.url
-            )  # Return the full URL if it is already correct
+            return obj.profile_picture.url  # Return the full URL if already correct
+
+        # Return None if no valid profile picture
         return None
 
     def create(self, validated_data):

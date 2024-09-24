@@ -60,7 +60,8 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     reset_token_expires = models.DateTimeField(null=True, blank=True)
     profile_picture = models.CharField(max_length=200, null=True, blank=True)
     is_confirmed = models.BooleanField(default=False)
-    date_joined = models.DateTimeField(auto_now_add=True)
+    is_subscribed = models.BooleanField(default=True)
+    date_joined = models.DateTimeField(auto_now_add=True, db_index=True)
 
     referral = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True
@@ -73,7 +74,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         max_length=50,
         choices=[
             ("SM", "Social Media - Facebook, Instagram, etc."),
-            ("IMs", "Instant Messaging - Whatsapp, Telegram, etc."),
+            ("IMs", "Instant Messaging - WhatsApp, Telegram, etc."),
             ("FF", "Family and Friend"),
             ("GS", "Google Search"),
             ("REC", "Recommended"),
@@ -318,7 +319,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
 
                     # Send confirmation email to the referrer
                     subject_referrer = f"Congrats!🎊🥂 Referral Reward Confirmed!"
-                    message_referrer = f"Congratulations {self.first_name},\n\nYou have received a referral reward of ₦1,000.00 in your wallet as a new and active user thanks to {self.referral.first_name}.\n\nThank you for using MyFund!\n\nKeep growing your funds.🥂\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+                    message_referrer = f"Congratulations {self.first_name},\n\nYou have received a referral reward of ₦500.00 in your wallet as a new and active user thanks to {self.referral.first_name}.\n\nThank you for using MyFund!\n\nKeep growing your funds.🥂\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
 
                     from_email_referrer = "MyFund <info@myfundmobile.com>"
                     recipient_list_referrer = [self.email]
@@ -328,12 +329,13 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                         message_referrer,
                         from_email_referrer,
                         recipient_list_referrer,
+                        bcc=["newusers@myfundmobile.com"],
                         fail_silently=False,
                     )
 
                     # Send confirmation email to the referred user
                     subject_referred = f"Congrats!🎊🥂 Referral Reward for {self.first_name} Confirmed!"
-                    message_referred = f"Congratulations {self.referral.first_name},\n\nYou have received a referral reward of ₦1,000.00 in your wallet for referring {self.first_name}.\n\nThank you for using MyFund and referring others!\n\nKeep growing your funds.🥂\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+                    message_referred = f"Congratulations {self.referral.first_name},\n\nYou have received a referral reward of ₦500.00 in your wallet for referring {self.first_name}.\n\nThank you for using MyFund and referring others!\n\nKeep growing your funds.🥂\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
 
                     from_email_referred = "MyFund <info@myfundmobile.com>"
                     recipient_list_referred = [self.referral.email]
