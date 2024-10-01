@@ -75,6 +75,15 @@ def signup(request):
             response_data = {"message": "OTP resent successfully"}
             return Response(response_data, status=status.HTTP_200_OK)
 
+        # Generate OTP for initial signup
+        otp = generate_otp()
+        user.otp = otp
+        user.is_active = False  # Set the user as inactive until OTP confirmation
+        user.save()
+
+        # Send OTP to the user's email
+        send_otp_email(user, otp)
+
         # Check if the user has a referrer (referral relationship)
         if user.referral:
             transaction_id = str(uuid.uuid4())[
@@ -118,15 +127,6 @@ def signup(request):
 
             # Send an email to the referred user (new user)
             send_referred_pending_reward_email(user)
-
-        # Generate OTP for initial signup
-        otp = generate_otp()
-        user.otp = otp
-        user.is_active = False  # Set the user as inactive until OTP confirmation
-        user.save()
-
-        # Send OTP to the user's email
-        send_otp_email(user, otp)
 
         # Modify the response data to include the referral email for pending transactions
         response_data = serializer.data
@@ -182,6 +182,10 @@ def confirm_otp(request):
             user.is_active = True
             user.save()
             print("Account confirmed successfully.")
+
+            # Send welcome email
+            send_welcome_email(user)
+
             return Response(
                 {"message": "Account confirmed successfully."},
                 status=status.HTTP_200_OK,
@@ -234,6 +238,70 @@ def send_otp_email(user, otp):
     recipient_list = [user.email]
 
     send_mail(subject, message, from_email, recipient_list, html_message=message)
+
+
+from django.core.mail import send_mail
+from django.utils.html import format_html
+
+logo_url = (
+    "https://drive.google.com/uc?export=view&id=1MorbW_xLg4k2txNQdhUnBVxad8xeni-N"
+)
+image_url = (
+    "https://drive.google.com/uc?export=view&id=1K7sBCm3mgW5jQ1Cfh73LQDZuvGuNFTKw"
+)
+
+
+def send_welcome_email(user):
+    subject = f"{user.first_name}, WELCOME TO MyFund! 🥂🎊🔥"
+
+    current_year = datetime.now().year
+    logo_url = (
+        "https://drive.google.com/uc?export=view&id=1MorbW_xLg4k2txNQdhUnBVxad8xeni-N"
+    )
+    image_url = (
+        "https://drive.google.com/uc?export=view&id=1K7sBCm3mgW5jQ1Cfh73LQDZuvGuNFTKw"
+    )
+    savings_image_url = "https://drive.google.com/uc?export=view&id=1bOVTTicGZJgUKX2aTm2SAqyX-8qfH41Q"  # Your new image link
+
+    message = f"""
+    <p><img src="{logo_url}" alt="MyFund Logo" style="display: block; margin: 0 auto; max-width: 100px; height: auto;"></p>
+
+    <p>Hi {user.first_name},</p>
+
+    <p>I'm personally welcoming you to the MyFund family.</p>
+
+    <p>By signing up, you've entered the 4th step toward financial freedom, <strong>SAVINGS</strong> (click WealthMap on the app for details).</p>
+    
+    <p><img src="{savings_image_url}" alt="Savings Step Image" style="display: block; margin: 10px auto; max-width: 100%; height: auto;"></p>
+
+    <p>The app tracks your progress as you save towards buying properties for a lifetime rental (passive) income.</p>
+
+    <p>In the last few years, thousands have saved to sort their rents, started a business, saved their first million, earned their first passive income, traveled abroad, got married... it's amazing.</p>
+
+    <p>I can't wait to hear your financial success story in the shortest time possible here at MyFund.</p>
+
+    <p>Once again, you're welcome!</p>
+
+    <br>
+
+    <p><img src="{image_url}" alt="Dr Tee" style="display: block; float: left; width: 100px; height: 100px; border-radius: 50%; margin-right: 10px;">
+    <strong>Tolulope Ahmed (Dr Tee)</strong><br>
+    CEO/Co-founder, MyFund</p>
+
+    <p>MyFund ©{current_year}</p>
+    """
+
+    from_email = "MyFund <info@myfundmobile.com>"
+    recipient_list = [user.email]
+
+    send_mail(
+        subject,
+        message,
+        from_email,
+        recipient_list,
+        html_message=message,
+        fail_silently=False,
+    )
 
 
 def send_otp_reset_email(user, otp):
