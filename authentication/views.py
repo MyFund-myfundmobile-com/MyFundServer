@@ -1804,7 +1804,7 @@ def wallet_to_investment(request):
         # Create a transaction record with the details
         transaction = Transaction(
             user=user,
-            transaction_type="credit",  # Debit for withdrawal
+            transaction_type="debit",  # Debit for withdrawal
             amount=amount,
             date=timezone.now().date(),
             time=timezone.now().time(),
