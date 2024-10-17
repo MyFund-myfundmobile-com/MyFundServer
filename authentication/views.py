@@ -1150,123 +1150,109 @@ def autosave(request):
     amount = request.data.get("amount")
     frequency = request.data.get("frequency")
 
-    # Validate frequency (should be one of 'hourly', 'daily', 'weekly', 'monthly')
-    valid_frequencies = ["hourly", "daily", "weekly", "monthly"]
+    # Validate request data
+    if not amount or not card_id or not frequency:
+        return Response(
+            {"error": "Missing required fields: card_id, amount, and frequency."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    try:
+        amount = int(amount)
+        if amount < 100:
+            return Response(
+                {"error": "Amount cannot be less that N100"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+    except ValueError:
+        return Response(
+            {"error": "Invalid amount. Amount should be a number."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    valid_frequencies = ["daily", "weekly", "monthly"]
     if frequency not in valid_frequencies:
         return Response(
-            {"error": "Invalid frequency"}, status=status.HTTP_400_BAD_REQUEST
+            {"error": "Invalid frequency. Choose 'daily', 'weekly', or 'monthly'."},
+            status=status.HTTP_400_BAD_REQUEST
         )
 
+     
+
+    # Validate card
     try:
-        active_autosave = AutoSave.objects.get(user=user, active=True)
-        return Response(
-            {"error": "User already has an active autosave"},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-    except AutoSave.DoesNotExist:
-        pass
-
         card = Card.objects.get(id=card_id)
     except Card.DoesNotExist:
         return Response(
-            {"error": "Selected card not found"}, status=status.HTTP_404_NOT_FOUND
+            {"error": "Selected card not found."},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except ValueError:
+        return Response(
+            {"error": "Invalid card ID format."},
+            status=status.HTTP_400_BAD_REQUEST
         )
 
-    # Calculate the interval based on the selected frequency (in seconds)
-    intervals = {
-        "hourly": 3600,
-        "daily": 86400,
-        "weekly": 604800,
-        "monthly": 2419200,  # Approximation for 28-31 days
+    # Prepare Paystack plan creation request
+    paystack_frequency = frequency  # Paystack uses same intervals
+    plan_payload = {
+        "name": f"{frequency.capitalize()} Autosave Plan for {user.email}",
+        "interval": paystack_frequency,
+        "amount": amount * 100  # Convert amount to kobo
+    }
+    
+    headers = {
+        "Authorization": f"Bearer {paystack_secret_key}",
+        "Content-Type": "application/json",
     }
 
-    interval_seconds = intervals.get(frequency)
+    # Step 1: Create subscription plan on Paystack
+    try:
+        plan_response = requests.post("https://api.paystack.co/plan", json=plan_payload, headers=headers)
+        plan_response.raise_for_status()  # Raises an HTTPError for bad responses
+        plan_data = plan_response.json()
 
-    if not interval_seconds:
-        return Response(
-            {"error": "Invalid frequency"}, status=status.HTTP_400_BAD_REQUEST
-        )
+        if not plan_data.get("status"):
+            return Response({"error": "Failed to create plan on Paystack."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-    # Create an 'AutoSave' record
+        plan_code = plan_data.get("data", {}).get("plan_code")
+    except requests.RequestException as e:
+        return Response({"error": f"Paystack plan creation failed: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    # Step 2: Subscribe user to the plan
+    subscription_payload = {
+        "customer": user.email,
+        "plan": plan_code
+    }
+    
+    try:
+        subscription_response = requests.post("https://api.paystack.co/subscription", json=subscription_payload, headers=headers)
+        subscription_response.raise_for_status()
+        subscription_data = subscription_response.json()
+
+        if not subscription_data.get("status"):
+            return Response({"error": "Subscription failed."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except requests.RequestException as e:
+        return Response({"error": f"Subscription failed: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    # Step 3: Save AutoSave record to the database
     AutoSave.objects.create(user=user, frequency=frequency, amount=amount, active=True)
 
-    # Use the card details to initiate a payment with Paystack periodically
-    def auto_charge():
-        while True:
-            # Delay for the specified interval
-            time.sleep(interval_seconds)
-
-            # Perform the auto charge
-            paystack_url = "https://api.paystack.co/charge"
-
-            payload = {
-                "card": {
-                    "number": card.card_number,
-                    "cvv": card.cvv,
-                    "expiry_month": card.expiry_date.split("/")[0],
-                    "expiry_year": card.expiry_date.split("/")[1],
-                },
-                "email": user.email,
-                "amount": int(amount) * 100,  # Amount in kobo (multiply by 100)
-            }
-
-            headers = {
-                "Authorization": f"Bearer {paystack_secret_key}",
-                "Content-Type": "application/json",
-            }
-
-            response = requests.post(paystack_url, json=payload, headers=headers)
-            paystack_response = response.json()
-
-            if paystack_response.get("status"):
-                # Payment successful, update user's savings and create a transaction
-                # user.savings += int(amount)
-                user.savings += int(0)
-                user.save()
-
-                # Create a transaction record
-                Transaction.objects.create(
-                    user=user,
-                    transaction_type="credit",
-                    amount=int(0),
-                    date=timezone.now().date(),
-                    time=timezone.now().time(),
-                    description=f"AutoSave",
-                    transaction_id=paystack_response.get("data", {}).get("reference"),
-                )
-
-                # Call the confirm_referral_rewards method here
-                user.confirm_referral_rewards(
-                    is_referrer=True
-                )  # Pass True if the user is a referrer, or False if not
-
-                # After processing a savings or investment transaction
-                user.update_total_savings_and_investment_this_month()
-
-                # Send a confirmation email
-                subject = "AutoSave Successful!"
-                message = f"Hi {user.first_name},\n\nYour AutoSave ({frequency}) of ₦{amount} was successful. It has been added to your SAVINGS account. \n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-                from_email = "MyFund <info@myfundmobile.com>"
-                recipient_list = [user.email]
-
-                send_mail(
-                    subject, message, from_email, recipient_list, fail_silently=False
-                )
-
-    # Start a new thread for the auto charge process
-    threading.Thread(target=auto_charge).start()
-
-    user.autosave_enabled = True
-    user.save()
-
-    # Send an immediate email alert for activation
+    # Send success notification email
     subject = "AutoSave Activated!"
-    message = f"Well done {user.first_name},\n\nAutoSave ({frequency}) was successfully activated. You are now saving ₦{amount} {frequency} and your next autosave transaction will happen in the next selected periodic interval. \n\n\nKeep growing your funds.🥂\n\nMyFund  \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+    message = f"Well done {user.first_name},\n\nAutoSave ({frequency}) was successfully activated. You are now saving ₦{amount} {frequency}."
     from_email = "MyFund <info@myfundmobile.com>"
     recipient_list = [user.email]
 
-    send_mail(subject, message, from_email, recipient_list, fail_silently=False)
-    # Return a success response indicating that AutoSave has been activated
+    try:
+        send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+    except Exception as e:
+        return Response({"error": f"Failed to send email: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    # Mark user as having autosave enabled
+    user.autosave_enabled = True
+    user.save()
+
     return Response({"message": "AutoSave activated"}, status=status.HTTP_200_OK)
 
 
@@ -1422,126 +1408,114 @@ def autoinvest(request):
     amount = request.data.get("amount")
     frequency = request.data.get("frequency")
 
-    # Validate frequency (should be one of 'hourly', 'daily', 'weekly', 'monthly')
-    valid_frequencies = ["hourly", "daily", "weekly", "monthly"]
+    # Validate request data
+    if not amount or not card_id or not frequency:
+        return Response(
+            {"error": "Missing required fields: card_id, amount, and frequency."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    try:
+        amount = int(amount)
+        if amount < 100:
+            return Response(
+                {"error": "Amount cannot be less than N100."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+    except ValueError:
+        return Response(
+            {"error": "Invalid amount. Amount should be a number."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    valid_frequencies = ["daily", "weekly", "monthly"]
     if frequency not in valid_frequencies:
         return Response(
-            {"error": "Invalid frequency"}, status=status.HTTP_400_BAD_REQUEST
+            {"error": "Invalid frequency. Choose 'daily', 'weekly', or 'monthly'."},
+            status=status.HTTP_400_BAD_REQUEST
         )
 
+    # Validate card
     try:
-        active_autoinvest = AutoInvest.objects.get(user=user, active=True)
+        card = Card.objects.get(id=card_id)
+    except Card.DoesNotExist:
         return Response(
-            {"error": "User already has an active autoinvest"},
-            status=status.HTTP_400_BAD_REQUEST,
+            {"error": "Selected card not found."},
+            status=status.HTTP_404_NOT_FOUND
         )
-    except AutoInvest.DoesNotExist:
-        pass
-
-    card = Card.objects.get(id=card_id)
-    if not card:
+    except ValueError:
         return Response(
-            {"error": "Selected card not found"}, status=status.HTTP_404_NOT_FOUND
+            {"error": "Invalid card ID format."},
+            status=status.HTTP_400_BAD_REQUEST
         )
 
-    # Calculate the interval based on the selected frequency (in seconds)
-    intervals = {
-        "hourly": 3600,
-        "daily": 86400,
-        "weekly": 604800,
-        "monthly": 2419200,  # Approximation for 28-31 days
+    # Prepare Paystack plan creation request
+    paystack_frequency = frequency  # Paystack uses the same intervals
+    plan_payload = {
+        "name": f"{frequency.capitalize()} AutoInvest Plan for {user.email}",
+        "interval": paystack_frequency,
+        "amount": amount * 100  # Convert amount to kobo
+    }
+    
+    headers = {
+        "Authorization": f"Bearer {paystack_secret_key}",
+        "Content-Type": "application/json",
     }
 
-    interval_seconds = intervals.get(frequency)
+    # Step 1: Create subscription plan on Paystack
+    try:
+        plan_response = requests.post("https://api.paystack.co/plan", json=plan_payload, headers=headers)
+        plan_response.raise_for_status()  # Raises an HTTPError for bad responses
+        plan_data = plan_response.json()
 
-    if not interval_seconds:
-        return Response(
-            {"error": "Invalid frequency"}, status=status.HTTP_400_BAD_REQUEST
-        )
+        if not plan_data.get("status"):
+            return Response({"error": "Failed to create plan on Paystack."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-    # Create an 'AutoInvest' record
-    autoinvest = AutoInvest.objects.create(
-        user=user, frequency=frequency, amount=amount, active=True
+        plan_code = plan_data.get("data", {}).get("plan_code")
+    except requests.RequestException as e:
+        return Response({"error": f"Paystack plan creation failed: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    # Step 2: Subscribe user to the plan
+    subscription_payload = {
+        "customer": user.email,  # Assuming you saved the customer's ID
+        "plan": plan_code
+    }
+    
+    try:
+        subscription_response = requests.post("https://api.paystack.co/subscription", json=subscription_payload, headers=headers)
+        subscription_response.raise_for_status()
+        subscription_data = subscription_response.json()
+
+        if not subscription_data.get("status"):
+            return Response({"error": "Subscription failed."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except requests.RequestException as e:
+        return Response({"error": f"Subscription failed: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    # Step 3: Save AutoInvest record to the database
+    AutoInvest.objects.create(
+        user=user,
+        frequency=frequency,
+        amount=amount,
+        active=True,
+        # need to add subscription_id to the database attributes
+        # subscription_id=subscription_data.get("data").get("id")  # Store subscription ID
     )
 
-    # Set the 'autoinvest_enabled' field to True
-    user.autoinvest_enabled = True  # Add this line
-    user.save()
-
-    # Use the card details to initiate a payment with Paystack periodically
-    def auto_invest():
-        while True:
-            # Delay for the specified interval
-            time.sleep(interval_seconds)
-
-            # Perform the auto invest
-            paystack_url = "https://api.paystack.co/charge"
-
-            payload = {
-                "card": {
-                    "number": card.card_number,
-                    "cvv": card.cvv,
-                    "expiry_month": card.expiry_date.split("/")[0],
-                    "expiry_year": card.expiry_date.split("/")[1],
-                },
-                "email": user.email,
-                "amount": int(amount) * 100,  # Amount in kobo (multiply by 100)
-            }
-
-            headers = {
-                "Authorization": f"Bearer {paystack_secret_key}",
-                "Content-Type": "application/json",
-            }
-
-            response = requests.post(paystack_url, json=payload, headers=headers)
-            paystack_response = response.json()
-
-            if paystack_response.get("status"):
-                # Investment successful, update user's investments and create a transaction
-                # user.investment += int(amount)
-                user.investment += int(0)
-                user.save()
-
-                # Call the confirm_referral_rewards method here
-                user.confirm_referral_rewards(
-                    is_referrer=True
-                )  # Pass True if the user is a referrer, or False if not
-
-                # Create a transaction record
-                Transaction.objects.create(
-                    user=user,
-                    transaction_type="credit",
-                    amount=int(0),
-                    date=timezone.now().date(),
-                    time=timezone.now().time(),
-                    description=f"AutoInvest",
-                    transaction_id=paystack_response.get("data", {}).get("reference"),
-                )
-
-                # After processing a savings or investment transaction
-                user.update_total_savings_and_investment_this_month()
-
-                # Send a confirmation email
-                subject = "AutoInvest Successful!"
-                message = f"Hi {user.first_name},\n\nYour AutoInvest ({frequency}) of ₦{amount} was successful. It has been added to your INVESTMENTS account. \n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-                from_email = "MyFund <info@myfundmobile.com>"
-                recipient_list = [user.email]
-
-                send_mail(
-                    subject, message, from_email, recipient_list, fail_silently=False
-                )
-
-    # Start a new thread for the auto invest process
-    threading.Thread(target=auto_invest).start()
-
-    # Send an immediate email alert for activation
+    # Send success notification email
     subject = "AutoInvest Activated!"
-    message = f"Well done {user.first_name},\n\nAutoInvest ({frequency}) was successfully activated. You are now investing ₦{amount} {frequency} and your next AutoInvest transaction will happen in the next selected periodic interval. \n\n\nKeep growing your funds.🥂\n\nMyFund  \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+    message = f"Well done {user.first_name},\n\nAutoInvest ({frequency}) was successfully activated. You are now investing ₦{amount} {frequency}."
     from_email = "MyFund <info@myfundmobile.com>"
     recipient_list = [user.email]
 
-    send_mail(subject, message, from_email, recipient_list, fail_silently=False)
-    # Return a success response indicating that AutoInvest has been activated
+    try:
+        send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+    except Exception as e:
+        return Response({"error": f"Failed to send email: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    # Mark user as having auto-invest enabled
+    user.autoinvest_enabled = True
+    user.save()
+
     return Response({"message": "AutoInvest activated"}, status=status.HTTP_200_OK)
 
 
