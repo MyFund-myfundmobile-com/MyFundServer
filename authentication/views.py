@@ -1085,9 +1085,9 @@ def autosave(request):
     
     try:
         amount = int(amount)
-        if amount <= 0:
+        if amount < 100:
             return Response(
-                {"error": "Amount should be a positive integer."},
+                {"error": "Amount cannot be less that N100"},
                 status=status.HTTP_400_BAD_REQUEST
             )
     except ValueError:
@@ -1103,13 +1103,7 @@ def autosave(request):
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    # Check if user has any active AutoSave
-    active_autosaves = AutoSave.objects.filter(user=user, active=True)
-    if active_autosaves.exists():
-        return Response(
-            {"error": "User already has an active AutoSave."},
-            status=status.HTTP_400_BAD_REQUEST
-        )
+     
 
     # Validate card
     try:
