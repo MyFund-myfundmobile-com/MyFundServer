@@ -65,10 +65,8 @@ ALLOWED_HOSTS = [
     "192.168.212.60",
     "192.168.239.60",
     "192.168.92.60",
-    "192.168.88.60",
-    "192.168.58.60",
-    "192.168.111.60",
-    "192.168.251.60",
+    "192.168.119.60",
+    "192.168.204.60",
     "192.168.0.148"
 ]
 
@@ -275,15 +273,10 @@ EMAIL_USE_SSL = True  # Use SSL for secure connection
 
 # SMTP Authentication
 EMAIL_HOST_USER = "info@myfundmobile.com"
-EMAIL_HOST_PASSWORD = "Reproduction1..."  # Make sure this is your actual email password
+EMAIL_HOST_PASSWORD = "Reproduction1..."
+EMAIL_HOST_PASSWORD = "Reproduction1..."
 
-# # SMTP Authentication
-# EMAIL_HOST_USER = "company@myfundmobile.com"
-# EMAIL_HOST_PASSWORD = (
-#     "AdminSecure123..."  # Make sure this is your actual email password
-# )
-
-# Default email settings
+# Other settings
 DEFAULT_FROM_EMAIL = "MyFund <info@myfundmobile.com>"
 PROTOCOL = "https"
 

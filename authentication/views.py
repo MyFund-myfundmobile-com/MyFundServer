@@ -59,6 +59,7 @@ def signup(request):
         how_did_you_hear = serializer.validated_data.get("how_did_you_hear", "OTHER")
         user.how_did_you_hear = how_did_you_hear
         user.save()
+        print("Received data:", request.data)
 
         # Check if it's a resend request
         is_resend = request.data.get("resend", False)
@@ -73,6 +74,15 @@ def signup(request):
             # Update the response data for resend case
             response_data = {"message": "OTP resent successfully"}
             return Response(response_data, status=status.HTTP_200_OK)
+
+        # Generate OTP for initial signup
+        otp = generate_otp()
+        user.otp = otp
+        user.is_active = False  # Set the user as inactive until OTP confirmation
+        user.save()
+
+        # Send OTP to the user's email
+        send_otp_email(user, otp)
 
         # Check if the user has a referrer (referral relationship)
         if user.referral:
@@ -118,15 +128,6 @@ def signup(request):
             # Send an email to the referred user (new user)
             send_referred_pending_reward_email(user)
 
-        # Generate OTP for initial signup
-        otp = generate_otp()
-        user.otp = otp
-        user.is_active = False  # Set the user as inactive until OTP confirmation
-        user.save()
-
-        # Send OTP to the user's email
-        send_otp_email(user, otp)
-
         # Modify the response data to include the referral email for pending transactions
         response_data = serializer.data
         if user.referral:
@@ -139,7 +140,7 @@ def signup(request):
 
 def send_referrer_pending_reward_email(referrer, referred_email):
     subject = f"{referrer.first_name}, Your Referral Reward is Pending..."
-    message = f"Hi {referrer.first_name},\n\nYour referral reward is pending. When your friend ({referred_email}) becomes active by making their first savings/investment, your reward will be confirmed in your wallet.\n\nThank you for using MyFund!\n\nKeep growing your funds.🥂\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+    message = f"Hi {referrer.first_name},\n\nYour referral reward of ₦500.00 is pending. When your friend ({referred_email}) becomes active by making their first savings/investment, your reward will be confirmed in your wallet.\n\nThank you for using MyFund!\n\nKeep growing your funds.🥂\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
 
     from_email = "MyFund <info@myfundmobile.com>"
     recipient_list = [referrer.email]
@@ -148,13 +149,18 @@ def send_referrer_pending_reward_email(referrer, referred_email):
 
 
 def send_referred_pending_reward_email(user):
-    subject = f"{user.first_name}, Your Referral Reward is Pending"
-    message = f"Hi {user.first_name},\n\nYou have received a referral reward for signing up with a referral. It will be confirmed in your wallet when you make your first savings of up to ₦20,000.\n\nThank you for using MyFund!\n\nKeep growing your funds.🥂\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+    subject = f"{user.first_name}, Your N500 Referral Reward is Pending"
+    message = f"Hi {user.first_name},\n\nYou have received a welcome referral reward bonus of ₦500.00 for signing up with a referral email. It will be confirmed in your Wallet when you make your first savings of up to ₦20,000.\n\nThank you for using MyFund!\n\nKeep growing your funds.🥂\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
 
     from_email = "MyFund <info@myfundmobile.com>"
     recipient_list = [user.email]
+    bcc_list = ["newusers@myfundmobile.com"]
 
-    send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+    # Combine recipient list and BCC list
+    all_recipients = recipient_list + bcc_list
+
+    # Send the email without the bcc argument
+    send_mail(subject, message, from_email, all_recipients, fail_silently=False)
 
 
 @api_view(["POST"])
@@ -176,6 +182,10 @@ def confirm_otp(request):
             user.is_active = True
             user.save()
             print("Account confirmed successfully.")
+
+            # Send welcome email
+            send_welcome_email(user)
+
             return Response(
                 {"message": "Account confirmed successfully."},
                 status=status.HTTP_200_OK,
@@ -228,6 +238,70 @@ def send_otp_email(user, otp):
     recipient_list = [user.email]
 
     send_mail(subject, message, from_email, recipient_list, html_message=message)
+
+
+from django.core.mail import send_mail
+from django.utils.html import format_html
+
+logo_url = (
+    "https://drive.google.com/uc?export=view&id=1MorbW_xLg4k2txNQdhUnBVxad8xeni-N"
+)
+image_url = (
+    "https://drive.google.com/uc?export=view&id=1K7sBCm3mgW5jQ1Cfh73LQDZuvGuNFTKw"
+)
+
+
+def send_welcome_email(user):
+    subject = f"{user.first_name}, WELCOME TO MyFund! 🥂🎊🔥"
+
+    current_year = datetime.now().year
+    logo_url = (
+        "https://drive.google.com/uc?export=view&id=1MorbW_xLg4k2txNQdhUnBVxad8xeni-N"
+    )
+    image_url = (
+        "https://drive.google.com/uc?export=view&id=1K7sBCm3mgW5jQ1Cfh73LQDZuvGuNFTKw"
+    )
+    savings_image_url = "https://drive.google.com/uc?export=view&id=1bOVTTicGZJgUKX2aTm2SAqyX-8qfH41Q"  # Your new image link
+
+    message = f"""
+    <p><img src="{logo_url}" alt="MyFund Logo" style="display: block; margin: 0 auto; max-width: 100px; height: auto;"></p>
+
+    <p>Hi {user.first_name},</p>
+
+    <p>I'm personally welcoming you to the MyFund family.</p>
+
+    <p>By signing up, you've entered the 4th step toward financial freedom, <strong>SAVINGS</strong> (click WealthMap on the app for details).</p>
+    
+    <p><img src="{savings_image_url}" alt="Savings Step Image" style="display: block; margin: 10px auto; max-width: 100%; height: auto;"></p>
+
+    <p>The app tracks your progress as you save towards buying properties for a lifetime rental (passive) income.</p>
+
+    <p>In the last few years, thousands have saved to sort their rents, started a business, saved their first million, earned their first passive income, traveled abroad, got married... it's amazing.</p>
+
+    <p>I can't wait to hear your financial success story in the shortest time possible here at MyFund.</p>
+
+    <p>Once again, you're welcome!</p>
+
+    <br>
+
+    <p><img src="{image_url}" alt="Dr Tee" style="display: block; float: left; width: 100px; height: 100px; border-radius: 50%; margin-right: 10px;">
+    <strong>Tolulope Ahmed (Dr Tee)</strong><br>
+    CEO/Co-founder, MyFund</p>
+
+    <p>MyFund ©{current_year}</p>
+    """
+
+    from_email = "MyFund <info@myfundmobile.com>"
+    recipient_list = [user.email]
+
+    send_mail(
+        subject,
+        message,
+        from_email,
+        recipient_list,
+        html_message=message,
+        fail_silently=False,
+    )
 
 
 def send_otp_reset_email(user, otp):
@@ -1334,126 +1408,114 @@ def autoinvest(request):
     amount = request.data.get("amount")
     frequency = request.data.get("frequency")
 
-    # Validate frequency (should be one of 'hourly', 'daily', 'weekly', 'monthly')
-    valid_frequencies = ["hourly", "daily", "weekly", "monthly"]
+    # Validate request data
+    if not amount or not card_id or not frequency:
+        return Response(
+            {"error": "Missing required fields: card_id, amount, and frequency."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    try:
+        amount = int(amount)
+        if amount < 100:
+            return Response(
+                {"error": "Amount cannot be less than N100."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+    except ValueError:
+        return Response(
+            {"error": "Invalid amount. Amount should be a number."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    valid_frequencies = ["daily", "weekly", "monthly"]
     if frequency not in valid_frequencies:
         return Response(
-            {"error": "Invalid frequency"}, status=status.HTTP_400_BAD_REQUEST
+            {"error": "Invalid frequency. Choose 'daily', 'weekly', or 'monthly'."},
+            status=status.HTTP_400_BAD_REQUEST
         )
 
+    # Validate card
     try:
-        active_autoinvest = AutoInvest.objects.get(user=user, active=True)
+        card = Card.objects.get(id=card_id)
+    except Card.DoesNotExist:
         return Response(
-            {"error": "User already has an active autoinvest"},
-            status=status.HTTP_400_BAD_REQUEST,
+            {"error": "Selected card not found."},
+            status=status.HTTP_404_NOT_FOUND
         )
-    except AutoInvest.DoesNotExist:
-        pass
-
-    card = Card.objects.get(id=card_id)
-    if not card:
+    except ValueError:
         return Response(
-            {"error": "Selected card not found"}, status=status.HTTP_404_NOT_FOUND
+            {"error": "Invalid card ID format."},
+            status=status.HTTP_400_BAD_REQUEST
         )
 
-    # Calculate the interval based on the selected frequency (in seconds)
-    intervals = {
-        "hourly": 3600,
-        "daily": 86400,
-        "weekly": 604800,
-        "monthly": 2419200,  # Approximation for 28-31 days
+    # Prepare Paystack plan creation request
+    paystack_frequency = frequency  # Paystack uses the same intervals
+    plan_payload = {
+        "name": f"{frequency.capitalize()} AutoInvest Plan for {user.email}",
+        "interval": paystack_frequency,
+        "amount": amount * 100  # Convert amount to kobo
+    }
+    
+    headers = {
+        "Authorization": f"Bearer {paystack_secret_key}",
+        "Content-Type": "application/json",
     }
 
-    interval_seconds = intervals.get(frequency)
+    # Step 1: Create subscription plan on Paystack
+    try:
+        plan_response = requests.post("https://api.paystack.co/plan", json=plan_payload, headers=headers)
+        plan_response.raise_for_status()  # Raises an HTTPError for bad responses
+        plan_data = plan_response.json()
 
-    if not interval_seconds:
-        return Response(
-            {"error": "Invalid frequency"}, status=status.HTTP_400_BAD_REQUEST
-        )
+        if not plan_data.get("status"):
+            return Response({"error": "Failed to create plan on Paystack."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-    # Create an 'AutoInvest' record
-    autoinvest = AutoInvest.objects.create(
-        user=user, frequency=frequency, amount=amount, active=True
+        plan_code = plan_data.get("data", {}).get("plan_code")
+    except requests.RequestException as e:
+        return Response({"error": f"Paystack plan creation failed: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    # Step 2: Subscribe user to the plan
+    subscription_payload = {
+        "customer": user.email,  # Assuming you saved the customer's ID
+        "plan": plan_code
+    }
+    
+    try:
+        subscription_response = requests.post("https://api.paystack.co/subscription", json=subscription_payload, headers=headers)
+        subscription_response.raise_for_status()
+        subscription_data = subscription_response.json()
+
+        if not subscription_data.get("status"):
+            return Response({"error": "Subscription failed."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except requests.RequestException as e:
+        return Response({"error": f"Subscription failed: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    # Step 3: Save AutoInvest record to the database
+    AutoInvest.objects.create(
+        user=user,
+        frequency=frequency,
+        amount=amount,
+        active=True,
+        # need to add subscription_id to the database attributes
+        # subscription_id=subscription_data.get("data").get("id")  # Store subscription ID
     )
 
-    # Set the 'autoinvest_enabled' field to True
-    user.autoinvest_enabled = True  # Add this line
-    user.save()
-
-    # Use the card details to initiate a payment with Paystack periodically
-    def auto_invest():
-        while True:
-            # Delay for the specified interval
-            time.sleep(interval_seconds)
-
-            # Perform the auto invest
-            paystack_url = "https://api.paystack.co/charge"
-
-            payload = {
-                "card": {
-                    "number": card.card_number,
-                    "cvv": card.cvv,
-                    "expiry_month": card.expiry_date.split("/")[0],
-                    "expiry_year": card.expiry_date.split("/")[1],
-                },
-                "email": user.email,
-                "amount": int(amount) * 100,  # Amount in kobo (multiply by 100)
-            }
-
-            headers = {
-                "Authorization": f"Bearer {paystack_secret_key}",
-                "Content-Type": "application/json",
-            }
-
-            response = requests.post(paystack_url, json=payload, headers=headers)
-            paystack_response = response.json()
-
-            if paystack_response.get("status"):
-                # Investment successful, update user's investments and create a transaction
-                # user.investment += int(amount)
-                user.investment += int(0)
-                user.save()
-
-                # Call the confirm_referral_rewards method here
-                user.confirm_referral_rewards(
-                    is_referrer=True
-                )  # Pass True if the user is a referrer, or False if not
-
-                # Create a transaction record
-                Transaction.objects.create(
-                    user=user,
-                    transaction_type="credit",
-                    amount=int(0),
-                    date=timezone.now().date(),
-                    time=timezone.now().time(),
-                    description=f"AutoInvest",
-                    transaction_id=paystack_response.get("data", {}).get("reference"),
-                )
-
-                # After processing a savings or investment transaction
-                user.update_total_savings_and_investment_this_month()
-
-                # Send a confirmation email
-                subject = "AutoInvest Successful!"
-                message = f"Hi {user.first_name},\n\nYour AutoInvest ({frequency}) of ₦{amount} was successful. It has been added to your INVESTMENTS account. \n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-                from_email = "MyFund <info@myfundmobile.com>"
-                recipient_list = [user.email]
-
-                send_mail(
-                    subject, message, from_email, recipient_list, fail_silently=False
-                )
-
-    # Start a new thread for the auto invest process
-    threading.Thread(target=auto_invest).start()
-
-    # Send an immediate email alert for activation
+    # Send success notification email
     subject = "AutoInvest Activated!"
-    message = f"Well done {user.first_name},\n\nAutoInvest ({frequency}) was successfully activated. You are now investing ₦{amount} {frequency} and your next AutoInvest transaction will happen in the next selected periodic interval. \n\n\nKeep growing your funds.🥂\n\nMyFund  \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+    message = f"Well done {user.first_name},\n\nAutoInvest ({frequency}) was successfully activated. You are now investing ₦{amount} {frequency}."
     from_email = "MyFund <info@myfundmobile.com>"
     recipient_list = [user.email]
 
-    send_mail(subject, message, from_email, recipient_list, fail_silently=False)
-    # Return a success response indicating that AutoInvest has been activated
+    try:
+        send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+    except Exception as e:
+        return Response({"error": f"Failed to send email: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    # Mark user as having auto-invest enabled
+    user.autoinvest_enabled = True
+    user.save()
+
     return Response({"message": "AutoInvest activated"}, status=status.HTTP_200_OK)
 
 
@@ -1716,7 +1778,7 @@ def wallet_to_investment(request):
         # Create a transaction record with the details
         transaction = Transaction(
             user=user,
-            transaction_type="credit",  # Debit for withdrawal
+            transaction_type="debit",  # Debit for withdrawal
             amount=amount,
             date=timezone.now().date(),
             time=timezone.now().time(),
@@ -1762,7 +1824,7 @@ def withdraw_to_local_bank(request):
             {"error": "Insufficient savings balance."},
             status=status.HTTP_400_BAD_REQUEST,
         )
-    elif source_account == "investment" and user.investment < amount:
+    if source_account == "investment" and user.investment < amount:
         return Response(
             {"error": "Insufficient investment balance."},
             status=status.HTTP_400_BAD_REQUEST,
@@ -1864,9 +1926,10 @@ def withdraw_to_local_bank(request):
         )
         print("Paystack API Response:", paystack_response)
 
-        if paystack_response.get("data", {}).get("status") == "success":
+        if paystack_response.get("status"):  # This checks if it's truthy
             # Deduct the total amount (including service charge) from the source account
             # Convert total_amount to Decimal
+            print("Paystack API Response:", paystack_response)
 
             bank_name = target_bank_account.bank_name
             # Send a confirmation email to the user
@@ -1879,14 +1942,15 @@ def withdraw_to_local_bank(request):
 
             return Response(
                 {
-                    "message": "Withdrawal to local bank successful.",
+                    "success": True,
+                    "message": paystack_response.get("message"),
                     "transaction_id": transaction_id,
-                    "updated_balance": updated_balance,  # Include the updated balance here
+                    "updated_balance": updated_balance,
                 },
                 status=status.HTTP_200_OK,
             )
         else:
-            # Handle Paystack withdrawal failure
+            print("Paystack withdrawal failed:", paystack_response)
             return Response(
                 {"error": "Withdrawal to local bank failed. Please try again later."},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -2857,24 +2921,76 @@ def paystack_webhook(request):
 
 # ------------------------------ ADMIN SECTION FUNCTIONS
 
+from datetime import timedelta
+from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.response import Response
-from rest_framework import status, generics
-from .models import CustomUser
-from .serializers import CustomUserSerializer
-from django.core.mail import EmailMessage
-from datetime import datetime, timedelta
+from .serializers import UserSerializer
+from django.shortcuts import get_object_or_404
 
 
 @api_view(["GET"])
-@permission_classes(
-    [IsAuthenticated]
-)  # You can adjust this based on who should access this API
+@permission_classes([IsAuthenticated])
 def get_all_users(request):
-    users = CustomUser.objects.all()
+    date_range = request.query_params.get("date_range", None)
+    now = timezone.now()
+    start_date = None
+
+    # Determine date range
+    if date_range == "daily":
+        start_date = now - timedelta(days=1)
+    elif date_range == "weekly":
+        start_date = now - timedelta(weeks=1)
+    elif date_range == "monthly":
+        start_date = now - timedelta(weeks=4)
+    elif date_range == "quarterly":
+        start_date = now - timedelta(weeks=13)
+    elif date_range == "6months":
+        start_date = now - timedelta(days=182)
+    elif date_range == "yearly":
+        start_date = now - timedelta(days=365)
+
+    # Filter users based on the date range and exclude unsubscribed users
+    if start_date:
+        users = CustomUser.objects.filter(
+            date_joined__gte=start_date, is_subscribed=True
+        )
+    else:
+        users = CustomUser.objects.filter(is_subscribed=True)
+
     serializer = UserSerializer(users, many=True)
     return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+@api_view(["POST"])
+def unsubscribe_user(request):
+    user_email = request.data.get("email", None)
+    if user_email:
+        user = get_object_or_404(CustomUser, email=user_email)
+        user.is_subscribed = False
+        user.save()
+        return Response(
+            {"message": "You have been unsubscribed."}, status=status.HTTP_200_OK
+        )
+    return Response({"error": "Email not provided"}, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(["POST"])
+def resubscribe_user(request):
+    print("Resubscribe endpoint hit")  # Add this for debugging
+    user_email = request.data.get("email", None)
+    if user_email:
+        user = get_object_or_404(CustomUser, email=user_email)
+        if not user.is_subscribed:
+            user.is_subscribed = True
+            user.save()
+            return Response(
+                {"message": "You have been resubscribed."}, status=status.HTTP_200_OK
+            )
+        return Response(
+            {"message": "You are already subscribed."}, status=status.HTTP_200_OK
+        )
+    return Response({"error": "Email not provided"}, status=status.HTTP_400_BAD_REQUEST)
 
 
 import logging
@@ -2956,37 +3072,6 @@ def send_email(request):
         )
 
 
-from django.utils import timezone
-from rest_framework import generics
-from .models import CustomUser
-from .serializers import CustomUserSerializer
-from datetime import datetime, timedelta
-
-
-class UsersByDateRangeView(generics.ListAPIView):
-    serializer_class = CustomUserSerializer
-
-    def get_queryset(self):
-        date_range = self.request.query_params.get("date_range", "daily")
-        today = timezone.now().date()  # Use timezone-aware datetime
-        if date_range == "daily":
-            start_date = today
-            end_date = today
-        elif date_range == "weekly":
-            start_date = today - timedelta(days=today.weekday())
-            end_date = start_date + timedelta(days=6)
-        elif date_range == "monthly":
-            start_date = today.replace(day=1)
-            next_month = start_date + timedelta(days=31)
-            end_date = next_month.replace(day=1) - timedelta(days=1)
-        else:
-            start_date = end_date = today  # Default to daily if unknown range
-
-        return CustomUser.objects.filter(
-            date_joined__date__range=[start_date, end_date]
-        )
-
-
 from .models import EmailTemplate
 from .serializers import EmailTemplateSerializer
 from django.views.decorators.http import require_http_methods
@@ -3037,12 +3122,18 @@ def get_templates(request):
 @api_view(["DELETE"])
 def delete_template(request, template_id):
     try:
+        logger.info(
+            f"Attempting to delete template with ID: {template_id}"
+        )  # Add logging
         template = EmailTemplate.objects.get(id=template_id)
         template.delete()
         return Response(
             {"message": "Template deleted successfully"}, status=status.HTTP_200_OK
         )
     except EmailTemplate.DoesNotExist:
+        logger.warning(
+            f"Template with ID {template_id} does not exist."
+        )  # Log if template doesn't exist
         return Response(
             {"error": "Template not found"}, status=status.HTTP_404_NOT_FOUND
         )
@@ -3059,7 +3150,8 @@ def get_template(request, template_id):
             {
                 "id": template.id,
                 "title": template.title,
-                "design": template.design_body,  # Return JSON
+                "design": template.design_body,  # JSON version
+                "design_html": template.design_html,  # HTML version
             },
             safe=False,
         )
