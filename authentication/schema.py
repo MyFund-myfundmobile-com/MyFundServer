@@ -34,7 +34,7 @@ class QuickSave(graphene.Mutation):
             # Payment processing with Paystack (similar to your previous code)
             paystack_secret_key = os.environ.get(
                 "PAYSTACK_KEY_LIVE",
-                default="sk_test_dacd07b029231eed22f407b3da805ecafdf2668f",
+                default="  ",
             )
             card_number = card.card_number
             cvv = card.cvv
