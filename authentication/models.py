@@ -121,6 +121,8 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     is_staff = models.BooleanField(default=False)
     is_superuser = models.BooleanField(default=False)
 
+    is_hired_referrer = models.BooleanField(default=False)
+
     objects = CustomUserManager()
 
     USERNAME_FIELD = "email"
@@ -297,15 +299,11 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
 
                     # Deduct the credited amount from the pending referral rewards
                     self.pending_referral_reward -= 500
-                    self.referral.pending_referral_reward -= 500
-                    self.pending_referral_reward -= 500
-                    self.referral.pending_referral_reward -= 500
+                    self.wallet += 500
 
-                    # Update the wallets of both users
-                    self.wallet += 500
-                    self.referral.wallet += 500
-                    self.wallet += 500
-                    self.referral.wallet += 500
+                    if not self.referral.is_hired_referrer:
+                        self.referral.pending_referral_reward -= 500
+                        self.referral.wallet += 500
 
                     # Save the changes to the database for both users
                     self.save()
@@ -679,3 +677,20 @@ class EmailTemplate(models.Model):
 
     def __str__(self):
         return self.title
+
+
+class Referral(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="referred_by"
+    )
+    referrer = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="referrals"
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("user", "referrer")  # Ensure a user-referrer pair is unique
+
+    def __str__(self):
+        return f"{self.user.first_name} referred by {self.referrer.first_name}"

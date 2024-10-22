@@ -22,7 +22,7 @@ from django.contrib.auth import logout
 from django.shortcuts import render, redirect
 from django.core.exceptions import ObjectDoesNotExist
 from django.utils import timezone
-from authentication.models import CustomUser
+from authentication.models import CustomUser, Referral
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from .serializers import UserProfileUpdateSerializer
@@ -86,21 +86,7 @@ def signup(request):
 
         # Check if the user has a referrer (referral relationship)
         if user.referral:
-            transaction_id = str(uuid.uuid4())[
-                :10
-            ]  # Generate a UUID and truncate it to 10 characters
-
             # Create pending credit transactions for both the referrer and the referred user
-            credit_transaction_referrer = Transaction.objects.create(
-                user=user.referral,
-                referral_email=user.email,  # Include the referral email
-                transaction_type="pending",
-                amount=500,
-                description="Referral Reward (Pending)",
-                transaction_id=transaction_id,
-            )
-            credit_transaction_referrer.save()
-
             transaction_id = str(uuid.uuid4())[
                 :10
             ]  # Generate a UUID and truncate it to 10 characters
@@ -114,16 +100,41 @@ def signup(request):
             )
             credit_transaction_referred.save()
 
+            user.pending_referral_reward = F("pending_referral_reward") + 500
+
+            user.save()
+
             # Update the user and referrer's pending reward
-            user.referral.pending_referral_reward = F("pending_referral_reward") + 500
-            user.pending_referral_reward = F("pending_referral_reward") + 500
-            user.referral.pending_referral_reward = F("pending_referral_reward") + 500
-            user.pending_referral_reward = F("pending_referral_reward") + 500
+            if not user.referral.is_hired_referrer:
+                transaction_id = str(uuid.uuid4())[
+                    :10
+                ]  # Generate a UUID and truncate it to 10 characters
+                credit_transaction_referrer = Transaction.objects.create(
+                    user=user.referral,
+                    referral_email=user.email,  # Include the referral email
+                    transaction_type="pending",
+                    amount=500,
+                    description="Referral Reward (Pending)",
+                    transaction_id=transaction_id,
+                )
 
-            user.referral.save()
+                credit_transaction_referrer.save()
 
-            # Send an email to the referrer (old user)
-            send_referrer_pending_reward_email(user.referral, user.email)
+                user.referral.pending_referral_reward = (
+                    F("pending_referral_reward") + 500
+                )
+
+                user.referral.save()
+
+                # Send an email to the referrer (old user)
+                send_referrer_pending_reward_email(user.referral, user.email)
+
+            if user.referral.is_hired_referrer:
+                hired_referrer = Referral.objects.create(
+                    user=user, referrer=user.referral
+                )
+
+                hired_referrer.save()
 
             # Send an email to the referred user (new user)
             send_referred_pending_reward_email(user)
@@ -737,7 +748,7 @@ class BankAccountViewSet(viewsets.ModelViewSet):
     def resolve_account(self, account_number, bank_code):
         secret_key = os.environ.get(
             "PAYSTACK_KEY_LIVE",
-            default="sk_test_dacd07b029231eed22f407b3da805ecafdf2668f",
+            default="  ",
         )
         url = f"https://api.paystack.co/bank/resolve?account_number={account_number}&bank_code={bank_code}"
         headers = {"Authorization": f"Bearer {secret_key}"}
@@ -1035,7 +1046,7 @@ class CustomGraphQLView(GraphQLView):
 
 paystack_secret_key = os.environ.get(
     "PAYSTACK_KEY_LIVE",
-    default="sk_test_dacd07b029231eed22f407b3da805ecafdf2668f",
+    default="  ",
 )
 
 
@@ -1154,20 +1165,20 @@ def autosave(request):
     if not amount or not card_id or not frequency:
         return Response(
             {"error": "Missing required fields: card_id, amount, and frequency."},
-            status=status.HTTP_400_BAD_REQUEST
+            status=status.HTTP_400_BAD_REQUEST,
         )
-    
+
     try:
         amount = int(amount)
         if amount < 100:
             return Response(
                 {"error": "Amount cannot be less that N100"},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
     except ValueError:
         return Response(
             {"error": "Invalid amount. Amount should be a number."},
-            status=status.HTTP_400_BAD_REQUEST
+            status=status.HTTP_400_BAD_REQUEST,
         )
 
     valid_frequencies = ["hourly", "daily", "weekly", "monthly"]
@@ -1195,13 +1206,11 @@ def autosave(request):
         card = Card.objects.get(id=card_id)
     except Card.DoesNotExist:
         return Response(
-            {"error": "Selected card not found."},
-            status=status.HTTP_404_NOT_FOUND
+            {"error": "Selected card not found."}, status=status.HTTP_404_NOT_FOUND
         )
     except ValueError:
         return Response(
-            {"error": "Invalid card ID format."},
-            status=status.HTTP_400_BAD_REQUEST
+            {"error": "Invalid card ID format."}, status=status.HTTP_400_BAD_REQUEST
         )
 
     # Prepare Paystack plan creation request
@@ -1209,9 +1218,9 @@ def autosave(request):
     plan_payload = {
         "name": f"{frequency.capitalize()} Autosave Plan for {user.email}",
         "interval": paystack_frequency,
-        "amount": amount * 100  # Convert amount to kobo
+        "amount": amount * 100,  # Convert amount to kobo
     }
-    
+
     headers = {
         "Authorization": f"Bearer {paystack_secret_key}",
         "Content-Type": "application/json",
@@ -1219,25 +1228,34 @@ def autosave(request):
 
     # Step 1: Create subscription plan on Paystack
     try:
-        plan_response = requests.post("https://api.paystack.co/plan", json=plan_payload, headers=headers)
-        plan_response.raise_for_status()  # Raises an HTTPError for bad responses
+        plan_response = requests.post(
+            "https://api.paystack.co/plan", json=plan_payload, headers=headers
+        )
+        plan_response.raise_for_status()
         plan_data = plan_response.json()
 
         if not plan_data.get("status"):
-            return Response({"error": "Failed to create plan on Paystack."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response(
+                {"error": "Failed to create plan on Paystack."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
         plan_code = plan_data.get("data", {}).get("plan_code")
     except requests.RequestException as e:
-        return Response({"error": f"Paystack plan creation failed: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response(
+            {"error": f"Paystack plan creation failed: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
     # Step 2: Subscribe user to the plan
-    subscription_payload = {
-        "customer": user.email,
-        "plan": plan_code
-    }
-    
+    subscription_payload = {"customer": user.email, "plan": plan_code}
+
     try:
-        subscription_response = requests.post("https://api.paystack.co/subscription", json=subscription_payload, headers=headers)
+        subscription_response = requests.post(
+            "https://api.paystack.co/subscription",
+            json=subscription_payload,
+            headers=headers,
+        )
         subscription_response.raise_for_status()
         subscription_data = subscription_response.json()
 
@@ -1249,7 +1267,10 @@ def autosave(request):
         subscription_token = subscription_data.get("data", {}).get("email_token")
 
     except requests.RequestException as e:
-        return Response({"error": f"Subscription failed: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response(
+            {"error": f"Subscription failed: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
     # Step 3: Save AutoSave record to the database
     AutoSave.objects.create(
@@ -1271,7 +1292,10 @@ def autosave(request):
     try:
         send_mail(subject, message, from_email, recipient_list, fail_silently=False)
     except Exception as e:
-        return Response({"error": f"Failed to send email: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response(
+            {"error": f"Failed to send email: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
     # Mark user as having autosave enabled
     user.autosave_enabled = True
@@ -1520,13 +1544,11 @@ def autoinvest(request):
         card = Card.objects.get(id=card_id)
     except Card.DoesNotExist:
         return Response(
-            {"error": "Selected card not found."},
-            status=status.HTTP_404_NOT_FOUND
+            {"error": "Selected card not found."}, status=status.HTTP_404_NOT_FOUND
         )
     except ValueError:
         return Response(
-            {"error": "Invalid card ID format."},
-            status=status.HTTP_400_BAD_REQUEST
+            {"error": "Invalid card ID format."}, status=status.HTTP_400_BAD_REQUEST
         )
 
     # Check for existing AutoInvest records for the user
@@ -1539,7 +1561,7 @@ def autoinvest(request):
         "interval": frequency,
         "amount": amount * 100  # Convert amount to kobo
     }
-    
+
     headers = {
         "Authorization": f"Bearer {paystack_secret_key}",
         "Content-Type": "application/json",
@@ -1560,9 +1582,13 @@ def autoinvest(request):
         "customer": user.email,
         "plan": plan_code
     }
-    
+
     try:
-        subscription_response = requests.post("https://api.paystack.co/subscription", json=subscription_payload, headers=headers)
+        subscription_response = requests.post(
+            "https://api.paystack.co/subscription",
+            json=subscription_payload,
+            headers=headers,
+        )
         subscription_response.raise_for_status()
         subscription_data = subscription_response.json()
         subscription_id = subscription_data["data"]["id"]
@@ -2440,7 +2466,7 @@ class BuyPropertyView(generics.CreateAPIView):
             # Define your payment gateway credentials and headers
             paystack_secret_key = os.environ.get(
                 "PAYSTACK_KEY_LIVE",
-                default="sk_test_dacd07b029231eed22f407b3da805ecafdf2668f",
+                default="  ",
             )
             headers = {
                 "Authorization": f"Bearer {paystack_secret_key}",
