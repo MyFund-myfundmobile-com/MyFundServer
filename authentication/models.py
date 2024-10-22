@@ -567,13 +567,28 @@ class AutoSave(models.Model):
         ],
     )
     active = models.BooleanField(default=True)
+    
+    # Paystack subscription details
+    paystack_sub_id = models.CharField(max_length=255, null=True, blank=True)
+    paystack_sub_code = models.CharField(max_length=255, null=True, blank=True)
+    paystack_sub_token = models.CharField(max_length=255, null=True, blank=True)
 
     def __str__(self):
         user_name = f"{self.user.first_name} ({self.user.email})"
         amount_saved = (
             f"₦{self.amount}" if self.amount is not None else "Amount not available"
         )
-        return f"AutoSave for {user_name} - {amount_saved} ({self.frequency})"
+        paystack_details = self.get_paystack_details()
+
+        return f"AutoSave for {user_name} - {amount_saved} ({self.frequency}) - {paystack_details}"
+
+    def get_paystack_details(self):
+        """Return Paystack subscription details as a dictionary."""
+        return {
+            "paystack_sub_id": self.paystack_sub_id,
+            "paystack_sub_code": self.paystack_sub_code,
+            "paystack_sub_token": self.paystack_sub_token,
+        } if self.paystack_sub_id or self.paystack_sub_code or self.paystack_sub_token else {"message": "No Paystack details"}
 
 
 class AutoInvest(models.Model):
@@ -585,13 +600,29 @@ class AutoInvest(models.Model):
         choices=[("daily", "Daily"), ("weekly", "Weekly"), ("monthly", "Monthly")],
     )
     active = models.BooleanField(default=True)
+    
+    # Paystack subscription details
+    paystack_sub_id = models.CharField(max_length=255, null=True, blank=True)
+    paystack_sub_code = models.CharField(max_length=255, null=True, blank=True)
+    paystack_sub_token = models.CharField(max_length=255, null=True, blank=True)
 
     def __str__(self):
         user_name = f"{self.user.first_name} ({self.user.email})"
         amount_invested = (
             f"₦{self.amount}" if self.amount is not None else "Amount not available"
         )
-        return f"AutoInvest for {user_name} - {amount_invested} ({self.frequency})"
+        paystack_details = self.get_paystack_details()
+
+        return f"AutoInvest for {user_name} - {amount_invested} ({self.frequency}) - {paystack_details}"
+
+    def get_paystack_details(self):
+        """Return Paystack subscription details as a dictionary."""
+        return {
+            "paystack_sub_id": self.paystack_sub_id,
+            "paystack_sub_code": self.paystack_sub_code,
+            "paystack_sub_token": self.paystack_sub_token,
+        } if self.paystack_sub_id or self.paystack_sub_code or self.paystack_sub_token else {"message": "No Paystack details"}
+
 
 
 class Property(models.Model):
