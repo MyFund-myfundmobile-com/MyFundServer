@@ -1691,13 +1691,7 @@ def deactivate_autoinvest(request):
         # Send a confirmation email
         subject = "AutoInvest Deactivated!"
         message = (
-            f"Hi {user.first_name},\n\n"
-            f"Your AutoInvest(s) for {frequency} have been deactivated.\n\n"
-            "Keep growing your funds.🥂\n\n"
-            "MyFund\n"
-            "Save, Buy Properties, Earn Rent\n"
-            "www.myfundmobile.com\n"
-            "13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+            f"Hi {user.first_name},\n\nYour AutoInvest(s) for {frequency} have been deactivated.\n\nKeep growing your funds.🥂\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
         )
         from_email = "MyFund <info@myfundmobile.com>"
         recipient_list = [user.email]
@@ -3060,13 +3054,82 @@ def paystack_webhook(request):
         description = transaction.description
         description = description.split(" ")
         user = transaction.user
+        
+        is_auto_renewal = False
+        sub_code = ""
+        sub_token = ""
+        sub_data = {}
+        
+        if (event["event"] == "invoice.create"
+            or event["event"] == "invoice.payment_failed"
+            or event["event"] == "invoice.update"
+            ):
+            sub_code = event["subscription"]["subscription_code"]
+            sub_token = event["subscription"]["email_token"]
+            
+            if AutoSave.objects.get(paystack_sub_code = sub_code, paystack_sub_token = sub_token) :
+                sub_data = AutoSave.objects.get(paystack_sub_code = sub_code, paystack_sub_token = sub_token)
+                is_auto_renewal = True
+                
+            if AutoInvest.objects.get(paystack_sub_code = sub_code, paystack_sub_token = sub_token) :
+                sub_data = AutoInvest.objects.get(paystack_sub_code = sub_code, paystack_sub_token = sub_token)
+                is_auto_renewal = True
 
         if (
             description[1] == "(Confirmed)"
             or description[1] == "(Failed)"
             or description[1] == "(successful)"
+            or is_auto_renewal == True
         ):
             return JsonResponse({"status": True}, status=status.HTTP_200_OK)
+        
+        if event["event"] == "invoice.create" and event["data"]["paid"] == False:
+            
+            if AutoSave.objects.get(paystack_sub_code = sub_code, paystack_sub_token = sub_token):
+                amount = event["data"]["amount"]
+                
+                #     Create a transaction record
+                Transaction.objects.create(
+                    user=user,
+                    transaction_type="pending",
+                    amount=int(amount),
+                    date=timezone.now().date(),
+                    time=timezone.now().time(),
+                    description="AutoSave (pending)",
+                    transaction_id=event["transaction"]["reference"],
+                )
+                
+            if AutoInvest.objects.get(paystack_sub_code = sub_code, paystack_sub_token = sub_token):
+                amount = event["data"]["amount"]
+                
+                #     Create a transaction record
+                Transaction.objects.create(
+                    user=user,
+                    transaction_type="pending",
+                    amount=int(amount),
+                    date=timezone.now().date(),
+                    time=timezone.now().time(),
+                    description="AutoInvest (pending)",
+                    transaction_id=event["transaction"]["reference"],
+                )
+                
+        if event["event"] == "invoice.payment_failed":
+            transaction.transaction_type = "failed"
+            transaction.description = description[0] + " (Failed)"
+            transaction.save()
+            
+            amount = transaction.amount
+            
+            subject = f"{description[0]} Failed!"
+            message = f"Hello {user.first_name},\n\nWe want to inform you that we tried to charge your card for your {description[0]} {sub_data.frequency} savings of ₦{amount}, but unfortunately, it was unsuccessful. Please check your card details and ensure that your information is updated on MyFund.\n\nIf you have any questions or need assistance, feel free to reach out.\n\nKeep growing your funds! 🥂\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+            from_email = "MyFund <info@myfundmobile.com>"
+            recipient_list = [user.email]
+
+            send_mail(
+                subject, message, from_email, recipient_list, fail_silently=False
+            )
+        
+        
 
         if event["data"]["status"] != "success":
             transaction.transaction_type = "failed"
@@ -3096,13 +3159,38 @@ def paystack_webhook(request):
                 user.savings += int(amount)
 
                 subject = "QuickSave Successful!"
-                message = f"Well done {user.first_name},\n\nYour QwickSave was successful and ₦{amount} has been successfully added to your SAVINGS account. \n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+                message = f"Well done {user.first_name},\n\nYour QuickSave was successful and ₦{amount} has been successfully added to your SAVINGS account. \n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
                 from_email = "MyFund <info@myfundmobile.com>"
                 recipient_list = [user.email]
 
                 send_mail(
                     subject, message, from_email, recipient_list, fail_silently=False
                 )
+            
+            if description[0] == "AutoSave":
+                user.savings += int(amount)
+
+                subject = f"{description[0]} Successful!"
+                message = f"Well done {user.first_name},\n\nYour {description[0]} was successful and ₦{amount} has been successfully added to your SAVINGS account. \n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+                from_email = "MyFund <info@myfundmobile.com>"
+                recipient_list = [user.email]
+
+                send_mail(
+                    subject, message, from_email, recipient_list, fail_silently=False
+                )
+            
+            if description[0] == "AutoInvest":
+                user.savings += int(amount)
+
+                subject = f"{description[0]} Successful!"
+                message = f"Well done {user.first_name},\n\nYour {description[0]} was successful and ₦{amount} has been successfully added to your INVESTMENT account. \n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+                from_email = "MyFund <info@myfundmobile.com>"
+                recipient_list = [user.email]
+
+                send_mail(
+                    subject, message, from_email, recipient_list, fail_silently=False
+                )
+                          
 
         user.confirm_referral_rewards(is_referrer=True)
         user.update_total_savings_and_investment_this_month()
