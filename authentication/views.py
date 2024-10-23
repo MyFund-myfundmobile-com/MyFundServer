@@ -1181,12 +1181,25 @@ def autosave(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    valid_frequencies = ["daily", "weekly", "monthly"]
+    valid_frequencies = ["hourly", "daily", "weekly", "monthly"]
     if frequency not in valid_frequencies:
         return Response(
-            {"error": "Invalid frequency. Choose 'daily', 'weekly', or 'monthly'."},
-            status=status.HTTP_400_BAD_REQUEST,
+            {"error": "Invalid frequency. Choose 'hourly', 'daily', 'weekly', or 'monthly'."},
+            status=status.HTTP_400_BAD_REQUEST
         )
+        
+    # Check for existing AutoSave records for the user
+    try:
+        existing_autosave = AutoSave.objects.filter(user=user, frequency=frequency, active=True)
+
+        if existing_autosave.exists():
+            return Response(
+                {"error": f"An active AutoSave record already exists for frequency: {frequency}."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+    except ObjectDoesNotExist:
+        pass
+     
 
     # Validate card
     try:
@@ -1201,7 +1214,7 @@ def autosave(request):
         )
 
     # Prepare Paystack plan creation request
-    paystack_frequency = frequency  # Paystack uses same intervals
+    paystack_frequency = frequency
     plan_payload = {
         "name": f"{frequency.capitalize()} Autosave Plan for {user.email}",
         "interval": paystack_frequency,
@@ -1247,10 +1260,12 @@ def autosave(request):
         subscription_data = subscription_response.json()
 
         if not subscription_data.get("status"):
-            return Response(
-                {"error": "Subscription failed."},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+            return Response({"error": "Subscription failed."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+        subscription_id = subscription_data.get("data", {}).get("id")
+        subscription_code = subscription_data.get("data", {}).get("subscription_code")
+        subscription_token = subscription_data.get("data", {}).get("email_token")
+
     except requests.RequestException as e:
         return Response(
             {"error": f"Subscription failed: {str(e)}"},
@@ -1258,7 +1273,15 @@ def autosave(request):
         )
 
     # Step 3: Save AutoSave record to the database
-    AutoSave.objects.create(user=user, frequency=frequency, amount=amount, active=True)
+    AutoSave.objects.create(
+        user=user,
+        frequency=frequency,
+        amount=amount,
+        paystack_sub_id=subscription_id,
+        paystack_sub_code=subscription_code,
+        paystack_sub_token=subscription_token,
+        active=True
+    )
 
     # Send success notification email
     subject = "AutoSave Activated!"
@@ -1286,24 +1309,59 @@ def autosave(request):
 def deactivate_autosave(request):
     user = request.user
     frequency = request.data.get("frequency")
+    
+    if not frequency:
+        return Response(
+            {"error": "Frequency Missing: Please, provide the frequency of the autosave."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     try:
-        # Find the active AutoSave for the user with the given frequency
-        autosave = AutoSave.objects.get(user=user, frequency=frequency, active=True)
+        # Find all active AutoSaves for the user with the given frequency
+        active_autosaves = AutoSave.objects.filter(user=user, frequency=frequency, active=True)
 
-        # Deactivate the AutoSave by setting it to False
-        autosave.active = False
-        autosave.save()
+        headers = {
+            "Authorization": f"Bearer {paystack_secret_key}",
+            "Content-Type": "application/json",
+        }
 
-        # Delete the AutoSave object from the database
-        autosave.delete()
+        for autosave in active_autosaves:
+            
+            print(f"autosave: {autosave}")
+            
+            if autosave.paystack_sub_id and autosave.paystack_sub_token:
+                # Prepare the data for the request
+                data = {
+                    "code": autosave.paystack_sub_code,
+                    "token": autosave.paystack_sub_token
+                }
+                
+                # Log the data being sent
+                print("Disabling subscription with data:", data)
+
+                # Make the API request
+                deactivate_response = requests.post("https://api.paystack.co/subscription/disable", json=data, headers=headers)
+
+                # Check for successful response
+                deactivate_response.raise_for_status()  # Raises an HTTPError for bad responses
+
+                # Deactivate the AutoSave
+                autosave.active = False
+                autosave.save()
+                autosave.delete()
+            else:
+                autosave.delete()
+                return Response(
+                    {"error": "Paystack subscription details are missing for one or more AutoSaves"},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
 
         user.autosave_enabled = False
         user.save()
 
         # Send a confirmation email
         subject = "AutoSave Deactivated!"
-        message = f"Hi {user.first_name},\n\nYour AutoSave ({frequency}) has been deactivated. \n\nKeep growing your funds.🥂\n\n\nMyFund  \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+        message = f"Hi {user.first_name},\n\nYour AutoSave(s) for {frequency} have been deactivated. \n\nKeep growing your funds.🥂\n\n\nMyFund  \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
         from_email = "MyFund <info@myfundmobile.com>"
         recipient_list = [user.email]
 
@@ -1312,9 +1370,10 @@ def deactivate_autosave(request):
         # Return a success response indicating that AutoSave has been deactivated
         return Response({"message": "AutoSave deactivated"}, status=status.HTTP_200_OK)
 
-    except AutoSave.DoesNotExist:
+    except requests.RequestException as e:
         return Response(
-            {"error": "AutoSave not found"}, status=status.HTTP_404_NOT_FOUND
+            {"error": f"Failed to deactivate subscription on Paystack: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
 
@@ -1323,27 +1382,59 @@ def deactivate_autosave(request):
 def get_autosave_status(request):
     user = request.user
     autosave_enabled = user.autosave_enabled
-
-    # You can retrieve the user's active auto-save settings here
+    
+    # Retrieve the user's active auto-save settings
     try:
-        active_autosave = AutoSave.objects.get(user=user, active=True)
+        autosave = AutoSave.objects.get(user=user, active=True)
         autoSaveSettings = {
-            "active": True,
-            "amount": active_autosave.amount,
-            "frequency": active_autosave.frequency,
+            "active": autosave_enabled,
+            "amount": autosave.amount,
+            "frequency": autosave.frequency,
         }
-    except AutoSave.DoesNotExist:
-        autoSaveSettings = {
+
+        # Fetch subscription status from Paystack
+        subscription_id = autosave.paystack_sub_id         
+        paystack_url = f'https://api.paystack.co/subscription/{subscription_id}'
+
+        headers = {
+            "Authorization": f"Bearer {paystack_secret_key}",
+            "Content-Type": "application/json",
+        }
+
+        response = requests.get(paystack_url, headers=headers)
+        if response.status_code == 200:
+            subscription_data = response.json()
+            subscription_status = subscription_data.get('data', {}).get('status')
+            autoSaveSettings['subscription_status'] = subscription_status
+            autosave_enabled = True if autoSaveSettings['subscription_status'] == "active" else False
+        else:
+            autoSaveSettings = {
             "active": False,
             "amount": 0,
-            "frequency": "",
+            "frequency": ""
         }
 
+    except AutoSave.DoesNotExist:
+       autoSaveSettings = {
+            "active": False,
+            "amount": 0,
+            "frequency": ""
+        }
+       
+    except Exception as e:
+        # Handle any other exceptions that might occur
+        return Response(
+            { "error": str(e) },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+        
     return Response(
-        {"autosave_enabled": autosave_enabled, "autoSaveSettings": autoSaveSettings},
-        status=status.HTTP_200_OK,
-    )
-
+            {
+               "autosave_enabled": autosave_enabled,
+                "autoSaveSettings": autoSaveSettings
+            },
+            status=status.HTTP_200_OK,
+        )
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
@@ -1370,7 +1461,7 @@ def quickinvest(request):
             "expiry_month": card.expiry_date.split("/")[0],
             "expiry_year": card.expiry_date.split("/")[1],
         },
-        "email": request.user.email,  # Assuming you have a user authenticated with a JWT token
+        "email": request.user.email,  
         "amount": int(amount) * 100,  # Amount in kobo (multiply by 100)
         "pin": card.pin,
     }
@@ -1434,31 +1525,19 @@ def autoinvest(request):
     frequency = request.data.get("frequency")
 
     # Validate request data
-    if not amount or not card_id or not frequency:
-        return Response(
-            {"error": "Missing required fields: card_id, amount, and frequency."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+    if not all([card_id, amount, frequency]):
+        return Response({"error": "Missing required fields: card_id, amount, and frequency."}, status=status.HTTP_400_BAD_REQUEST)
 
     try:
         amount = int(amount)
-        if amount < 100:
-            return Response(
-                {"error": "Amount cannot be less than N100."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        if amount < 100000:
+            return Response({"error": "Amount cannot be less than N100,000."}, status=status.HTTP_400_BAD_REQUEST)
     except ValueError:
-        return Response(
-            {"error": "Invalid amount. Amount should be a number."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+        return Response({"error": "Invalid amount. Amount should be a number."}, status=status.HTTP_400_BAD_REQUEST)
 
     valid_frequencies = ["daily", "weekly", "monthly"]
     if frequency not in valid_frequencies:
-        return Response(
-            {"error": "Invalid frequency. Choose 'daily', 'weekly', or 'monthly'."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+        return Response({"error": "Invalid frequency. Choose 'daily', 'weekly', or 'monthly'."}, status=status.HTTP_400_BAD_REQUEST)
 
     # Validate card
     try:
@@ -1472,12 +1551,15 @@ def autoinvest(request):
             {"error": "Invalid card ID format."}, status=status.HTTP_400_BAD_REQUEST
         )
 
+    # Check for existing AutoInvest records for the user
+    if AutoInvest.objects.filter(user=user, frequency=frequency, active=True).exists():
+        return Response({"error": f"An active AutoInvest record already exists for frequency: {frequency}."}, status=status.HTTP_400_BAD_REQUEST)
+
     # Prepare Paystack plan creation request
-    paystack_frequency = frequency  # Paystack uses the same intervals
     plan_payload = {
         "name": f"{frequency.capitalize()} AutoInvest Plan for {user.email}",
-        "interval": paystack_frequency,
-        "amount": amount * 100,  # Convert amount to kobo
+        "interval": frequency,
+        "amount": amount * 100  # Convert amount to kobo
     }
 
     headers = {
@@ -1487,29 +1569,18 @@ def autoinvest(request):
 
     # Step 1: Create subscription plan on Paystack
     try:
-        plan_response = requests.post(
-            "https://api.paystack.co/plan", json=plan_payload, headers=headers
-        )
-        plan_response.raise_for_status()  # Raises an HTTPError for bad responses
+        plan_response = requests.post("https://api.paystack.co/plan", json=plan_payload, headers=headers)
+        plan_response.raise_for_status()
         plan_data = plan_response.json()
-
-        if not plan_data.get("status"):
-            return Response(
-                {"error": "Failed to create plan on Paystack."},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-
-        plan_code = plan_data.get("data", {}).get("plan_code")
+        plan_code = plan_data["data"]["plan_code"]
     except requests.RequestException as e:
-        return Response(
-            {"error": f"Paystack plan creation failed: {str(e)}"},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
+        logger.error(f"Paystack plan creation failed: {e}")
+        return Response({"error": "Failed to create plan on Paystack."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     # Step 2: Subscribe user to the plan
     subscription_payload = {
-        "customer": user.email,  # Assuming you saved the customer's ID
-        "plan": plan_code,
+        "customer": user.email,
+        "plan": plan_code
     }
 
     try:
@@ -1520,45 +1591,37 @@ def autoinvest(request):
         )
         subscription_response.raise_for_status()
         subscription_data = subscription_response.json()
-
-        if not subscription_data.get("status"):
-            return Response(
-                {"error": "Subscription failed."},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+        subscription_id = subscription_data["data"]["id"]
+        subscription_code = subscription_data["data"]["subscription_code"]
+        subscription_token = subscription_data["data"]["email_token"]
     except requests.RequestException as e:
-        return Response(
-            {"error": f"Subscription failed: {str(e)}"},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
+        logger.error(f"Subscription failed: {e}")
+        return Response({"error": "Subscription failed."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     # Step 3: Save AutoInvest record to the database
-    AutoInvest.objects.create(
-        user=user,
-        frequency=frequency,
-        amount=amount,
-        active=True,
-        # need to add subscription_id to the database attributes
-        # subscription_id=subscription_data.get("data").get("id")  # Store subscription ID
-    )
+    with transaction.atomic():
+        AutoInvest.objects.create(
+            user=user,
+            frequency=frequency,
+            amount=amount,
+            paystack_sub_id=subscription_id,
+            paystack_sub_code=subscription_code,
+            paystack_sub_token=subscription_token,
+            active=True
+        )
+        user.autoinvest_enabled = True
+        user.save()
 
     # Send success notification email
     subject = "AutoInvest Activated!"
     message = f"Well done {user.first_name},\n\nAutoInvest ({frequency}) was successfully activated. You are now investing ₦{amount} {frequency}."
     from_email = "MyFund <info@myfundmobile.com>"
-    recipient_list = [user.email]
-
+    
     try:
-        send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+        send_mail(subject, message, from_email, [user.email], fail_silently=False)
     except Exception as e:
-        return Response(
-            {"error": f"Failed to send email: {str(e)}"},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
-
-    # Mark user as having auto-invest enabled
-    user.autoinvest_enabled = True
-    user.save()
+        logger.error(f"Failed to send email: {e}")
+        return Response({"error": "Failed to send notification email."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     return Response({"message": "AutoInvest activated"}, status=status.HTTP_200_OK)
 
@@ -1568,24 +1631,74 @@ def autoinvest(request):
 def deactivate_autoinvest(request):
     user = request.user
     frequency = request.data.get("frequency")
+    
+    # Check if frequency is provided and not an empty string
+    if not frequency:
+        return Response(
+            {"error": "Frequency Missing: Please, provide the frequency of the autoinvest."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     try:
-        # Find the active AutoInvest for the user with the given frequency
-        autoinvest = AutoInvest.objects.get(user=user, frequency=frequency, active=True)
+        # Find all active AutoInvests for the user with the given frequency
+        active_autoinvests = AutoInvest.objects.filter(user=user, frequency=frequency, active=True)
 
-        # Deactivate the AutoInvest by setting it to False
-        autoinvest.active = False
-        autoinvest.save()
+        if not active_autoinvests.exists():
+            return Response(
+                {"error": "No active AutoInvest found"}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
 
-        # Delete the AutoInvest object from the database
-        autoinvest.delete()
+        headers = {
+            "Authorization": f"Bearer {paystack_secret_key}",
+            "Content-Type": "application/json",
+        }
 
+        for autoinvest in active_autoinvests:
+            if not (autoinvest.paystack_sub_id and autoinvest.paystack_sub_token):
+                # Handle missing subscription details
+                autoinvest.delete()
+                continue
+            
+            data = {
+                "code": autoinvest.paystack_sub_code,
+                "token": autoinvest.paystack_sub_token
+            }
+            
+            # Make the API request to deactivate the subscription
+            try:
+                deactivate_response = requests.post(
+                    "https://api.paystack.co/subscription/disable", 
+                    json=data, 
+                    headers=headers
+                )
+                deactivate_response.raise_for_status()  # Raise an error for bad responses
+            except requests.RequestException as e:
+                return Response(
+                    {"error": f"Failed to deactivate subscription on Paystack: {str(e)}"},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+
+            # Deactivate the AutoInvest
+            autoinvest.active = False
+            autoinvest.save()
+            autoinvest.delete()
+        
+        # Update user autoinvest status
         user.autoinvest_enabled = False
         user.save()
 
         # Send a confirmation email
         subject = "AutoInvest Deactivated!"
-        message = f"Hi {user.first_name},\n\nYour AutoInvest ({frequency}) has been deactivated. \n\nKeep growing your funds.🥂\n\n\nMyFund  \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+        message = (
+            f"Hi {user.first_name},\n\n"
+            f"Your AutoInvest(s) for {frequency} have been deactivated.\n\n"
+            "Keep growing your funds.🥂\n\n"
+            "MyFund\n"
+            "Save, Buy Properties, Earn Rent\n"
+            "www.myfundmobile.com\n"
+            "13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+        )
         from_email = "MyFund <info@myfundmobile.com>"
         recipient_list = [user.email]
 
@@ -1593,12 +1706,14 @@ def deactivate_autoinvest(request):
 
         # Return a success response indicating that AutoInvest has been deactivated
         return Response(
-            {"message": "AutoInvest deactivated"}, status=status.HTTP_200_OK
+            {"message": "AutoInvest deactivated"}, 
+            status=status.HTTP_200_OK
         )
 
-    except AutoInvest.DoesNotExist:
+    except Exception as e:
         return Response(
-            {"error": "AutoInvest not found"}, status=status.HTTP_404_NOT_FOUND
+            {"error": f"An unexpected error occurred: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
 
@@ -1608,7 +1723,7 @@ def get_autoinvest_status(request):
     user = request.user
     autoinvest_enabled = user.autoinvest_enabled
 
-    # You can retrieve the user's active auto-invest settings here
+    # Retrieve the user's active auto-invest settings
     try:
         active_autoinvest = AutoInvest.objects.get(user=user, active=True)
         autoInvestSettings = {
@@ -1616,12 +1731,49 @@ def get_autoinvest_status(request):
             "amount": active_autoinvest.amount,
             "frequency": active_autoinvest.frequency,
         }
+
+        # Fetch subscription status from Paystack
+        subscription_id = active_autoinvest.paystack_sub_id         
+        paystack_url = f'https://api.paystack.co/subscription/{subscription_id}'
+
+        headers = {
+            "Authorization": f"Bearer {paystack_secret_key}",  # Ensure secure handling of secret keys
+            "Content-Type": "application/json",
+        }
+
+        response = requests.get(paystack_url, headers=headers)
+
+        if response.status_code == 200:
+            subscription_data = response.json()
+            subscription_status = subscription_data.get('data', {}).get('status')
+            autoInvestSettings['subscription_status'] = subscription_status
+        else:
+            autoInvestSettings = {
+            "active": False,
+            "amount": 0,
+            "frequency": "",
+            "subscription_status": None,
+        }
+
     except AutoInvest.DoesNotExist:
         autoInvestSettings = {
             "active": False,
             "amount": 0,
             "frequency": "",
+            "subscription_status": None,
         }
+
+    except requests.RequestException as e:
+        return Response(
+            { "error": f'Request to Paystack failed: {str(e)}' },
+            status=status.HTTP_502_BAD_GATEWAY
+        )
+
+    except Exception as e:
+        return Response(
+            { "error": str(e) },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
 
     return Response(
         {
