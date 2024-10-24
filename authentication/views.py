@@ -1285,7 +1285,7 @@ def autosave(request):
 
     # Send success notification email
     subject = "AutoSave Activated!"
-    message = f"Well done {user.first_name},\n\nAutoSave ({frequency}) was successfully activated. You are now saving ₦{amount} {frequency}."
+    message = f"Hi {user.first_name},\n\nYour AutoSave have been activated. You are now saving ₦{amount} {frequency}.\n\nKeep growing your funds.🥂\n\n\nMyFund  \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
     from_email = "MyFund <info@myfundmobile.com>"
     recipient_list = [user.email]
 
@@ -1614,7 +1614,7 @@ def autoinvest(request):
 
     # Send success notification email
     subject = "AutoInvest Activated!"
-    message = f"Well done {user.first_name},\n\nAutoInvest ({frequency}) was successfully activated. You are now investing ₦{amount} {frequency}."
+    message = f"Hi {user.first_name},\n\nYour AutoInvest have been activated. You are now saving ₦{amount} {frequency}.\n\nKeep growing your funds.🥂\n\n\nMyFund  \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
     from_email = "MyFund <info@myfundmobile.com>"
     
     try:
@@ -3021,6 +3021,7 @@ def paystack_webhook(request):
         ip_is_paystack = ip_address in paystack_ips
 
         print(str(event))
+        print(f"paystack event status: {event["event"]}")
 
         # Do something with event
         subject = "Paystack Webhook Received!"
@@ -3083,7 +3084,11 @@ def paystack_webhook(request):
         ):
             return JsonResponse({"status": True}, status=status.HTTP_200_OK)
         
-        if event["event"] == "invoice.create" and event["data"]["paid"] == False:
+        if event["event"] == "invoice.create":
+            
+            print(f"paystack_sub_code: {sub_code}")
+            print(f"paystack_sub_token: {sub_token}")
+            print(f"paystack_sub_data: {str(sub_data)}")
             
             if AutoSave.objects.get(paystack_sub_code = sub_code, paystack_sub_token = sub_token):
                 amount = event["data"]["amount"]
@@ -3180,7 +3185,7 @@ def paystack_webhook(request):
                 )
             
             if description[0] == "AutoInvest":
-                user.savings += int(amount)
+                user.investment += int(amount)
 
                 subject = f"{description[0]} Successful!"
                 message = f"Well done {user.first_name},\n\nYour {description[0]} was successful and ₦{amount} has been successfully added to your INVESTMENT account. \n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
