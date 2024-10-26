@@ -67,7 +67,7 @@ ALLOWED_HOSTS = [
     "192.168.92.60",
     "192.168.119.60",
     "192.168.204.60",
-    "192.168.0.148"
+    "192.168.0.148",
 ]
 
 
@@ -228,6 +228,26 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": "INFO",
+    },
+    "loggers": {
+        "django": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": True,
+        },
+    },
+}
 
 # Internationalization
 # https://docs.djangoproject.com/en/4.2/topics/i18n/
