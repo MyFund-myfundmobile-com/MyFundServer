@@ -3065,7 +3065,7 @@ def paystack_webhook(request):
     try:
         event = request.data
 
-        ip_address = request.headers.get("True-Client-Ip")
+        ip_address = request.headers.get("Cf-Connecting-Ip")
 
         ip_is_paystack = ip_address in paystack_ips
         
@@ -3245,6 +3245,9 @@ def paystack_webhook(request):
                 
                 send_mail(subject, message, from_email, recipient_list, fail_silently=False)
 
+                return JsonResponse({"status": True}, status=status.HTTP_200_OK)
+            
+            case _:
                 return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
 
