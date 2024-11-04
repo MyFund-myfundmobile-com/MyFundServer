@@ -3057,13 +3057,17 @@ def paystack_submit_otp(request):
         )
 
 
-paystack_ips = ["52.31.139.75", "52.49.173.169", "52.214.14.220"]
+import threading
+import time
 
+paystack_ips = ["52.31.139.75", "52.49.173.169", "52.214.14.220"]
 
 @api_view(["POST"])
 def paystack_webhook(request):
     try:
         event = request.data
+        
+        header_data = request.headers
 
         ip_address = request.headers.get("Cf-Connecting-Ip")
 
@@ -3074,23 +3078,6 @@ def paystack_webhook(request):
         # print(str(event))
         print(f"paystack event status: {event_status}")
 
-        # Do something with event
-        subject = "Paystack Webhook Received!"
-        message = (
-            str(event)
-            + " ip Address:"
-            + str(ip_address)
-            + "  verified:"
-            + str(ip_is_paystack)
-            + " headers:"
-            + str(request.headers)
-        )
-
-        from_email = "MyFund <info@myfundmobile.com>"
-        recipient_list = ["care@myfundmobile.com", "sammy@myfundmobile.com"]
-
-        send_mail(subject, message, from_email, recipient_list, fail_silently=False)
-
         if not ip_is_paystack:
             return JsonResponse(
                 {
@@ -3100,7 +3087,51 @@ def paystack_webhook(request):
                 },
                 status=status.HTTP_403_FORBIDDEN,
             )
+        else:
+            # Create and Start a thread that process the event in the background
+            threading.Thread(target=paystack_webhook_processing, args=(event, ip_address, ip_is_paystack, header_data,)).start()
             
+            return JsonResponse({"status": True}, status=status.HTTP_200_OK)          
+
+    except Exception as e:
+        #print error
+        print(f"\nPaystack Webhook(Internal Server Error):  {e}\n")
+        
+        # Send an email of the error that ocurred
+        subject = "Paystack Webhook Error!"
+        message = (
+            f"Paystack Webhook Internal Server Error:  {e}"
+        )
+
+        from_email = "MyFund <info@myfundmobile.com>"
+        recipient_list = ["care@myfundmobile.com", "sammy@myfundmobile.com"]
+        
+        send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+        
+        return JsonResponse(
+            {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+        
+def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data ):
+    try: 
+        
+        # Send a email of the webhook payload
+        subject = "Paystack Webhook Received!"
+        message = (
+            str(event)
+            + " ip Address:"
+            + str(ip_address)
+            + "  verified:"
+            + str(ip_is_paystack)
+            + " headers:"
+            + str(header_data)
+        )
+
+        from_email = "MyFund <info@myfundmobile.com>"
+        recipient_list = ["care@myfundmobile.com", "sammy@myfundmobile.com"]
+
+        send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+        
         match event["event"]:
             case "charge.success":
                 reference = event["data"]["reference"]
@@ -3234,7 +3265,7 @@ def paystack_webhook(request):
                 
                 event_data = event["data"]
                 
-                # Send an email of the error that ocurred
+                # Send an email of the data of the failed payment
                 subject = "Paystack Webhook(Payment Failed)"
                 message = (
                     f"Invoice Data:  \n\n{event_data}"
@@ -3245,9 +3276,6 @@ def paystack_webhook(request):
                 
                 send_mail(subject, message, from_email, recipient_list, fail_silently=False)
 
-                return JsonResponse({"status": True}, status=status.HTTP_200_OK)
-            
-            case _:
                 return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
 
