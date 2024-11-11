@@ -1251,7 +1251,7 @@ def autosave(request):
     # Prepare Paystack plan creation request
     paystack_frequency = frequency
     plan_payload = {
-        "name": f"{frequency.capitalize()} Autosave Plan for {user.email}",
+        "name": f"{frequency.capitalize()} AutoSave Plan for {user.email}",
         "interval": paystack_frequency,
         "amount": amount * 100,  # Convert amount to kobo
     }
@@ -1303,6 +1303,7 @@ def autosave(request):
         subscription_id = subscription_data.get("data", {}).get("id")
         subscription_code = subscription_data.get("data", {}).get("subscription_code")
         subscription_token = subscription_data.get("data", {}).get("email_token")
+        transaction_reference = subscription_data.get("data", {}).get("reference")
 
     except requests.RequestException as e:
         return Response(
@@ -1318,6 +1319,7 @@ def autosave(request):
         paystack_sub_id=subscription_id,
         paystack_sub_code=subscription_code,
         paystack_sub_token=subscription_token,
+        paystack_trans_ref=transaction_reference,
         active=True,
     )
 
@@ -1379,7 +1381,7 @@ def deactivate_autosave(request):
                 }
 
                 # Log the data being sent
-                print("Disabling subscription with data:", data)
+                # print("Disabling subscription with data:", autosave.paystack_trans_ref)
 
                 # Make the API request
                 deactivate_response = requests.post(
@@ -1647,9 +1649,10 @@ def autoinvest(request):
         )
         subscription_response.raise_for_status()
         subscription_data = subscription_response.json()
-        subscription_id = subscription_data["data"]["id"]
-        subscription_code = subscription_data["data"]["subscription_code"]
-        subscription_token = subscription_data["data"]["email_token"]
+        subscription_id = subscription_data.get("data", {}).get("id")
+        subscription_code = subscription_data.get("data", {}).get("subscription_code")
+        subscription_token = subscription_data.get("data", {}).get("email_token")
+        transaction_reference = subscription_data.get("data", {}).get("reference")
     except requests.RequestException as e:
         logger.error(f"Subscription failed: {e}")
         return Response(
@@ -1666,6 +1669,7 @@ def autoinvest(request):
             paystack_sub_id=subscription_id,
             paystack_sub_code=subscription_code,
             paystack_sub_token=subscription_token,
+            paystack_trans_ref=transaction_reference,
             active=True,
         )
         user.autoinvest_enabled = True
@@ -3135,12 +3139,48 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data )
         match event["event"]:
             case "charge.success":
                 reference = event["data"]["reference"]
-                transaction = Transaction.objects.get(transaction_id=reference)
+                email = event["data"]["customer"]["email"]
+                transaction = Transaction.objects.filter(transaction_id=reference).first()
+                user = CustomUser.objects.get(email=email)
+
+                # Check if transaction already exists
+                if transaction is None:
+                    # Create a record in the database if the event record does not exist
+                    trans_description = event["data"]["plan"]["name"]
+                    trans_description = trans_description.split(" ")
+
+                    amount = event["data"]["amount"] / 100  # convert amount to naira
+
+                    # Handle AutoSave case
+                    if trans_description[1] == "AutoSave" or AutoSave.objects.filter(paystack_trans_ref=reference).first():
+                        # Create a new transaction record for AutoSave
+                        transaction = Transaction.objects.create(
+                            user=user,
+                            transaction_type="pending",
+                            amount=int(amount),
+                            date=timezone.now().date(),
+                            time=timezone.now().time(),
+                            description=f"{trans_description[1]} (pending)",
+                            transaction_id=event["data"]["reference"],
+                        )
+
+                    # Handle AutoInvest case
+                    if trans_description[1] == "AutoInvest" or AutoInvest.objects.filter(paystack_trans_ref=reference).first():
+                        # Create a new transaction record for AutoInvest
+                        transaction = Transaction.objects.create(
+                            user=user,
+                            transaction_type="pending",
+                            amount=int(amount),
+                            date=timezone.now().date(),
+                            time=timezone.now().time(),
+                            description=f"{trans_description[1]} (pending)",
+                            transaction_id=event["data"]["reference"],
+                        )
+
+                print(f"transaction: {transaction}")
                 description = transaction.description
                 description = description.split(" ")
-                user = transaction.user
                 # print(f"user: {user}")
-                
                 
                 if event["data"]["status"] != "success":
                     transaction.transaction_type = "failed"
@@ -3206,57 +3246,60 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data )
                     user.update_total_savings_and_investment_this_month()
                     user.save()
 
-                    return JsonResponse({"status": True}, status=status.HTTP_200_OK)
+                return JsonResponse({"status": True}, status=status.HTTP_200_OK)
                 
             case "invoice.create":
                 sub_code = event["data"]["subscription"]["subscription_code"]
                 sub_token = event["data"]["subscription"]["email_token"]
                 email = event["data"]["customer"]["email"]
+                trans_ref = event["data"]["transaction"]["reference"]
                 user = CustomUser.objects.get(email=email)
                 
                 print(f"sub_code: {sub_code}, sub_token: {sub_token}")
                 
-                try:
-                    if AutoSave.objects.get(
-                    paystack_sub_code = sub_code, 
-                    paystack_sub_token = sub_token,
-                    ) :                        
-                        
-                        amount = event["data"]["amount"]
-                        
-                        #     Create a transaction record
-                        Transaction.objects.create(
-                            user=user,
-                            transaction_type="pending",
-                            amount=int(amount),
-                            date=timezone.now().date(),
-                            time=timezone.now().time(),
-                            description="AutoSave (pending)",
-                            transaction_id=event["data"]["transaction"]["reference"],
-                        )
-                except:
-                    pass
-                             
-                try:
-                    if AutoInvest.objects.get(
+                if not AutoSave.objects.get(paystack_trans_ref=trans_ref) or AutoInvest.objects.get(paystack_trans_ref=trans_ref):
+                    
+                    try:
+                        if AutoSave.objects.get(
                         paystack_sub_code = sub_code, 
                         paystack_sub_token = sub_token,
-                    ) :
+                        ) :                        
+                            
+                            amount = event["data"]["amount"] / 100 # convert amount to naira
+                            
+                            #     Create a transaction record
+                            Transaction.objects.create(
+                                user=user,
+                                transaction_type="pending",
+                                amount=int(amount),
+                                date=timezone.now().date(),
+                                time=timezone.now().time(),
+                                description="AutoSave (pending)",
+                                transaction_id=trans_ref,
+                            )
+                    except:
+                        pass
+                                
+                    try:
+                        if AutoInvest.objects.get(
+                            paystack_sub_code = sub_code, 
+                            paystack_sub_token = sub_token,
+                        ) :
+                            
+                            amount = event["data"]["amount"] / 100 # convert amount to naira
                         
-                        amount = event["data"]["amount"]
-                    
-                        #     Create a transaction record
-                        Transaction.objects.create(
-                            user=user,
-                            transaction_type="pending",
-                            amount=int(amount),
-                            date=timezone.now().date(),
-                            time=timezone.now().time(),
-                            description="AutoInvest (pending)",
-                            transaction_id=event["data"]["transaction"]["reference"],
-                        )
-                except :
-                    print(f"\n\"invoice.create\" details does not exist in MyFund database\n")
+                            #     Create a transaction record
+                            Transaction.objects.create(
+                                user=user,
+                                transaction_type="pending",
+                                amount=int(amount),
+                                date=timezone.now().date(),
+                                time=timezone.now().time(),
+                                description="AutoInvest (pending)",
+                                transaction_id=trans_ref,
+                            )
+                    except :
+                        print(f"\n\"invoice.create\" details does not exist in MyFund database\n")
               
                 return JsonResponse({"status": True}, status=status.HTTP_200_OK)
             
