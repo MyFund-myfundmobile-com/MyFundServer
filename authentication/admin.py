@@ -33,6 +33,32 @@ from django.utils import timezone
 from .models import CustomUser, CustomUserMetrics, Referral
 
 
+class TransactionInline(
+    admin.TabularInline
+):  # Use TabularInline for a table-like display
+    model = Transaction
+    extra = 0  # Do not add extra blank forms
+    fields = (
+        "transaction_type",
+        "amount",
+        "service_charge",
+        "total_amount",
+        "date",
+        "time",
+        "description",
+        "transaction_id",
+        "property_name",
+        "property_value",
+        "rent_earned_annually",
+        "rent_earned_monthly",
+    )
+    readonly_fields = (
+        "transaction_id",
+        "date",
+        "time",
+    )  # Make fields read-only as needed
+
+
 class CustomUserAdmin(UserAdmin):
     list_display = (
         "id",
@@ -131,6 +157,7 @@ class CustomUserAdmin(UserAdmin):
     )
     search_fields = ("email", "first_name", "last_name")
     ordering = ("email", "date_joined")
+    inlines = [TransactionInline]
 
     def make_hired_referrer(self, request, queryset):
         updated_count = queryset.update(is_hired_referrer=True)
