@@ -11,6 +11,7 @@ from .models import (
     AutoInvest,
     Transaction,
     AutoSave,
+    PendingWithdrawals,
 )
 from django.core.mail import send_mail
 from django.urls import reverse
@@ -530,6 +531,73 @@ class InvestTransferRequestAdmin(admin.ModelAdmin):
             request.delete()
 
     reject_invest_transfer.short_description = "Reject selected investment transfers"
+
+@admin.register(PendingWithdrawals)
+class PendingWithdrawalsAdmin(admin.ModelAdmin):
+    list_display = ("user", "amount", "is_approved", "created_at")
+    list_filter = ("is_approved",)
+    actions = ["approve_withdrawal", "reject_withdrawal"]
+
+    def approve_withdrawal(self, request, queryset):
+        for withdrawal_request in queryset:
+            withdrawal_request.is_approved = True
+            withdrawal_request.save()
+
+            user = withdrawal_request.user
+
+            # Assuming the withdrawal is subtracted from the user's savings
+            user.savings -= int(withdrawal_request.amount)
+            user.save()
+
+            # Create a debit transaction for the withdrawal
+            transaction = Transaction.objects.create(
+                user=user,
+                transaction_type="debit",  # Debiting the savings
+                amount=withdrawal_request.amount,
+                date=timezone.now().date(),
+                time=timezone.now().time(),
+                description="Withdrawal (Approved)",
+                transaction_id=str(uuid.uuid4()),  # Full UUID for uniqueness
+            )
+
+            # Send an approval email
+            subject = "Withdrawal Approved! ✔"
+            message = f"Hi {user.first_name}, \n\nYour withdrawal request of ₦{withdrawal_request.amount} has been approved and debited from your savings account.\n\nThank you for using MyFund."
+            from_email = "MyFund <info@myfundmobile.com>"
+            recipient_list = [user.email]
+            send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+
+            # Update the user's monthly totals after approval
+            user.update_total_savings_and_investment_this_month()
+
+    approve_withdrawal.short_description = "Approve selected withdrawals"
+
+    def reject_withdrawal(self, request, queryset):
+        for withdrawal_request in queryset:
+            user = withdrawal_request.user
+
+            # Create a transaction record for rejection (e.g., no actual debit but tracking failure)
+            transaction = Transaction.objects.create(
+                user=user,
+                transaction_type="debit",
+                amount=withdrawal_request.amount,
+                date=timezone.now().date(),
+                time=timezone.now().time(),
+                description="Withdrawal (Rejected)",
+                transaction_id=str(uuid.uuid4()),
+            )
+
+            # Send a rejection email
+            subject = "Withdrawal Request Rejected ❌"
+            message = f"Hi {user.first_name}, \n\nYour withdrawal request of ₦{withdrawal_request.amount} was not approved. Please check your account details and try again.\n\nThank you for using MyFund."
+            from_email = "MyFund <info@myfundmobile.com>"
+            recipient_list = [user.email]
+            send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+
+            # Mark the withdrawal request as rejected instead of deleting it
+            withdrawal_request.delete()
+
+    reject_withdrawal.short_description = "Reject selected withdrawals"
 
 
 @admin.register(Message)
