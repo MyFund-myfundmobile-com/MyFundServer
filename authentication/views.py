@@ -59,76 +59,59 @@ def signup(request):
         how_did_you_hear = serializer.validated_data.get("how_did_you_hear", "OTHER")
         user.how_did_you_hear = how_did_you_hear
         user.save()
-        print("Received data:", request.data)
 
-        # Check if it's a resend request
         is_resend = request.data.get("resend", False)
 
         if is_resend:
-            # If it's a resend request, generate a new OTP and send it
             otp = generate_otp()
             user.otp = otp
             user.save()
             send_otp_email(user, otp)
 
-            # Update the response data for resend case
             response_data = {"message": "OTP resent successfully"}
             return Response(response_data, status=status.HTTP_200_OK)
 
-        # Generate OTP for initial signup
         otp = generate_otp()
         user.otp = otp
-        user.is_active = False  # Set the user as inactive until OTP confirmation
+        user.is_active = False  # Set user as inactive until OTP confirmation
         user.save()
 
         # Send OTP to the user's email
         send_otp_email(user, otp)
 
-        # Check if the user has a referrer (referral relationship)
-        if user.referral:
-            transaction_id = str(uuid.uuid4())[
-                :10
-            ]  # Generate a UUID and truncate it to 10 characters
-
-            # Create pending credit transactions for both the referrer and the referred user
-            credit_transaction_referrer = Transaction.objects.create(
-                user=user.referral,
-                referral_email=user.email,  # Include the referral email
-                transaction_type="pending",
-                amount=500,
-                description="Referral Reward (Pending)",
-                transaction_id=transaction_id,
-            )
-            credit_transaction_referrer.save()
-
-            transaction_id = str(uuid.uuid4())[
-                :10
-            ]  # Generate a UUID and truncate it to 10 characters
-            credit_transaction_referred = Transaction.objects.create(
-                user=user,
-                referral_email=user.referral.email,  # Include the referrer's email
-                transaction_type="pending",
-                amount=500,
-                description="Referral Reward (Pending)",
-                transaction_id=transaction_id,
-            )
-            credit_transaction_referred.save()
-
-            # Update the user and referrer's pending reward
-            user.referral.pending_referral_reward = F("pending_referral_reward") + 500
-            user.pending_referral_reward = F("pending_referral_reward") + 500
+        if user.referral:  # If user signed up with a referral
             user.referral.pending_referral_reward = F("pending_referral_reward") + 500
             user.pending_referral_reward = F("pending_referral_reward") + 500
 
-            user.referral.save()
+            user.save()  # Save the referred user
+            user.referral.save()  # Save the referrer
 
-            # Send an email to the referrer (old user)
+            # Create pending transactions for both
+            Transaction.objects.bulk_create(
+                [
+                    Transaction(
+                        user=user.referral,
+                        referral_email=user.email,
+                        transaction_type="pending",
+                        amount=500,
+                        description="Referral Reward (Pending)",
+                        transaction_id=str(uuid.uuid4())[:10],
+                    ),
+                    Transaction(
+                        user=user,
+                        referral_email=user.referral.email,
+                        transaction_type="pending",
+                        amount=500,
+                        description="Referral Reward (Pending)",
+                        transaction_id=str(uuid.uuid4())[:10],
+                    ),
+                ]
+            )
+
+            # Send referral reward pending emails
             send_referrer_pending_reward_email(user.referral, user.email)
-
-            # Send an email to the referred user (new user)
             send_referred_pending_reward_email(user)
 
-        # Modify the response data to include the referral email for pending transactions
         response_data = serializer.data
         if user.referral:
             response_data["referral_email"] = user.referral.email
@@ -3021,7 +3004,6 @@ def resubscribe_user(request):
 
 import logging
 from django.core.mail import EmailMultiAlternatives
-from django.conf import settings
 from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
@@ -3043,6 +3025,7 @@ def send_email(request):
 
     # Ensure all fields are present and valid
     if not all([sender, subject, body, recipients]):
+        logger.error("Missing required fields.")
         return Response(
             {"message": "All fields are required."}, status=status.HTTP_400_BAD_REQUEST
         )
@@ -3053,6 +3036,7 @@ def send_email(request):
         total_recipients = len(recipients)
         logger.info(f"Total recipients: {total_recipients}")
 
+        # Process recipients in batches
         for i in range(0, total_recipients, BATCH_SIZE):
             batch_recipients = recipients[i : i + BATCH_SIZE]
             logger.info(
@@ -3079,6 +3063,7 @@ def send_email(request):
 
         # Return success, but include information about failed recipients
         if failed_recipients:
+            logger.warning(f"Some emails failed to send: {failed_recipients}")
             return Response(
                 {
                     "message": "Emails sent with some failures.",
@@ -3087,6 +3072,7 @@ def send_email(request):
                 status=status.HTTP_207_MULTI_STATUS,  # Indicates partial success
             )
         else:
+            logger.info("All emails sent successfully!")
             return Response(
                 {"message": "All emails sent successfully!"}, status=status.HTTP_200_OK
             )
