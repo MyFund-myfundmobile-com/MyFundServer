@@ -22,7 +22,7 @@ from django.contrib.auth import logout
 from django.shortcuts import render, redirect
 from django.core.exceptions import ObjectDoesNotExist
 from django.utils import timezone
-from authentication.models import CustomUser
+from authentication.models import CustomUser, Referral
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from .serializers import UserProfileUpdateSerializer
@@ -43,6 +43,10 @@ import hashlib
 import json
 import hmac
 from dotenv import load_dotenv
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 load_dotenv()
 
@@ -50,75 +54,129 @@ load_dotenv()
 @api_view(["POST"])
 @csrf_exempt
 def signup(request):
-    serializer = SignupSerializer(data=request.data)
+    try:
+        serializer = SignupSerializer(data=request.data)
 
-    if serializer.is_valid():
-        user = serializer.save()
+        if serializer.is_valid():
+            try:
+                user = serializer.save()
 
-        # Access the new field through the serializer's validated data
-        how_did_you_hear = serializer.validated_data.get("how_did_you_hear", "OTHER")
-        user.how_did_you_hear = how_did_you_hear
-        user.save()
+                how_did_you_hear = serializer.validated_data.get(
+                    "how_did_you_hear", "OTHER"
+                )
+                user.how_did_you_hear = how_did_you_hear
+                user.save()
 
-        is_resend = request.data.get("resend", False)
+                logger.info("New user signup data: %s", request.data)
 
-        if is_resend:
-            otp = generate_otp()
-            user.otp = otp
-            user.save()
-            send_otp_email(user, otp)
+                # Check if it's a resend request
+                is_resend = request.data.get("resend", False)
 
-            response_data = {"message": "OTP resent successfully"}
-            return Response(response_data, status=status.HTTP_200_OK)
+                if is_resend:
+                    otp = generate_otp()
+                    user.otp = otp
+                    user.save()
+                    send_otp_email(user, otp)
 
-        otp = generate_otp()
-        user.otp = otp
-        user.is_active = False  # Set user as inactive until OTP confirmation
-        user.save()
+                    logger.info("OTP resent successfully to user %s", user.email)
+                    return Response(
+                        {"message": "OTP resent successfully"},
+                        status=status.HTTP_200_OK,
+                    )
 
-        # Send OTP to the user's email
-        send_otp_email(user, otp)
+                # Generate OTP for initial signup
+                otp = generate_otp()
+                user.otp = otp
+                user.is_active = (
+                    False  # Set the user as inactive until OTP confirmation
+                )
+                user.save()
 
-        if user.referral:  # If user signed up with a referral
-            user.referral.pending_referral_reward = F("pending_referral_reward") + 500
-            user.pending_referral_reward = F("pending_referral_reward") + 500
+                send_otp_email(user, otp)
+                logger.info("OTP sent to user %s", user.email)
 
-            user.save()  # Save the referred user
-            user.referral.save()  # Save the referrer
+                if user.referral:
+                    try:
+                        # Handle referral rewards
+                        transaction_id = str(uuid.uuid4())[:10]
+                        credit_transaction_referred = Transaction.objects.create(
+                            user=user,
+                            referral_email=user.referral.email,
+                            transaction_type="pending",
+                            amount=500,
+                            description="Referral Reward (Pending)",
+                            transaction_id=transaction_id,
+                        )
+                        credit_transaction_referred.save()
 
-            # Create pending transactions for both
-            Transaction.objects.bulk_create(
-                [
-                    Transaction(
-                        user=user.referral,
-                        referral_email=user.email,
-                        transaction_type="pending",
-                        amount=500,
-                        description="Referral Reward (Pending)",
-                        transaction_id=str(uuid.uuid4())[:10],
-                    ),
-                    Transaction(
-                        user=user,
-                        referral_email=user.referral.email,
-                        transaction_type="pending",
-                        amount=500,
-                        description="Referral Reward (Pending)",
-                        transaction_id=str(uuid.uuid4())[:10],
-                    ),
-                ]
-            )
+                        user.pending_referral_reward = (
+                            F("pending_referral_reward") + 500
+                        )
+                        user.save()
 
-            # Send referral reward pending emails
-            send_referrer_pending_reward_email(user.referral, user.email)
-            send_referred_pending_reward_email(user)
+                        if not user.referral.is_hired_referrer:
+                            transaction_id = str(uuid.uuid4())[:10]
+                            credit_transaction_referrer = Transaction.objects.create(
+                                user=user.referral,
+                                referral_email=user.email,
+                                transaction_type="pending",
+                                amount=500,
+                                description="Referral Reward (Pending)",
+                                transaction_id=transaction_id,
+                            )
+                            credit_transaction_referrer.save()
 
-        response_data = serializer.data
-        if user.referral:
-            response_data["referral_email"] = user.referral.email
+                            user.referral.pending_referral_reward = (
+                                F("pending_referral_reward") + 500
+                            )
+                            user.referral.save()
+                            send_referrer_pending_reward_email(
+                                user.referral, user.email
+                            )
 
-        return Response(response_data, status=status.HTTP_201_CREATED)
+                        if user.referral.is_hired_referrer:
+                            hired_referrer = Referral.objects.create(
+                                user=user, referrer=user.referral
+                            )
+                            hired_referrer.save()
 
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+                        send_referred_pending_reward_email(user)
+                        logger.info(
+                            "Referral rewards processed for user %s", user.email
+                        )
+                    except Exception as e:
+                        logger.error(
+                            "Error processing referral rewards for user %s: %s",
+                            user.email,
+                            str(e),
+                        )
+                        return Response(
+                            {"error": "Failed to process referral rewards"},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        )
+
+                response_data = serializer.data
+                if user.referral:
+                    response_data["referral_email"] = user.referral.email
+
+                return Response(response_data, status=status.HTTP_201_CREATED)
+
+            except Exception as e:
+                logger.error("Error during user signup: %s", str(e))
+                return Response(
+                    {"error": "An error occurred during signup"},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+
+        logger.warning("Invalid signup data: %s", serializer.errors)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    except Exception as e:
+        logger.critical("Unexpected error in signup: %s", str(e))
+        return Response(
+            {"error": "Unexpected server error"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
 
 def send_referrer_pending_reward_email(referrer, referred_email):
@@ -720,7 +778,7 @@ class BankAccountViewSet(viewsets.ModelViewSet):
     def resolve_account(self, account_number, bank_code):
         secret_key = os.environ.get(
             "PAYSTACK_KEY_LIVE",
-            default="sk_test_dacd07b029231eed22f407b3da805ecafdf2668f",
+            default="  ",
         )
         url = f"https://api.paystack.co/bank/resolve?account_number={account_number}&bank_code={bank_code}"
         headers = {"Authorization": f"Bearer {secret_key}"}
@@ -1018,7 +1076,7 @@ class CustomGraphQLView(GraphQLView):
 
 paystack_secret_key = os.environ.get(
     "PAYSTACK_KEY_LIVE",
-    default="sk_test_dacd07b029231eed22f407b3da805ecafdf2668f",
+    default="  ",
 )
 
 
@@ -1133,123 +1191,156 @@ def autosave(request):
     amount = request.data.get("amount")
     frequency = request.data.get("frequency")
 
-    # Validate frequency (should be one of 'hourly', 'daily', 'weekly', 'monthly')
-    valid_frequencies = ["hourly", "daily", "weekly", "monthly"]
-    if frequency not in valid_frequencies:
+    # Validate request data
+    if not amount or not card_id or not frequency:
         return Response(
-            {"error": "Invalid frequency"}, status=status.HTTP_400_BAD_REQUEST
+            {"error": "Missing required fields: card_id, amount, and frequency."},
+            status=status.HTTP_400_BAD_REQUEST,
         )
 
     try:
-        active_autosave = AutoSave.objects.get(user=user, active=True)
+        amount = int(amount)
+        if amount < 100:
+            return Response(
+                {"error": "Amount cannot be less that N100"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+    except ValueError:
         return Response(
-            {"error": "User already has an active autosave"},
+            {"error": "Invalid amount. Amount should be a number."},
             status=status.HTTP_400_BAD_REQUEST,
         )
-    except AutoSave.DoesNotExist:
+
+    valid_frequencies = ["hourly", "daily", "weekly", "monthly"]
+    if frequency not in valid_frequencies:
+        return Response(
+            {
+                "error": "Invalid frequency. Choose 'hourly', 'daily', 'weekly', or 'monthly'."
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Check for existing AutoSave records for the user
+    try:
+        existing_autosave = AutoSave.objects.filter(
+            user=user, frequency=frequency, active=True
+        )
+
+        if existing_autosave.exists():
+            return Response(
+                {
+                    "error": f"An active AutoSave record already exists for frequency: {frequency}."
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+    except ObjectDoesNotExist:
         pass
 
+    # Validate card
+    try:
         card = Card.objects.get(id=card_id)
     except Card.DoesNotExist:
         return Response(
-            {"error": "Selected card not found"}, status=status.HTTP_404_NOT_FOUND
+            {"error": "Selected card not found."}, status=status.HTTP_404_NOT_FOUND
+        )
+    except ValueError:
+        return Response(
+            {"error": "Invalid card ID format."}, status=status.HTTP_400_BAD_REQUEST
         )
 
-    # Calculate the interval based on the selected frequency (in seconds)
-    intervals = {
-        "hourly": 3600,
-        "daily": 86400,
-        "weekly": 604800,
-        "monthly": 2419200,  # Approximation for 28-31 days
+    # Prepare Paystack plan creation request
+    paystack_frequency = frequency
+    plan_payload = {
+        "name": f"{frequency.capitalize()} AutoSave Plan for {user.email}",
+        "interval": paystack_frequency,
+        "amount": amount * 100,  # Convert amount to kobo
     }
 
-    interval_seconds = intervals.get(frequency)
+    headers = {
+        "Authorization": f"Bearer {paystack_secret_key}",
+        "Content-Type": "application/json",
+    }
 
-    if not interval_seconds:
+    # Step 1: Create subscription plan on Paystack
+    try:
+        plan_response = requests.post(
+            "https://api.paystack.co/plan", json=plan_payload, headers=headers
+        )
+        plan_response.raise_for_status()
+        plan_data = plan_response.json()
+
+        if not plan_data.get("status"):
+            return Response(
+                {"error": "Failed to create plan on Paystack."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        plan_code = plan_data.get("data", {}).get("plan_code")
+    except requests.RequestException as e:
         return Response(
-            {"error": "Invalid frequency"}, status=status.HTTP_400_BAD_REQUEST
+            {"error": f"Paystack plan creation failed: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
-    # Create an 'AutoSave' record
-    AutoSave.objects.create(user=user, frequency=frequency, amount=amount, active=True)
+    # Step 2: Subscribe user to the plan
+    subscription_payload = {"customer": user.email, "plan": plan_code}
 
-    # Use the card details to initiate a payment with Paystack periodically
-    def auto_charge():
-        while True:
-            # Delay for the specified interval
-            time.sleep(interval_seconds)
+    try:
+        subscription_response = requests.post(
+            "https://api.paystack.co/subscription",
+            json=subscription_payload,
+            headers=headers,
+        )
+        subscription_response.raise_for_status()
+        subscription_data = subscription_response.json()
 
-            # Perform the auto charge
-            paystack_url = "https://api.paystack.co/charge"
+        if not subscription_data.get("status"):
+            return Response(
+                {"error": "Subscription failed."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
-            payload = {
-                "card": {
-                    "number": card.card_number,
-                    "cvv": card.cvv,
-                    "expiry_month": card.expiry_date.split("/")[0],
-                    "expiry_year": card.expiry_date.split("/")[1],
-                },
-                "email": user.email,
-                "amount": int(amount) * 100,  # Amount in kobo (multiply by 100)
-            }
+        subscription_id = subscription_data.get("data", {}).get("id")
+        subscription_code = subscription_data.get("data", {}).get("subscription_code")
+        subscription_token = subscription_data.get("data", {}).get("email_token")
+        transaction_reference = subscription_data.get("data", {}).get("reference")
 
-            headers = {
-                "Authorization": f"Bearer {paystack_secret_key}",
-                "Content-Type": "application/json",
-            }
+    except requests.RequestException as e:
+        return Response(
+            {"error": f"Subscription failed: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
-            response = requests.post(paystack_url, json=payload, headers=headers)
-            paystack_response = response.json()
+    # Step 3: Save AutoSave record to the database
+    AutoSave.objects.create(
+        user=user,
+        frequency=frequency,
+        amount=amount,
+        paystack_sub_id=subscription_id,
+        paystack_sub_code=subscription_code,
+        paystack_sub_token=subscription_token,
+        paystack_trans_ref=transaction_reference,
+        active=True,
+    )
 
-            if paystack_response.get("status"):
-                # Payment successful, update user's savings and create a transaction
-                # user.savings += int(amount)
-                user.savings += int(0)
-                user.save()
-
-                # Create a transaction record
-                Transaction.objects.create(
-                    user=user,
-                    transaction_type="credit",
-                    amount=int(0),
-                    date=timezone.now().date(),
-                    time=timezone.now().time(),
-                    description=f"AutoSave",
-                    transaction_id=paystack_response.get("data", {}).get("reference"),
-                )
-
-                # Call the confirm_referral_rewards method here
-                user.confirm_referral_rewards(
-                    is_referrer=True
-                )  # Pass True if the user is a referrer, or False if not
-
-                # After processing a savings or investment transaction
-                user.update_total_savings_and_investment_this_month()
-
-                # Send a confirmation email
-                subject = "AutoSave Successful!"
-                message = f"Hi {user.first_name},\n\nYour AutoSave ({frequency}) of ₦{amount} was successful. It has been added to your SAVINGS account. \n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-                from_email = "MyFund <info@myfundmobile.com>"
-                recipient_list = [user.email]
-
-                send_mail(
-                    subject, message, from_email, recipient_list, fail_silently=False
-                )
-
-    # Start a new thread for the auto charge process
-    threading.Thread(target=auto_charge).start()
-
-    user.autosave_enabled = True
-    user.save()
-
-    # Send an immediate email alert for activation
+    # Send success notification email
     subject = "AutoSave Activated!"
-    message = f"Well done {user.first_name},\n\nAutoSave ({frequency}) was successfully activated. You are now saving ₦{amount} {frequency} and your next autosave transaction will happen in the next selected periodic interval. \n\n\nKeep growing your funds.🥂\n\nMyFund  \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+    message = f"Hi {user.first_name},\n\nYour AutoSave have been activated. You are now saving ₦{amount} {frequency}.\n\nKeep growing your funds.🥂\n\n\nMyFund  \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
     from_email = "MyFund <info@myfundmobile.com>"
     recipient_list = [user.email]
 
-    send_mail(subject, message, from_email, recipient_list, fail_silently=False)
-    # Return a success response indicating that AutoSave has been activated
+    try:
+        send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+    except Exception as e:
+        return Response(
+            {"error": f"Failed to send email: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    # Mark user as having autosave enabled
+    user.autosave_enabled = True
+    user.save()
+
     return Response({"message": "AutoSave activated"}, status=status.HTTP_200_OK)
 
 
@@ -1259,23 +1350,68 @@ def deactivate_autosave(request):
     user = request.user
     frequency = request.data.get("frequency")
 
+    if not frequency:
+        return Response(
+            {
+                "error": "Frequency Missing: Please, provide the frequency of the autosave."
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
     try:
-        # Find the active AutoSave for the user with the given frequency
-        autosave = AutoSave.objects.get(user=user, frequency=frequency, active=True)
+        # Find all active AutoSaves for the user with the given frequency
+        active_autosaves = AutoSave.objects.filter(
+            user=user, frequency=frequency, active=True
+        )
 
-        # Deactivate the AutoSave by setting it to False
-        autosave.active = False
-        autosave.save()
+        headers = {
+            "Authorization": f"Bearer {paystack_secret_key}",
+            "Content-Type": "application/json",
+        }
 
-        # Delete the AutoSave object from the database
-        autosave.delete()
+        for autosave in active_autosaves:
+
+            # print(f"autosave: {autosave}")
+
+            if autosave.paystack_sub_id and autosave.paystack_sub_token:
+                # Prepare the data for the request
+                data = {
+                    "code": autosave.paystack_sub_code,
+                    "token": autosave.paystack_sub_token,
+                }
+
+                # Log the data being sent
+                # print("Disabling subscription with data:", autosave.paystack_trans_ref)
+
+                # Make the API request
+                deactivate_response = requests.post(
+                    "https://api.paystack.co/subscription/disable",
+                    json=data,
+                    headers=headers,
+                )
+
+                # Check for successful response
+                deactivate_response.raise_for_status()  # Raises an HTTPError for bad responses
+
+                # Deactivate the AutoSave
+                autosave.active = False
+                autosave.save()
+                autosave.delete()
+            else:
+                autosave.delete()
+                return Response(
+                    {
+                        "error": "Paystack subscription details are missing for one or more AutoSaves"
+                    },
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
 
         user.autosave_enabled = False
         user.save()
 
         # Send a confirmation email
         subject = "AutoSave Deactivated!"
-        message = f"Hi {user.first_name},\n\nYour AutoSave ({frequency}) has been deactivated. \n\nKeep growing your funds.🥂\n\n\nMyFund  \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+        message = f"Hi {user.first_name},\n\nYour AutoSave(s) for {frequency} have been deactivated. \n\nKeep growing your funds.🥂\n\n\nMyFund  \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
         from_email = "MyFund <info@myfundmobile.com>"
         recipient_list = [user.email]
 
@@ -1284,9 +1420,10 @@ def deactivate_autosave(request):
         # Return a success response indicating that AutoSave has been deactivated
         return Response({"message": "AutoSave deactivated"}, status=status.HTTP_200_OK)
 
-    except AutoSave.DoesNotExist:
+    except requests.RequestException as e:
         return Response(
-            {"error": "AutoSave not found"}, status=status.HTTP_404_NOT_FOUND
+            {"error": f"Failed to deactivate subscription on Paystack: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
 
@@ -1296,20 +1433,41 @@ def get_autosave_status(request):
     user = request.user
     autosave_enabled = user.autosave_enabled
 
-    # You can retrieve the user's active auto-save settings here
+    # Retrieve the user's active auto-save settings
     try:
-        active_autosave = AutoSave.objects.get(user=user, active=True)
+        autosave = AutoSave.objects.get(user=user, active=True)
         autoSaveSettings = {
-            "active": True,
-            "amount": active_autosave.amount,
-            "frequency": active_autosave.frequency,
+            "active": autosave_enabled,
+            "amount": autosave.amount,
+            "frequency": autosave.frequency,
         }
+
+        # Fetch subscription status from Paystack
+        subscription_id = autosave.paystack_sub_id
+        paystack_url = f"https://api.paystack.co/subscription/{subscription_id}"
+
+        headers = {
+            "Authorization": f"Bearer {paystack_secret_key}",
+            "Content-Type": "application/json",
+        }
+
+        response = requests.get(paystack_url, headers=headers)
+        if response.status_code == 200:
+            subscription_data = response.json()
+            subscription_status = subscription_data.get("data", {}).get("status")
+            autoSaveSettings["subscription_status"] = subscription_status
+            autosave_enabled = (
+                True if autoSaveSettings["subscription_status"] == "active" else False
+            )
+        else:
+            autoSaveSettings = {"active": False, "amount": 0, "frequency": ""}
+
     except AutoSave.DoesNotExist:
-        autoSaveSettings = {
-            "active": False,
-            "amount": 0,
-            "frequency": "",
-        }
+        autoSaveSettings = {"active": False, "amount": 0, "frequency": ""}
+
+    except Exception as e:
+        # Handle any other exceptions that might occur
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     return Response(
         {"autosave_enabled": autosave_enabled, "autoSaveSettings": autoSaveSettings},
@@ -1342,7 +1500,7 @@ def quickinvest(request):
             "expiry_month": card.expiry_date.split("/")[0],
             "expiry_year": card.expiry_date.split("/")[1],
         },
-        "email": request.user.email,  # Assuming you have a user authenticated with a JWT token
+        "email": request.user.email,
         "amount": int(amount) * 100,  # Amount in kobo (multiply by 100)
         "pin": card.pin,
     }
@@ -1405,126 +1563,132 @@ def autoinvest(request):
     amount = request.data.get("amount")
     frequency = request.data.get("frequency")
 
-    # Validate frequency (should be one of 'hourly', 'daily', 'weekly', 'monthly')
-    valid_frequencies = ["hourly", "daily", "weekly", "monthly"]
-    if frequency not in valid_frequencies:
+    # Validate request data
+    if not all([card_id, amount, frequency]):
         return Response(
-            {"error": "Invalid frequency"}, status=status.HTTP_400_BAD_REQUEST
+            {"error": "Missing required fields: card_id, amount, and frequency."},
+            status=status.HTTP_400_BAD_REQUEST,
         )
 
     try:
-        active_autoinvest = AutoInvest.objects.get(user=user, active=True)
+        amount = int(amount)
+        if amount < 100000:
+            return Response(
+                {"error": "Amount cannot be less than N100,000."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+    except ValueError:
         return Response(
-            {"error": "User already has an active autoinvest"},
+            {"error": "Invalid amount. Amount should be a number."},
             status=status.HTTP_400_BAD_REQUEST,
         )
-    except AutoInvest.DoesNotExist:
-        pass
 
-    card = Card.objects.get(id=card_id)
-    if not card:
+    valid_frequencies = ["daily", "weekly", "monthly"]
+    if frequency not in valid_frequencies:
         return Response(
-            {"error": "Selected card not found"}, status=status.HTTP_404_NOT_FOUND
+            {"error": "Invalid frequency. Choose 'daily', 'weekly', or 'monthly'."},
+            status=status.HTTP_400_BAD_REQUEST,
         )
 
-    # Calculate the interval based on the selected frequency (in seconds)
-    intervals = {
-        "hourly": 3600,
-        "daily": 86400,
-        "weekly": 604800,
-        "monthly": 2419200,  # Approximation for 28-31 days
+    # Validate card
+    try:
+        card = Card.objects.get(id=card_id)
+    except Card.DoesNotExist:
+        return Response(
+            {"error": "Selected card not found."}, status=status.HTTP_404_NOT_FOUND
+        )
+    except ValueError:
+        return Response(
+            {"error": "Invalid card ID format."}, status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # Check for existing AutoInvest records for the user
+    if AutoInvest.objects.filter(user=user, frequency=frequency, active=True).exists():
+        return Response(
+            {
+                "error": f"An active AutoInvest record already exists for frequency: {frequency}."
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Prepare Paystack plan creation request
+    plan_payload = {
+        "name": f"{frequency.capitalize()} AutoInvest Plan for {user.email}",
+        "interval": frequency,
+        "amount": amount * 100,  # Convert amount to kobo
     }
 
-    interval_seconds = intervals.get(frequency)
+    headers = {
+        "Authorization": f"Bearer {paystack_secret_key}",
+        "Content-Type": "application/json",
+    }
 
-    if not interval_seconds:
+    # Step 1: Create subscription plan on Paystack
+    try:
+        plan_response = requests.post(
+            "https://api.paystack.co/plan", json=plan_payload, headers=headers
+        )
+        plan_response.raise_for_status()
+        plan_data = plan_response.json()
+        plan_code = plan_data["data"]["plan_code"]
+    except requests.RequestException as e:
+        logger.error(f"Paystack plan creation failed: {e}")
         return Response(
-            {"error": "Invalid frequency"}, status=status.HTTP_400_BAD_REQUEST
+            {"error": "Failed to create plan on Paystack."},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
-    # Create an 'AutoInvest' record
-    autoinvest = AutoInvest.objects.create(
-        user=user, frequency=frequency, amount=amount, active=True
-    )
+    # Step 2: Subscribe user to the plan
+    subscription_payload = {"customer": user.email, "plan": plan_code}
 
-    # Set the 'autoinvest_enabled' field to True
-    user.autoinvest_enabled = True  # Add this line
-    user.save()
+    try:
+        subscription_response = requests.post(
+            "https://api.paystack.co/subscription",
+            json=subscription_payload,
+            headers=headers,
+        )
+        subscription_response.raise_for_status()
+        subscription_data = subscription_response.json()
+        subscription_id = subscription_data.get("data", {}).get("id")
+        subscription_code = subscription_data.get("data", {}).get("subscription_code")
+        subscription_token = subscription_data.get("data", {}).get("email_token")
+        transaction_reference = subscription_data.get("data", {}).get("reference")
+    except requests.RequestException as e:
+        logger.error(f"Subscription failed: {e}")
+        return Response(
+            {"error": "Subscription failed."},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
-    # Use the card details to initiate a payment with Paystack periodically
-    def auto_invest():
-        while True:
-            # Delay for the specified interval
-            time.sleep(interval_seconds)
+    # Step 3: Save AutoInvest record to the database
+    with transaction.atomic():
+        AutoInvest.objects.create(
+            user=user,
+            frequency=frequency,
+            amount=amount,
+            paystack_sub_id=subscription_id,
+            paystack_sub_code=subscription_code,
+            paystack_sub_token=subscription_token,
+            paystack_trans_ref=transaction_reference,
+            active=True,
+        )
+        user.autoinvest_enabled = True
+        user.save()
 
-            # Perform the auto invest
-            paystack_url = "https://api.paystack.co/charge"
-
-            payload = {
-                "card": {
-                    "number": card.card_number,
-                    "cvv": card.cvv,
-                    "expiry_month": card.expiry_date.split("/")[0],
-                    "expiry_year": card.expiry_date.split("/")[1],
-                },
-                "email": user.email,
-                "amount": int(amount) * 100,  # Amount in kobo (multiply by 100)
-            }
-
-            headers = {
-                "Authorization": f"Bearer {paystack_secret_key}",
-                "Content-Type": "application/json",
-            }
-
-            response = requests.post(paystack_url, json=payload, headers=headers)
-            paystack_response = response.json()
-
-            if paystack_response.get("status"):
-                # Investment successful, update user's investments and create a transaction
-                # user.investment += int(amount)
-                user.investment += int(0)
-                user.save()
-
-                # Call the confirm_referral_rewards method here
-                user.confirm_referral_rewards(
-                    is_referrer=True
-                )  # Pass True if the user is a referrer, or False if not
-
-                # Create a transaction record
-                Transaction.objects.create(
-                    user=user,
-                    transaction_type="credit",
-                    amount=int(0),
-                    date=timezone.now().date(),
-                    time=timezone.now().time(),
-                    description=f"AutoInvest",
-                    transaction_id=paystack_response.get("data", {}).get("reference"),
-                )
-
-                # After processing a savings or investment transaction
-                user.update_total_savings_and_investment_this_month()
-
-                # Send a confirmation email
-                subject = "AutoInvest Successful!"
-                message = f"Hi {user.first_name},\n\nYour AutoInvest ({frequency}) of ₦{amount} was successful. It has been added to your INVESTMENTS account. \n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-                from_email = "MyFund <info@myfundmobile.com>"
-                recipient_list = [user.email]
-
-                send_mail(
-                    subject, message, from_email, recipient_list, fail_silently=False
-                )
-
-    # Start a new thread for the auto invest process
-    threading.Thread(target=auto_invest).start()
-
-    # Send an immediate email alert for activation
+    # Send success notification email
     subject = "AutoInvest Activated!"
-    message = f"Well done {user.first_name},\n\nAutoInvest ({frequency}) was successfully activated. You are now investing ₦{amount} {frequency} and your next AutoInvest transaction will happen in the next selected periodic interval. \n\n\nKeep growing your funds.🥂\n\nMyFund  \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+    message = f"Hi {user.first_name},\n\nYour AutoInvest have been activated. You are now saving ₦{amount} {frequency}.\n\nKeep growing your funds.🥂\n\n\nMyFund  \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
     from_email = "MyFund <info@myfundmobile.com>"
-    recipient_list = [user.email]
 
-    send_mail(subject, message, from_email, recipient_list, fail_silently=False)
-    # Return a success response indicating that AutoInvest has been activated
+    try:
+        send_mail(subject, message, from_email, [user.email], fail_silently=False)
+    except Exception as e:
+        logger.error(f"Failed to send email: {e}")
+        return Response(
+            {"error": "Failed to send notification email."},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
     return Response({"message": "AutoInvest activated"}, status=status.HTTP_200_OK)
 
 
@@ -1534,23 +1698,68 @@ def deactivate_autoinvest(request):
     user = request.user
     frequency = request.data.get("frequency")
 
+    if not frequency:
+        return Response(
+            {
+                "error": "Frequency Missing: Please, provide the frequency of the autoinvest."
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
     try:
-        # Find the active AutoInvest for the user with the given frequency
-        autoinvest = AutoInvest.objects.get(user=user, frequency=frequency, active=True)
+        # Find all active AutoInvest for the user with the given frequency
+        active_autoinvest = AutoInvest.objects.filter(
+            user=user, frequency=frequency, active=True
+        )
 
-        # Deactivate the AutoInvest by setting it to False
-        autoinvest.active = False
-        autoinvest.save()
+        headers = {
+            "Authorization": f"Bearer {paystack_secret_key}",
+            "Content-Type": "application/json",
+        }
 
-        # Delete the AutoInvest object from the database
-        autoinvest.delete()
+        for autoinvest in active_autoinvest:
+
+            # print(f"autoinvest: {autoinvest}")
+
+            if autoinvest.paystack_sub_id and autoinvest.paystack_sub_token:
+                # Prepare the data for the request
+                data = {
+                    "code": autoinvest.paystack_sub_code,
+                    "token": autoinvest.paystack_sub_token,
+                }
+
+                # Log the data being sent
+                # print("Disabling AutoInvest subscription with data:", data)
+
+                # Make the API request
+                deactivate_response = requests.post(
+                    "https://api.paystack.co/subscription/disable",
+                    json=data,
+                    headers=headers,
+                )
+
+                # Check for successful response
+                deactivate_response.raise_for_status()  # Raises an HTTPError for bad responses
+
+                # Deactivate the AutoInvest
+                autoinvest.active = False
+                autoinvest.save()
+                autoinvest.delete()
+            else:
+                autoinvest.delete()
+                return Response(
+                    {
+                        "error": "Paystack subscription details are missing for one or more AutoInvest"
+                    },
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
 
         user.autoinvest_enabled = False
         user.save()
 
         # Send a confirmation email
         subject = "AutoInvest Deactivated!"
-        message = f"Hi {user.first_name},\n\nYour AutoInvest ({frequency}) has been deactivated. \n\nKeep growing your funds.🥂\n\n\nMyFund  \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+        message = f"Hi {user.first_name},\n\nYour {frequency} AutoInvest subscription have been deactivated. \n\nKeep growing your funds.🥂\n\n\nMyFund  \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
         from_email = "MyFund <info@myfundmobile.com>"
         recipient_list = [user.email]
 
@@ -1561,9 +1770,12 @@ def deactivate_autoinvest(request):
             {"message": "AutoInvest deactivated"}, status=status.HTTP_200_OK
         )
 
-    except AutoInvest.DoesNotExist:
+    except requests.RequestException as e:
         return Response(
-            {"error": "AutoInvest not found"}, status=status.HTTP_404_NOT_FOUND
+            {
+                "error": f"Failed to deactivate AutoInvest subscription on Paystack: {str(e)}"
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
 
@@ -1573,7 +1785,7 @@ def get_autoinvest_status(request):
     user = request.user
     autoinvest_enabled = user.autoinvest_enabled
 
-    # You can retrieve the user's active auto-invest settings here
+    # Retrieve the user's active auto-invest settings
     try:
         active_autoinvest = AutoInvest.objects.get(user=user, active=True)
         autoInvestSettings = {
@@ -1581,12 +1793,46 @@ def get_autoinvest_status(request):
             "amount": active_autoinvest.amount,
             "frequency": active_autoinvest.frequency,
         }
+
+        # Fetch subscription status from Paystack
+        subscription_id = active_autoinvest.paystack_sub_id
+        paystack_url = f"https://api.paystack.co/subscription/{subscription_id}"
+
+        headers = {
+            "Authorization": f"Bearer {paystack_secret_key}",  # Ensure secure handling of secret keys
+            "Content-Type": "application/json",
+        }
+
+        response = requests.get(paystack_url, headers=headers)
+
+        if response.status_code == 200:
+            subscription_data = response.json()
+            subscription_status = subscription_data.get("data", {}).get("status")
+            autoInvestSettings["subscription_status"] = subscription_status
+        else:
+            autoInvestSettings = {
+                "active": False,
+                "amount": 0,
+                "frequency": "",
+                "subscription_status": None,
+            }
+
     except AutoInvest.DoesNotExist:
         autoInvestSettings = {
             "active": False,
             "amount": 0,
             "frequency": "",
+            "subscription_status": None,
         }
+
+    except requests.RequestException as e:
+        return Response(
+            {"error": f"Request to Paystack failed: {str(e)}"},
+            status=status.HTTP_502_BAD_GATEWAY,
+        )
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     return Response(
         {
@@ -2279,7 +2525,7 @@ class BuyPropertyView(generics.CreateAPIView):
             # Define your payment gateway credentials and headers
             paystack_secret_key = os.environ.get(
                 "PAYSTACK_KEY_LIVE",
-                default="sk_test_dacd07b029231eed22f407b3da805ecafdf2668f",
+                default="  ",
             )
             headers = {
                 "Authorization": f"Bearer {paystack_secret_key}",
@@ -2827,6 +3073,9 @@ def paystack_submit_otp(request):
         )
 
 
+import threading
+import time
+
 paystack_ips = ["52.31.139.75", "52.49.173.169", "52.214.14.220"]
 
 
@@ -2835,28 +3084,16 @@ def paystack_webhook(request):
     try:
         event = request.data
 
-        ip_address = request.headers.get("True-Client-Ip")
+        header_data = request.headers
+
+        ip_address = request.headers.get("Cf-Connecting-Ip")
 
         ip_is_paystack = ip_address in paystack_ips
 
-        print(str(event))
+        event_status = event["event"]
 
-        # Do something with event
-        subject = "Paystack Webhook Received!"
-        message = (
-            str(event)
-            + " ip Address:"
-            + str(ip_address)
-            + "  verified:"
-            + str(ip_is_paystack)
-            + " headers:"
-            + str(request.headers)
-        )
-
-        from_email = "MyFund <info@myfundmobile.com>"
-        recipient_list = ["care@myfundmobile.com"]
-
-        send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+        # print(str(event))
+        print(f"paystack event status: {event_status}")
 
         if not ip_is_paystack:
             return JsonResponse(
@@ -2867,62 +3104,289 @@ def paystack_webhook(request):
                 },
                 status=status.HTTP_403_FORBIDDEN,
             )
+        else:
+            # Create and Start a thread that process the event in the background
+            threading.Thread(
+                target=paystack_webhook_processing,
+                args=(
+                    event,
+                    ip_address,
+                    ip_is_paystack,
+                    header_data,
+                ),
+            ).start()
 
-        reference = event["data"]["reference"]
-        transaction = Transaction.objects.get(transaction_id=reference)
-        description = transaction.description
-        description = description.split(" ")
-        user = transaction.user
-
-        if (
-            description[1] == "(Confirmed)"
-            or description[1] == "(Failed)"
-            or description[1] == "(successful)"
-        ):
             return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
-        if event["data"]["status"] != "success":
-            transaction.transaction_type = "failed"
-            transaction.description = description[0] + " (Failed)"
-            transaction.save()
-
-        if event["data"]["status"] == "success":
-            transaction.transaction_type = "credit"
-            transaction.description = description[0] + " (Confirmed)"
-            transaction.save()
-
-            amount = transaction.amount
-
-            if description[0] == "QuickInvest":
-                user.investment += int(amount)
-
-                subject = "QuickInvest Successful!"
-                message = f"Well done {user.first_name},\n\nYour QuickInvest was successful and ₦{amount} has been successfully added to your INVESTMENTS account. \n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-                from_email = "MyFund <info@myfundmobile.com>"
-                recipient_list = [user.email]
-
-                send_mail(
-                    subject, message, from_email, recipient_list, fail_silently=False
-                )
-
-            if description[0] == "QuickSave":
-                user.savings += int(amount)
-
-                subject = "QuickSave Successful!"
-                message = f"Well done {user.first_name},\n\nYour QwickSave was successful and ₦{amount} has been successfully added to your SAVINGS account. \n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-                from_email = "MyFund <info@myfundmobile.com>"
-                recipient_list = [user.email]
-
-                send_mail(
-                    subject, message, from_email, recipient_list, fail_silently=False
-                )
-
-        user.confirm_referral_rewards(is_referrer=True)
-        user.update_total_savings_and_investment_this_month()
-        user.save()
-
-        return JsonResponse({"status": True}, status=status.HTTP_200_OK)
     except Exception as e:
+        # print error
+        print(f"\nPaystack Webhook(Internal Server Error):  {e}\n")
+
+        # Send an email of the error that ocurred
+        subject = "Paystack Webhook Error!"
+        message = f"Paystack Webhook Internal Server Error:  {e}"
+
+        from_email = "MyFund <info@myfundmobile.com>"
+        recipient_list = ["care@myfundmobile.com", "sammy@myfundmobile.com"]
+
+        send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+
+        return JsonResponse(
+            {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
+    try:
+
+        # Send a email of the webhook payload
+        subject = "Paystack Webhook Received!"
+        message = (
+            str(event)
+            + " ip Address:"
+            + str(ip_address)
+            + "  verified:"
+            + str(ip_is_paystack)
+            + " headers:"
+            + str(header_data)
+        )
+
+        from_email = "MyFund <info@myfundmobile.com>"
+        recipient_list = ["care@myfundmobile.com", "sammy@myfundmobile.com"]
+
+        send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+
+        match event["event"]:
+            case "charge.success":
+                reference = event["data"]["reference"]
+                email = event["data"]["customer"]["email"]
+                transaction = Transaction.objects.filter(
+                    transaction_id=reference
+                ).first()
+                user = CustomUser.objects.get(email=email)
+
+                # Check if transaction already exists
+                if transaction is None:
+                    # Create a record in the database if the event record does not exist
+                    trans_description = event["data"]["plan"]["name"]
+                    trans_description = trans_description.split(" ")
+
+                    amount = event["data"]["amount"] / 100  # convert amount to naira
+
+                    # Handle AutoSave case
+                    if (
+                        trans_description[1] == "AutoSave"
+                        or AutoSave.objects.filter(paystack_trans_ref=reference).first()
+                    ):
+                        # Create a new transaction record for AutoSave
+                        transaction = Transaction.objects.create(
+                            user=user,
+                            transaction_type="pending",
+                            amount=int(amount),
+                            date=timezone.now().date(),
+                            time=timezone.now().time(),
+                            description=f"{trans_description[1]} (pending)",
+                            transaction_id=event["data"]["reference"],
+                        )
+
+                    # Handle AutoInvest case
+                    if (
+                        trans_description[1] == "AutoInvest"
+                        or AutoInvest.objects.filter(
+                            paystack_trans_ref=reference
+                        ).first()
+                    ):
+                        # Create a new transaction record for AutoInvest
+                        transaction = Transaction.objects.create(
+                            user=user,
+                            transaction_type="pending",
+                            amount=int(amount),
+                            date=timezone.now().date(),
+                            time=timezone.now().time(),
+                            description=f"{trans_description[1]} (pending)",
+                            transaction_id=event["data"]["reference"],
+                        )
+
+                print(f"transaction: {transaction}")
+                description = transaction.description
+                description = description.split(" ")
+                # print(f"user: {user}")
+
+                if event["data"]["status"] != "success":
+                    transaction.transaction_type = "failed"
+                    transaction.description = description[0] + " (Failed)"
+                    transaction.save()
+
+                if event["data"]["status"] == "success":
+                    transaction.transaction_type = "credit"
+                    transaction.description = description[0] + " (Confirmed)"
+                    transaction.save()
+
+                    amount = transaction.amount
+
+                    if description[0] == "QuickInvest":
+                        user.investment += int(amount)
+
+                        subject = "QuickInvest Successful!"
+                        message = f"Well done {user.first_name},\n\nYour QuickInvest was successful and ₦{amount} has been successfully added to your INVESTMENTS account. \n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+                        from_email = "MyFund <info@myfundmobile.com>"
+                        recipient_list = [user.email]
+
+                        send_mail(
+                            subject,
+                            message,
+                            from_email,
+                            recipient_list,
+                            fail_silently=False,
+                        )
+
+                    if description[0] == "QuickSave":
+                        user.savings += int(amount)
+
+                        subject = "QuickSave Successful!"
+                        message = f"Well done {user.first_name},\n\nYour QuickSave was successful and ₦{amount} has been successfully added to your SAVINGS account. \n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+                        from_email = "MyFund <info@myfundmobile.com>"
+                        recipient_list = [user.email]
+
+                        send_mail(
+                            subject,
+                            message,
+                            from_email,
+                            recipient_list,
+                            fail_silently=False,
+                        )
+
+                    if description[0] == "AutoSave":
+                        user.savings += int(amount)
+
+                        subject = f"{description[0]} Successful!"
+                        message = f"Well done {user.first_name},\n\nYour {description[0]} was successful and ₦{amount} has been successfully added to your SAVINGS account. \n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+                        from_email = "MyFund <info@myfundmobile.com>"
+                        recipient_list = [user.email]
+
+                        send_mail(
+                            subject,
+                            message,
+                            from_email,
+                            recipient_list,
+                            fail_silently=False,
+                        )
+
+                    if description[0] == "AutoInvest":
+                        user.investment += int(amount)
+
+                        subject = f"{description[0]} Successful!"
+                        message = f"Well done {user.first_name},\n\nYour {description[0]} was successful and ₦{amount} has been successfully added to your INVESTMENT account. \n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+                        from_email = "MyFund <info@myfundmobile.com>"
+                        recipient_list = [user.email]
+
+                        send_mail(
+                            subject,
+                            message,
+                            from_email,
+                            recipient_list,
+                            fail_silently=False,
+                        )
+
+                    user.confirm_referral_rewards(is_referrer=True)
+                    user.update_total_savings_and_investment_this_month()
+                    user.save()
+
+                return JsonResponse({"status": True}, status=status.HTTP_200_OK)
+
+            case "invoice.create":
+                sub_code = event["data"]["subscription"]["subscription_code"]
+                sub_token = event["data"]["subscription"]["email_token"]
+                email = event["data"]["customer"]["email"]
+                trans_ref = event["data"]["transaction"]["reference"]
+                user = CustomUser.objects.get(email=email)
+
+                print(f"sub_code: {sub_code}, sub_token: {sub_token}")
+
+                if not AutoSave.objects.get(
+                    paystack_trans_ref=trans_ref
+                ) or AutoInvest.objects.get(paystack_trans_ref=trans_ref):
+
+                    try:
+                        if AutoSave.objects.get(
+                            paystack_sub_code=sub_code,
+                            paystack_sub_token=sub_token,
+                        ):
+
+                            amount = (
+                                event["data"]["amount"] / 100
+                            )  # convert amount to naira
+
+                            #     Create a transaction record
+                            Transaction.objects.create(
+                                user=user,
+                                transaction_type="pending",
+                                amount=int(amount),
+                                date=timezone.now().date(),
+                                time=timezone.now().time(),
+                                description="AutoSave (pending)",
+                                transaction_id=trans_ref,
+                            )
+                    except:
+                        pass
+
+                    try:
+                        if AutoInvest.objects.get(
+                            paystack_sub_code=sub_code,
+                            paystack_sub_token=sub_token,
+                        ):
+
+                            amount = (
+                                event["data"]["amount"] / 100
+                            )  # convert amount to naira
+
+                            #     Create a transaction record
+                            Transaction.objects.create(
+                                user=user,
+                                transaction_type="pending",
+                                amount=int(amount),
+                                date=timezone.now().date(),
+                                time=timezone.now().time(),
+                                description="AutoInvest (pending)",
+                                transaction_id=trans_ref,
+                            )
+                    except:
+                        print(
+                            f'\n"invoice.create" details does not exist in MyFund database\n'
+                        )
+
+                return JsonResponse({"status": True}, status=status.HTTP_200_OK)
+
+            case "invoice.payment_failed":
+
+                event_data = event["data"]
+
+                # Send an email of the data of the failed payment
+                subject = "Paystack Webhook(Payment Failed)"
+                message = f"Invoice Data:  \n\n{event_data}"
+
+                from_email = "MyFund <info@myfundmobile.com>"
+                recipient_list = ["care@myfundmobile.com", "sammy@myfundmobile.com"]
+
+                send_mail(
+                    subject, message, from_email, recipient_list, fail_silently=False
+                )
+
+                return JsonResponse({"status": True}, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        # print error
+        print(f"\nPaystack Webhook(Internal Server Error):  {e}\n")
+
+        # Send an email of the error that ocurred
+        subject = "Paystack Webhook Error!"
+        message = f"Paystack Webhook Internal Server Error:  {e}"
+
+        from_email = "MyFund <info@myfundmobile.com>"
+        recipient_list = ["care@myfundmobile.com", "sammy@myfundmobile.com"]
+
+        send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+
         return JsonResponse(
             {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )

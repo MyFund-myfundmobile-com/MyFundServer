@@ -30,7 +30,33 @@ from django.db.models import (
 from django.db import models
 from django.db.models.functions import Coalesce
 from django.utils import timezone
-from .models import CustomUser, CustomUserMetrics
+from .models import CustomUser, CustomUserMetrics, Referral
+
+
+class TransactionInline(
+    admin.TabularInline
+):  # Use TabularInline for a table-like display
+    model = Transaction
+    extra = 0  # Do not add extra blank forms
+    fields = (
+        "transaction_type",
+        "amount",
+        "service_charge",
+        "total_amount",
+        "date",
+        "time",
+        "description",
+        "transaction_id",
+        "property_name",
+        "property_value",
+        "rent_earned_annually",
+        "rent_earned_monthly",
+    )
+    readonly_fields = (
+        "transaction_id",
+        "date",
+        "time",
+    )  # Make fields read-only as needed
 
 
 class CustomUserAdmin(UserAdmin):
@@ -56,6 +82,7 @@ class CustomUserAdmin(UserAdmin):
         "total_savings_and_investments_this_month",
         "user_percentage_to_top_saver",
         "how_did_you_hear",
+        "is_hired_referrer",
     )
     list_filter = (
         "is_staff",
@@ -63,8 +90,15 @@ class CustomUserAdmin(UserAdmin):
         "kyc_updated",
         "how_did_you_hear",
         "date_joined",
+        "is_hired_referrer",
     )
-    actions = ["send_custom_email", "view_kyc_details", "approve_kyc", "reject_kyc"]
+    actions = [
+        "send_custom_email",
+        "view_kyc_details",
+        "approve_kyc",
+        "reject_kyc",
+        "make_hired_referrer",
+    ]
 
     fieldsets = (
         (None, {"fields": ("email", "password")}),
@@ -79,6 +113,7 @@ class CustomUserAdmin(UserAdmin):
                     "is_staff",
                     "is_active",
                     "is_superuser",
+                    "is_hired_referrer",
                     "groups",
                     "user_permissions",
                 )
@@ -122,6 +157,10 @@ class CustomUserAdmin(UserAdmin):
     )
     search_fields = ("email", "first_name", "last_name")
     ordering = ("email", "date_joined")
+    inlines = [TransactionInline]
+
+    def make_hired_referrer(self, request, queryset):
+        updated_count = queryset.update(is_hired_referrer=True)
 
     def view_kyc_details(self, request, queryset):
         if queryset.count() == 1:
@@ -308,16 +347,19 @@ class CustomUserAdmin(UserAdmin):
         response = super().changelist_view(request, extra_context=extra_context)
 
         # Update the context with the total metrics
-        content_data = response.context_data
-        content_data["total_users"] = total_users
-        content_data["total_savings"] = total_savings
-        content_data["total_investments"] = total_investments
-        content_data["total_wallets"] = total_wallets
-        content_data["total_properties"] = total_properties
-        content_data["total_savings_and_investments"] = total_savings_and_investments
-        content_data["total_savings_and_investments_this_month"] = (
-            total_savings_and_investments_this_month
-        )
+        if hasattr(response, "context_data"):
+            content_data = response.context_data
+            content_data["total_users"] = total_users
+            content_data["total_savings"] = total_savings
+            content_data["total_investments"] = total_investments
+            content_data["total_wallets"] = total_wallets
+            content_data["total_properties"] = total_properties
+            content_data["total_savings_and_investments"] = (
+                total_savings_and_investments
+            )
+            content_data["total_savings_and_investments_this_month"] = (
+                total_savings_and_investments_this_month
+            )
 
         return response
 
@@ -595,8 +637,21 @@ class PropertyAdmin(admin.ModelAdmin):
     ]  # Make the units_available field editable in the list view
 
 
+class ReferralAdmin(admin.ModelAdmin):
+    list_display = ("user", "referrer", "created_at")
+    search_fields = ("user__email", "referrer__email")
+    list_filter = ("created_at",)
+    ordering = ("-created_at",)
+
+    def get_queryset(self, request):
+        """Optimize the queryset by prefetching related user and referrer data."""
+        qs = super().get_queryset(request)
+        return qs.select_related("user", "referrer")
+
+
 admin.site.register(Card, CardAdmin)
 admin.site.register(Transaction, TransactionAdmin)
 admin.site.register(AutoSave, AutoSaveAdmin)
 admin.site.register(AutoInvest, AutoInvestAdmin)
 admin.site.register(Property, PropertyAdmin)
+admin.site.register(Referral, ReferralAdmin)
