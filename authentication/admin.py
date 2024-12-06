@@ -338,75 +338,91 @@ class BankTransferRequestAdmin(admin.ModelAdmin):
     def approve_bank_transfer(self, request, queryset):
         approved_users = []
 
-        for request in queryset:
-            request.is_approved = True
-            request.save()
+        for transfer_request in queryset:
+            transfer_request.is_approved = True
+            transfer_request.save()
 
-            # Update user's savings
-            user = request.user
-            user.savings += int(request.amount)
+            user = transfer_request.user
+            user.savings += int(transfer_request.amount)
             user.save()
-
-            # Call the confirm_referral_rewards method here
-            is_referrer = (
-                True  # Determine whether the user is the referrer or the referred user
-            )
-            user.confirm_referral_rewards(
-                is_referrer=True
-            )  # Pass True if the user is a referrer, or False if not
 
             # Create a transaction record
             transaction = Transaction.objects.create(
                 user=user,
                 transaction_type="credit",
-                amount=request.amount,
+                amount=transfer_request.amount,
                 date=timezone.now().date(),
                 time=timezone.now().time(),
-                description=f"QuickSave (Confirmed)",
+                description="QuickSave (Confirmed)",
                 transaction_id=str(uuid.uuid4())[:10],
             )
+
+            # Save the transaction
             transaction.save()
 
-            # Send an approval email to the user
+            # Send approval email
             subject = "QuickSave Updated! ✔"
-            message = f"Hi {user.first_name}, \n\nYour bank transfer request for ₦{request.amount} has been approved and credited to your SAVINGS account!\n\nThank you for using MyFund. \n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-            from_email = "MyFund <info@myfundmobile.com>"
-            recipient_list = [user.email]
-
-            send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+            message = f"Hi {user.first_name},\n\nYour bank transfer for ₦{transfer_request.amount} has been approved!"
+            send_mail(subject, message, "MyFund <info@myfundmobile.com>", [user.email])
 
             approved_users.append(user)
 
-            # After processing a bank transfer transaction
+            # Update total savings this month
             user.update_total_savings_and_investment_this_month()
+
+            # Check if user crossed referral reward threshold
+            if user.savings >= 20000 or user.investment >= 100000:
+                user.confirm_referral_rewards(is_referrer=False)  # For referred user
+
+                if user.referral:
+                    # Confirm and apply reward for referrer
+                    user.referral.confirm_referral_rewards(is_referrer=True)
+
+                    # Deduct the pending reward for both users
+                    user.pending_referral_reward -= 500
+                    user.referral.pending_referral_reward -= 500
+                    user.save()
+                    user.referral.save()
+
+                    # Send referral reward confirmation emails
+                    user.send_confirmation_email(user.referral, is_referrer=True)
+                    user.send_confirmation_email(user, is_referrer=False)
+
+        # Referral email notifications
+        for user in approved_users:
+            if user.savings >= 20000 or user.investment >= 100000:
+                if user.referral:
+                    # Notify referrer of the confirmed reward
+                    user.send_confirmation_email(user.referral, is_referrer=True)
+
+                # Notify referred user of their confirmed reward
+                user.send_confirmation_email(user, is_referrer=False)
 
     approve_bank_transfer.short_description = "Approve selected bank transfers"
 
     def reject_bank_transfer(self, request, queryset):
-        for request in queryset:
-            user = request.user
+        for transfer_request in queryset:
+            user = transfer_request.user
 
             # Create a transaction record
             transaction = Transaction.objects.create(
                 user=user,
                 transaction_type="debit",
-                amount=request.amount,
+                amount=transfer_request.amount,
                 date=timezone.now().date(),
                 time=timezone.now().time(),
-                description=f"QuickSave (Failed)",
+                description="QuickSave (Failed)",
                 transaction_id=str(uuid.uuid4())[:10],
             )
             transaction.save()
-            # Send a rejection email to the user
-            subject = "QuickSave Failed. ❌"
-            message = f"Hi {request.user.first_name}, \n\nYour bank transfer request for ₦{request.amount} could not be confirmed. Kindly check and try again.\n\nThank you for using MyFund. \n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-            from_email = "MyFund <info@myfundmobile.com>"
-            recipient_list = [request.user.email]
 
-            send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+            # Send a rejection email to the user
+            subject = "QuickSave Failed!"
+            message = f"Hi {transfer_request.user.first_name}, \n\nYour bank transfer request for ₦{transfer_request.amount} could not be confirmed. Kindly check and try again.\n\nThank you for using MyFund."
+            send_mail(subject, message, "MyFund <info@myfundmobile.com>", [user.email])
 
             # Delete the rejected request
-            request.delete()
+            transfer_request.delete()
 
     reject_bank_transfer.short_description = "Reject selected bank transfers"
 

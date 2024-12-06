@@ -51,7 +51,7 @@ ALLOWED_HOSTS = [
     "10.0.101.10",
     "myfund.onrender.com",
     "localhost",
-    "10.10.10.226",
+    "10.10.10.192",
     "192.168.10.60",
     "192.168.136.60",
     "192.168.170.60",
@@ -61,12 +61,9 @@ ALLOWED_HOSTS = [
     "192.168.90.60",
     "192.168.92.60",
     "192.168.71.60",
-    "192.168.121.60",
-    "192.168.212.60",
-    "192.168.239.60",
-    "192.168.92.60",
-    "192.168.119.60",
-    "192.168.204.60",
+    "172.20.10.2",
+    "172.20.10.9",
+    "172.20.10.9",
 ]
 
 
@@ -99,9 +96,9 @@ ASGI_APPLICATION = "myfundproject.routing.application"
 ADMIN_URL = "admin/"
 
 
-# Celery settings
-# CELERY_BROKER_URL = 'redis://localhost:6379/0'  # Use the appropriate broker URL for your environment.
-# CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'  # Use the appropriate result backend URL for your environment.
+# Celery settings]
+# CELERY_BROKER_URL = 'redis://localhost:6379/0'  # Use the appropri\n.ate broker URL for your environment.
+888  # CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'  # Use the appropriate result backend URL for your environment.
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
@@ -278,6 +275,25 @@ EMAIL_HOST_PASSWORD = "Reproduction1..."
 # Other settings
 DEFAULT_FROM_EMAIL = "MyFund <info@myfundmobile.com>"
 PROTOCOL = "https"
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "handlers": {
+        "console": {
+            "level": "INFO",  # Change to INFO to capture all logs
+            "class": "logging.StreamHandler",
+        },
+    },
+    "loggers": {
+        "django": {
+            "handlers": ["console"],
+            "level": "INFO",  # Ensure this captures logs of level INFO and above
+            "propagate": True,
+        },
+    },
+}
+
 
 #     os.environ['DJANGO_SECURE_SSL_REDIRECT'] = 'True'
 #     os.environ['SSL_CERT_FILE'] = SSL_CERT  # Set the SSL certificate file

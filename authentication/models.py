@@ -262,91 +262,58 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
 
     def confirm_referral_rewards(self, is_referrer):
         if self.savings >= 20000 or self.investment > 0:
-            if self.referral is not None:  # Check if there is a referral
-                # Check if there is a pending referral reward
-                if self.pending_referral_reward > 0:
-                    # Create a confirmed credit transaction for the referrer
-                    referrer_transaction_id = str(uuid.uuid4())[
-                        :10
-                    ]  # Generate a unique UUID for the referrer
-                    credit_transaction_referrer = Transaction.objects.create(
-                        user=self,
-                        referral_email=(
-                            self.referral.email if self.referral else ""
-                        ),  # Save the referral email if it exists
-                        transaction_type="credit",
-                        amount=500,
-                        description="Referral Reward (Confirmed)",
-                        transaction_id=referrer_transaction_id,
-                    )
-                    credit_transaction_referrer.save()
+            if self.referral:  # Ensure referral exists
+                transaction_id = str(uuid.uuid4())[:10]
 
-                    # Create a confirmed credit transaction for the referred user
-                    referred_transaction_id = str(uuid.uuid4())[
-                        :10
-                    ]  # Generate a unique UUID for the referred user
-                    credit_transaction_referred = Transaction.objects.create(
+                # Credit referrer if applicable
+                if is_referrer:
+                    Transaction.objects.create(
                         user=self.referral,
-                        referral_email=self.email,  # Save the referrer's email
                         transaction_type="credit",
                         amount=500,
                         description="Referral Reward (Confirmed)",
-                        transaction_id=referred_transaction_id,
+                        transaction_id=transaction_id,
                     )
-                    credit_transaction_referred.save()
 
-                    # Deduct the credited amount from the pending referral rewards
-                    self.pending_referral_reward -= 500
-                    self.referral.pending_referral_reward -= 500
-                    self.pending_referral_reward -= 500
-                    self.referral.pending_referral_reward -= 500
-
-                    # Update the wallets of both users
-                    self.wallet += 500
+                    # Update referrer wallet
                     self.referral.wallet += 500
-                    self.wallet += 500
-                    self.referral.wallet += 500
-
-                    # Save the changes to the database for both users
-                    self.save()
                     self.referral.save()
 
-                    # Debugging: Print the updated wallet balances
-                    print(f"Referrer's wallet balance after credit: {self.wallet}")
-                    print(
-                        f"Referred user's wallet balance after credit: {self.referral.wallet}"
-                    )
+                # Credit referred user
+                Transaction.objects.create(
+                    user=self,
+                    transaction_type="credit",
+                    amount=500,
+                    description="Referral Reward (Confirmed)",
+                    transaction_id=transaction_id,
+                )
 
-                    # Send confirmation email to the referrer
-                    subject_referrer = f"Congrats!🎊🥂 Referral Reward Confirmed!"
-                    message_referrer = f"Congratulations {self.first_name},\n\nYou have received a referral reward of ₦500.00 in your wallet as a new and active user thanks to {self.referral.first_name}.\n\nThank you for using MyFund!\n\nKeep growing your funds.🥂\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+                # Update referred user wallet
+                self.wallet += 500
+                self.save()
 
-                    from_email_referrer = "MyFund <info@myfundmobile.com>"
-                    recipient_list_referrer = [self.email]
+                # Deduct the pending referral reward
+                self.pending_referral_reward -= 500
+                self.referral.pending_referral_reward -= 500
+                self.save()
+                self.referral.save()
 
-                    send_mail(
-                        subject_referrer,
-                        message_referrer,
-                        from_email_referrer,
-                        recipient_list_referrer,
-                        bcc=["newusers@myfundmobile.com"],
-                        fail_silently=False,
-                    )
+                # Send referral reward confirmation emails
+                self.send_confirmation_email(self.referral, is_referrer=True)
+                self.send_confirmation_email(self, is_referrer=False)
 
-                    # Send confirmation email to the referred user
-                    subject_referred = f"Congrats!🎊🥂 Referral Reward for {self.first_name} Confirmed!"
-                    message_referred = f"Congratulations {self.referral.first_name},\n\nYou have received a referral reward of ₦500.00 in your wallet for referring {self.first_name}.\n\nThank you for using MyFund and referring others!\n\nKeep growing your funds.🥂\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+    def send_confirmation_email(self, user, is_referrer):
+        if is_referrer:
+            subject = f"Congrats!🎊🥂 Referral Reward Confirmed!"
+            message = f"Congratulations {user.first_name},\n\nYou have received a referral reward of ₦500.00 in your wallet thanks to your referral.\n\nThank you for using MyFund!\n\nKeep growing your funds.🥂\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+        else:
+            subject = f"Congrats!🎊🥂 Referral Reward for {self.first_name} Confirmed!"
+            message = f"Congratulations {self.first_name},\n\nYou have received a referral reward of ₦500.00 in your wallet for referring {user.first_name}.\n\nThank you for using MyFund and referring others!\n\nKeep growing your funds.🥂\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
 
-                    from_email_referred = "MyFund <info@myfundmobile.com>"
-                    recipient_list_referred = [self.referral.email]
+        from_email = "MyFund <info@myfundmobile.com>"
+        recipient_list = [user.email]
 
-                    send_mail(
-                        subject_referred,
-                        message_referred,
-                        from_email_referred,
-                        recipient_list_referred,
-                        fail_silently=False,
-                    )
+        send_mail(subject, message, from_email, recipient_list, fail_silently=False)
 
     def calculate_user_percentage_to_top_saver(self):
         top_saver = (
