@@ -462,7 +462,7 @@ class BankAccount(models.Model):
     paystack_recipient_code = models.CharField(max_length=255, blank=True, null=True)
 
     def __str__(self):
-        return f"{self.user.email} - {self.bank_name} ({self.account_number})"
+        return f"{self.user} - {self.user.email} - {self.bank_name} ({self.account_number})"
 
 
 class Card(models.Model):
@@ -660,7 +660,13 @@ class InvestTransferRequest(models.Model):
     is_approved = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     transaction_id = models.CharField(max_length=10, unique=False, default="")
-
+    
+class PendingWithdrawals(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    is_approved = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    transaction_id = models.CharField(max_length=20, unique=False, default="")
 
 from django.db import models
 
@@ -690,3 +696,4 @@ class Referral(models.Model):
 
     def __str__(self):
         return f"{self.user.first_name} referred by {self.referrer.first_name}"
+    
