@@ -2070,7 +2070,26 @@ def withdraw_to_local_bank(request):
     source_account = request.data.get(
         "source_account", ""
     )  # 'savings', 'investment', 'wallet'
+    
+    # when source_account is not provided
+    if not source_account:
+        return Response(
+            {"error": "\"source_account\" was NOT provided."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
     target_bank_account_id = request.data.get("target_bank_account_id", "")
+    # when target_bank_account_id is not provided
+    if not target_bank_account_id:
+        return Response(
+            {"error": "\"target_bank_account_id\" was NOT provided."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    # when amount is not provided
+    if not request.data.get("amount", 0):
+        return Response(
+            {"error": "\"amount\" was NOT provided."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
     amount = Decimal(request.data.get("amount", 0))
 
     # Validate that the user has enough balance in the source account
@@ -2206,6 +2225,7 @@ def withdraw_to_local_bank(request):
             )
         else:
             print("Paystack withdrawal failed:", paystack_response)
+            
             return Response(
                 {"error": "Withdrawal to local bank failed. Please try again later."},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -2217,6 +2237,9 @@ def withdraw_to_local_bank(request):
             {"error": "Transaction ID conflict. Please try again."},
             status=status.HTTP_400_BAD_REQUEST,
         )
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        return Response({"error": "An internal error occurred. Please try again later."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 import logging
@@ -3135,10 +3158,10 @@ def paystack_webhook(request):
             {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
-
-def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
-    try:
-
+from .models import PendingWithdrawals
+        
+def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data ):
+    try: 
         # Send a email of the webhook payload
         subject = "Paystack Webhook Received!"
         message = (
@@ -3368,10 +3391,44 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                 from_email = "MyFund <info@myfundmobile.com>"
                 recipient_list = ["care@myfundmobile.com", "sammy@myfundmobile.com"]
 
-                send_mail(
-                    subject, message, from_email, recipient_list, fail_silently=False
-                )
-
+                return JsonResponse({"status": True}, status=status.HTTP_200_OK)
+            
+            case "transfer.failed":
+                amount = event["data"]["amount"]
+                amount = int(amount/100) # convert to naira
+                reason = event["data"]["reason"]
+                transaction_id  = event["data"]["transfer_code"]
+                bank_name = event["data"]["recipient"]["details"]["bank_name"]
+                account_number = event["data"]["recipient"]["details"]["account_number"]
+                # print(f"bank_name: {bank_name}")
+                # print(f"account_number: {account_number}")
+                
+                
+                # Get the user of the failed withdrawal
+                user = None
+                try:
+                    user = BankAccount.objects.get(
+                        account_number=account_number,
+                    ).user
+                except CustomUser.DoesNotExist:
+                    print("User does not exist")
+                
+                # Create a PendingWithdrawals record
+                request = PendingWithdrawals(user=user, amount=amount, transaction_id=transaction_id)
+                request.save()
+                
+                # Send a Withdrawal Request to Admin
+                subject = f"[CHECK] {user.first_name} Withdrawal Request FAILED!"
+                message = f"Hi Admin, \n\nA withdrawal request of ₦{amount} that was initiated by {user.first_name} {user.last_name} ({user.email}) has just FAILED!\n\nReason for failure: {reason}\n\nPlease log in to the admin panel for review: https://myfundapi-myfund-07ce351a.koyeb.app/admin/login/?next=/admin/\n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+                from_email = "MyFund <info@myfundmobile.com>"
+                recipient_list = [
+                    "company@myfundmobile.com",
+                    "info@myfundmobile.com",
+                    "sammy@myfundmobile.com"
+                ]
+                
+                send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+                
                 return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
     except Exception as e:
