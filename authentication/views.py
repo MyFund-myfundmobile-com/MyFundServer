@@ -2070,24 +2070,24 @@ def withdraw_to_local_bank(request):
     source_account = request.data.get(
         "source_account", ""
     )  # 'savings', 'investment', 'wallet'
-    
+
     # when source_account is not provided
     if not source_account:
         return Response(
-            {"error": "\"source_account\" was NOT provided."},
+            {"error": '"source_account" was NOT provided.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
     target_bank_account_id = request.data.get("target_bank_account_id", "")
     # when target_bank_account_id is not provided
     if not target_bank_account_id:
         return Response(
-            {"error": "\"target_bank_account_id\" was NOT provided."},
+            {"error": '"target_bank_account_id" was NOT provided.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
     # when amount is not provided
     if not request.data.get("amount", 0):
         return Response(
-            {"error": "\"amount\" was NOT provided."},
+            {"error": '"amount" was NOT provided.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
     amount = Decimal(request.data.get("amount", 0))
@@ -2225,7 +2225,7 @@ def withdraw_to_local_bank(request):
             )
         else:
             print("Paystack withdrawal failed:", paystack_response)
-            
+
             return Response(
                 {"error": "Withdrawal to local bank failed. Please try again later."},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -2239,7 +2239,10 @@ def withdraw_to_local_bank(request):
         )
     except Exception as e:
         print(f"Error: {str(e)}")
-        return Response({"error": "An internal error occurred. Please try again later."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response(
+            {"error": "An internal error occurred. Please try again later."},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
 
 import logging
@@ -3158,10 +3161,12 @@ def paystack_webhook(request):
             {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
+
 from .models import PendingWithdrawals
-        
-def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data ):
-    try: 
+
+
+def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
+    try:
         # Send a email of the webhook payload
         subject = "Paystack Webhook Received!"
         message = (
@@ -3392,18 +3397,17 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data )
                 recipient_list = ["care@myfundmobile.com", "sammy@myfundmobile.com"]
 
                 return JsonResponse({"status": True}, status=status.HTTP_200_OK)
-            
+
             case "transfer.failed":
                 amount = event["data"]["amount"]
-                amount = int(amount/100) # convert to naira
+                amount = int(amount / 100)  # convert to naira
                 reason = event["data"]["reason"]
-                transaction_id  = event["data"]["transfer_code"]
+                transaction_id = event["data"]["transfer_code"]
                 bank_name = event["data"]["recipient"]["details"]["bank_name"]
                 account_number = event["data"]["recipient"]["details"]["account_number"]
                 # print(f"bank_name: {bank_name}")
                 # print(f"account_number: {account_number}")
-                
-                
+
                 # Get the user of the failed withdrawal
                 user = None
                 try:
@@ -3412,11 +3416,13 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data )
                     ).user
                 except CustomUser.DoesNotExist:
                     print("User does not exist")
-                
+
                 # Create a PendingWithdrawals record
-                request = PendingWithdrawals(user=user, amount=amount, transaction_id=transaction_id)
+                request = PendingWithdrawals(
+                    user=user, amount=amount, transaction_id=transaction_id
+                )
                 request.save()
-                
+
                 # Send a Withdrawal Request to Admin
                 subject = f"[CHECK] {user.first_name} Withdrawal Request FAILED!"
                 message = f"Hi Admin, \n\nA withdrawal request of ₦{amount} that was initiated by {user.first_name} {user.last_name} ({user.email}) has just FAILED!\n\nReason for failure: {reason}\n\nPlease log in to the admin panel for review: https://myfundapi-myfund-07ce351a.koyeb.app/admin/login/?next=/admin/\n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
@@ -3424,11 +3430,13 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data )
                 recipient_list = [
                     "company@myfundmobile.com",
                     "info@myfundmobile.com",
-                    "sammy@myfundmobile.com"
+                    "sammy@myfundmobile.com",
                 ]
-                
-                send_mail(subject, message, from_email, recipient_list, fail_silently=False)
-                
+
+                send_mail(
+                    subject, message, from_email, recipient_list, fail_silently=False
+                )
+
                 return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
     except Exception as e:
@@ -3543,16 +3551,15 @@ logger = logging.getLogger(__name__)
 def send_email(request):
     sender = request.data.get("sender")
     subject = request.data.get("subject")
-    body = request.data.get("body")  # Body containing placeholders like {name}, {email}
+    body = request.data.get("body")
     recipients = request.data.get("recipients", [])
 
-    # Ensure all fields are present and valid
     if not all([sender, subject, body, recipients]):
         return Response(
             {"message": "All fields are required."}, status=status.HTTP_400_BAD_REQUEST
         )
 
-    failed_recipients = []  # To track recipients that failed
+    failed_recipients = []
 
     try:
         total_recipients = len(recipients)
@@ -3566,7 +3573,6 @@ def send_email(request):
 
             for recipient_email in batch_recipients:
                 try:
-                    # Fetch recipient details
                     recipient_user = CustomUser.objects.filter(
                         email=recipient_email
                     ).first()
@@ -3575,38 +3581,56 @@ def send_email(request):
                         failed_recipients.append(recipient_email)
                         continue
 
-                    # Replace merged tags
-                    # Replace merged tags in the email body
-                    personalized_body = (
-                        body.replace(
-                            "{first_name}", recipient_user.first_name or "Valued"
-                        )
-                        .replace("{last_name}", recipient_user.last_name or "User")
-                        .replace("{email}", recipient_email)
-                    )
+                    # Map placeholders with user attributes
+                    placeholder_map = {
+                        "{first_name}": recipient_user.first_name or "Valued",
+                        "{last_name}": recipient_user.last_name or "User",
+                        "{email}": recipient_email,
+                        "{wallet}": str(recipient_user.wallet),
+                        "{savings}": str(recipient_user.savings),
+                        "{investment}": str(recipient_user.investment),
+                        "{properties}": str(recipient_user.properties),
+                        "{full_name}": recipient_user.full_name,
+                        "{total_savings_and_investments_this_month}": str(
+                            recipient_user.total_savings_and_investments_this_month
+                        ),
+                        "{top_saver_percentage}": str(
+                            recipient_user.top_saver_percentage
+                        ),
+                    }
 
+                    # Replace placeholders in subject and body
+                    personalized_subject = subject
+                    personalized_body = body
+                    for placeholder, value in placeholder_map.items():
+                        personalized_subject = personalized_subject.replace(
+                            placeholder, value
+                        )
+                        personalized_body = personalized_body.replace(
+                            placeholder, value
+                        )
+
+                    # Send the email
                     email = EmailMultiAlternatives(
-                        subject=subject,
+                        subject=personalized_subject,
                         body=personalized_body,
                         from_email=sender,
                         to=[recipient_email],
                     )
                     email.attach_alternative(personalized_body, "text/html")
-
                     email.send(fail_silently=False)
                     logger.info(f"Email sent to {recipient_email}")
                 except Exception as e:
                     logger.error(f"Error sending email to {recipient_email}: {str(e)}")
                     failed_recipients.append(recipient_email)
 
-        # Return success, but include information about failed recipients
         if failed_recipients:
             return Response(
                 {
                     "message": "Emails sent with some failures.",
                     "failed_recipients": failed_recipients,
                 },
-                status=status.HTTP_207_MULTI_STATUS,  # Indicates partial success
+                status=status.HTTP_207_MULTI_STATUS,
             )
         else:
             return Response(
