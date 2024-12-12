@@ -3468,10 +3468,12 @@ def resubscribe_user(request):
 
 import logging
 from django.core.mail import EmailMultiAlternatives
+from django.conf import settings
 from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework import status
+from .models import CustomUser  # Adjust import based on your project structure
 
 BATCH_SIZE = 30  # Number of emails per batch
 
@@ -3484,12 +3486,11 @@ logger = logging.getLogger(__name__)
 def send_email(request):
     sender = request.data.get("sender")
     subject = request.data.get("subject")
-    body = request.data.get("body")
+    body = request.data.get("body")  # Body containing placeholders like {name}, {email}
     recipients = request.data.get("recipients", [])
 
     # Ensure all fields are present and valid
     if not all([sender, subject, body, recipients]):
-        logger.error("Missing required fields.")
         return Response(
             {"message": "All fields are required."}, status=status.HTTP_400_BAD_REQUEST
         )
@@ -3500,34 +3501,49 @@ def send_email(request):
         total_recipients = len(recipients)
         logger.info(f"Total recipients: {total_recipients}")
 
-        # Process recipients in batches
         for i in range(0, total_recipients, BATCH_SIZE):
             batch_recipients = recipients[i : i + BATCH_SIZE]
             logger.info(
                 f"Processing batch {i // BATCH_SIZE + 1} with {len(batch_recipients)} recipients"
             )
 
-            for recipient in batch_recipients:
-                email = EmailMultiAlternatives(
-                    subject=subject,
-                    body=body,
-                    from_email=sender,
-                    to=[recipient],
-                )
-                email.attach_alternative(body, "text/html")
-
+            for recipient_email in batch_recipients:
                 try:
+                    # Fetch recipient details
+                    recipient_user = CustomUser.objects.filter(
+                        email=recipient_email
+                    ).first()
+                    if not recipient_user:
+                        logger.warning(f"No user found for email {recipient_email}")
+                        failed_recipients.append(recipient_email)
+                        continue
+
+                    # Replace merged tags
+                    # Replace merged tags in the email body
+                    personalized_body = (
+                        body.replace(
+                            "{first_name}", recipient_user.first_name or "Valued"
+                        )
+                        .replace("{last_name}", recipient_user.last_name or "User")
+                        .replace("{email}", recipient_email)
+                    )
+
+                    email = EmailMultiAlternatives(
+                        subject=subject,
+                        body=personalized_body,
+                        from_email=sender,
+                        to=[recipient_email],
+                    )
+                    email.attach_alternative(personalized_body, "text/html")
+
                     email.send(fail_silently=False)
-                    logger.info(f"Email sent to {recipient}")
+                    logger.info(f"Email sent to {recipient_email}")
                 except Exception as e:
-                    logger.error(f"Error sending email to {recipient}: {str(e)}")
-                    failed_recipients.append(
-                        recipient
-                    )  # Keep track of failed recipients
+                    logger.error(f"Error sending email to {recipient_email}: {str(e)}")
+                    failed_recipients.append(recipient_email)
 
         # Return success, but include information about failed recipients
         if failed_recipients:
-            logger.warning(f"Some emails failed to send: {failed_recipients}")
             return Response(
                 {
                     "message": "Emails sent with some failures.",
@@ -3536,7 +3552,6 @@ def send_email(request):
                 status=status.HTTP_207_MULTI_STATUS,  # Indicates partial success
             )
         else:
-            logger.info("All emails sent successfully!")
             return Response(
                 {"message": "All emails sent successfully!"}, status=status.HTTP_200_OK
             )
