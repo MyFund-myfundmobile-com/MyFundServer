@@ -3532,6 +3532,7 @@ def resubscribe_user(request):
 
 
 import logging
+import time
 from django.core.mail import EmailMultiAlternatives
 from django.conf import settings
 from rest_framework.response import Response
@@ -3541,6 +3542,12 @@ from rest_framework import status
 from .models import CustomUser  # Adjust import based on your project structure
 
 BATCH_SIZE = 30  # Number of emails per batch
+EMAILS_PER_HOUR_LIMIT = (
+    200  # Reduce this to give space for other emails sent by the server
+)
+TIME_BETWEEN_BATCHES = (
+    3600 / EMAILS_PER_HOUR_LIMIT
+)  # Time in seconds between batches to avoid overloading (this is approximately 18 seconds per batch)
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -3623,6 +3630,11 @@ def send_email(request):
                 except Exception as e:
                     logger.error(f"Error sending email to {recipient_email}: {str(e)}")
                     failed_recipients.append(recipient_email)
+
+            # Sleep to avoid exceeding the max emails per hour
+            time.sleep(
+                TIME_BETWEEN_BATCHES
+            )  # Sleep between batches to respect rate limits
 
         if failed_recipients:
             return Response(
