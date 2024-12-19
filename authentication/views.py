@@ -1370,9 +1370,9 @@ def deactivate_autosave(request):
         }
 
         for autosave in active_autosaves:
-            
+
             # print(f"autosave: {autosave}")
-            
+
             if autosave.paystack_sub_id and autosave.paystack_sub_token:
                 # Prepare the data for the request
                 data = {
@@ -1697,7 +1697,7 @@ def autoinvest(request):
 def deactivate_autoinvest(request):
     user = request.user
     frequency = request.data.get("frequency")
-    
+
     if not frequency:
         return Response(
             {
@@ -1708,7 +1708,9 @@ def deactivate_autoinvest(request):
 
     try:
         # Find all active AutoInvest for the user with the given frequency
-        active_autoinvest = AutoInvest.objects.filter(user=user, frequency=frequency, active=True)
+        active_autoinvest = AutoInvest.objects.filter(
+            user=user, frequency=frequency, active=True
+        )
 
         headers = {
             "Authorization": f"Bearer {paystack_secret_key}",
@@ -1716,21 +1718,25 @@ def deactivate_autoinvest(request):
         }
 
         for autoinvest in active_autoinvest:
-            
+
             # print(f"autoinvest: {autoinvest}")
-            
+
             if autoinvest.paystack_sub_id and autoinvest.paystack_sub_token:
                 # Prepare the data for the request
                 data = {
                     "code": autoinvest.paystack_sub_code,
-                    "token": autoinvest.paystack_sub_token
+                    "token": autoinvest.paystack_sub_token,
                 }
-                
+
                 # Log the data being sent
                 # print("Disabling AutoInvest subscription with data:", data)
 
                 # Make the API request
-                deactivate_response = requests.post("https://api.paystack.co/subscription/disable", json=data, headers=headers)
+                deactivate_response = requests.post(
+                    "https://api.paystack.co/subscription/disable",
+                    json=data,
+                    headers=headers,
+                )
 
                 # Check for successful response
                 deactivate_response.raise_for_status()  # Raises an HTTPError for bad responses
@@ -1742,8 +1748,10 @@ def deactivate_autoinvest(request):
             else:
                 autoinvest.delete()
                 return Response(
-                    {"error": "Paystack subscription details are missing for one or more AutoInvest"},
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                    {
+                        "error": "Paystack subscription details are missing for one or more AutoInvest"
+                    },
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 )
 
         user.autoinvest_enabled = False
@@ -1758,12 +1766,16 @@ def deactivate_autoinvest(request):
         send_mail(subject, message, from_email, recipient_list)
 
         # Return a success response indicating that AutoInvest has been deactivated
-        return Response({"message": "AutoInvest deactivated"}, status=status.HTTP_200_OK)
+        return Response(
+            {"message": "AutoInvest deactivated"}, status=status.HTTP_200_OK
+        )
 
     except requests.RequestException as e:
         return Response(
-            {"error": f"Failed to deactivate AutoInvest subscription on Paystack: {str(e)}"},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            {
+                "error": f"Failed to deactivate AutoInvest subscription on Paystack: {str(e)}"
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
 
@@ -2058,7 +2070,26 @@ def withdraw_to_local_bank(request):
     source_account = request.data.get(
         "source_account", ""
     )  # 'savings', 'investment', 'wallet'
+
+    # when source_account is not provided
+    if not source_account:
+        return Response(
+            {"error": '"source_account" was NOT provided.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
     target_bank_account_id = request.data.get("target_bank_account_id", "")
+    # when target_bank_account_id is not provided
+    if not target_bank_account_id:
+        return Response(
+            {"error": '"target_bank_account_id" was NOT provided.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    # when amount is not provided
+    if not request.data.get("amount", 0):
+        return Response(
+            {"error": '"amount" was NOT provided.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
     amount = Decimal(request.data.get("amount", 0))
 
     # Validate that the user has enough balance in the source account
@@ -2194,6 +2225,7 @@ def withdraw_to_local_bank(request):
             )
         else:
             print("Paystack withdrawal failed:", paystack_response)
+
             return Response(
                 {"error": "Withdrawal to local bank failed. Please try again later."},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -2204,6 +2236,12 @@ def withdraw_to_local_bank(request):
         return Response(
             {"error": "Transaction ID conflict. Please try again."},
             status=status.HTTP_400_BAD_REQUEST,
+        )
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        return Response(
+            {"error": "An internal error occurred. Please try again later."},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
 
@@ -3066,19 +3104,20 @@ import time
 
 paystack_ips = ["52.31.139.75", "52.49.173.169", "52.214.14.220"]
 
+
 @api_view(["POST"])
 def paystack_webhook(request):
     try:
         event = request.data
-        
+
         header_data = request.headers
 
         ip_address = request.headers.get("Cf-Connecting-Ip")
 
         ip_is_paystack = ip_address in paystack_ips
-        
+
         event_status = event["event"]
-        
+
         # print(str(event))
         print(f"paystack event status: {event_status}")
 
@@ -3093,32 +3132,41 @@ def paystack_webhook(request):
             )
         else:
             # Create and Start a thread that process the event in the background
-            threading.Thread(target=paystack_webhook_processing, args=(event, ip_address, ip_is_paystack, header_data,)).start()
-            
-            return JsonResponse({"status": True}, status=status.HTTP_200_OK)          
+            threading.Thread(
+                target=paystack_webhook_processing,
+                args=(
+                    event,
+                    ip_address,
+                    ip_is_paystack,
+                    header_data,
+                ),
+            ).start()
+
+            return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
     except Exception as e:
-        #print error
+        # print error
         print(f"\nPaystack Webhook(Internal Server Error):  {e}\n")
-        
+
         # Send an email of the error that ocurred
         subject = "Paystack Webhook Error!"
-        message = (
-            f"Paystack Webhook Internal Server Error:  {e}"
-        )
+        message = f"Paystack Webhook Internal Server Error:  {e}"
 
         from_email = "MyFund <info@myfundmobile.com>"
         recipient_list = ["care@myfundmobile.com", "sammy@myfundmobile.com"]
-        
+
         send_mail(subject, message, from_email, recipient_list, fail_silently=False)
-        
+
         return JsonResponse(
             {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
-        
-def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data ):
-    try: 
-        
+
+
+from .models import PendingWithdrawals
+
+
+def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
+    try:
         # Send a email of the webhook payload
         subject = "Paystack Webhook Received!"
         message = (
@@ -3135,12 +3183,14 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data )
         recipient_list = ["care@myfundmobile.com", "sammy@myfundmobile.com"]
 
         send_mail(subject, message, from_email, recipient_list, fail_silently=False)
-        
+
         match event["event"]:
             case "charge.success":
                 reference = event["data"]["reference"]
                 email = event["data"]["customer"]["email"]
-                transaction = Transaction.objects.filter(transaction_id=reference).first()
+                transaction = Transaction.objects.filter(
+                    transaction_id=reference
+                ).first()
                 user = CustomUser.objects.get(email=email)
 
                 # Check if transaction already exists
@@ -3152,7 +3202,10 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data )
                     amount = event["data"]["amount"] / 100  # convert amount to naira
 
                     # Handle AutoSave case
-                    if trans_description[1] == "AutoSave" or AutoSave.objects.filter(paystack_trans_ref=reference).first():
+                    if (
+                        trans_description[1] == "AutoSave"
+                        or AutoSave.objects.filter(paystack_trans_ref=reference).first()
+                    ):
                         # Create a new transaction record for AutoSave
                         transaction = Transaction.objects.create(
                             user=user,
@@ -3165,7 +3218,12 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data )
                         )
 
                     # Handle AutoInvest case
-                    if trans_description[1] == "AutoInvest" or AutoInvest.objects.filter(paystack_trans_ref=reference).first():
+                    if (
+                        trans_description[1] == "AutoInvest"
+                        or AutoInvest.objects.filter(
+                            paystack_trans_ref=reference
+                        ).first()
+                    ):
                         # Create a new transaction record for AutoInvest
                         transaction = Transaction.objects.create(
                             user=user,
@@ -3181,7 +3239,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data )
                 description = transaction.description
                 description = description.split(" ")
                 # print(f"user: {user}")
-                
+
                 if event["data"]["status"] != "success":
                     transaction.transaction_type = "failed"
                     transaction.description = description[0] + " (Failed)"
@@ -3203,7 +3261,11 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data )
                         recipient_list = [user.email]
 
                         send_mail(
-                            subject, message, from_email, recipient_list, fail_silently=False
+                            subject,
+                            message,
+                            from_email,
+                            recipient_list,
+                            fail_silently=False,
                         )
 
                     if description[0] == "QuickSave":
@@ -3215,9 +3277,13 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data )
                         recipient_list = [user.email]
 
                         send_mail(
-                            subject, message, from_email, recipient_list, fail_silently=False
+                            subject,
+                            message,
+                            from_email,
+                            recipient_list,
+                            fail_silently=False,
                         )
-                        
+
                     if description[0] == "AutoSave":
                         user.savings += int(amount)
 
@@ -3227,9 +3293,13 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data )
                         recipient_list = [user.email]
 
                         send_mail(
-                            subject, message, from_email, recipient_list, fail_silently=False
+                            subject,
+                            message,
+                            from_email,
+                            recipient_list,
+                            fail_silently=False,
                         )
-                    
+
                     if description[0] == "AutoInvest":
                         user.investment += int(amount)
 
@@ -3239,34 +3309,42 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data )
                         recipient_list = [user.email]
 
                         send_mail(
-                            subject, message, from_email, recipient_list, fail_silently=False
+                            subject,
+                            message,
+                            from_email,
+                            recipient_list,
+                            fail_silently=False,
                         )
-                    
+
                     user.confirm_referral_rewards(is_referrer=True)
                     user.update_total_savings_and_investment_this_month()
                     user.save()
 
                 return JsonResponse({"status": True}, status=status.HTTP_200_OK)
-                
+
             case "invoice.create":
                 sub_code = event["data"]["subscription"]["subscription_code"]
                 sub_token = event["data"]["subscription"]["email_token"]
                 email = event["data"]["customer"]["email"]
                 trans_ref = event["data"]["transaction"]["reference"]
                 user = CustomUser.objects.get(email=email)
-                
+
                 print(f"sub_code: {sub_code}, sub_token: {sub_token}")
-                
-                if not AutoSave.objects.get(paystack_trans_ref=trans_ref) or AutoInvest.objects.get(paystack_trans_ref=trans_ref):
-                    
+
+                if not AutoSave.objects.get(
+                    paystack_trans_ref=trans_ref
+                ) or AutoInvest.objects.get(paystack_trans_ref=trans_ref):
+
                     try:
                         if AutoSave.objects.get(
-                        paystack_sub_code = sub_code, 
-                        paystack_sub_token = sub_token,
-                        ) :                        
-                            
-                            amount = event["data"]["amount"] / 100 # convert amount to naira
-                            
+                            paystack_sub_code=sub_code,
+                            paystack_sub_token=sub_token,
+                        ):
+
+                            amount = (
+                                event["data"]["amount"] / 100
+                            )  # convert amount to naira
+
                             #     Create a transaction record
                             Transaction.objects.create(
                                 user=user,
@@ -3279,15 +3357,17 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data )
                             )
                     except:
                         pass
-                                
+
                     try:
                         if AutoInvest.objects.get(
-                            paystack_sub_code = sub_code, 
-                            paystack_sub_token = sub_token,
-                        ) :
-                            
-                            amount = event["data"]["amount"] / 100 # convert amount to naira
-                        
+                            paystack_sub_code=sub_code,
+                            paystack_sub_token=sub_token,
+                        ):
+
+                            amount = (
+                                event["data"]["amount"] / 100
+                            )  # convert amount to naira
+
                             #     Create a transaction record
                             Transaction.objects.create(
                                 user=user,
@@ -3298,45 +3378,80 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data )
                                 description="AutoInvest (pending)",
                                 transaction_id=trans_ref,
                             )
-                    except :
-                        print(f"\n\"invoice.create\" details does not exist in MyFund database\n")
-              
+                    except:
+                        print(
+                            f'\n"invoice.create" details does not exist in MyFund database\n'
+                        )
+
                 return JsonResponse({"status": True}, status=status.HTTP_200_OK)
-            
-            
+
             case "invoice.payment_failed":
-                
+
                 event_data = event["data"]
-                
+
                 # Send an email of the data of the failed payment
                 subject = "Paystack Webhook(Payment Failed)"
-                message = (
-                    f"Invoice Data:  \n\n{event_data}"
-                )
+                message = f"Invoice Data:  \n\n{event_data}"
 
                 from_email = "MyFund <info@myfundmobile.com>"
                 recipient_list = ["care@myfundmobile.com", "sammy@myfundmobile.com"]
-                
-                send_mail(subject, message, from_email, recipient_list, fail_silently=False)
 
                 return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
+            case "transfer.failed":
+                amount = event["data"]["amount"]
+                amount = int(amount / 100)  # convert to naira
+                reason = event["data"]["reason"]
+                transaction_id = event["data"]["transfer_code"]
+                bank_name = event["data"]["recipient"]["details"]["bank_name"]
+                account_number = event["data"]["recipient"]["details"]["account_number"]
+                # print(f"bank_name: {bank_name}")
+                # print(f"account_number: {account_number}")
+
+                # Get the user of the failed withdrawal
+                user = None
+                try:
+                    user = BankAccount.objects.get(
+                        account_number=account_number,
+                    ).user
+                except CustomUser.DoesNotExist:
+                    print("User does not exist")
+
+                # Create a PendingWithdrawals record
+                request = PendingWithdrawals(
+                    user=user, amount=amount, transaction_id=transaction_id
+                )
+                request.save()
+
+                # Send a Withdrawal Request to Admin
+                subject = f"[CHECK] {user.first_name} Withdrawal Request FAILED!"
+                message = f"Hi Admin, \n\nA withdrawal request of ₦{amount} that was initiated by {user.first_name} {user.last_name} ({user.email}) has just FAILED!\n\nReason for failure: {reason}\n\nPlease log in to the admin panel for review: https://myfundapi-myfund-07ce351a.koyeb.app/admin/login/?next=/admin/\n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+                from_email = "MyFund <info@myfundmobile.com>"
+                recipient_list = [
+                    "company@myfundmobile.com",
+                    "info@myfundmobile.com",
+                    "sammy@myfundmobile.com",
+                ]
+
+                send_mail(
+                    subject, message, from_email, recipient_list, fail_silently=False
+                )
+
+                return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
     except Exception as e:
-        #print error
+        # print error
         print(f"\nPaystack Webhook(Internal Server Error):  {e}\n")
-        
+
         # Send an email of the error that ocurred
         subject = "Paystack Webhook Error!"
-        message = (
-            f"Paystack Webhook Internal Server Error:  {e}"
-        )
+        message = f"Paystack Webhook Internal Server Error:  {e}"
 
         from_email = "MyFund <info@myfundmobile.com>"
         recipient_list = ["care@myfundmobile.com", "sammy@myfundmobile.com"]
-        
+
         send_mail(subject, message, from_email, recipient_list, fail_silently=False)
-        
+
         return JsonResponse(
             {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
@@ -3417,14 +3532,22 @@ def resubscribe_user(request):
 
 
 import logging
+import time
 from django.core.mail import EmailMultiAlternatives
 from django.conf import settings
 from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework import status
+from .models import CustomUser  # Adjust import based on your project structure
 
 BATCH_SIZE = 30  # Number of emails per batch
+EMAILS_PER_HOUR_LIMIT = (
+    200  # Reduce this to give space for other emails sent by the server
+)
+TIME_BETWEEN_BATCHES = (
+    3600 / EMAILS_PER_HOUR_LIMIT
+)  # Time in seconds between batches to avoid overloading (this is approximately 18 seconds per batch)
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -3438,13 +3561,12 @@ def send_email(request):
     body = request.data.get("body")
     recipients = request.data.get("recipients", [])
 
-    # Ensure all fields are present and valid
     if not all([sender, subject, body, recipients]):
         return Response(
             {"message": "All fields are required."}, status=status.HTTP_400_BAD_REQUEST
         )
 
-    failed_recipients = []  # To track recipients that failed
+    failed_recipients = []
 
     try:
         total_recipients = len(recipients)
@@ -3456,32 +3578,71 @@ def send_email(request):
                 f"Processing batch {i // BATCH_SIZE + 1} with {len(batch_recipients)} recipients"
             )
 
-            for recipient in batch_recipients:
-                email = EmailMultiAlternatives(
-                    subject=subject,
-                    body=body,
-                    from_email=sender,
-                    to=[recipient],
-                )
-                email.attach_alternative(body, "text/html")
-
+            for recipient_email in batch_recipients:
                 try:
-                    email.send(fail_silently=False)
-                    logger.info(f"Email sent to {recipient}")
-                except Exception as e:
-                    logger.error(f"Error sending email to {recipient}: {str(e)}")
-                    failed_recipients.append(
-                        recipient
-                    )  # Keep track of failed recipients
+                    recipient_user = CustomUser.objects.filter(
+                        email=recipient_email
+                    ).first()
+                    if not recipient_user:
+                        logger.warning(f"No user found for email {recipient_email}")
+                        failed_recipients.append(recipient_email)
+                        continue
 
-        # Return success, but include information about failed recipients
+                    # Map placeholders with user attributes
+                    placeholder_map = {
+                        "{first_name}": recipient_user.first_name or "Valued",
+                        "{last_name}": recipient_user.last_name or "User",
+                        "{email}": recipient_email,
+                        "{wallet}": str(recipient_user.wallet),
+                        "{savings}": str(recipient_user.savings),
+                        "{investment}": str(recipient_user.investment),
+                        "{properties}": str(recipient_user.properties),
+                        "{full_name}": recipient_user.full_name,
+                        "{total_savings_and_investments_this_month}": str(
+                            recipient_user.total_savings_and_investments_this_month
+                        ),
+                        "{top_saver_percentage}": str(
+                            recipient_user.top_saver_percentage
+                        ),
+                    }
+
+                    # Replace placeholders in subject and body
+                    personalized_subject = subject
+                    personalized_body = body
+                    for placeholder, value in placeholder_map.items():
+                        personalized_subject = personalized_subject.replace(
+                            placeholder, value
+                        )
+                        personalized_body = personalized_body.replace(
+                            placeholder, value
+                        )
+
+                    # Send the email
+                    email = EmailMultiAlternatives(
+                        subject=personalized_subject,
+                        body=personalized_body,
+                        from_email=sender,
+                        to=[recipient_email],
+                    )
+                    email.attach_alternative(personalized_body, "text/html")
+                    email.send(fail_silently=False)
+                    logger.info(f"Email sent to {recipient_email}")
+                except Exception as e:
+                    logger.error(f"Error sending email to {recipient_email}: {str(e)}")
+                    failed_recipients.append(recipient_email)
+
+            # Sleep to avoid exceeding the max emails per hour
+            time.sleep(
+                TIME_BETWEEN_BATCHES
+            )  # Sleep between batches to respect rate limits
+
         if failed_recipients:
             return Response(
                 {
                     "message": "Emails sent with some failures.",
                     "failed_recipients": failed_recipients,
                 },
-                status=status.HTTP_207_MULTI_STATUS,  # Indicates partial success
+                status=status.HTTP_207_MULTI_STATUS,
             )
         else:
             return Response(

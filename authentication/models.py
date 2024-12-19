@@ -63,6 +63,10 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     is_subscribed = models.BooleanField(default=True)
     date_joined = models.DateTimeField(auto_now_add=True, db_index=True)
 
+    @property
+    def full_name(self):
+        return f"{self.first_name} {self.last_name}".strip()
+
     referral = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True
     )
@@ -209,6 +213,255 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         default="Choose",
     )
     next_of_kin_phone_number = models.CharField(max_length=15, default="Enter Number")
+    state = models.CharField(
+        max_length=100,
+        choices=[
+            (state, state)
+            for state in [
+                "Abia",
+                "Adamawa",
+                "Akwa Ibom",
+                "Anambra",
+                "Bauchi",
+                "Bayelsa",
+                "Benue",
+                "Borno",
+                "Cross River",
+                "Delta",
+                "Ebonyi",
+                "Edo",
+                "Ekiti",
+                "Enugu",
+                "Gombe",
+                "Imo",
+                "Jigawa",
+                "Kaduna",
+                "Kano",
+                "Katsina",
+                "Kebbi",
+                "Kogi",
+                "Kwara",
+                "Lagos",
+                "Nasarawa",
+                "Niger",
+                "Ogun",
+                "Ondo",
+                "Osun",
+                "Oyo",
+                "Plateau",
+                "Rivers",
+                "Sokoto",
+                "Taraba",
+                "Yobe",
+                "Zamfara",
+            ]
+        ],
+        default="Choose",
+    )
+    country = models.CharField(
+        max_length=100,
+        choices=[
+            (country, country)
+            for country in [
+                "Afghanistan",
+                "Albania",
+                "Algeria",
+                "Andorra",
+                "Angola",
+                "Antigua and Barbuda",
+                "Argentina",
+                "Armenia",
+                "Australia",
+                "Austria",
+                "Azerbaijan",
+                "Bahamas",
+                "Bahrain",
+                "Bangladesh",
+                "Barbados",
+                "Belarus",
+                "Belgium",
+                "Belize",
+                "Benin",
+                "Bhutan",
+                "Bolivia",
+                "Bosnia and Herzegovina",
+                "Botswana",
+                "Brazil",
+                "Brunei",
+                "Bulgaria",
+                "Burkina Faso",
+                "Burundi",
+                "Cabo Verde",
+                "Cambodia",
+                "Cameroon",
+                "Canada",
+                "Central African Republic",
+                "Chad",
+                "Chile",
+                "China",
+                "Colombia",
+                "Comoros",
+                "Congo",
+                "Costa Rica",
+                "Croatia",
+                "Cuba",
+                "Cyprus",
+                "Czech Republic",
+                "Democratic Republic of the Congo",
+                "Denmark",
+                "Djibouti",
+                "Dominica",
+                "Dominican Republic",
+                "Ecuador",
+                "Egypt",
+                "El Salvador",
+                "Equatorial Guinea",
+                "Eritrea",
+                "Estonia",
+                "Eswatini",
+                "Ethiopia",
+                "Fiji",
+                "Finland",
+                "France",
+                "Gabon",
+                "Gambia",
+                "Georgia",
+                "Germany",
+                "Ghana",
+                "Greece",
+                "Grenada",
+                "Guatemala",
+                "Guinea",
+                "Guinea-Bissau",
+                "Guyana",
+                "Haiti",
+                "Honduras",
+                "Hungary",
+                "Iceland",
+                "India",
+                "Indonesia",
+                "Iran",
+                "Iraq",
+                "Ireland",
+                "Israel",
+                "Italy",
+                "Ivory Coast",
+                "Jamaica",
+                "Japan",
+                "Jordan",
+                "Kazakhstan",
+                "Kenya",
+                "Kiribati",
+                "Korea, North",
+                "Korea, South",
+                "Kuwait",
+                "Kyrgyzstan",
+                "Laos",
+                "Latvia",
+                "Lebanon",
+                "Lesotho",
+                "Liberia",
+                "Libya",
+                "Liechtenstein",
+                "Lithuania",
+                "Luxembourg",
+                "Madagascar",
+                "Malawi",
+                "Malaysia",
+                "Maldives",
+                "Mali",
+                "Malta",
+                "Marshall Islands",
+                "Mauritania",
+                "Mauritius",
+                "Mexico",
+                "Micronesia",
+                "Moldova",
+                "Monaco",
+                "Mongolia",
+                "Montenegro",
+                "Morocco",
+                "Mozambique",
+                "Myanmar",
+                "Namibia",
+                "Nauru",
+                "Nepal",
+                "Netherlands",
+                "New Zealand",
+                "Nicaragua",
+                "Niger",
+                "Nigeria",
+                "North Macedonia",
+                "Norway",
+                "Oman",
+                "Pakistan",
+                "Palau",
+                "Panama",
+                "Papua New Guinea",
+                "Paraguay",
+                "Peru",
+                "Philippines",
+                "Poland",
+                "Portugal",
+                "Qatar",
+                "Romania",
+                "Russia",
+                "Rwanda",
+                "Saint Kitts and Nevis",
+                "Saint Lucia",
+                "Saint Vincent and the Grenadines",
+                "Samoa",
+                "San Marino",
+                "Sao Tome and Principe",
+                "Saudi Arabia",
+                "Senegal",
+                "Serbia",
+                "Seychelles",
+                "Sierra Leone",
+                "Singapore",
+                "Slovakia",
+                "Slovenia",
+                "Solomon Islands",
+                "Somalia",
+                "South Africa",
+                "South Sudan",
+                "Spain",
+                "Sri Lanka",
+                "Sudan",
+                "Suriname",
+                "Sweden",
+                "Switzerland",
+                "Syria",
+                "Taiwan",
+                "Tajikistan",
+                "Tanzania",
+                "Thailand",
+                "Timor-Leste",
+                "Togo",
+                "Tonga",
+                "Trinidad and Tobago",
+                "Tunisia",
+                "Turkey",
+                "Turkmenistan",
+                "Tuvalu",
+                "Uganda",
+                "Ukraine",
+                "United Arab Emirates",
+                "United Kingdom",
+                "United States",
+                "Uruguay",
+                "Uzbekistan",
+                "Vanuatu",
+                "Vatican City",
+                "Venezuela",
+                "Vietnam",
+                "Yemen",
+                "Zambia",
+                "Zimbabwe",
+            ]
+        ],
+        default="Nigeria",
+    )
 
     # KYC status
     kyc_updated = models.BooleanField(default=False)
@@ -264,38 +517,18 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
 
     def confirm_referral_rewards(self, is_referrer):
         if self.savings >= 20000 or self.investment > 0:
-            if self.referral is not None:  # Check if there is a referral
-                # Check if there is a pending referral reward
-                if self.pending_referral_reward > 0:
-                    # Create a confirmed credit transaction for the referrer
-                    referrer_transaction_id = str(uuid.uuid4())[
-                        :10
-                    ]  # Generate a unique UUID for the referrer
-                    credit_transaction_referrer = Transaction.objects.create(
-                        user=self,
-                        referral_email=(
-                            self.referral.email if self.referral else ""
-                        ),  # Save the referral email if it exists
-                        transaction_type="credit",
-                        amount=500,
-                        description="Referral Reward (Confirmed)",
-                        transaction_id=referrer_transaction_id,
-                    )
-                    credit_transaction_referrer.save()
+            if self.referral:  # Ensure referral exists
+                transaction_id = str(uuid.uuid4())[:10]
 
-                    # Create a confirmed credit transaction for the referred user
-                    referred_transaction_id = str(uuid.uuid4())[
-                        :10
-                    ]  # Generate a unique UUID for the referred user
-                    credit_transaction_referred = Transaction.objects.create(
+                # Credit referrer if applicable
+                if is_referrer:
+                    Transaction.objects.create(
                         user=self.referral,
-                        referral_email=self.email,  # Save the referrer's email
                         transaction_type="credit",
                         amount=500,
                         description="Referral Reward (Confirmed)",
-                        transaction_id=referred_transaction_id,
+                        transaction_id=transaction_id,
                     )
-                    credit_transaction_referred.save()
 
                     # Deduct the credited amount from the pending referral rewards
                     self.pending_referral_reward -= 500
@@ -309,42 +542,41 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                     self.save()
                     self.referral.save()
 
-                    # Debugging: Print the updated wallet balances
-                    print(f"Referrer's wallet balance after credit: {self.wallet}")
-                    print(
-                        f"Referred user's wallet balance after credit: {self.referral.wallet}"
-                    )
+                # Credit referred user
+                Transaction.objects.create(
+                    user=self,
+                    transaction_type="credit",
+                    amount=500,
+                    description="Referral Reward (Confirmed)",
+                    transaction_id=transaction_id,
+                )
 
-                    # Send confirmation email to the referrer
-                    subject_referrer = f"Congrats!🎊🥂 Referral Reward Confirmed!"
-                    message_referrer = f"Congratulations {self.first_name},\n\nYou have received a referral reward of ₦500.00 in your wallet as a new and active user thanks to {self.referral.first_name}.\n\nThank you for using MyFund!\n\nKeep growing your funds.🥂\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+                # Update referred user wallet
+                self.wallet += 500
+                self.save()
 
-                    from_email_referrer = "MyFund <info@myfundmobile.com>"
-                    recipient_list_referrer = [self.email]
+                # Deduct the pending referral reward
+                self.pending_referral_reward -= 500
+                self.referral.pending_referral_reward -= 500
+                self.save()
+                self.referral.save()
 
-                    send_mail(
-                        subject_referrer,
-                        message_referrer,
-                        from_email_referrer,
-                        recipient_list_referrer,
-                        bcc=["newusers@myfundmobile.com"],
-                        fail_silently=False,
-                    )
+                # Send referral reward confirmation emails
+                self.send_confirmation_email(self.referral, is_referrer=True)
+                self.send_confirmation_email(self, is_referrer=False)
 
-                    # Send confirmation email to the referred user
-                    subject_referred = f"Congrats!🎊🥂 Referral Reward for {self.first_name} Confirmed!"
-                    message_referred = f"Congratulations {self.referral.first_name},\n\nYou have received a referral reward of ₦500.00 in your wallet for referring {self.first_name}.\n\nThank you for using MyFund and referring others!\n\nKeep growing your funds.🥂\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+    def send_confirmation_email(self, user, is_referrer):
+        if is_referrer:
+            subject = f"Congrats!🎊🥂 Referral Reward Confirmed!"
+            message = f"Congratulations {user.first_name},\n\nYou have received a referral reward of ₦500.00 in your wallet thanks to your referral.\n\nThank you for using MyFund!\n\nKeep growing your funds.🥂\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+        else:
+            subject = f"Congrats!🎊🥂 Referral Reward for {self.first_name} Confirmed!"
+            message = f"Congratulations {self.first_name},\n\nYou have received a referral reward of ₦500.00 in your wallet for referring {user.first_name}.\n\nThank you for using MyFund and referring others!\n\nKeep growing your funds.🥂\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
 
-                    from_email_referred = "MyFund <info@myfundmobile.com>"
-                    recipient_list_referred = [self.referral.email]
+        from_email = "MyFund <info@myfundmobile.com>"
+        recipient_list = [user.email]
 
-                    send_mail(
-                        subject_referred,
-                        message_referred,
-                        from_email_referred,
-                        recipient_list_referred,
-                        fail_silently=False,
-                    )
+        send_mail(subject, message, from_email, recipient_list, fail_silently=False)
 
     def calculate_user_percentage_to_top_saver(self):
         top_saver = (
@@ -483,7 +715,7 @@ class BankAccount(models.Model):
     paystack_recipient_code = models.CharField(max_length=255, blank=True, null=True)
 
     def __str__(self):
-        return f"{self.user.email} - {self.bank_name} ({self.account_number})"
+        return f"{self.user} - {self.user.email} - {self.bank_name} ({self.account_number})"
 
 
 class Card(models.Model):
@@ -565,7 +797,7 @@ class AutoSave(models.Model):
         ],
     )
     active = models.BooleanField(default=True)
-    
+
     # Paystack subscription details
     paystack_sub_id = models.CharField(max_length=255, null=True, blank=True)
     paystack_sub_code = models.CharField(max_length=255, null=True, blank=True)
@@ -583,12 +815,19 @@ class AutoSave(models.Model):
 
     def get_paystack_details(self):
         """Return Paystack subscription details as a dictionary."""
-        return {
-            "paystack_sub_id": self.paystack_sub_id,
-            "paystack_sub_code": self.paystack_sub_code,
-            "paystack_sub_token": self.paystack_sub_token,
-            "paystack_trans_ref": self.paystack_trans_ref,
-        } if self.paystack_sub_id or self.paystack_sub_code or self.paystack_sub_token or self.paystack_trans_ref else {"message": "No Paystack details"}
+        return (
+            {
+                "paystack_sub_id": self.paystack_sub_id,
+                "paystack_sub_code": self.paystack_sub_code,
+                "paystack_sub_token": self.paystack_sub_token,
+                "paystack_trans_ref": self.paystack_trans_ref,
+            }
+            if self.paystack_sub_id
+            or self.paystack_sub_code
+            or self.paystack_sub_token
+            or self.paystack_trans_ref
+            else {"message": "No Paystack details"}
+        )
 
 
 class AutoInvest(models.Model):
@@ -600,7 +839,7 @@ class AutoInvest(models.Model):
         choices=[("daily", "Daily"), ("weekly", "Weekly"), ("monthly", "Monthly")],
     )
     active = models.BooleanField(default=True)
-    
+
     # Paystack subscription details
     paystack_sub_id = models.CharField(max_length=255, null=True, blank=True)
     paystack_sub_code = models.CharField(max_length=255, null=True, blank=True)
@@ -618,13 +857,19 @@ class AutoInvest(models.Model):
 
     def get_paystack_details(self):
         """Return Paystack subscription details as a dictionary."""
-        return {
-            "paystack_sub_id": self.paystack_sub_id,
-            "paystack_sub_code": self.paystack_sub_code,
-            "paystack_sub_token": self.paystack_sub_token,
-            "paystack_trans_ref": self.paystack_trans_ref,
-        } if self.paystack_sub_id or self.paystack_sub_code or self.paystack_sub_token or self.paystack_trans_ref else {"message": "No Paystack details"}
-
+        return (
+            {
+                "paystack_sub_id": self.paystack_sub_id,
+                "paystack_sub_code": self.paystack_sub_code,
+                "paystack_sub_token": self.paystack_sub_token,
+                "paystack_trans_ref": self.paystack_trans_ref,
+            }
+            if self.paystack_sub_id
+            or self.paystack_sub_code
+            or self.paystack_sub_token
+            or self.paystack_trans_ref
+            else {"message": "No Paystack details"}
+        )
 
 
 class Property(models.Model):
@@ -668,6 +913,14 @@ class InvestTransferRequest(models.Model):
     is_approved = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     transaction_id = models.CharField(max_length=10, unique=False, default="")
+
+
+class PendingWithdrawals(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    is_approved = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    transaction_id = models.CharField(max_length=20, unique=False, default="")
 
 
 from django.db import models
