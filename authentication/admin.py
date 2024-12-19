@@ -33,11 +33,9 @@ from django.utils import timezone
 from .models import CustomUser, CustomUserMetrics, Referral
 
 
-class TransactionInline(
-    admin.TabularInline
-):  # Use TabularInline for a table-like display
+class TransactionInline(admin.TabularInline):
     model = Transaction
-    extra = 0  # Do not add extra blank forms
+    extra = 0
     fields = (
         "transaction_type",
         "amount",
@@ -56,7 +54,7 @@ class TransactionInline(
         "transaction_id",
         "date",
         "time",
-    )  # Make fields read-only as needed
+    )
 
 
 class CustomUserAdmin(UserAdmin):
