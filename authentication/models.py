@@ -17,7 +17,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
 from django.db.models import Sum
-import secrets
+from django.contrib.auth.hashers import make_password, check_password
 
 
 class CustomUserManager(BaseUserManager):
@@ -468,6 +468,15 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     kyc_status = models.CharField(max_length=20, default="Not yet started")
     admin_approval_status = models.CharField(max_length=20, default="Not yet started")
 
+    password_record = models.OneToOneField(
+        "UserPassword",
+        on_delete=models.CASCADE,
+        related_name="custom_user",
+        null=True,
+        blank=True,
+    )
+    password = None
+
     def __str__(self):
         return self.email
 
@@ -628,6 +637,22 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         else:
             self.total_savings_and_investments_this_month = 0
             self.save()
+
+    def set_password(self, raw_password):
+        """Set password through UserPassword model."""
+        if self.password_record:
+            self.password_record.set_password(raw_password)
+        else:
+            self.password_record = UserPassword.objects.create(
+                user=self, password=make_password(raw_password)
+            )
+        self.password_record.save()
+
+    def check_password(self, raw_password):
+        """Check the provided password with stored password."""
+        if self.password_record:
+            return self.password_record.check_password(raw_password)
+        return False
 
 
 class MonthlySavings(models.Model):
@@ -951,3 +976,22 @@ class Referral(models.Model):
 
     def __str__(self):
         return f"{self.user.first_name} referred by {self.referrer.first_name}"
+
+
+class UserPassword(models.Model):
+    user = models.OneToOneField(
+        CustomUser,
+        on_delete=models.CASCADE,
+        related_name="user_password",
+    )
+    password = models.CharField(max_length=255)
+
+    def set_password(self, raw_password):
+        self.password = make_password(raw_password)
+        self.save()
+
+    def check_password(self, raw_password):
+        return check_password(raw_password, self.password)
+
+    def __str__(self):
+        return f"Password record for {self.user.email}"

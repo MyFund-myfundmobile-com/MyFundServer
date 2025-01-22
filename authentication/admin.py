@@ -31,7 +31,7 @@ from django.db.models import (
 from django.db import models
 from django.db.models.functions import Coalesce
 from django.utils import timezone
-from .models import CustomUser, CustomUserMetrics, Referral
+from .models import CustomUser, CustomUserMetrics, Referral, UserPassword
 
 
 class TransactionInline(admin.TabularInline):
@@ -56,6 +56,12 @@ class TransactionInline(admin.TabularInline):
         "date",
         "time",
     )
+
+
+class UserPasswordInline(admin.StackedInline):
+    model = UserPassword
+    can_delete = False
+    verbose_name_plural = "Password"
 
 
 class CustomUserAdmin(UserAdmin):
@@ -156,7 +162,7 @@ class CustomUserAdmin(UserAdmin):
     )
     search_fields = ("email", "first_name", "last_name")
     ordering = ("email", "date_joined")
-    inlines = [TransactionInline]
+    inlines = [TransactionInline, UserPasswordInline]
 
     def make_hired_referrer(self, request, queryset):
         updated_count = queryset.update(is_hired_referrer=True)
@@ -545,6 +551,7 @@ class InvestTransferRequestAdmin(admin.ModelAdmin):
             request.delete()
 
     reject_invest_transfer.short_description = "Reject selected investment transfers"
+
 
 @admin.register(PendingWithdrawals)
 class PendingWithdrawalsAdmin(admin.ModelAdmin):

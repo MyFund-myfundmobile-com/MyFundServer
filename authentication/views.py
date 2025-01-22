@@ -12,7 +12,11 @@ from rest_framework.decorators import (
     parser_classes,
 )
 from rest_framework.permissions import IsAuthenticated, AllowAny
-from .serializers import SignupSerializer, ConfirmOTPSerializer, UserSerializer
+from .serializers import (
+    SignupSerializer,
+    ConfirmOTPSerializer,
+    UserSerializer,
+)
 import random
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
@@ -447,7 +451,7 @@ class OTPVerificationView(APIView):
             )
 
 
-from .models import CustomUser, PasswordReset
+from .models import CustomUser, PasswordReset, UserPassword
 
 
 @api_view(["POST"])
@@ -3707,7 +3711,7 @@ from django.shortcuts import get_object_or_404
 
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+# @permission_classes([IsAuthenticated])
 def get_all_users(request):
     date_range = request.query_params.get("date_range", None)
     now = timezone.now()
@@ -3997,6 +4001,7 @@ def update_template(request, template_id):
 
 
 @api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def first_ever_transaction_in_month(request):
     current_date = timezone.now()
     current_month = current_date.month
