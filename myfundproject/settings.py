@@ -297,30 +297,16 @@ EMAIL_USE_SSL = True  # Use SSL for secure connection
 # SMTP Authentication
 EMAIL_HOST_USER = "info@myfundmobile.com"
 EMAIL_HOST_PASSWORD = "Reproduction1..."
-EMAIL_HOST_PASSWORD = "Reproduction1..."
 
 # Other settings
 DEFAULT_FROM_EMAIL = "MyFund <info@myfundmobile.com>"
 PROTOCOL = "https"
 
-LOGGING = {
-    "version": 1,
-    "disable_existing_loggers": False,
-    "handlers": {
-        "console": {
-            "level": "INFO",  # Change to INFO to capture all logs
-            "class": "logging.StreamHandler",
-        },
-    },
-    "loggers": {
-        "django": {
-            "handlers": ["console"],
-            "level": "INFO",  # Ensure this captures logs of level INFO and above
-            "propagate": True,
-        },
-    },
-}
-
+AUTHENTICATION_BACKENDS = [
+    "authentication.auth_backends.CustomUserAdminAuthBackend",  # Custom admin authentication
+    "authentication.auth_backends.CustomUserAuthBackend",
+    "django.contrib.auth.backends.ModelBackend",
+]
 
 #     os.environ['DJANGO_SECURE_SSL_REDIRECT'] = 'True'
 #     os.environ['SSL_CERT_FILE'] = SSL_CERT  # Set the SSL certificate file
