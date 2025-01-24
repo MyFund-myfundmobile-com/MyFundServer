@@ -18,6 +18,7 @@ from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
 from django.db.models import Sum
 from django.contrib.auth.hashers import make_password, check_password
+from django.db import transaction
 
 
 class CustomUserManager(BaseUserManager):
@@ -639,14 +640,14 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
             self.save()
 
     def set_password(self, raw_password):
-        """Set password through UserPassword model."""
-        if self.password_record:
-            self.password_record.set_password(raw_password)
-        else:
-            self.password_record = UserPassword.objects.create(
-                user=self, password=make_password(raw_password)
-            )
-        self.password_record.save()
+        with transaction.atomic():
+            if self.password_record:
+                self.password_record.password = make_password(raw_password)
+                self.password_record.save()
+            else:
+                self.password_record, created = UserPassword.objects.get_or_create(
+                    user=self, defaults={"password": make_password(raw_password)}
+                )
 
     def check_password(self, raw_password):
         """Check the provided password with stored password."""
