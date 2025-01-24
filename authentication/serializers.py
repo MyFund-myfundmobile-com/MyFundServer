@@ -93,7 +93,6 @@ class UserSerializer(serializers.ModelSerializer):
             "is_confirmed",
             "date_joined",
             "is_subscribed",
-            "password_record",
         ]
 
     def get_date_joined(self, obj):

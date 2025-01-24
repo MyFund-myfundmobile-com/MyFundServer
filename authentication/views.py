@@ -583,7 +583,9 @@ def get_user_profile(request):
             "mobileNumber": user.phone_number,
             "email": user.email,
             "profile_picture": (
-                user.profile_picture.url if user.profile_picture else None
+                user.profile_picture.url
+                if hasattr(user.profile_picture, "url")
+                else user.profile_picture if user.profile_picture else None
             ),
             "preferred_asset": user.preferred_asset,
             "savings_goal_amount": user.savings_goal_amount,
