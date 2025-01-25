@@ -3,7 +3,7 @@ import os
 from django.http import JsonResponse
 from rest_framework import serializers, status
 from django.contrib.auth.models import User
-from .models import CustomUser, Message
+from .models import CustomUser, Message, UserPassword
 
 
 class SignupSerializer(serializers.ModelSerializer):
@@ -99,33 +99,46 @@ class UserSerializer(serializers.ModelSerializer):
         return obj.date_joined.strftime("%d %b. %Y   |   %I:%M%p")
 
     def get_profile_picture(self, obj):
-        # If the profile_picture is a string (file path), return it directly
         if isinstance(obj.profile_picture, str):
             if "http" not in obj.profile_picture:
-                # Prepend MEDIA_URL if it's a local file path
                 return f"{settings.MEDIA_URL}{obj.profile_picture}"
-            return obj.profile_picture  # If it's already a full URL, return it
+            return obj.profile_picture
 
-        # If the profile_picture is an image field (with `.url`), handle as before
         if obj.profile_picture and hasattr(obj.profile_picture, "url"):
             if "http" not in obj.profile_picture.url:
-                # Prepend MEDIA_URL if it's a local file
                 return f"{settings.MEDIA_URL}{obj.profile_picture.url}"
-            return obj.profile_picture.url  # Return the full URL if already correct
+            return obj.profile_picture.url
 
-        # Return None if no valid profile picture
         return None
 
     def create(self, validated_data):
-        user = CustomUser.objects.create_user(
-            email=validated_data["email"],
-            password=validated_data["password"],
-            first_name=validated_data["first_name"],
-            last_name=validated_data["last_name"],
-            phone_number=validated_data["phone_number"],
-            referral=validated_data["referral"],
-        )
+        password = validated_data.pop("password")
+
+        # Create the user instance first
+        user = CustomUser.objects.create(**validated_data)
+
+        # Create the password record manually if it doesn't exist
+        if not hasattr(user, "password_record"):
+            password_record = UserPassword.objects.create(user=user, password=password)
+            user.password_record = password_record
+            user.save()
+        else:
+            user.password_record.set_password(password)
+            user.password_record.save()
+
         return user
+
+    def update(self, instance, validated_data):
+        if "password" in validated_data:
+            password = validated_data.pop("password")
+
+            if instance.password_record:
+                instance.password_record.set_password(password)
+                instance.password_record.save()
+            else:
+                UserPassword.objects.create(user=instance, password=password)
+
+        return super().update(instance, validated_data)
 
 
 from authentication.models import CustomUser

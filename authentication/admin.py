@@ -31,7 +31,7 @@ from django.db.models import (
 from django.db import models
 from django.db.models.functions import Coalesce
 from django.utils import timezone
-from .models import CustomUser, CustomUserMetrics, Referral
+from .models import CustomUser, CustomUserMetrics, Referral, UserPassword
 
 
 class TransactionInline(admin.TabularInline):
@@ -56,6 +56,12 @@ class TransactionInline(admin.TabularInline):
         "date",
         "time",
     )
+
+
+class UserPasswordInline(admin.StackedInline):
+    model = UserPassword
+    can_delete = False
+    verbose_name_plural = "Password"
 
 
 class CustomUserAdmin(UserAdmin):
@@ -156,7 +162,7 @@ class CustomUserAdmin(UserAdmin):
     )
     search_fields = ("email", "first_name", "last_name")
     ordering = ("email", "date_joined")
-    inlines = [TransactionInline]
+    inlines = [TransactionInline, UserPasswordInline]
 
     def make_hired_referrer(self, request, queryset):
         updated_count = queryset.update(is_hired_referrer=True)
@@ -571,7 +577,7 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
                 date=timezone.now().date(),
                 time=timezone.now().time(),
                 description="Withdrawal (Approved)",
-                transaction_id=str(uuid.uuid4()),  # Full UUID for uniqueness
+                transaction_id=str(uuid.uuid4())[:16],  # Full UUID for uniqueness
             )
 
             # Send an approval email
@@ -589,6 +595,10 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
     def reject_withdrawal(self, request, queryset):
         for withdrawal_request in queryset:
             user = withdrawal_request.user
+            
+            # Assuming the withdrawal is subtracted from the user's savings
+            user.savings += int(withdrawal_request.amount)
+            user.save()
 
             # Create a transaction record for rejection (e.g., no actual debit but tracking failure)
             transaction = Transaction.objects.create(
@@ -598,7 +608,7 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
                 date=timezone.now().date(),
                 time=timezone.now().time(),
                 description="Withdrawal (Rejected)",
-                transaction_id=str(uuid.uuid4()),
+                transaction_id=str(uuid.uuid4())[:16],
             )
 
             # Send a rejection email

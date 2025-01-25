@@ -12,7 +12,11 @@ from rest_framework.decorators import (
     parser_classes,
 )
 from rest_framework.permissions import IsAuthenticated, AllowAny
-from .serializers import SignupSerializer, ConfirmOTPSerializer, UserSerializer
+from .serializers import (
+    SignupSerializer,
+    ConfirmOTPSerializer,
+    UserSerializer,
+)
 import random
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
@@ -44,133 +48,97 @@ import json
 import hmac
 from dotenv import load_dotenv
 import logging
-
-logger = logging.getLogger(__name__)
+from django.db.models import Min
 
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 
 @api_view(["POST"])
 @csrf_exempt
 def signup(request):
+    def handle_referral_rewards(user):
+        try:
+            transaction_id = str(uuid.uuid4())[:10]
+            # Reward for referred user
+            Transaction.objects.create(
+                user=user,
+                referral_email=user.referral.email,
+                transaction_type="pending",
+                amount=500,
+                description="Referral Reward (Pending)",
+                transaction_id=transaction_id,
+            )
+            user.pending_referral_reward = F("pending_referral_reward") + 500
+            user.save()
+
+            # Reward for referrer
+            if not user.referral.is_hired_referrer:
+                transaction_id = str(uuid.uuid4())[:10]
+                Transaction.objects.create(
+                    user=user.referral,
+                    referral_email=user.email,
+                    transaction_type="pending",
+                    amount=500,
+                    description="Referral Reward (Pending)",
+                    transaction_id=transaction_id,
+                )
+                user.referral.pending_referral_reward = (
+                    F("pending_referral_reward") + 500
+                )
+                user.referral.save()
+                send_referrer_pending_reward_email(user.referral, user.email)
+
+            if user.referral.is_hired_referrer:
+                Referral.objects.create(user=user, referrer=user.referral)
+
+            send_referred_pending_reward_email(user)
+            logger.info("Referral rewards processed for user %s", user.email)
+        except Exception as e:
+            logger.error(
+                "Error processing referral rewards for user %s: %s", user.email, str(e)
+            )
+            raise
+
+    def process_otp(user, resend=False):
+        otp = generate_otp()
+        user.otp = otp
+        user.is_active = False if not resend else user.is_active
+        user.save()
+        send_otp_email(user, otp)
+        logger.info("OTP %s to user %s", "resent" if resend else "sent", user.email)
+
     try:
         serializer = SignupSerializer(data=request.data)
-
         if serializer.is_valid():
-            try:
-                user = serializer.save()
+            user = serializer.save()
+            user.how_did_you_hear = serializer.validated_data.get(
+                "how_did_you_hear", "OTHER"
+            )
+            user.save()
+            logger.info("New user signup data: %s", request.data)
 
-                how_did_you_hear = serializer.validated_data.get(
-                    "how_did_you_hear", "OTHER"
-                )
-                user.how_did_you_hear = how_did_you_hear
-                user.save()
+            is_resend = request.data.get("resend", False)
+            process_otp(user, resend=is_resend)
 
-                logger.info("New user signup data: %s", request.data)
-
-                # Check if it's a resend request
-                is_resend = request.data.get("resend", False)
-
-                if is_resend:
-                    otp = generate_otp()
-                    user.otp = otp
-                    user.save()
-                    send_otp_email(user, otp)
-
-                    logger.info("OTP resent successfully to user %s", user.email)
-                    return Response(
-                        {"message": "OTP resent successfully"},
-                        status=status.HTTP_200_OK,
-                    )
-
-                # Generate OTP for initial signup
-                otp = generate_otp()
-                user.otp = otp
-                user.is_active = (
-                    False  # Set the user as inactive until OTP confirmation
-                )
-                user.save()
-
-                send_otp_email(user, otp)
-                logger.info("OTP sent to user %s", user.email)
-
-                if user.referral:
-                    try:
-                        # Handle referral rewards
-                        transaction_id = str(uuid.uuid4())[:10]
-                        credit_transaction_referred = Transaction.objects.create(
-                            user=user,
-                            referral_email=user.referral.email,
-                            transaction_type="pending",
-                            amount=500,
-                            description="Referral Reward (Pending)",
-                            transaction_id=transaction_id,
-                        )
-                        credit_transaction_referred.save()
-
-                        user.pending_referral_reward = (
-                            F("pending_referral_reward") + 500
-                        )
-                        user.save()
-
-                        if not user.referral.is_hired_referrer:
-                            transaction_id = str(uuid.uuid4())[:10]
-                            credit_transaction_referrer = Transaction.objects.create(
-                                user=user.referral,
-                                referral_email=user.email,
-                                transaction_type="pending",
-                                amount=500,
-                                description="Referral Reward (Pending)",
-                                transaction_id=transaction_id,
-                            )
-                            credit_transaction_referrer.save()
-
-                            user.referral.pending_referral_reward = (
-                                F("pending_referral_reward") + 500
-                            )
-                            user.referral.save()
-                            send_referrer_pending_reward_email(
-                                user.referral, user.email
-                            )
-
-                        if user.referral.is_hired_referrer:
-                            hired_referrer = Referral.objects.create(
-                                user=user, referrer=user.referral
-                            )
-                            hired_referrer.save()
-
-                        send_referred_pending_reward_email(user)
-                        logger.info(
-                            "Referral rewards processed for user %s", user.email
-                        )
-                    except Exception as e:
-                        logger.error(
-                            "Error processing referral rewards for user %s: %s",
-                            user.email,
-                            str(e),
-                        )
-                        return Response(
-                            {"error": "Failed to process referral rewards"},
-                            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        )
-
-                response_data = serializer.data
-                if user.referral:
-                    response_data["referral_email"] = user.referral.email
-
-                return Response(response_data, status=status.HTTP_201_CREATED)
-
-            except Exception as e:
-                logger.error("Error during user signup: %s", str(e))
+            if is_resend:
                 return Response(
-                    {"error": "An error occurred during signup"},
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    {"message": "OTP resent successfully"}, status=status.HTTP_200_OK
                 )
 
-        logger.warning("Invalid signup data: %s", serializer.errors)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            if user.referral:
+                handle_referral_rewards(user)
 
+            response_data = serializer.data
+            if user.referral:
+                response_data["referral_email"] = user.referral.email
+
+            return Response(response_data, status=status.HTTP_201_CREATED)
+        else:
+            logger.warning("Invalid signup data: %s", serializer.errors)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     except Exception as e:
         logger.critical("Unexpected error in signup: %s", str(e))
         return Response(
@@ -208,6 +176,12 @@ def send_referred_pending_reward_email(user):
 @permission_classes([AllowAny])
 @csrf_exempt
 def confirm_otp(request):
+    def activate_user_account(user):
+        user.is_active = True
+        user.save()
+        logger.info("Account confirmed successfully for user %s", user.email)
+        send_welcome_email(user)
+
     serializer = ConfirmOTPSerializer(data=request.data)
     if serializer.is_valid():
         otp = serializer.validated_data["otp"]
@@ -215,28 +189,28 @@ def confirm_otp(request):
         try:
             user = CustomUser.objects.get(otp=otp)
             if user.is_active:
+                logger.info(
+                    "Attempted to confirm an already active account for user %s",
+                    user.email,
+                )
                 return Response(
                     {"message": "Account already confirmed."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            user.is_active = True
-            user.save()
-            print("Account confirmed successfully.")
-
-            # Send welcome email
-            send_welcome_email(user)
-
+            activate_user_account(user)
             return Response(
                 {"message": "Account confirmed successfully."},
                 status=status.HTTP_200_OK,
             )
         except CustomUser.DoesNotExist:
-            print("Invalid OTP.")
+            logger.warning("Invalid OTP provided: %s", otp)
             return Response(
-                {"message": "Invalid OTP."}, status=status.HTTP_400_BAD_REQUEST
+                {"message": "Invalid OTP."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
+    logger.warning("Invalid data submitted for OTP confirmation: %s", serializer.errors)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -395,151 +369,287 @@ class CustomObtainAuthToken(ObtainAuthToken):
         serializer.is_valid(raise_exception=True)
 
         user = serializer.validated_data["user"]
-        refresh = RefreshToken.for_user(user)
+        logger.info("User authenticated successfully: %s", user.email)
 
-        return Response(
-            {
-                "refresh": str(refresh),
-                "access": str(refresh.access_token),
-                "user_id": user.id,
-            }
-        )
+        # Generate tokens
+        tokens = self.get_tokens_for_user(user)
+
+        return Response(tokens)
+
+    @staticmethod
+    def get_tokens_for_user(user):
+        """
+        Generate and return JWT tokens for the given user.
+        """
+        refresh = RefreshToken.for_user(user)
+        return {
+            "refresh": str(refresh),
+            "access": str(refresh.access_token),
+            "user_id": user.id,
+        }
 
 
 from rest_framework.permissions import AllowAny
 
 
 class LogoutView(APIView):
-    permission_classes = [AllowAny]  # Allow any user to access this endpoint
+    permission_classes = [IsAuthenticated]  # Restrict access to authenticated users
 
     def post(self, request):
-        logout(request)
-        return Response(
-            {"detail": "Logged out successfully."}, status=status.HTTP_200_OK
-        )
+        try:
+            logout(request)
+            logger.info("User logged out successfully: %s", request.user)
+            return Response(
+                {"detail": "Logged out successfully."},
+                status=status.HTTP_200_OK,
+            )
+        except Exception as e:
+            logger.error("Error during logout: %s", str(e))
+            return Response(
+                {"detail": "An error occurred during logout."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 class OTPVerificationView(APIView):
+    permission_classes = [IsAuthenticated]  # Ensure only authenticated users can access
+
     def post(self, request, *args, **kwargs):
         received_otp = request.data.get("otp")
-        user = request.user  # Assuming the user is authenticated
+        user = request.user  # Authenticated user
 
-        if user.otp == received_otp and not user.otp_verified:
-            # OTP matches and is not yet verified
+        if not received_otp:
+            logger.warning("No OTP provided by user: %s", user.email)
+            return Response(
+                {"success": False, "message": "OTP is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if user.otp == received_otp:
+            if user.otp_verified:
+                logger.info(
+                    "User %s attempted to verify an already verified OTP.", user.email
+                )
+                return Response(
+                    {"success": False, "message": "OTP already verified."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            # OTP matches and not yet verified
             user.otp_verified = True
             user.save()
-            return Response({"success": True})
+            logger.info("User %s successfully verified OTP.", user.email)
+            return Response(
+                {"success": True, "message": "OTP verified successfully."},
+                status=status.HTTP_200_OK,
+            )
         else:
-            return Response({"success": False})
+            logger.warning("Invalid OTP provided by user: %s", user.email)
+            return Response(
+                {"success": False, "message": "Invalid OTP."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
 
-from .models import CustomUser, PasswordReset
+from .models import CustomUser, PasswordReset, UserPassword
 
 
 @api_view(["POST"])
 @csrf_exempt
 def request_password_reset(request):
-    if request.method == "POST":
-        email = request.data.get("email")
+    """
+    Handles password reset requests by sending an OTP to the user's email.
+    """
+    email = request.data.get("email")
 
-        try:
-            user = CustomUser.objects.get(email=email)
-            # Generate and store OTP
-            otp = generate_otp()
-            password_reset = PasswordReset.objects.create(user=user, otp=otp)
+    if not email:
+        logger.warning("Password reset request received without an email.")
+        return Response(
+            {"detail": "Email is required."}, status=status.HTTP_400_BAD_REQUEST
+        )
 
-            # Send OTP reset email
-            send_otp_reset_email(user, otp)
+    try:
+        user = CustomUser.objects.get(email=email)
+        logger.info("Password reset request for user: %s", user.email)
 
-            return Response({"detail": "Password reset OTP sent successfully."})
-        except CustomUser.DoesNotExist:
-            return Response(
-                {"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND
-            )
+        # Generate and store OTP
+        otp = generate_otp()
+        PasswordReset.objects.create(user=user, otp=otp)
 
-    return Response({"detail": "Invalid request."}, status=status.HTTP_400_BAD_REQUEST)
+        # Send OTP reset email
+        send_otp_reset_email(user, otp)
+        logger.info("Password reset OTP sent successfully to user: %s", user.email)
+
+        return Response(
+            {"detail": "Password reset OTP sent successfully."},
+            status=status.HTTP_200_OK,
+        )
+
+    except CustomUser.DoesNotExist:
+        logger.warning("Password reset requested for non-existent user: %s", email)
+        return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    except Exception as e:
+        logger.error("Error handling password reset request: %s", str(e))
+        return Response(
+            {"detail": "An error occurred while processing the request."},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
 
 @api_view(["POST"])
 @csrf_exempt
 def reset_password(request):
-    if request.method == "POST":
-        email = request.data.get("email")
-        otp = request.data.get("otp")
-        password = request.data.get("password")
-        confirm_password = request.data.get("confirm_password")
-
-        try:
-            user = CustomUser.objects.get(email=email)
-            # Check if the OTP is valid
-            password_reset = PasswordReset.objects.get(user=user, otp=otp)
-
-            if password == confirm_password:
-                # Reset the password
-                user.set_password(password)
-                user.save()
-                password_reset.delete()  # Delete the used OTP entry
-                return Response({"message": "Password reset successful"})
-            else:
-                return Response(
-                    {"error": "Passwords do not match"},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-        except (CustomUser.DoesNotExist, PasswordReset.DoesNotExist):
+    """
+    Handles password reset using an email, OTP, and new password.
+    """
+    required_fields = ["email", "otp", "password", "confirm_password"]
+    for field in required_fields:
+        if field not in request.data:
+            logger.warning("Password reset request missing required field: %s", field)
             return Response(
-                {"error": "Invalid email or OTP"}, status=status.HTTP_400_BAD_REQUEST
+                {"error": f"'{field}' is required."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-    return Response({"error": "Invalid request"}, status=status.HTTP_400_BAD_REQUEST)
+    email = request.data.get("email")
+    otp = request.data.get("otp")
+    password = request.data.get("password")
+    confirm_password = request.data.get("confirm_password")
+
+    if password != confirm_password:
+        logger.warning("Password mismatch for user email: %s", email)
+        return Response(
+            {"error": "Passwords do not match."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        user = CustomUser.objects.get(email=email)
+        password_reset = PasswordReset.objects.get(user=user, otp=otp)
+    except CustomUser.DoesNotExist:
+        logger.warning("Password reset attempted with non-existent email: %s", email)
+        return Response(
+            {"error": "Invalid email."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    except PasswordReset.DoesNotExist:
+        logger.warning("Invalid OTP for email: %s", email)
+        return Response(
+            {"error": "Invalid OTP."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        # Reset the password
+        user.set_password(password)
+        user.save()
+        password_reset.delete()  # Delete the used OTP entry
+        logger.info("Password reset successful for user: %s", user.email)
+        return Response(
+            {"message": "Password reset successful."},
+            status=status.HTTP_200_OK,
+        )
+    except Exception as e:
+        logger.error("Error during password reset for user %s: %s", email, str(e))
+        return Response(
+            {"error": "An error occurred while resetting the password."},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
 
 @api_view(["GET"])
 @authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def get_user_profile(request):
-    print("Headers:", request.headers)
-    print("Data:", request.data)
-    print("Token:", request.auth)  # Print the token to verify it's being extracted
+    """
+    Retrieve and return the authenticated user's profile information.
+    """
+    try:
+        user = request.user
 
-    if request.user.is_authenticated:
-        print("Authenticated user:", request.user)
-    else:
-        print("User not authenticated.")
+        if not user.is_authenticated:
+            logger.warning("Unauthenticated request attempted for user profile.")
+            return Response(
+                {"error": "User is not authenticated."},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
 
-    user = request.user
-    profile_data = {
-        "firstName": user.first_name,
-        "lastName": user.last_name,
-        "mobileNumber": user.phone_number,
-        "email": user.email,
-        "profile_picture": user.profile_picture if user.profile_picture else None,
-        "preferred_asset": user.preferred_asset,
-        "savings_goal_amount": user.savings_goal_amount,
-        "time_period": user.time_period,
-    }
-    return Response(profile_data)
+        logger.info("Fetching profile data for user: %s", user.email)
+
+        profile_data = {
+            "firstName": user.first_name,
+            "lastName": user.last_name,
+            "mobileNumber": user.phone_number,
+            "email": user.email,
+            "profile_picture": (
+                user.profile_picture.url
+                if hasattr(user.profile_picture, "url")
+                else user.profile_picture if user.profile_picture else None
+            ),
+            "preferred_asset": user.preferred_asset,
+            "savings_goal_amount": user.savings_goal_amount,
+            "time_period": user.time_period,
+        }
+        return Response(profile_data, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        logger.error(
+            "Error fetching user profile for user %s: %s", request.user, str(e)
+        )
+        return Response(
+            {"error": "An error occurred while fetching user profile."},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
 
 @api_view(["PATCH"])
 @authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def update_user_profile(request):
+    """
+    Updates the authenticated user's profile with provided data.
+    """
     user = request.user
-    first_name = request.data.get("first_name")
-    last_name = request.data.get("last_name")
-    phone_number = request.data.get("phone_number")
+    allowed_fields = ["first_name", "last_name", "phone_number"]
 
-    if first_name:
-        user.first_name = first_name
-    if last_name:
-        user.last_name = last_name
-    if phone_number:
-        user.phone_number = phone_number
+    try:
+        updated_fields = {}
 
-    user.save()
-    return Response(
-        {"message": "Profile updated successfully."}, status=status.HTTP_200_OK
-    )
+        for field in allowed_fields:
+            if field in request.data:
+                setattr(user, field, request.data[field])
+                updated_fields[field] = request.data[field]
+
+        if updated_fields:
+            user.save()
+            logger.info(
+                "User profile updated for user: %s with fields: %s",
+                user.email,
+                updated_fields,
+            )
+            return Response(
+                {
+                    "message": "Profile updated successfully.",
+                    "updated_fields": updated_fields,
+                },
+                status=status.HTTP_200_OK,
+            )
+        else:
+            logger.warning(
+                "No valid fields provided for user profile update: %s", user.email
+            )
+            return Response(
+                {"error": "No valid fields provided for update."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    except Exception as e:
+        logger.error("Error updating profile for user %s: %s", user.email, str(e))
+        return Response(
+            {"error": "An error occurred while updating the profile."},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
 
 import base64
@@ -548,35 +658,46 @@ import base64
 @api_view(["PATCH"])
 @permission_classes([IsAuthenticated])
 def profile_picture_update(request):
+    """
+    Updates the authenticated user's profile picture.
+    """
+    user = request.user
+
+    if not request.data.get("profile_picture"):
+        logger.warning("No profile picture provided for user: %s", user.email)
+        return Response(
+            {"error": "No image was provided."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
     try:
-        user = request.user
-
-        if not bool(request.data):
-            return JsonResponse(
-                "No image was provided", status=status.HTTP_404_NOT_FOUND
-            )
-
         profile_pic = request.data["profile_picture"]
-
         imgstr = base64.b64encode(profile_pic.read())
 
+        # Upload image to ImageKit
         upload = imagekit.upload_file(file=imgstr, file_name="profile_pic.jpg")
 
-        if not bool(upload.response_metadata.raw):
-            return JsonResponse(
-                "Process failed, please try again.",
+        if not upload.response_metadata.raw:
+            logger.error("Image upload failed for user: %s", user.email)
+            return Response(
+                {"error": "Image upload failed, please try again."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-        print(upload.response_metadata.raw)
-
+        # Extract image URL from upload response
         image_url = list(upload.response_metadata.raw.values())[5]
+        if not image_url:
+            logger.error("Image URL extraction failed for user: %s", user.email)
+            return Response(
+                {"error": "Image processing failed, please try again."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
-        print("image", image_url)
-
+        # Update user's profile picture
         user.profile_picture = image_url
-
         user.save()
+
+        logger.info("Profile picture updated successfully for user: %s", user.email)
 
         updated_user_data = {
             "firstName": user.first_name,
@@ -586,15 +707,21 @@ def profile_picture_update(request):
             "profile_picture": user.profile_picture,
         }
 
-        return JsonResponse(
+        return Response(
             {
                 "message": "Profile picture updated successfully.",
                 "user": updated_user_data,
-            }
+            },
+            status=status.HTTP_200_OK,
         )
+
     except Exception as e:
-        return JsonResponse(
-            {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        logger.error(
+            "Error updating profile picture for user %s: %s", user.email, str(e)
+        )
+        return Response(
+            {"error": "An error occurred while updating the profile picture."},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
 
@@ -604,20 +731,35 @@ from .serializers import SavingsGoalUpdateSerializer
 @api_view(["PUT"])
 @permission_classes([IsAuthenticated])
 def update_savings_goal(request):
+    """
+    Updates the user's savings goal and handles the first-time signup flag.
+    """
     user = request.user
 
-    serializer = SavingsGoalUpdateSerializer(user, data=request.data, partial=True)
-    if serializer.is_valid():
-        serializer.save()
+    try:
+        serializer = SavingsGoalUpdateSerializer(user, data=request.data, partial=True)
 
-        # Set is_first_time_signup flag to False after first login
-        if user.is_first_time_signup:
-            user.is_first_time_signup = False
-            user.save()
+        if serializer.is_valid():
+            serializer.save()
 
-        return Response(serializer.data, status=status.HTTP_200_OK)
+            # Update is_first_time_signup flag
+            if user.is_first_time_signup:
+                user.is_first_time_signup = False
+                user.save()
+                logger.info("First-time signup flag updated for user: %s", user.email)
 
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            logger.info("Savings goal updated for user: %s", user.email)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+
+        logger.warning("Invalid data for savings goal update: %s", serializer.errors)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    except Exception as e:
+        logger.error("Error updating savings goal for user %s: %s", user.email, str(e))
+        return Response(
+            {"error": "An error occurred while updating the savings goal."},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
 
 from .serializers import (
@@ -633,67 +775,124 @@ from rest_framework.parsers import MultiPartParser
 @permission_classes([IsAuthenticated])
 @parser_classes([MultiPartParser])
 def send_message(request, recipient_id):
+    """
+    Sends a message with optional content or image to a specified recipient.
+    """
     user = request.user
     content = request.data.get("content")
     image = request.data.get("image")
 
-    recipient_id = 1
-
-    try:
-        recipient = get_user_model().objects.get(id=recipient_id)
-    except get_user_model().DoesNotExist:
-        return Response(
-            {"error": "Recipient not found"}, status=status.HTTP_404_NOT_FOUND
-        )
-
+    # Validate input
     if not content and not image:
+        logger.warning("Message content or image is required. User: %s", user.email)
         return Response(
-            {"error": "Message content or image is required"},
+            {"error": "Message content or image is required."},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    message = Message.objects.create(
-        sender=user, recipient=recipient, content=content, image=image
-    )
+    # Validate recipient
+    try:
+        recipient = get_user_model().objects.get(id=recipient_id)
+    except get_user_model().DoesNotExist:
+        logger.warning(
+            "Recipient not found for id: %s by user: %s", recipient_id, user.email
+        )
+        return Response(
+            {"error": "Recipient not found."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
 
-    message_data = {
-        "type": "chat.message",
-        "message": {
+    try:
+        # Create the message
+        message = Message.objects.create(
+            sender=user,
+            recipient=recipient,
+            content=content,
+            image=image,
+        )
+
+        logger.info(
+            "Message sent from user %s to recipient %s", user.email, recipient.email
+        )
+
+        # Prepare response data
+        message_data = {
             "content": message.content,
             "image": message.image.url if message.image else None,
             "timestamp": message.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
             "sender_id": message.sender.id,
-        },
-    }
+            "recipient_id": message.recipient.id,
+        }
 
-    return Response({"success": True})
+        return Response(
+            {"success": True, "message": message_data},
+            status=status.HTTP_201_CREATED,
+        )
+
+    except Exception as e:
+        logger.error("Error while sending message from user %s: %s", user.email, str(e))
+        return Response(
+            {"error": "An error occurred while sending the message."},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_messages(request, recipient_id):
+    """
+    Retrieves all messages exchanged between the authenticated user and the specified recipient.
+    """
     user = request.user
-    recipient = get_user_model().objects.get(id=recipient_id)
 
-    # Retrieve messages from the database
-    messages = Message.objects.filter(
-        sender__in=[user, recipient], recipient__in=[user, recipient]
-    ).order_by("timestamp")
+    try:
+        # Validate recipient existence
+        recipient = get_user_model().objects.get(id=recipient_id)
+    except get_user_model().DoesNotExist:
+        logger.warning(
+            "Recipient with id %s not found. User: %s", recipient_id, user.email
+        )
+        return Response(
+            {"error": "Recipient not found."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
 
-    # Serialize messages and create a list of message data
-    message_data_list = []
-    for message in messages:
-        message_data = {
-            "content": message.content,
-            "timestamp": message.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
-            "sender_id": message.sender.id,
-            "image": (
-                message.image.url if message.image else None
-            ),  # Include the image URL if available
-        }
-        message_data_list.append(message_data)
+    try:
+        # Retrieve and order messages
+        messages = Message.objects.filter(
+            sender__in=[user, recipient], recipient__in=[user, recipient]
+        ).order_by("timestamp")
 
-    return Response(message_data_list)
+        # Serialize messages
+        message_data_list = [
+            {
+                "content": message.content,
+                "timestamp": message.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                "sender_id": message.sender.id,
+                "recipient_id": message.recipient.id,
+                "image": message.image.url if message.image else None,
+            }
+            for message in messages
+        ]
+
+        logger.info(
+            "Messages retrieved successfully between %s and %s",
+            user.email,
+            recipient.email,
+        )
+        return Response(message_data_list, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        logger.error(
+            "Error retrieving messages for user %s with recipient %s: %s",
+            user.email,
+            recipient_id,
+            str(e),
+        )
+        return Response(
+            {"error": "An error occurred while retrieving messages."},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
 
 @api_view(["POST"])
@@ -765,17 +964,27 @@ import requests
 
 
 class BankAccountViewSet(viewsets.ModelViewSet):
+    """
+    A viewset for managing bank accounts.
+    """
+
     queryset = BankAccount.objects.all()
     serializer_class = BankAccountSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     @action(detail=False, methods=["get"])
     def get_user_banks(self, request):
+        """
+        Retrieve all bank accounts associated with the authenticated user.
+        """
         user_banks = BankAccount.objects.filter(user=request.user)
-        serializer = BankAccountSerializer(user_banks, many=True)
-        return Response(serializer.data)
+        serializer = self.get_serializer(user_banks, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
     def resolve_account(self, account_number, bank_code):
+        """
+        Resolve account details using Paystack's API.
+        """
         secret_key = os.environ.get(
             "PAYSTACK_KEY_LIVE",
             default="  ",
@@ -783,136 +992,134 @@ class BankAccountViewSet(viewsets.ModelViewSet):
         url = f"https://api.paystack.co/bank/resolve?account_number={account_number}&bank_code={bank_code}"
         headers = {"Authorization": f"Bearer {secret_key}"}
 
-        response = requests.get(url, headers=headers)
+        try:
+            response = requests.get(url, headers=headers)
+            response.raise_for_status()
 
-        if response.status_code == status.HTTP_200_OK:
             response_data = response.json()
             account_name = response_data.get("data", {}).get("account_name", "")
+            if account_name:
+                logger.info("Account resolved successfully: %s", account_name)
             return account_name
-        else:
+        except requests.exceptions.RequestException as e:
+            logger.error("Failed to resolve account: %s", str(e))
             return None
 
+    def perform_create(self, serializer):
+        """
+        Create a bank account, resolving account details if possible.
+        """
+        account_number = self.request.data.get("accountNumber")
+        bank_code = self.request.data.get("bankCode")
 
-def perform_create(self, serializer):
-    account_number = self.request.data.get("accountNumber")
-    bank_code = self.request.data.get("bankCode")
+        if account_number and bank_code:
+            account_name = self.resolve_account(account_number, bank_code)
 
-    if account_number and bank_code:
-        account_name = self.resolve_account(account_number, bank_code)
+            if account_name:
+                # Create the recipient code through Paystack
+                paystack_recipient_code = create_paystack_recipient(
+                    account_name, account_number, bank_code
+                )
 
-        if account_name is not None:
-            # Create a dictionary with all the data to save
-            data_to_save = {
-                "user": self.request.user,
-                "bank_name": serializer.validated_data.get("bank_name", ""),
-                "account_number": account_number,
-                "bank_code": bank_code,
-                "account_name": account_name,
-            }
-
-            paystack_recipient_code = create_paystack_recipient(
-                account_name, account_number, bank_code
-            )
-            data_to_save["paystack_recipient_code"] = paystack_recipient_code
-
-            serializer = BankAccountSerializer(data=data_to_save)
-
-            if serializer.is_valid():
-                serializer.save()
+                serializer.save(
+                    user=self.request.user,
+                    account_number=account_number,
+                    bank_code=bank_code,
+                    account_name=account_name,
+                    paystack_recipient_code=paystack_recipient_code,
+                )
+                logger.info(
+                    "Bank account added successfully for user: %s",
+                    self.request.user.email,
+                )
                 return Response(
                     {"message": "Bank account added successfully."},
                     status=status.HTTP_201_CREATED,
                 )
             else:
-                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+                logger.warning(
+                    "Failed to resolve account details for user: %s",
+                    self.request.user.email,
+                )
+                return Response(
+                    {"error": "Failed to resolve account details."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
         else:
-            return Response(
-                {"message": "Failed to resolve account details."},
-                status=status.HTTP_400_BAD_REQUEST,
+            serializer.save(user=self.request.user)
+            logger.info(
+                "Bank account added without resolution for user: %s",
+                self.request.user.email,
             )
-    else:
-        data_to_save = {
-            "user": self.request.user,
-            "bank_name": "",
-            "account_number": "",
-            "bank_code": "",
-            "account_name": "",
-        }
-
-        serializer = BankAccountSerializer(data=data_to_save)
-
-        if serializer.is_valid():
-            serializer.save()
             return Response(
                 {"message": "Bank account added without account details resolution."},
                 status=status.HTTP_201_CREATED,
             )
-        else:
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 from django.db import IntegrityError
-
-import logging
-
-logger = logging.getLogger(__name__)
 
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def add_bank_account(request):
+    """
+    Adds a bank account for the authenticated user.
+    """
     bank_name = request.data.get("bankName")
     account_number = request.data.get("accountNumber")
     account_name = request.data.get("accountName")
-    bank_code = request.data.get("bankCode")  # Add this line to get the bank_code
+    bank_code = request.data.get("bankCode")
 
-    if bank_name and account_number and account_name and bank_code:
-        try:
-            paystack_recipient_code = create_paystack_recipient(
-                bank_name, account_number, bank_code
-            )  # Pass bank_code
-
-            if paystack_recipient_code:
-                bank_account = BankAccount(
-                    user=request.user,
-                    bank_name=bank_name,
-                    account_number=account_number,
-                    account_name=account_name,
-                    bank_code=bank_code,  # Include bank_code here
-                    is_default=False,
-                    paystack_recipient_code=paystack_recipient_code,  # Store the recipient code
-                )
-                bank_account.save()
-
-                serializer = BankAccountSerializer(bank_account)
-                return Response(serializer.data, status=status.HTTP_201_CREATED)
-            else:
-                error_message = "Failed to create Paystack recipient."
-                logger.error(error_message)
-                return Response(
-                    {"error": error_message}, status=status.HTTP_400_BAD_REQUEST
-                )
-
-        except IntegrityError:
-            error_message = "This bank account is already associated with another user."
-            logger.error(error_message)
-            return Response(
-                {"error": error_message}, status=status.HTTP_400_BAD_REQUEST
-            )
-
-        except Exception as e:
-            error_message = f"An error occurred: {str(e)}"
-            logger.error(error_message)
-            return Response(
-                {"error": error_message}, status=status.HTTP_400_BAD_REQUEST
-            )
-
-    else:
+    # Validate required fields
+    if not all([bank_name, account_number, account_name, bank_code]):
         error_message = (
-            "accountNumber, bankName, bankCode, and accountName are required."
+            "All fields (bankName, accountNumber, accountName, bankCode) are required."
         )
         logger.error(error_message)
         return Response({"error": error_message}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        # Create Paystack recipient
+        paystack_recipient_code = create_paystack_recipient(
+            account_name, account_number, bank_code
+        )
+
+        if not paystack_recipient_code:
+            error_message = "Failed to create Paystack recipient."
+            logger.error(error_message)
+            return Response(
+                {"error": error_message}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Save bank account
+        bank_account = BankAccount.objects.create(
+            user=request.user,
+            bank_name=bank_name,
+            account_number=account_number,
+            account_name=account_name,
+            bank_code=bank_code,
+            is_default=False,
+            paystack_recipient_code=paystack_recipient_code,
+        )
+
+        logger.info("Bank account added successfully for user: %s", request.user.email)
+
+        # Serialize and return response
+        serializer = BankAccountSerializer(bank_account)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    except IntegrityError:
+        error_message = "This bank account is already associated with another user."
+        logger.error("IntegrityError: %s", error_message)
+        return Response({"error": error_message}, status=status.HTTP_400_BAD_REQUEST)
+
+    except Exception as e:
+        error_message = f"An unexpected error occurred: {str(e)}"
+        logger.error("Unexpected error: %s", error_message)
+        return Response(
+            {"error": error_message}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
 
 
 from django.db.models import Count
@@ -921,12 +1128,21 @@ from django.db import transaction
 
 @api_view(["DELETE"])
 def delete_bank_account(request, account_number):
+    """
+    Deletes a bank account identified by the account number.
+    """
     try:
+        # Attempt to retrieve the bank account
         bank_account = BankAccount.objects.get(account_number=account_number)
     except BankAccount.DoesNotExist:
-        return Response(status=status.HTTP_404_NOT_FOUND)
+        logger.warning("Bank account with account number %s not found.", account_number)
+        return Response(
+            {"error": "Bank account not found."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
 
-    if request.method == "DELETE":
+    try:
+        # Identify duplicate accounts with the same account number
         duplicates = (
             BankAccount.objects.filter(account_number=account_number)
             .annotate(count=Count("id"))
@@ -934,21 +1150,54 @@ def delete_bank_account(request, account_number):
         )
 
         with transaction.atomic():
+            # Delete duplicates (if any)
             for duplicate in duplicates:
                 if duplicate.id != bank_account.id:
+                    logger.info(
+                        "Deleting duplicate bank account with ID %s", duplicate.id
+                    )
                     duplicate.delete()
 
+            # Delete the primary bank account
             bank_account.delete()
+            logger.info(
+                "Bank account with account number %s deleted successfully.",
+                account_number,
+            )
 
-        return Response(status=status.HTTP_204_NO_CONTENT)
+        return Response(
+            {"message": "Bank account deleted successfully."},
+            status=status.HTTP_204_NO_CONTENT,
+        )
+
+    except Exception as e:
+        logger.error("Error deleting bank account %s: %s", account_number, str(e))
+        return Response(
+            {"error": "An error occurred while deleting the bank account."},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_user_banks(request):
-    user_banks = BankAccount.objects.filter(user=request.user)
-    serializer = BankAccountSerializer(user_banks, many=True)
-    return Response(serializer.data)
+    try:
+        user_banks = BankAccount.objects.filter(user=request.user)
+        serializer = BankAccountSerializer(user_banks, many=True)
+        logger.info(
+            "Retrieved %d bank accounts for user: %s",
+            user_banks.count(),
+            request.user.email,
+        )
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    except Exception as e:
+        logger.error(
+            "Error retrieving bank accounts for user %s: %s", request.user.email, str(e)
+        )
+        return Response(
+            {"error": "An error occurred while retrieving bank accounts."},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
 
 from .models import Card
@@ -1179,8 +1428,6 @@ def quicksave(request):
 import time
 import threading
 import logging
-
-logger = logging.getLogger(__name__)
 
 
 @api_view(["POST"])
@@ -2094,6 +2341,7 @@ def withdraw_to_local_bank(request):
 
     # Validate that the user has enough balance in the source account
     if source_account == "savings" and user.savings < amount:
+        # print(f"user.savings({user.savings}) < withdrawal amount({amount})")
         return Response(
             {"error": "Insufficient savings balance."},
             status=status.HTTP_400_BAD_REQUEST,
@@ -2159,6 +2407,7 @@ def withdraw_to_local_bank(request):
                 user.savings -= total_amount_decimal
                 user.save()
             else:
+                # print(f"user.savings({user.savings}) < total_amount_decimal({total_amount_decimal})")
                 return Response(
                     {"error": "Insufficient savings balance."},
                     status=status.HTTP_400_BAD_REQUEST,
@@ -2203,6 +2452,9 @@ def withdraw_to_local_bank(request):
         """
         
         if amount < 500000:
+            
+            # print("Paystack processing the withdrawal...")
+            
             # Perform the withdrawal to the local bank using Paystack API
             paystack_response = make_withdrawal_through_paystack(
                 user, target_bank_account, withdrawal_amount
@@ -2291,8 +2543,6 @@ def withdraw_to_local_bank(request):
 
 import logging
 
-logger = logging.getLogger(__name__)
-
 
 def create_paystack_recipient(bank_name, account_number, bank_code):
     try:
@@ -2369,6 +2619,7 @@ def make_withdrawal_through_admin(user, amount, transaction_id):
         recipient_list = [
             "company@myfundmobile.com",
             "info@myfundmobile.com",
+            "sammy@myfundmobile.com"
         ]
 
         send_mail(subject, message, from_email, recipient_list, fail_silently=False)
@@ -3561,7 +3812,7 @@ from django.shortcuts import get_object_or_404
 
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+# @permission_classes([IsAuthenticated])
 def get_all_users(request):
     date_range = request.query_params.get("date_range", None)
     now = timezone.now()
@@ -3642,8 +3893,7 @@ TIME_BETWEEN_BATCHES = (
     3600 / EMAILS_PER_HOUR_LIMIT
 )  # Time in seconds between batches to avoid overloading (this is approximately 18 seconds per batch)
 
-# Set up logging
-logger = logging.getLogger(__name__)
+# Set up loggin
 
 
 @api_view(["POST"])
@@ -3756,9 +4006,6 @@ from django.views.decorators.http import require_http_methods
 import logging
 
 
-logger = logging.getLogger(__name__)
-
-
 @api_view(["POST"])
 def save_template(request):
     try:
@@ -3852,3 +4099,33 @@ def update_template(request, template_id):
         return JsonResponse({"error": "Template not found"}, status=404)
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def first_ever_transaction_in_month(request):
+    current_date = timezone.now()
+    current_month = current_date.month
+    current_year = current_date.year
+    User = get_user_model()
+
+    # Get users with their first-ever transaction excluding referral-related ones
+    first_transactions = (
+        Transaction.objects.exclude(description__icontains="referral")
+        .values("user")
+        .annotate(first_transaction_date=Min("date"))
+        .filter(
+            first_transaction_date__year=current_year,
+            first_transaction_date__month=current_month,
+        )
+    )
+
+    # Extract user IDs from the filtered transactions
+    user_ids = list(first_transactions.values_list("user", flat=True))
+
+    # Fetch user details based on the filtered user IDs
+    users = User.objects.filter(id__in=user_ids).values(
+        "id", "first_name", "last_name", "email"
+    )
+
+    return Response({"users": list(users)})
