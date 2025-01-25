@@ -20,7 +20,9 @@ from .views import (
     delete_template,
     get_template,
     update_template,
-    get_all_users, unsubscribe_user, resubscribe_user
+    get_all_users,
+    unsubscribe_user,
+    resubscribe_user,
 )
 from django.views.decorators.csrf import csrf_exempt
 from authentication.views import CustomGraphQLView
@@ -201,4 +203,9 @@ urlpatterns = [
     path("users/", get_all_users, name="get_all_users"),
     path("unsubscribe/", unsubscribe_user, name="unsubscribe_user"),
     path("resubscribe/", resubscribe_user, name="resubscribe_user"),
+    path(
+        "first_time_savers/",
+        views.first_ever_transaction_in_month,
+        name="first_time_savers",
+    ),
 ]
