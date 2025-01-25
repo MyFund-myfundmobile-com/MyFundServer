@@ -2144,7 +2144,7 @@ def withdraw_to_local_bank(request):
             total_amount=amount,
             date=timezone.now().date(),
             time=timezone.now().time(),
-            description=f"Withdrawal ({source_account.capitalize()} > Bank)",
+            description=f"Withdrawal [{source_account.capitalize()} > Bank] (Pending)",
             transaction_id=transaction_id,
         )
         transaction.save()
@@ -2193,43 +2193,87 @@ def withdraw_to_local_bank(request):
         }
 
         user.save()
-
-        # Perform the withdrawal to the local bank using Paystack API
-        paystack_response = make_withdrawal_to_local_bank(
-            user, target_bank_account, withdrawal_amount
-        )
-        print("Paystack API Response:", paystack_response)
-
-        if paystack_response.get("status"):  # This checks if it's truthy
-            # Deduct the total amount (including service charge) from the source account
-            # Convert total_amount to Decimal
+        
+        """ 
+            IF amount < 500,000: 
+                paystack should process the withdrawal_to_bank
+            ELSE: 
+                admin should shouls process the withdrawal_to_bank
+        
+        """
+        
+        if amount < 500000:
+            # Perform the withdrawal to the local bank using Paystack API
+            paystack_response = make_withdrawal_through_paystack(
+                user, target_bank_account, withdrawal_amount
+            )
             print("Paystack API Response:", paystack_response)
 
-            bank_name = target_bank_account.bank_name
-            # Send a confirmation email to the user
-            subject = f"Withdrawal from {source_account.capitalize()} Successful!"
-            message = f"Hi {user.first_name},\n\nYour withdrawal of ₦{amount} from your {source_account.capitalize()} account has been sent to your {bank_name} account successfully.\n\nThank you for using MyFund.\n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-            from_email = "MyFund <info@myfundmobile.com>"
-            recipient_list = [user.email]
+            if paystack_response.get("status"):  # This checks if it's truthy
+                # Deduct the total amount (including service charge) from the source account
+                # Convert total_amount to Decimal
+                print("Paystack API Response:", paystack_response)
+                
+                # Update the transaction database table.
+                transaction = Transaction(
+                    user=user,
+                    transaction_type="debit",
+                    amount=withdrawal_amount,
+                    service_charge=service_charge,
+                    total_amount=amount,
+                    date=timezone.now().date(),
+                    time=timezone.now().time(),
+                    description=f"Withdrawal [{source_account.capitalize()} > Bank] (Successful)",
+                    transaction_id=transaction_id,
+                )
+                transaction.save()
 
-            send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+                bank_name = target_bank_account.bank_name
+                # Send a confirmation email to the user
+                subject = f"Withdrawal from {source_account.capitalize()} Successful!"
+                message = f"Hi {user.first_name},\n\nYour withdrawal of ₦{amount} from your {source_account.capitalize()} account has been sent to your {bank_name} account successfully.\n\nThank you for using MyFund.\n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+                from_email = "MyFund <info@myfundmobile.com>"
+                recipient_list = [user.email]
 
-            return Response(
-                {
-                    "success": True,
-                    "message": paystack_response.get("message"),
-                    "transaction_id": transaction_id,
-                    "updated_balance": updated_balance,
-                },
-                status=status.HTTP_200_OK,
-            )
+                send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+
+                return Response(
+                    {
+                        "success": True,
+                        "message": paystack_response.get("message"),
+                        "transaction_id": transaction_id,
+                        "updated_balance": updated_balance,
+                    },
+                    status=status.HTTP_200_OK,
+                )
+            else:
+                print("Paystack withdrawal failed:", paystack_response)
+
+                return Response(
+                    {"error": "Withdrawal to local bank failed. Please try again later."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
         else:
-            print("Paystack withdrawal failed:", paystack_response)
-
-            return Response(
-                {"error": "Withdrawal to local bank failed. Please try again later."},
-                status=status.HTTP_400_BAD_REQUEST,
+            # Perform the withdrawal to the local bank through the Admin
+            response = make_withdrawal_through_admin(
+                user, withdrawal_amount, transaction_id
             )
+            
+            if response is not None:
+                return Response(
+                    {
+                        "success": True,
+                        "message": response.get("message"),
+                        "transaction_id": transaction_id,
+                        "updated_balance": updated_balance,
+                    },
+                    status=status.HTTP_200_OK,
+                )
+            else:
+                return Response(
+                    {"error": "Withdrawal to local bank failed. Please try again later."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
     except IntegrityError:
         # Handle the case where a unique constraint (transaction_id) is violated
@@ -2281,7 +2325,7 @@ def create_paystack_recipient(bank_name, account_number, bank_code):
         return None
 
 
-def make_withdrawal_to_local_bank(user, target_bank_account, amount):
+def make_withdrawal_through_paystack(user, target_bank_account, amount):
     # Make a withdrawal request to Paystack API
     url = "https://api.paystack.co/transfer"
     headers = {
@@ -2309,6 +2353,55 @@ def make_withdrawal_to_local_bank(user, target_bank_account, amount):
     )  # This will print the response body
 
     return response.json()
+
+def make_withdrawal_through_admin(user, amount, transaction_id):
+    
+    try:
+
+        # Create a WithdrawalsRequestToAdmin record
+        request = WithdrawalsRequestToAdmin(user=user, amount=amount, transaction_id=transaction_id)
+        request.save()
+
+        # Send an email to admin
+        subject = f"[CHECK] {user.first_name} Made A Withdrawal Request"
+        message = f"Hi Admin, \n\nA withdrawal request of ₦{amount} has just been initiated by {user.first_name} {user.last_name} ({user.email}).\n\nPlease log in to the admin panel for review: https://myfundapi-myfund-07ce351a.koyeb.app/admin/login/?next=/admin/\n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+        from_email = "MyFund <info@myfundmobile.com>"
+        recipient_list = [
+            "company@myfundmobile.com",
+            "info@myfundmobile.com",
+        ]
+
+        send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+
+        # Send a pending quicksave email to the user
+        user_subject = "Withdrawal Pending..."
+        user_message = f"Hi {user.first_name},\n\nYour withdrawal of ₦{amount} is pending approval. We will notify you once it's processed. \n\nThank you for using MyFund. \n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+        user_email = user.email
+
+        send_mail(
+            user_subject, user_message, from_email, [user_email], fail_silently=False
+        )
+
+        # # Create a pending transaction for the user with date and time
+        # current_datetime = timezone.now()  # Get the current date and time
+
+        # transaction = Transaction.objects.create(
+        #     user=user,
+        #     transaction_type="pending",
+        #     amount=amount,
+        #     date=current_datetime.date(),  # Set the date to the current date
+        #     time=current_datetime.time(),  # Set the time to the current time
+        #     description="Withdrawal {source_account.capitalize()} > Bank} (Pending)", 
+        #     transaction_id=str(uuid.uuid4())[:10],
+        # )
+        # transaction.save()
+
+        return {"message": "Withdrawal request created and pending admin approval"}
+
+    except Exception as e:
+        # print error
+        print(f"\n(Error) make_withdrawal_through_admin():  {e}\n")
+
 
 
 from decimal import Decimal
@@ -3162,7 +3255,7 @@ def paystack_webhook(request):
         )
 
 
-from .models import PendingWithdrawals
+from .models import WithdrawalsRequestToAdmin
 
 
 def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
@@ -3417,8 +3510,8 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                 except CustomUser.DoesNotExist:
                     print("User does not exist")
 
-                # Create a PendingWithdrawals record
-                request = PendingWithdrawals(
+                # Create a WithdrawalsRequestToAdmin record
+                request = WithdrawalsRequestToAdmin(
                     user=user, amount=amount, transaction_id=transaction_id
                 )
                 request.save()
