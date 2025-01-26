@@ -4,6 +4,8 @@ from django.http import JsonResponse
 from rest_framework import serializers, status
 from django.contrib.auth.models import User
 from .models import CustomUser, Message, UserPassword
+from django.db import transaction
+from django.contrib.auth.hashers import make_password
 
 
 class SignupSerializer(serializers.ModelSerializer):
@@ -30,9 +32,9 @@ class SignupSerializer(serializers.ModelSerializer):
             "last_name",
             "email",
             "phone_number",
-            "password",
             "referral",
             "how_did_you_hear",
+            "password",
         ]
 
     def to_representation(self, instance):
@@ -43,23 +45,33 @@ class SignupSerializer(serializers.ModelSerializer):
         return representation
 
     def create(self, validated_data):
-        # Extract the referral code and remove it from the data dictionary
+
         referral_code = validated_data.pop("referral", None)
+        request = self.context.get("request")
 
-        # Create a new user
-        password = validated_data.pop("password")
-        user = CustomUser(**validated_data)
-        user.set_password(password)
-        user.save()
+        password = request.data.get("password")
 
-        # Check if a referrer exists with the given referral code
+        if not password:
+            raise serializers.ValidationError({"password": "Password is required."})
+
+        with transaction.atomic():
+            # Create the user without password field
+            user = CustomUser.objects.create(**validated_data)
+
+            # Save password in related UserPassword model
+            user_password, created = UserPassword.objects.get_or_create(
+                user=user, defaults={"password": make_password(password)}
+            )
+            user.save()
+
         if referral_code:
             try:
                 referrer = CustomUser.objects.get(email=referral_code)
                 user.referral = referrer
                 user.save()
+                logger.info("Referral applied successfully")
             except CustomUser.DoesNotExist:
-                pass  # Handle invalid referral codes here
+                logger.warning(f"Invalid referral code: {referral_code}")
 
         return user
 

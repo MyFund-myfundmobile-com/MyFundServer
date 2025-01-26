@@ -111,14 +111,14 @@ def signup(request):
         logger.info("OTP %s to user %s", "resent" if resend else "sent", user.email)
 
     try:
-        serializer = SignupSerializer(data=request.data)
+        serializer = SignupSerializer(data=request.data, context={"request": request})
         if serializer.is_valid():
             user = serializer.save()
             user.how_did_you_hear = serializer.validated_data.get(
                 "how_did_you_hear", "OTHER"
             )
             user.save()
-            logger.info("New user signup data: %s", request.data)
+            logger.info("New user signup data: %s", request.data.email)
 
             is_resend = request.data.get("resend", False)
             process_otp(user, resend=is_resend)
