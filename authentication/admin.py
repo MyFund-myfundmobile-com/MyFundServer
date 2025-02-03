@@ -11,7 +11,7 @@ from .models import (
     AutoInvest,
     Transaction,
     AutoSave,
-    PendingWithdrawals,
+    WithdrawalsRequestToAdmin,
 )
 from django.core.mail import send_mail
 from django.urls import reverse
@@ -552,10 +552,9 @@ class InvestTransferRequestAdmin(admin.ModelAdmin):
 
     reject_invest_transfer.short_description = "Reject selected investment transfers"
 
-
-@admin.register(PendingWithdrawals)
+@admin.register(WithdrawalsRequestToAdmin)
 class PendingWithdrawalsAdmin(admin.ModelAdmin):
-    list_display = ("user", "amount", "is_approved", "created_at")
+    list_display = ("user", "amount",  "is_approved", "created_at")
     list_filter = ("is_approved",)
     actions = ["approve_withdrawal", "reject_withdrawal"]
 
@@ -567,8 +566,8 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
             user = withdrawal_request.user
 
             # Assuming the withdrawal is subtracted from the user's savings
-            user.savings -= int(withdrawal_request.amount)
-            user.save()
+            # user.savings -= int(withdrawal_request.amount)
+            # user.save()
 
             # Create a debit transaction for the withdrawal
             transaction = Transaction.objects.create(
@@ -578,12 +577,12 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
                 date=timezone.now().date(),
                 time=timezone.now().time(),
                 description="Withdrawal (Approved)",
-                transaction_id=str(uuid.uuid4()),  # Full UUID for uniqueness
+                transaction_id=str(uuid.uuid4())[:16],  # Full UUID for uniqueness
             )
 
             # Send an approval email
             subject = "Withdrawal Approved! ✔"
-            message = f"Hi {user.first_name}, \n\nYour withdrawal request of ₦{withdrawal_request.amount} has been approved and debited from your savings account.\n\nThank you for using MyFund."
+            message = f"Hi {user.first_name}, \n\nYour withdrawal request of ₦{withdrawal_request.amount} has been approved and pay to your bank account.\n\nThank you for using MyFund."
             from_email = "MyFund <info@myfundmobile.com>"
             recipient_list = [user.email]
             send_mail(subject, message, from_email, recipient_list, fail_silently=False)
@@ -596,6 +595,10 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
     def reject_withdrawal(self, request, queryset):
         for withdrawal_request in queryset:
             user = withdrawal_request.user
+            
+            # Assuming the withdrawal is subtracted from the user's savings
+            user.savings += int(withdrawal_request.amount)
+            user.save()
 
             # Create a transaction record for rejection (e.g., no actual debit but tracking failure)
             transaction = Transaction.objects.create(
@@ -605,7 +608,7 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
                 date=timezone.now().date(),
                 time=timezone.now().time(),
                 description="Withdrawal (Rejected)",
-                transaction_id=str(uuid.uuid4()),
+                transaction_id=str(uuid.uuid4())[:16],
             )
 
             # Send a rejection email
