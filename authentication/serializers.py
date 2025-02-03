@@ -6,6 +6,9 @@ from django.contrib.auth.models import User
 from .models import CustomUser, Message, UserPassword
 from django.db import transaction
 from django.contrib.auth.hashers import make_password
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class SignupSerializer(serializers.ModelSerializer):
