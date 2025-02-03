@@ -118,7 +118,7 @@ def signup(request):
                 "how_did_you_hear", "OTHER"
             )
             user.save()
-            logger.info("New user signup data: %s", request.data.email)
+            logger.info("New user signup data: %s", user.email)
 
             is_resend = request.data.get("resend", False)
             process_otp(user, resend=is_resend)
@@ -2442,7 +2442,7 @@ def withdraw_to_local_bank(request):
         }
 
         user.save()
-        
+
         """ 
             IF amount < 500,000: 
                 paystack should process the withdrawal_to_bank
@@ -2450,11 +2450,11 @@ def withdraw_to_local_bank(request):
                 admin should shouls process the withdrawal_to_bank
         
         """
-        
+
         if amount < 500000:
-            
+
             # print("Paystack processing the withdrawal...")
-            
+
             # Perform the withdrawal to the local bank using Paystack API
             paystack_response = make_withdrawal_through_paystack(
                 user, target_bank_account, withdrawal_amount
@@ -2465,7 +2465,7 @@ def withdraw_to_local_bank(request):
                 # Deduct the total amount (including service charge) from the source account
                 # Convert total_amount to Decimal
                 print("Paystack API Response:", paystack_response)
-                
+
                 # Update the transaction database table.
                 transaction = Transaction(
                     user=user,
@@ -2487,7 +2487,9 @@ def withdraw_to_local_bank(request):
                 from_email = "MyFund <info@myfundmobile.com>"
                 recipient_list = [user.email]
 
-                send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+                send_mail(
+                    subject, message, from_email, recipient_list, fail_silently=False
+                )
 
                 return Response(
                     {
@@ -2502,7 +2504,9 @@ def withdraw_to_local_bank(request):
                 print("Paystack withdrawal failed:", paystack_response)
 
                 return Response(
-                    {"error": "Withdrawal to local bank failed. Please try again later."},
+                    {
+                        "error": "Withdrawal to local bank failed. Please try again later."
+                    },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
         else:
@@ -2510,7 +2514,7 @@ def withdraw_to_local_bank(request):
             response = make_withdrawal_through_admin(
                 user, withdrawal_amount, transaction_id
             )
-            
+
             if response is not None:
                 return Response(
                     {
@@ -2523,7 +2527,9 @@ def withdraw_to_local_bank(request):
                 )
             else:
                 return Response(
-                    {"error": "Withdrawal to local bank failed. Please try again later."},
+                    {
+                        "error": "Withdrawal to local bank failed. Please try again later."
+                    },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
@@ -2604,12 +2610,15 @@ def make_withdrawal_through_paystack(user, target_bank_account, amount):
 
     return response.json()
 
+
 def make_withdrawal_through_admin(user, amount, transaction_id):
-    
+
     try:
 
         # Create a WithdrawalsRequestToAdmin record
-        request = WithdrawalsRequestToAdmin(user=user, amount=amount, transaction_id=transaction_id)
+        request = WithdrawalsRequestToAdmin(
+            user=user, amount=amount, transaction_id=transaction_id
+        )
         request.save()
 
         # Send an email to admin
@@ -2619,7 +2628,7 @@ def make_withdrawal_through_admin(user, amount, transaction_id):
         recipient_list = [
             "company@myfundmobile.com",
             "info@myfundmobile.com",
-            "sammy@myfundmobile.com"
+            "sammy@myfundmobile.com",
         ]
 
         send_mail(subject, message, from_email, recipient_list, fail_silently=False)
@@ -2642,7 +2651,7 @@ def make_withdrawal_through_admin(user, amount, transaction_id):
         #     amount=amount,
         #     date=current_datetime.date(),  # Set the date to the current date
         #     time=current_datetime.time(),  # Set the time to the current time
-        #     description="Withdrawal {source_account.capitalize()} > Bank} (Pending)", 
+        #     description="Withdrawal {source_account.capitalize()} > Bank} (Pending)",
         #     transaction_id=str(uuid.uuid4())[:10],
         # )
         # transaction.save()
@@ -2652,7 +2661,6 @@ def make_withdrawal_through_admin(user, amount, transaction_id):
     except Exception as e:
         # print error
         print(f"\n(Error) make_withdrawal_through_admin():  {e}\n")
-
 
 
 from decimal import Decimal
