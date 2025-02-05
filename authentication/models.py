@@ -941,12 +941,12 @@ class InvestTransferRequest(models.Model):
     transaction_id = models.CharField(max_length=10, unique=False, default="")
 
 
-class PendingWithdrawals(models.Model):
+class WithdrawalsRequestToAdmin(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     amount = models.DecimalField(max_digits=10, decimal_places=2)
+    transaction_id = models.CharField(max_length=20, unique=False, default="")
     is_approved = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
-    transaction_id = models.CharField(max_length=20, unique=False, default="")
 
 
 from django.db import models
