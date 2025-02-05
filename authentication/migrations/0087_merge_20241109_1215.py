@@ -6,9 +6,8 @@ from django.db import migrations
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('authentication', '0082_autoinvest_paystack_sub_code_and_more'),
-        ('authentication', '0086_autoinvest_autosave'),
+        ("authentication", "0085_remove_autosave_card_remove_autosave_user_and_more"),
+        ("authentication", "0086_autoinvest_autosave"),
     ]
 
-    operations = [
-    ]
+    operations = []
