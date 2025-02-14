@@ -461,3 +461,36 @@ class EmailTemplateSerializer(serializers.ModelSerializer):
     class Meta:
         model = EmailTemplate
         fields = "__all__"
+        
+
+from rest_framework import serializers
+from .models import Group
+from authentication.models import CustomUser
+
+class GroupSerializer(serializers.ModelSerializer):
+    # You may want to serialize user-related fields as well. For example, including the creator's username.
+    created_by = serializers.SerializerMethodField()
+    
+    def get_created_by(self, obj):
+        return obj.created_by.email
+    
+    # Customizing `invited_users` to return email instead of the primary key
+    invited_users = serializers.SerializerMethodField()
+    contributors = serializers.SerializerMethodField()
+
+    def get_invited_users(self, obj):
+        return [user.email for user in obj.invited_users.all()]  # Get emails of all invited users
+
+    def get_contributors(self, obj):
+        return [user.email for user in obj.contributors.all()]  # Get emails of all contributors
+    
+    status = serializers.ChoiceField(choices=Group.GROUP_STATUS)  # Assuming you have defined choices for status
+    group_type = serializers.ChoiceField(choices=Group.GROUP_TYPE)  # Assuming choices are defined for group type
+    created_at = serializers.DateTimeField(read_only=True)
+    
+    class Meta:
+        model = Group
+        fields = ['id', 'property_id', 'created_by', 'goal_amount', 'minimum_contribution', 'total_raised', 'status', 'group_type', 
+                  'invited_users', 'contributors', 'deadline', 'created_at']
+        # Exclude 'invited_users' and 'contributors' for public groups if you want
+
