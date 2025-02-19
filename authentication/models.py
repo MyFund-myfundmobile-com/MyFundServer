@@ -793,18 +793,6 @@ class Transaction(models.Model):
     total_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
     referral_email = models.EmailField(max_length=255, blank=True, null=True)
 
-    # New fields
-    property_name = models.CharField(max_length=255, default="", blank=True)
-    property_value = models.DecimalField(
-        max_digits=10, decimal_places=2, default=0, blank=True
-    )
-    rent_earned_annually = models.DecimalField(
-        max_digits=10, decimal_places=2, default=0, blank=True
-    )
-    rent_earned_monthly = models.DecimalField(
-        max_digits=10, decimal_places=2, default=0, blank=True
-    )
-
     def __str__(self):
         return f"{self.transaction_type} - {self.amount} - {self.date}"
 
@@ -998,50 +986,69 @@ class UserPassword(models.Model):
         return f"Password record for {self.user.email}"
 
 
-
 # from django.db import models
 # import uuid
 # from django.contrib.auth.models import User  # Assuming you are using Django's default User model
 
+
 class Group(models.Model):
     GROUP_STATUS = [
-        ('Active', 'Active'),
-        ('Completed', 'Completed'),
-        ('Failed', 'Failed'),
+        ("Active", "Active"),
+        ("Completed", "Completed"),
+        ("Failed", "Failed"),
     ]
-    
+
     GROUP_TYPE = [
-        ('Public', 'Public'),
-        ('Private', 'Private'),
+        ("Public", "Public"),
+        ("Private", "Private"),
     ]
-    
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    property = models.ForeignKey('Property', on_delete=models.CASCADE)
-    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, null=True, related_name='created_groups')
+    property = models.ForeignKey("Property", on_delete=models.CASCADE)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        null=True,
+        related_name="created_groups",
+    )
     total_raised = models.DecimalField(max_digits=11, decimal_places=2, default=0)
     goal_amount = models.DecimalField(max_digits=11, decimal_places=2, default=0)
-    minimum_contribution = models.DecimalField(max_digits=11, decimal_places=2, default=0)
+    minimum_contribution = models.DecimalField(
+        max_digits=11, decimal_places=2, default=0
+    )
     status = models.CharField(max_length=10, choices=GROUP_STATUS)
     group_type = models.CharField(max_length=7, choices=GROUP_TYPE)
-    invited_users = models.ManyToManyField(settings.AUTH_USER_MODEL, related_name='invited_groups', blank=True)
-    contributors = models.ManyToManyField(settings.AUTH_USER_MODEL, related_name='contributed_groups', through='Contribution')
+    invited_users = models.ManyToManyField(
+        settings.AUTH_USER_MODEL, related_name="invited_groups", blank=True
+    )
+    contributors = models.ManyToManyField(
+        settings.AUTH_USER_MODEL,
+        related_name="contributed_groups",
+        through="Contribution",
+    )
     deadline = models.DateTimeField()
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
-        return f"Group {self.id} for Property {self.property.name} (Status: {self.status})"
-    
-    
+        return (
+            f"Group {self.id} for Property {self.property.name} (Status: {self.status})"
+        )
+
+
 class Contribution(models.Model):
     PAYMENT_STATUS = [
-        ('Pending', 'Pending'),
-        ('Confirmed', 'Confirmed'),
-        ('Failed', 'Failed'),
+        ("Pending", "Pending"),
+        ("Confirmed", "Confirmed"),
+        ("Failed", "Failed"),
     ]
-    
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    group = models.ForeignKey(Group, on_delete=models.CASCADE, related_name='contributions')
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='contributions')
+    group = models.ForeignKey(
+        Group, on_delete=models.CASCADE, related_name="contributions"
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="contributions"
+    )
     amount = models.DecimalField(max_digits=11, decimal_places=2, default=0)
     payment_status = models.CharField(max_length=10, choices=PAYMENT_STATUS)
     created_at = models.DateTimeField(auto_now_add=True)
