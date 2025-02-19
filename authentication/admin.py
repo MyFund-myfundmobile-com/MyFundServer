@@ -46,10 +46,6 @@ class TransactionInline(admin.TabularInline):
         "time",
         "description",
         "transaction_id",
-        "property_name",
-        "property_value",
-        "rent_earned_annually",
-        "rent_earned_monthly",
     )
     readonly_fields = (
         "transaction_id",
@@ -552,9 +548,10 @@ class InvestTransferRequestAdmin(admin.ModelAdmin):
 
     reject_invest_transfer.short_description = "Reject selected investment transfers"
 
+
 @admin.register(WithdrawalsRequestToAdmin)
 class PendingWithdrawalsAdmin(admin.ModelAdmin):
-    list_display = ("user", "amount",  "is_approved", "created_at")
+    list_display = ("user", "amount", "is_approved", "created_at")
     list_filter = ("is_approved",)
     actions = ["approve_withdrawal", "reject_withdrawal"]
 
@@ -595,7 +592,7 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
     def reject_withdrawal(self, request, queryset):
         for withdrawal_request in queryset:
             user = withdrawal_request.user
-            
+
             # Assuming the withdrawal is subtracted from the user's savings
             user.savings += int(withdrawal_request.amount)
             user.save()

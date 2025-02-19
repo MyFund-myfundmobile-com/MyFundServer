@@ -2864,9 +2864,6 @@ class BuyPropertyView(generics.CreateAPIView):
                 transaction_type="credit",
                 amount=total_price,
                 description=f"{property.name}",
-                property_name=property.name,
-                property_value=property.price,
-                rent_earned_annually=rent_reward,
                 date=timezone.now().date(),
                 time=timezone.now().time(),
                 transaction_id=generate_short_id(),
@@ -2953,9 +2950,6 @@ class BuyPropertyView(generics.CreateAPIView):
                         transaction_type="credit",
                         amount=total_price,
                         description=f"{property.name}",
-                        property_name=property.name,
-                        property_value=property.price,
-                        rent_earned_annually=rent_reward,
                         date=timezone.now().date(),
                         time=timezone.now().time(),
                         transaction_id=generate_short_id(),
@@ -4139,7 +4133,7 @@ def first_ever_transaction_in_month(request):
     return Response({"users": list(users)})
 
 
-'''Group Contribution APIs'''
+"""Group Contribution APIs"""
 from .models import Contribution
 from .models import Group
 from .serializers import GroupSerializer
@@ -4150,27 +4144,33 @@ from django.core.exceptions import ValidationError
 
 
 # POST /groups/create - Create a new group buy for a property
-@api_view(['POST'])
+@api_view(["POST"])
 def create_group(request):
-    if request.method == 'POST':
+    if request.method == "POST":
         data = request.data
 
     # Step 1: Check if the required fields are in the request data
-    required_fields = ['propertyId', 'minimumContribution', 'groupType', 'deadline']
+    required_fields = ["propertyId", "minimumContribution", "groupType", "deadline"]
     missing_fields = [field for field in required_fields if field not in data]
-    
+
     if missing_fields:
-        return JsonResponse({'error': f'Missing required fields: {", ".join(missing_fields)}'}, status=400)
-    
+        return JsonResponse(
+            {"error": f'Missing required fields: {", ".join(missing_fields)}'},
+            status=400,
+        )
+
     # Ensure the property exists
     try:
-        property_obj = Property.objects.get(id=data['propertyId'])
+        property_obj = Property.objects.get(id=data["propertyId"])
     except Property.DoesNotExist:
-        return JsonResponse({'error': 'Invalid Property ID'}, status=400)
-    
+        return JsonResponse({"error": "Invalid Property ID"}, status=400)
+
     # Step 2: Check if the available units are less than 1
     if property_obj.units_available < 1:
-        return JsonResponse({'error': 'The group limit for this property has already been reached'}, status=400)
+        return JsonResponse(
+            {"error": "The group limit for this property has already been reached"},
+            status=400,
+        )
 
     # Decrease the available units of the property by 1 since a new group is being created
     property_obj.units_available -= 1
@@ -4178,21 +4178,23 @@ def create_group(request):
 
     # Make sure the deadline is aware of timezones
     try:
-        deadline = datetime.strptime(data['deadline'], '%Y-%m-%d')
+        deadline = datetime.strptime(data["deadline"], "%Y-%m-%d")
         deadline = timezone.make_aware(deadline)
     except ValueError:
-        return JsonResponse({'error': 'Invalid deadline format. Use YYYY-MM-DD.'}, status=400)
-    
+        return JsonResponse(
+            {"error": "Invalid deadline format. Use YYYY-MM-DD."}, status=400
+        )
+
     # Step 4: Create the new group with the selected type (Public or Private)
     group = Group.objects.create(
-        property_id=data['propertyId'],
+        property_id=data["propertyId"],
         created_by=request.user,
         goal_amount=property_obj.price,
-        minimum_contribution=data['minimumContribution'],
+        minimum_contribution=data["minimumContribution"],
         total_raised=0,  # Initially set total raised to 0
-        status='Active',  # Group starts as active
-        group_type=data['groupType'],
-        deadline=deadline
+        status="Active",  # Group starts as active
+        group_type=data["groupType"],
+        deadline=deadline,
     )
 
     # Serialize and return the created group data
@@ -4201,60 +4203,78 @@ def create_group(request):
 
 
 # GET /groups/:propertyId - Retrieve group buy details for a specific property
-@api_view(['GET'])
+@api_view(["GET"])
 def get_group_by_property(request, property_id):
     try:
         group = Group.objects.filter(property_id=property_id)
         if group.exists():
             serializer = GroupSerializer(group, many=True)
             return Response(serializer.data)
-        return Response({'message': 'No group found for this property.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(
+            {"message": "No group found for this property."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
     except Group.DoesNotExist:
-        return Response({'message': 'Group not found.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(
+            {"message": "Group not found."}, status=status.HTTP_404_NOT_FOUND
+        )
 
 
 # POST /groups/:groupId/join - Allow a user to join a group
-@api_view(['POST'])
+@api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def join_group(request, group_id):
     try:
         group = Group.objects.get(id=group_id)
-        print(f'user: {request.user}')
-        print(f'group: {group}')
+        print(f"user: {request.user}")
+        print(f"group: {group}")
         group.contributors.add(request.user)  # Add current user as contributor
-        return Response({'message': 'You successfully joined the group.'}, status=status.HTTP_200_OK)
+        return Response(
+            {"message": "You successfully joined the group."}, status=status.HTTP_200_OK
+        )
     except Group.DoesNotExist:
-        return Response({'message': 'Group not found.'}, status=status.HTTP_404_NOT_FOUND)
-    
+        return Response(
+            {"message": "Group not found."}, status=status.HTTP_404_NOT_FOUND
+        )
+
 
 # POST /groups/:groupId/invite - Send invitations to users for private groups
-@api_view(['POST'])
+@api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def invite_to_group(request, group_id):
     try:
         group = Group.objects.get(id=group_id)
         user = request.user
-        
+
         # Step 1: Check if the group is private
-        if group.group_type == 'Private':
+        if group.group_type == "Private":
             # Step 2: Check if the requesting user is the group creator
             if group.created_by != request.user:
-                return Response({'message': 'Only the group creator can invite members.'}, status=status.HTTP_403_FORBIDDEN)
+                return Response(
+                    {"message": "Only the group creator can invite members."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
 
             # Step 3: Get the list of user IDs to invite
-            invited_user_ids = request.data.get('userIds', [])
+            invited_user_ids = request.data.get("userIds", [])
             if not invited_user_ids:
-                return Response({'message': 'No user IDs provided for invitation.'}, status=status.HTTP_400_BAD_REQUEST)
+                return Response(
+                    {"message": "No user IDs provided for invitation."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
             # Step 4: Validate the user IDs
             invited_users = get_user_model().objects.filter(id__in=invited_user_ids)
             if not invited_users:
-                return Response({'message': 'Some or all users are not found.'}, status=status.HTTP_404_NOT_FOUND)
+                return Response(
+                    {"message": "Some or all users are not found."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
 
             # Step 5: Add the invited users to the group
             group.invited_users.add(*invited_users)
-            
-            '''Send an Email to all the invited users.'''
+
+            """Send an Email to all the invited users."""
             # subject = "Invitation To Join Our Property Investment Group"
             # message = f"Hi {user.first_name},\n\nYour AutoSave have been activated. You are now saving ₦{amount} {frequency}.\n\nKeep growing your funds.🥂\n\n\nMyFund  \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
             # from_email = "MyFund <info@myfundmobile.com>"
@@ -4267,16 +4287,21 @@ def invite_to_group(request, group_id):
             #         {"error": f"Failed to send email: {str(e)}"},
             #         status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             #     )
-            
-            
-            return Response({'message': 'Invitations sent.'}, status=status.HTTP_200_OK)
-        
+
+            return Response({"message": "Invitations sent."}, status=status.HTTP_200_OK)
+
         # If the group is not private
-        return Response({'message': 'This group is not private.'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            {"message": "This group is not private."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     except Group.DoesNotExist:
-        return Response({'message': 'Group not found.'}, status=status.HTTP_404_NOT_FOUND)
-    
+        return Response(
+            {"message": "Group not found."}, status=status.HTTP_404_NOT_FOUND
+        )
+
+
 # POST /groups/:groupId/leave - Allow users to exit a group before funding completion
 # @api_view(['POST'])
 # def leave_group(request, group_id):
@@ -4330,4 +4355,3 @@ def invite_to_group(request, group_id):
 #         return Response(serializer.data)
 #     except Group.DoesNotExist:
 #         return Response({'message': 'Group not found.'}, status=status.HTTP_404_NOT_FOUND)
-
