@@ -208,4 +208,14 @@ urlpatterns = [
         views.first_ever_transaction_in_month,
         name="first_time_savers",
     ),
+    
+    # Group Contribution Related APIs
+    path('groups/create/', views.create_group, name='create_group'),
+    path('groups/<int:property_id>/', views.get_group_by_property, name='get_group_by_property'),
+    path('groups/join/<str:group_id>/', views.join_group, name='join_group'),
+    path('groups/invite/<str:group_id>/', views.invite_to_group, name='invite_to_group'),
+    # path('groups/contribute/<str:group_id>/', views.contribute_to_group, name='contribute_to_group'),
+    # path('groups/contributions/<str:group_id>/', views.get_contributions, name='get_contributions'),
+    # path('groups/leave/<str:group_id>/', views.leave_group, name='leave_group'),
+    # path('users/groups/<str:group_id>/', views.get_user_groups, name='get_user_groups'),
 ]
