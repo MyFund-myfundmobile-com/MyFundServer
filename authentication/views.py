@@ -3891,7 +3891,7 @@ logger = logging.getLogger(__name__)
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def send_email(request):
-    sender = "message@myfundmobile.com"
+    sender = settings.DEFAULT_FROM_EMAIL
     subject = request.data.get("subject")
     body = request.data.get("body")
     recipients = request.data.get("recipients", [])
@@ -3964,7 +3964,7 @@ def send_email(request):
                 email = EmailMultiAlternatives(
                     subject=personalized_subject,
                     body=personalized_body,
-                    from_email=sender,
+                    from_email=settings.DEFAULT_FROM_EMAIL,
                     bcc=[recipient_email],  # Use BCC to reduce load
                     connection=connection,  # Use the same connection for all emails
                 )

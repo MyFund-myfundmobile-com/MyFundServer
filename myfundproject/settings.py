@@ -212,9 +212,9 @@ else:
         "default": {
             "ENGINE": "django.db.backends.sqlite3",
             "NAME": BASE_DIR / "db.sqlite3",
-            'OPTIONS': {
-            'timeout': 20,  # Increase timeout value (in seconds)
-        },
+            "OPTIONS": {
+                "timeout": 20,  # Increase timeout value (in seconds)
+            },
         }
     }
 
@@ -301,11 +301,11 @@ EMAIL_PORT = 465
 EMAIL_USE_SSL = True  # Use SSL for secure connection
 
 # SMTP Authentication
-EMAIL_HOST_USER = "info@myfundmobile.com"
-EMAIL_HOST_PASSWORD = "Reproduction1..."
+EMAIL_HOST_USER = "message@myfundmobile.com"
+EMAIL_HOST_PASSWORD = "AdminSecure123..."
 
 # Other settings
-DEFAULT_FROM_EMAIL = "MyFund <info@myfundmobile.com>"
+DEFAULT_FROM_EMAIL = "MyFund <message@myfundmobile.com>"
 PROTOCOL = "https"
 
 AUTHENTICATION_BACKENDS = [
