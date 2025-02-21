@@ -652,9 +652,6 @@ def update_user_profile(request):
         )
 
 
-import base64
-
-
 @api_view(["PATCH"])
 @permission_classes([IsAuthenticated])
 def profile_picture_update(request):
@@ -663,7 +660,7 @@ def profile_picture_update(request):
     """
     user = request.user
 
-    if not request.data.get("profile_picture"):
+    if "profile_picture" not in request.FILES:
         logger.warning("No profile picture provided for user: %s", user.email)
         return Response(
             {"error": "No image was provided."},
@@ -671,30 +668,23 @@ def profile_picture_update(request):
         )
 
     try:
-        profile_pic = request.data["profile_picture"]
-        imgstr = base64.b64encode(profile_pic.read())
+        profile_pic = request.FILES["profile_picture"]  # Ensure file is from FILES
 
         # Upload image to ImageKit
-        upload = imagekit.upload_file(file=imgstr, file_name="profile_pic.jpg")
+        upload = imagekit.upload_file(
+            file=profile_pic, file_name=f"profile_{user.id}.jpg"
+        )
 
-        if not upload.response_metadata.raw:
+        # Check if upload was successful
+        if not upload or not hasattr(upload, "url") or not upload.url:
             logger.error("Image upload failed for user: %s", user.email)
             return Response(
                 {"error": "Image upload failed, please try again."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-        # Extract image URL from upload response
-        image_url = list(upload.response_metadata.raw.values())[5]
-        if not image_url:
-            logger.error("Image URL extraction failed for user: %s", user.email)
-            return Response(
-                {"error": "Image processing failed, please try again."},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-
         # Update user's profile picture
-        user.profile_picture = image_url
+        user.profile_picture = upload.url
         user.save()
 
         logger.info("Profile picture updated successfully for user: %s", user.email)
@@ -720,7 +710,9 @@ def profile_picture_update(request):
             "Error updating profile picture for user %s: %s", user.email, str(e)
         )
         return Response(
-            {"error": "An error occurred while updating the profile picture."},
+            {
+                "error": f"An error occurred while updating the profile picture: {str(e)}"
+            },
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
@@ -3879,29 +3871,27 @@ def resubscribe_user(request):
 
 import logging
 import time
-from django.core.mail import EmailMultiAlternatives
-from django.conf import settings
+from smtplib import SMTPException
+from django.core.mail import EmailMultiAlternatives, get_connection
+from django.core.exceptions import ObjectDoesNotExist
 from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework import status
 from .models import CustomUser  # Adjust import based on your project structure
 
-BATCH_SIZE = 30  # Number of emails per batch
-EMAILS_PER_HOUR_LIMIT = (
-    200  # Reduce this to give space for other emails sent by the server
-)
-TIME_BETWEEN_BATCHES = (
-    3600 / EMAILS_PER_HOUR_LIMIT
-)  # Time in seconds between batches to avoid overloading (this is approximately 18 seconds per batch)
+# Email batching settings
+BATCH_SIZE = 15  # Lower batch size for stability
+EMAILS_PER_HOUR_LIMIT = 200  # Adjust based on SMTP limits
+TIME_BETWEEN_BATCHES = 3600 / EMAILS_PER_HOUR_LIMIT  # Approx. 18s per batch
 
-# Set up loggin
+logger = logging.getLogger(__name__)
 
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def send_email(request):
-    sender = request.data.get("sender")
+    sender = "message@myfundmobile.com"
     subject = request.data.get("subject")
     body = request.data.get("body")
     recipients = request.data.get("recipients", [])
@@ -3912,92 +3902,103 @@ def send_email(request):
         )
 
     failed_recipients = []
+    total_recipients = len(recipients)
+    logger.info(f"Total recipients: {total_recipients}")
 
-    try:
-        total_recipients = len(recipients)
-        logger.info(f"Total recipients: {total_recipients}")
+    # Reuse SMTP connection for performance
+    connection = get_connection()
+    connection.open()
 
-        for i in range(0, total_recipients, BATCH_SIZE):
-            batch_recipients = recipients[i : i + BATCH_SIZE]
-            logger.info(
-                f"Processing batch {i // BATCH_SIZE + 1} with {len(batch_recipients)} recipients"
-            )
+    for i in range(0, total_recipients, BATCH_SIZE):
+        batch_recipients = recipients[i : i + BATCH_SIZE]
+        logger.info(
+            f"Processing batch {i // BATCH_SIZE + 1} with {len(batch_recipients)} recipients"
+        )
 
-            for recipient_email in batch_recipients:
-                try:
-                    recipient_user = CustomUser.objects.filter(
-                        email=recipient_email
-                    ).first()
-                    if not recipient_user:
-                        logger.warning(f"No user found for email {recipient_email}")
-                        failed_recipients.append(recipient_email)
-                        continue
+        email_objects = []
+        for recipient_email in batch_recipients:
+            try:
+                recipient_user = CustomUser.objects.filter(
+                    email=recipient_email
+                ).first()
 
-                    # Map placeholders with user attributes
-                    placeholder_map = {
-                        "{first_name}": recipient_user.first_name or "Valued",
-                        "{last_name}": recipient_user.last_name or "User",
-                        "{email}": recipient_email,
-                        "{wallet}": str(recipient_user.wallet),
-                        "{savings}": str(recipient_user.savings),
-                        "{investment}": str(recipient_user.investment),
-                        "{properties}": str(recipient_user.properties),
-                        "{full_name}": recipient_user.full_name,
-                        "{total_savings_and_investments_this_month}": str(
-                            recipient_user.total_savings_and_investments_this_month
-                        ),
-                        "{top_saver_percentage}": str(
-                            recipient_user.top_saver_percentage
-                        ),
-                    }
+                # Personalization placeholders
+                placeholder_map = {
+                    "{first_name}": (
+                        recipient_user.first_name if recipient_user else "User"
+                    ),
+                    "{last_name}": recipient_user.last_name if recipient_user else "",
+                    "{email}": recipient_email,
+                    "{wallet}": str(recipient_user.wallet) if recipient_user else "0",
+                    "{savings}": str(recipient_user.savings) if recipient_user else "0",
+                    "{investment}": (
+                        str(recipient_user.investment) if recipient_user else "0"
+                    ),
+                    "{properties}": (
+                        str(recipient_user.properties) if recipient_user else "0"
+                    ),
+                    "{full_name}": (
+                        recipient_user.full_name if recipient_user else "User"
+                    ),
+                    "{total_savings_and_investments_this_month}": (
+                        str(recipient_user.total_savings_and_investments_this_month)
+                        if recipient_user
+                        else "0"
+                    ),
+                    "{top_saver_percentage}": (
+                        str(recipient_user.top_saver_percentage)
+                        if recipient_user
+                        else "0"
+                    ),
+                }
 
-                    # Replace placeholders in subject and body
-                    personalized_subject = subject
-                    personalized_body = body
-                    for placeholder, value in placeholder_map.items():
-                        personalized_subject = personalized_subject.replace(
-                            placeholder, value
-                        )
-                        personalized_body = personalized_body.replace(
-                            placeholder, value
-                        )
-
-                    # Send the email
-                    email = EmailMultiAlternatives(
-                        subject=personalized_subject,
-                        body=personalized_body,
-                        from_email=sender,
-                        to=[recipient_email],
+                personalized_subject = subject
+                personalized_body = body
+                for placeholder, value in placeholder_map.items():
+                    personalized_subject = personalized_subject.replace(
+                        placeholder, value
                     )
-                    email.attach_alternative(personalized_body, "text/html")
-                    email.send(fail_silently=False)
-                    logger.info(f"Email sent to {recipient_email}")
-                except Exception as e:
-                    logger.error(f"Error sending email to {recipient_email}: {str(e)}")
-                    failed_recipients.append(recipient_email)
+                    personalized_body = personalized_body.replace(placeholder, value)
 
-            # Sleep to avoid exceeding the max emails per hour
-            time.sleep(
-                TIME_BETWEEN_BATCHES
-            )  # Sleep between batches to respect rate limits
+                # Create Email Object (Batched BCC Sending)
+                email = EmailMultiAlternatives(
+                    subject=personalized_subject,
+                    body=personalized_body,
+                    from_email=sender,
+                    bcc=[recipient_email],  # Use BCC to reduce load
+                    connection=connection,  # Use the same connection for all emails
+                )
+                email.attach_alternative(personalized_body, "text/html")
+                email_objects.append(email)
 
-        if failed_recipients:
-            return Response(
-                {
-                    "message": "Emails sent with some failures.",
-                    "failed_recipients": failed_recipients,
-                },
-                status=status.HTTP_207_MULTI_STATUS,
-            )
-        else:
-            return Response(
-                {"message": "All emails sent successfully!"}, status=status.HTTP_200_OK
-            )
-    except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}")
+            except Exception as e:
+                logger.error(f"Error preparing email for {recipient_email}: {str(e)}")
+                failed_recipients.append(recipient_email)
+
+        # Send batched emails together
+        try:
+            if email_objects:
+                connection.send_messages(email_objects)
+                logger.info(f"Batch {i // BATCH_SIZE + 1} sent successfully")
+        except SMTPException as e:
+            logger.error(f"SMTP error sending batch {i // BATCH_SIZE + 1}: {str(e)}")
+            failed_recipients.extend(batch_recipients)
+
+        time.sleep(TIME_BETWEEN_BATCHES)  # Controlled delay between batches
+
+    connection.close()  # Close SMTP connection
+
+    if failed_recipients:
         return Response(
-            {"message": f"Error: {str(e)}"},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            {
+                "message": "Emails sent with some failures.",
+                "failed_recipients": failed_recipients,
+            },
+            status=status.HTTP_207_MULTI_STATUS,
+        )
+    else:
+        return Response(
+            {"message": "All emails sent successfully!"}, status=status.HTTP_200_OK
         )
 
 
