@@ -96,6 +96,7 @@ INSTALLED_APPS = [
     "channels",
     "graphene_django",
     # 'django_socketio',
+    'django_celery_beat',
 ]
 
 
@@ -110,6 +111,15 @@ CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 
+
+# from celery.schedules import crontab
+
+# CELERY_BEAT_SCHEDULE = {
+#     'refund-contributions-task': {
+#         'task': 'myfundproject.tasks.refund_contributions_if_goal_not_reached',
+#         'schedule': crontab(minute=0, hour=0),  # Run daily at midnight
+#     },
+# }
 
 REST_FRAMEWORK = {
     # Other settings...
