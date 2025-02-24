@@ -4138,6 +4138,7 @@ def first_ever_transaction_in_month(request):
 from .models import Contribution
 from .models import Group
 from .serializers import GroupSerializer
+from .serializers import ContributionSerializer
 from django.utils import timezone
 from django.core.exceptions import ValidationError
 
@@ -4250,7 +4251,7 @@ def invite_to_group(request, group_id):
         # Step 1: Check if the group is private
         if group.group_type == "Private":
             # Step 2: Check if the requesting user is the group creator
-            if group.created_by != request.user:
+            if group.created_by != user:
                 return Response(
                     {"message": "Only the group creator can invite members."},
                     status=status.HTTP_403_FORBIDDEN,
@@ -4275,19 +4276,20 @@ def invite_to_group(request, group_id):
             # Step 5: Add the invited users to the group
             group.invited_users.add(*invited_users)
 
-            """Send an Email to all the invited users."""
-            # subject = "Invitation To Join Our Property Investment Group"
-            # message = f"Hi {user.first_name},\n\nYour AutoSave have been activated. You are now saving ₦{amount} {frequency}.\n\nKeep growing your funds.🥂\n\n\nMyFund  \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-            # from_email = "MyFund <info@myfundmobile.com>"
-            # recipient_list = [user.email]
+            # Step 6: Send an email to all invited users
+            subject = "Invitation to Join Property Investment Group"
+            message = f"Hello,\n\nYou have been invited by {user.email} to join a private property investment group. Please consider joining to participate in the joint property investment.\n\nKeep growing your funds.🥂\n\n\nMyFund  \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+            from_email = "MyFund <info@myfundmobile.com>"
 
-            # try:
-            #     send_mail(subject, message, from_email, recipient_list, fail_silently=False)
-            # except Exception as e:
-            #     return Response(
-            #         {"error": f"Failed to send email: {str(e)}"},
-            #         status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            #     )
+            # Loop through the invited users and send emails
+            recipient_list = [invited_user.email for invited_user in invited_users]
+            try:
+                send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+            except Exception as e:
+                return Response(
+                    {"error": f"Failed to send email: {str(e)}"},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
 
             return Response({"message": "Invitations sent."}, status=status.HTTP_200_OK)
 
@@ -4304,55 +4306,264 @@ def invite_to_group(request, group_id):
 
 
 # POST /groups/:groupId/leave - Allow users to exit a group before funding completion
-# @api_view(['POST'])
-# def leave_group(request, group_id):
-#     try:
-#         group = Group.objects.get(id=group_id)
-#         if request.user in group.contributors.all():
-#             group.contributors.remove(request.user)
-#             return Response({'message': 'Successfully left the group.'}, status=status.HTTP_200_OK)
-#         return Response({'message': 'You are not a member of this group.'}, status=status.HTTP_400_BAD_REQUEST)
-#     except Group.DoesNotExist:
-#         return Response({'message': 'Group not found.'}, status=status.HTTP_404_NOT_FOUND)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def leave_group(request, group_id):
+    try:
+        group = Group.objects.get(id=group_id)
+        
+        # Check if the group has completed funding
+        if group.status == "completed":
+            return Response({'message': 'You cannot leave the group once funding is complete.'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Check if the user is a contributor to the group
+        if request.user not in group.contributors.all():
+            return Response({'message': 'You are not a member of this group.'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Retrieve the contributor's contribution
+        contribution = Contribution.objects.filter(group=group, user=request.user).first()
+        if contribution:
+            # Refund the contribution to the appropriate source (wallet, savings, or investments)
+            amount_to_refund = contribution.amount
+            source = contribution.source
 
-# # GET /users/:userId/groups - Retrieve all groups a user has joined
-# @api_view(['GET'])
-# def get_user_groups(request, user_id):
-#     try:
-#         user = get_user_model().objects.get(id=user_id)
-#         groups = Group.objects.filter(contributors=user)
-#         serializer = GroupSerializer(groups, many=True)
-#         return Response(serializer.data)
-#     except get_user_model().DoesNotExist:
-#         return Response({'message': 'User not found.'}, status=status.HTTP_404_NOT_FOUND)
+            # Refund the contribution amount to the user based on their source
+            if source == "Savings":
+                request.user.savings += amount_to_refund
+            elif source == "Investment":
+                request.user.investment += amount_to_refund
+            elif source == "Wallet":
+                request.user.wallet += amount_to_refund
+
+            # Save the user after updating their balance
+            request.user.save()
+
+            # Refund the contribution status to 'Refunded'
+            contribution.payment_status = "Refunded"
+            contribution.save()
+
+        # Remove the user from the group contributors
+        group.contributors.remove(request.user)
+
+        return Response({'message': 'Successfully left the group and contribution refunded.'}, status=status.HTTP_200_OK)
+
+    except Group.DoesNotExist:
+        return Response({'message': 'Group not found.'}, status=status.HTTP_404_NOT_FOUND)
 
 
-# # Contribution Related APIs
+# GET /users/:userId/groups - Retrieve all groups a user has joined
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_user_groups(request):
+    try:
+        # Get the current user
+        user = request.user
 
-# # POST /groups/:groupId/contribute - Enable users to contribute funds to a group
-# @api_view(['POST'])
-# def contribute_to_group(request, group_id):
-#     try:
-#         group = Group.objects.get(id=group_id)
-#         amount = request.data['amount']
-#         contribution = Contribution.objects.create(
-#             group=group,
-#             user=request.user,
-#             amount=amount,
-#             payment_status='Pending'  # You can change this based on actual payment status
-#         )
-#         return Response({'message': 'Contribution successful.'}, status=status.HTTP_201_CREATED)
-#     except Group.DoesNotExist:
-#         return Response({'message': 'Group not found.'}, status=status.HTTP_404_NOT_FOUND)
+        # Get all groups where the user is a contributor
+        groups = Group.objects.filter(contributors=user).distinct()  # Assumes Group has a 'contributors' field
+
+        # Serialize the group data
+        serializer = GroupSerializer(groups, many=True)
+
+        # Return the serialized data with a 200 OK status
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    except get_user_model().DoesNotExist:
+        # If the user is not found
+        return Response({'message': 'User not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+# Contribution Related APIs
+
+# POST /groups/:groupId/contribute - Enable users to contribute funds to a group
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def contribute_to_group(request, group_id):
+    try:
+        # Get the group by ID
+        group = Group.objects.get(id=group_id)
+        
+        # Check if the current time is after the group's deadline
+        if timezone.now() > group.deadline:
+            return Response({'message': 'Contributions are no longer allowed after the deadline.'}, status=status.HTTP_403_FORBIDDEN)
+        
+        # Check if the group is private and if the user is not an invited user
+        if group.group_type == "private" and request.user not in group.invited_users.all():
+            return Response({'message': 'You are not an invited contributor to this group.'}, status=status.HTTP_403_FORBIDDEN)
+        
+        # Get user object
+        user = request.user
+        
+        # Retrieve 'amount' and 'source' from the request data
+        amount = int(request.data.get('amount'))
+        source = request.data.get('source').capitalize()
+        
+        # Validate that 'amount' and 'source' are provided
+        if not amount:
+            return Response({'message': 'Amount is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        if not source:
+            return Response({'message': 'Source is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Validate 'source' value
+        accepted_sources = ['Savings', 'Investment', 'Wallet']
+        if source not in accepted_sources:
+            return Response({'message': 'Invalid source. Accepted values are: Savings, Investment, Wallet.'}, 
+                            status=status.HTTP_400_BAD_REQUEST)
+        
+        # Validate that the amount is not less than the minimum contribution in the group
+        if amount < group.minimum_contribution:
+            return Response(
+                {"message": f"The minimum contribution for this group is {group.minimum_contribution}."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        
+        # Validate that the user has enough balance in the source account
+        if source == "Savings" and user.savings < amount:
+            return Response(
+                {"error": "Insufficient savings balance."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if source == "Investment" and user.investment < amount:
+            return Response(
+                {"error": "Insufficient investment balance."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        elif source == "Wallet" and user.wallet < amount:
+            return Response(
+                {"error": "Insufficient wallet balance."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+            
+        # Debit the source
+        if source == "Savings":
+            if user.savings >= amount:
+                user.savings -= amount
+                user.save()
+            else:
+                return Response(
+                    {"error": "Insufficient savings balance."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        elif source == "Investment":
+            if user.investment >= amount:
+                user.investment -= amount
+                user.save()
+            else:
+                return Response(
+                    {"error": "Insufficient investment balance."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        elif source == "Wallet":
+            if user.wallet >= amount:
+                user.wallet -= amount
+                user.save()
+            else:
+                return Response(
+                    {"error": "Insufficient wallet balance."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        
+        # Create the contribution record
+        contribution = Contribution.objects.create(
+            group=group,
+            user=request.user,
+            amount=amount,
+            payment_status='Pending',  # You can change this based on actual payment status
+            source=source  # Store the source of the contribution
+        )
+        
+        # Check if the contribution would exceed the goal amount
+        total_raised_after_contribution = group.total_raised + amount
+        excess_amount = 0
+        
+        if total_raised_after_contribution > group.goal_amount:
+            # Calculate excess
+            excess_amount = total_raised_after_contribution - group.goal_amount
+            # Adjust contribution amount to fit the goal
+            amount -= excess_amount
+            # Refund the excess amount
+            if source == "Savings":
+                user.savings += excess_amount
+            elif source == "Investment":
+                user.investment += excess_amount
+            elif source == "Wallet":
+                user.wallet += excess_amount
+            user.save()
+        
+        # Add the valid contribution amount to the group's total_raised
+        group.total_raised += amount
+        group.save()
+        
+        # Calculate the ownership percentage for the contributor
+        ownership_percentage = (amount / group.goal_amount) * 100
+        
+        # Update the contribution's ownership percentage
+        contribution.ownership_percentage = ownership_percentage
+        contribution.save()
+
+        # Change the contribution payment_status to Confirmed
+        contribution.payment_status = "Confirmed"
+        contribution.save()
+        
+        # Add user to the contributors if not already a contributor
+        if user not in group.contributors.all():
+            group.contributors.add(user)
+        
+        return Response({'message': 'Contribution successful.'}, status=status.HTTP_201_CREATED)
+
+    except Group.DoesNotExist:
+        return Response({'message': 'Group not found.'}, status=status.HTTP_404_NOT_FOUND)
 
 
-# # GET /groups/:groupId/contributions - Fetch all contributions for a group
-# @api_view(['GET'])
-# def get_contributions(request, group_id):
-#     try:
-#         group = Group.objects.get(id=group_id)
-#         contributions = Contribution.objects.filter(group=group)
-#         serializer = ContributionSerializer(contributions, many=True)
-#         return Response(serializer.data)
-#     except Group.DoesNotExist:
-#         return Response({'message': 'Group not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+# GET /groups/:groupId/contributions - Fetch all contributions for a group
+@api_view(['GET'])
+def get_contributions(request, group_id):
+    try:
+        group = Group.objects.get(id=group_id)
+
+        # Get all users who contributed to the group
+        contributors = group.contributors.all()
+        
+        # Prepare a dictionary to hold the total contributions for each user
+        user_contributions = {}
+
+        # Loop through each contributor
+        for contributor in contributors:
+            # Get all contributions made by the current contributor in the group
+            contributions = Contribution.objects.filter(group=group, user=contributor)
+            
+            # Sum the total contribution amount for this user
+            total_amount = sum(contribution.amount for contribution in contributions)
+            
+            # Calculate the total ownership percentage
+            ownership_percentage = (total_amount / group.goal_amount) * 100 if group.goal_amount > 0 else 0
+            
+            # Store the data in the user_contributions dictionary
+            user_contributions[contributor.email] = {
+                "total_amount": total_amount,
+                "ownership_percentage": ownership_percentage
+            }
+
+        return Response(user_contributions)
+
+    except Group.DoesNotExist:
+        return Response({'message': 'Group not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+# GET /users/:userId/contributions – Fetch all contributions made by a user.
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_user_contributions(request):
+    try:
+        # Fetch contributions of the currently authenticated user
+        user = request.user  # Get the currently authenticated user
+        contributions = Contribution.objects.filter(user=user)  # Filter contributions by user
+        
+        # Serialize the contributions
+        serializer = ContributionSerializer(contributions, many=True)
+        
+        # Return the serialized data
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    
+    except Contribution.DoesNotExist:
+        return Response({'message': 'No contributions found.'}, status=status.HTTP_404_NOT_FOUND)
