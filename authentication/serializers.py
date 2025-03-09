@@ -534,5 +534,18 @@ class ContributionSerializer(serializers.ModelSerializer):
     class Meta:
         model = Contribution
         fields = ['id', 'group_id', 'user_email', 'amount', 'payment_status', 'source', 'ownership_percentage', 'created_at']
+        
 
 
+from .models import SavingsGoal
+
+class SavingsGoalSerializer(serializers.ModelSerializer):
+    
+    user = serializers.SerializerMethodField()
+    
+    def get_user(self, obj):
+        return obj.user.email  # Return user's email
+    
+    class Meta:
+        model = SavingsGoal
+        fields = ['id', 'user', 'name', 'target_amount', 'saved_amount', 'deadline', 'auto_debit_enabled', 'contribution_type', 'created_at']
