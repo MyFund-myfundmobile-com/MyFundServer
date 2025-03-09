@@ -1064,3 +1064,22 @@ class Contribution(models.Model):
 
     def __str__(self):
         return f"Contribution by {self.user.email} to Group {self.group.id} (Amount: {self.amount}, Source: {self.source}, Ownership: {self.ownership_percentage}%)"
+    
+
+class SavingsGoal(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    name = models.CharField(max_length=255)
+    target_amount = models.DecimalField(max_digits=10, decimal_places=2)
+    saved_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    deadline = models.DateField()
+    auto_debit_enabled = models.BooleanField(default=False)  # Changed to auto_debit_enabled
+    contribution_type = models.CharField(max_length=50, choices=[
+        ('daily', 'Daily'),
+        ('weekly', 'Weekly'),
+        ('monthly', 'Monthly'),
+    ])
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.name
