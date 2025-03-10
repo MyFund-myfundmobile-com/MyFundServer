@@ -214,8 +214,18 @@ urlpatterns = [
     path('groups/<int:property_id>/', views.get_group_by_property, name='get_group_by_property'),
     path('groups/join/<str:group_id>/', views.join_group, name='join_group'),
     path('groups/invite/<str:group_id>/', views.invite_to_group, name='invite_to_group'),
-    # path('groups/contribute/<str:group_id>/', views.contribute_to_group, name='contribute_to_group'),
-    # path('groups/contributions/<str:group_id>/', views.get_contributions, name='get_contributions'),
-    # path('groups/leave/<str:group_id>/', views.leave_group, name='leave_group'),
-    # path('users/groups/<str:group_id>/', views.get_user_groups, name='get_user_groups'),
+    path('groups/contribute/<str:group_id>/', views.contribute_to_group, name='contribute_to_group'),
+    path('groups/contributions/<str:group_id>/', views.get_contributions, name='get_contributions'),
+    path('groups/leave/<str:group_id>/', views.leave_group, name='leave_group'),
+    path('users/groups/', views.get_user_groups, name='get_user_groups'),
+    path('users/contributions/', views.get_user_contributions, name='get_user_contributions'),
+    
+    # Targeted Savings Plan
+    path('savings/create/', views.create_savings_goal, name='create_savings_goal'),
+    path('savings/<uuid:id>/', views.fetch_savings_goal, name='fetch_savings_goal'),
+    path('savings/deposit/<uuid:id>/', views.add_funds, name='add_funds'),
+    path('savings/withdraw/<uuid:id>/', views.withdraw_savings, name='withdraw_savings'),
+    path('savings/user/<int:user_id>/', views.fetch_user_savings_goals, name='fetch_user_savings_goals'),
+    path('savings/delete/<uuid:id>/', views.delete_savings_goal, name='delete_savings_goal'),
+    
 ]

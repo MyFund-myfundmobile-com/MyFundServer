@@ -4138,6 +4138,7 @@ def first_ever_transaction_in_month(request):
 from .models import Contribution
 from .models import Group
 from .serializers import GroupSerializer
+from .serializers import ContributionSerializer
 from django.utils import timezone
 from django.core.exceptions import ValidationError
 
@@ -4250,7 +4251,7 @@ def invite_to_group(request, group_id):
         # Step 1: Check if the group is private
         if group.group_type == "Private":
             # Step 2: Check if the requesting user is the group creator
-            if group.created_by != request.user:
+            if group.created_by != user:
                 return Response(
                     {"message": "Only the group creator can invite members."},
                     status=status.HTTP_403_FORBIDDEN,
@@ -4275,19 +4276,20 @@ def invite_to_group(request, group_id):
             # Step 5: Add the invited users to the group
             group.invited_users.add(*invited_users)
 
-            """Send an Email to all the invited users."""
-            # subject = "Invitation To Join Our Property Investment Group"
-            # message = f"Hi {user.first_name},\n\nYour AutoSave have been activated. You are now saving ₦{amount} {frequency}.\n\nKeep growing your funds.🥂\n\n\nMyFund  \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-            # from_email = "MyFund <info@myfundmobile.com>"
-            # recipient_list = [user.email]
+            # Step 6: Send an email to all invited users
+            subject = "Invitation to Join Property Investment Group"
+            message = f"Hello,\n\nYou have been invited by {user.email} to join a private property investment group. Please consider joining to participate in the joint property investment.\n\nKeep growing your funds.🥂\n\n\nMyFund  \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+            from_email = "MyFund <info@myfundmobile.com>"
 
-            # try:
-            #     send_mail(subject, message, from_email, recipient_list, fail_silently=False)
-            # except Exception as e:
-            #     return Response(
-            #         {"error": f"Failed to send email: {str(e)}"},
-            #         status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            #     )
+            # Loop through the invited users and send emails
+            recipient_list = [invited_user.email for invited_user in invited_users]
+            try:
+                send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+            except Exception as e:
+                return Response(
+                    {"error": f"Failed to send email: {str(e)}"},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
 
             return Response({"message": "Invitations sent."}, status=status.HTTP_200_OK)
 
@@ -4304,55 +4306,676 @@ def invite_to_group(request, group_id):
 
 
 # POST /groups/:groupId/leave - Allow users to exit a group before funding completion
-# @api_view(['POST'])
-# def leave_group(request, group_id):
-#     try:
-#         group = Group.objects.get(id=group_id)
-#         if request.user in group.contributors.all():
-#             group.contributors.remove(request.user)
-#             return Response({'message': 'Successfully left the group.'}, status=status.HTTP_200_OK)
-#         return Response({'message': 'You are not a member of this group.'}, status=status.HTTP_400_BAD_REQUEST)
-#     except Group.DoesNotExist:
-#         return Response({'message': 'Group not found.'}, status=status.HTTP_404_NOT_FOUND)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def leave_group(request, group_id):
+    try:
+        group = Group.objects.get(id=group_id)
+        
+        # Check if the group has completed funding
+        if group.status == "completed":
+            return Response({'message': 'You cannot leave the group once funding is complete.'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Check if the user is a contributor to the group
+        if request.user not in group.contributors.all():
+            return Response({'message': 'You are not a member of this group.'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Retrieve the contributor's contribution
+        contribution = Contribution.objects.filter(group=group, user=request.user).first()
+        if contribution:
+            # Refund the contribution to the appropriate source (wallet, savings, or investments)
+            amount_to_refund = contribution.amount
+            source = contribution.source
 
-# # GET /users/:userId/groups - Retrieve all groups a user has joined
-# @api_view(['GET'])
-# def get_user_groups(request, user_id):
-#     try:
-#         user = get_user_model().objects.get(id=user_id)
-#         groups = Group.objects.filter(contributors=user)
-#         serializer = GroupSerializer(groups, many=True)
-#         return Response(serializer.data)
-#     except get_user_model().DoesNotExist:
-#         return Response({'message': 'User not found.'}, status=status.HTTP_404_NOT_FOUND)
+            # Refund the contribution amount to the user based on their source
+            if source == "Savings":
+                request.user.savings += amount_to_refund
+            elif source == "Investment":
+                request.user.investment += amount_to_refund
+            elif source == "Wallet":
+                request.user.wallet += amount_to_refund
+
+            # Save the user after updating their balance
+            request.user.save()
+
+            # Refund the contribution status to 'Refunded'
+            contribution.payment_status = "Refunded"
+            contribution.save()
+
+        # Remove the user from the group contributors
+        group.contributors.remove(request.user)
+
+        return Response({'message': 'Successfully left the group and contribution refunded.'}, status=status.HTTP_200_OK)
+
+    except Group.DoesNotExist:
+        return Response({'message': 'Group not found.'}, status=status.HTTP_404_NOT_FOUND)
 
 
-# # Contribution Related APIs
+# GET /users/:userId/groups - Retrieve all groups a user has joined
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_user_groups(request):
+    try:
+        # Get the current user
+        user = request.user
 
-# # POST /groups/:groupId/contribute - Enable users to contribute funds to a group
-# @api_view(['POST'])
-# def contribute_to_group(request, group_id):
-#     try:
-#         group = Group.objects.get(id=group_id)
-#         amount = request.data['amount']
-#         contribution = Contribution.objects.create(
-#             group=group,
-#             user=request.user,
-#             amount=amount,
-#             payment_status='Pending'  # You can change this based on actual payment status
-#         )
-#         return Response({'message': 'Contribution successful.'}, status=status.HTTP_201_CREATED)
-#     except Group.DoesNotExist:
-#         return Response({'message': 'Group not found.'}, status=status.HTTP_404_NOT_FOUND)
+        # Get all groups where the user is a contributor
+        groups = Group.objects.filter(contributors=user).distinct()  # Assumes Group has a 'contributors' field
+
+        # Serialize the group data
+        serializer = GroupSerializer(groups, many=True)
+
+        # Return the serialized data with a 200 OK status
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    except get_user_model().DoesNotExist:
+        # If the user is not found
+        return Response({'message': 'User not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+# Contribution Related APIs
+
+# POST /groups/:groupId/contribute - Enable users to contribute funds to a group
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def contribute_to_group(request, group_id):
+    try:
+        # Get the group by ID
+        group = Group.objects.get(id=group_id)
+        
+        # Check if the current time is after the group's deadline
+        if timezone.now() > group.deadline:
+            return Response({'message': 'Contributions are no longer allowed after the deadline.'}, status=status.HTTP_403_FORBIDDEN)
+        
+        # Check if the group is private and if the user is not an invited user
+        if group.group_type == "private" and request.user not in group.invited_users.all():
+            return Response({'message': 'You are not an invited contributor to this group.'}, status=status.HTTP_403_FORBIDDEN)
+        
+        # Get user object
+        user = request.user
+        
+        # Retrieve 'amount' and 'source' from the request data
+        amount = int(request.data.get('amount'))
+        source = request.data.get('source').capitalize()
+        
+        # Validate that 'amount' and 'source' are provided
+        if not amount:
+            return Response({'message': 'Amount is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        if not source:
+            return Response({'message': 'Source is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Validate 'source' value
+        accepted_sources = ['Savings', 'Investment', 'Wallet']
+        if source not in accepted_sources:
+            return Response({'message': 'Invalid source. Accepted values are: Savings, Investment, Wallet.'}, 
+                            status=status.HTTP_400_BAD_REQUEST)
+        
+        # Validate that the amount is not less than the minimum contribution in the group
+        if amount < group.minimum_contribution:
+            return Response(
+                {"message": f"The minimum contribution for this group is {group.minimum_contribution}."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        
+        # Validate that the user has enough balance in the source account
+        if source == "Savings" and user.savings < amount:
+            return Response(
+                {"error": "Insufficient savings balance."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if source == "Investment" and user.investment < amount:
+            return Response(
+                {"error": "Insufficient investment balance."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        elif source == "Wallet" and user.wallet < amount:
+            return Response(
+                {"error": "Insufficient wallet balance."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+            
+        # Debit the source
+        if source == "Savings":
+            if user.savings >= amount:
+                user.savings -= amount
+                user.save()
+            else:
+                return Response(
+                    {"error": "Insufficient savings balance."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        elif source == "Investment":
+            if user.investment >= amount:
+                user.investment -= amount
+                user.save()
+            else:
+                return Response(
+                    {"error": "Insufficient investment balance."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        elif source == "Wallet":
+            if user.wallet >= amount:
+                user.wallet -= amount
+                user.save()
+            else:
+                return Response(
+                    {"error": "Insufficient wallet balance."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        
+        # Create the contribution record
+        contribution = Contribution.objects.create(
+            group=group,
+            user=request.user,
+            amount=amount,
+            payment_status='Pending',  # You can change this based on actual payment status
+            source=source  # Store the source of the contribution
+        )
+        
+        # Check if the contribution would exceed the goal amount
+        total_raised_after_contribution = group.total_raised + amount
+        excess_amount = 0
+        
+        if total_raised_after_contribution > group.goal_amount:
+            # Calculate excess
+            excess_amount = total_raised_after_contribution - group.goal_amount
+            # Adjust contribution amount to fit the goal
+            amount -= excess_amount
+            # Refund the excess amount
+            if source == "Savings":
+                user.savings += excess_amount
+            elif source == "Investment":
+                user.investment += excess_amount
+            elif source == "Wallet":
+                user.wallet += excess_amount
+            user.save()
+        
+        # Add the valid contribution amount to the group's total_raised
+        group.total_raised += amount
+        group.save()
+        
+        # Calculate the ownership percentage for the contributor
+        ownership_percentage = (amount / group.goal_amount) * 100
+        
+        # Update the contribution's ownership percentage
+        contribution.ownership_percentage = ownership_percentage
+        contribution.save()
+
+        # Change the contribution payment_status to Confirmed
+        contribution.payment_status = "Confirmed"
+        contribution.save()
+        
+        # Add user to the contributors if not already a contributor
+        if user not in group.contributors.all():
+            group.contributors.add(user)
+        
+        return Response({'message': 'Contribution successful.'}, status=status.HTTP_201_CREATED)
+
+    except Group.DoesNotExist:
+        return Response({'message': 'Group not found.'}, status=status.HTTP_404_NOT_FOUND)
 
 
-# # GET /groups/:groupId/contributions - Fetch all contributions for a group
-# @api_view(['GET'])
-# def get_contributions(request, group_id):
-#     try:
-#         group = Group.objects.get(id=group_id)
-#         contributions = Contribution.objects.filter(group=group)
-#         serializer = ContributionSerializer(contributions, many=True)
-#         return Response(serializer.data)
-#     except Group.DoesNotExist:
-#         return Response({'message': 'Group not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+# GET /groups/:groupId/contributions - Fetch all contributions for a group
+@api_view(['GET'])
+def get_contributions(request, group_id):
+    try:
+        group = Group.objects.get(id=group_id)
+
+        # Get all users who contributed to the group
+        contributors = group.contributors.all()
+        
+        # Prepare a dictionary to hold the total contributions for each user
+        user_contributions = {}
+
+        # Loop through each contributor
+        for contributor in contributors:
+            # Get all contributions made by the current contributor in the group
+            contributions = Contribution.objects.filter(group=group, user=contributor)
+            
+            # Sum the total contribution amount for this user
+            total_amount = sum(contribution.amount for contribution in contributions)
+            
+            # Calculate the total ownership percentage
+            ownership_percentage = (total_amount / group.goal_amount) * 100 if group.goal_amount > 0 else 0
+            
+            # Store the data in the user_contributions dictionary
+            user_contributions[contributor.email] = {
+                "total_amount": total_amount,
+                "ownership_percentage": ownership_percentage
+            }
+
+        return Response(user_contributions)
+
+    except Group.DoesNotExist:
+        return Response({'message': 'Group not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+# GET /users/:userId/contributions – Fetch all contributions made by a user.
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_user_contributions(request):
+    try:
+        # Fetch contributions of the currently authenticated user
+        user = request.user  # Get the currently authenticated user
+        contributions = Contribution.objects.filter(user=user)  # Filter contributions by user
+        
+        # Serialize the contributions
+        serializer = ContributionSerializer(contributions, many=True)
+        
+        # Return the serialized data
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    
+    except Contribution.DoesNotExist:
+        return Response({'message': 'No contributions found.'}, status=status.HTTP_404_NOT_FOUND)
+
+
+from .models import SavingsGoal
+from .serializers import SavingsGoalSerializer
+from django.db import IntegrityError
+from decimal import Decimal, InvalidOperation
+
+MINIMUM_TARGET_AMOUNT = Decimal('10.00')  # Set minimum threshold for the target amount
+
+# POST /savings/create - Create a savings goal
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def create_savings_goal(request):
+    try:
+        # Extract data from request body
+        data = request.data
+        user = request.user  # Get the currently authenticated user
+
+        # Ensure all required fields are provided
+        required_fields = ['name', 'target_amount', 'deadline', 'contribution_type']
+        
+        # Check for missing required fields
+        missing_fields = [field for field in required_fields if field not in data]
+        if missing_fields:
+            return Response({'error': f'Missing fields: {", ".join(missing_fields)}'}, status=status.HTTP_400_BAD_REQUEST)
+
+        name = data['name']
+        target_amount_str = data['target_amount']
+        deadline = data['deadline']
+        contribution_type = data['contribution_type']
+        auto_debit_enabled = data.get('auto_debit_enabled', 'False')  # Default to 'False' if not provided
+
+        # Validate target_amount
+        try:
+            target_amount = Decimal(target_amount_str)
+            if target_amount < MINIMUM_TARGET_AMOUNT:
+                return Response(
+                    {'error': f'Target amount must be at least {MINIMUM_TARGET_AMOUNT}'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        except (ValueError, InvalidOperation):
+            return Response({'error': 'Invalid target amount format'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Validate contribution_type (it should be one of the valid options)
+        valid_contribution_types = ['daily', 'weekly', 'monthly']
+        if contribution_type not in valid_contribution_types:
+            return Response({'error': f'Invalid contribution type. Valid options are {", ".join(valid_contribution_types)}.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Validate deadline (should be in YYYY-MM-DD format)
+        try:
+            # Attempt to parse the deadline string to a date object
+            deadline_date = datetime.strptime(deadline, '%Y-%m-%d').date()
+        except ValueError:
+            return Response({'error': 'Invalid deadline format. Please use YYYY-MM-DD.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Validate auto_debit_enabled (should be either 'True' or 'False' string)
+        if auto_debit_enabled not in ['True', 'False']:
+            return Response({'error': 'auto_debit_enabled must be either "True" or "False".'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Convert auto_debit_enabled to boolean (True or False)
+        auto_debit_enabled = auto_debit_enabled == 'True'
+
+        # If Auto-Debit is enabled, schedule recurring transactions
+        if auto_debit_enabled:
+            # Example: schedule_auto_debit(user, goal) 
+            # (You need to implement scheduling logic or integrate with a scheduler)
+            pass
+
+        # Create the savings goal
+        goal = SavingsGoal.objects.create(
+            user=user,
+            name=name,
+            target_amount=target_amount,
+            saved_amount=0,  # Initial saved amount is 0
+            deadline=deadline_date,
+            contribution_type=contribution_type,
+            auto_debit_enabled=auto_debit_enabled,
+        )
+        
+        # Serialize the savings goal data and return the response
+        serializer = SavingsGoalSerializer(goal)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    except KeyError as e:
+        return Response({'error': f'Missing field: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
+    except IntegrityError as e:
+        # Log the error for debugging purposes
+        logging.error(f'IntegrityError: {str(e)}')
+        return Response({'error': 'Database integrity error'}, status=status.HTTP_400_BAD_REQUEST)
+    except ValueError as e:
+        return Response({'error': f'Invalid data: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
+    except Exception as e:
+        # General exception for unexpected errors
+        logging.error(f'Unexpected error: {str(e)}')
+        return Response({'error': 'An unexpected error occurred'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+# GET /savings/{id} - Fetch a savings goal
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def fetch_savings_goal(request, id):
+    try:
+        # Fetch the savings goal by ID
+        goal = SavingsGoal.objects.get(id=id)
+        
+        # Serialize the savings goal data and return the response
+        serializer = SavingsGoalSerializer(goal)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    
+    except SavingsGoal.DoesNotExist:
+        return Response({'error': 'Savings goal not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+# POST /savings/{id}/deposit - Add funds to a goal
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def add_funds(request, id):
+    try:
+        
+        user = request.user
+        
+        # Retrieve 'amount' and 'source' from the request data
+        amount = request.data.get('amount')
+        source = request.data.get('source')
+        
+        # Check if 'source' is provided and capitalize it, otherwise return an error message
+        if source:
+            source = source.capitalize()
+        else:
+            return Response({'message': 'Source is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Validate that 'amount' and 'source' are provided
+        if not amount:
+            return Response({'message': 'Amount is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Validate 'source' value
+        accepted_sources = ['Savings', 'Wallet']
+        if source not in accepted_sources:
+            return Response({'message': 'Invalid source. Accepted values are: Savings, Investment, Wallet.'}, 
+                            status=status.HTTP_400_BAD_REQUEST)
+            
+        # Ensure deposit amount is valid
+        try:
+            deposit_amount = Decimal(amount)
+        except (ValueError, InvalidOperation):
+            return Response({'error': 'Invalid deposit amount format.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Check if the deposit amount is positive
+        if deposit_amount <= 0:
+            return Response({'error': 'Deposit amount cannot be less than or equals to zero(0).'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Fetch the savings goal by ID
+        try:
+            goal = SavingsGoal.objects.get(id=id)
+        except SavingsGoal.DoesNotExist:
+            return Response({'error': 'Target savings not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Validate if the deposit exceeds the remaining balance required to reach the goal
+        remaining_balance = goal.target_amount - goal.saved_amount
+        if deposit_amount > remaining_balance:
+            return Response({
+                'error': f'Deposit amount exceeds the remaining balance to reach your goal. Remaining balance is {remaining_balance}.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Debit the source
+        if source == "Savings":
+            if user.savings >= deposit_amount :
+                user.savings -= deposit_amount 
+                user.save()
+            else:
+                return Response(
+                    {"error": "Insufficient savings balance."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        elif source == "Wallet":
+            if user.wallet >= deposit_amount :
+                user.wallet -= deposit_amount
+                user.save()
+            else:
+                return Response(
+                    {"error": "Insufficient wallet balance."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        # Update the saved amount for the goal
+        goal.saved_amount += deposit_amount
+        goal.save()
+
+        # Generate a unique transaction ID (You can also use UUID or another method if needed)
+        transaction_id = str(uuid.uuid4())[:16]
+
+        # Log the transaction (Create a new Transaction record)
+        transaction = Transaction.objects.create(
+            user=request.user,
+            transaction_type='credit',  # 'credit' for deposits
+            amount=deposit_amount,
+            date=timezone.now().date(),
+            time=timezone.now().time(),
+            description=f"Transfer [{source} > Target Savings({goal.name})] (Successful)",
+            transaction_id=transaction_id,
+        )
+
+        # Optional: Send a notification to the user (you can add actual email or push notification logic here)
+        subject = f"Deposit to Your Target Savings ({goal.name}) Successful!"
+        message = f"Hi {user.first_name},\n\nWe’re excited to let you know that your deposit of ₦{amount} has been successfully added to your Target Savings ({goal.name}) account!\n\nThank you for choosing MyFund to help you achieve your savings goals. Keep up the great work—your financial future is looking brighter every day! 🌟\n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+        from_email = "MyFund <info@myfundmobile.com>"
+        recipient_list = [user.email]
+
+        send_mail(
+            subject, message, from_email, recipient_list, fail_silently=False
+        )
+
+        # Return the success message
+        return Response({
+            'message': f'{deposit_amount} successfully added to your target savings goal. Remaining balance: {goal.target_amount - goal.saved_amount}',
+            'transaction_id': transaction_id
+        }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        # Catch any unexpected exceptions and log them
+        logging.error(f'Unexpected error: {str(e)}')
+        return Response({'error': f'An unexpected error occurred: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+
+# POST /savings/{id}/withdraw - Withdraw savings (if allowed)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def withdraw_savings(request, id):
+    try:
+        data = request.data
+        user = request.user
+        
+        # Ensure required fields are provided
+        amount = int(data.get('amount'))
+        target_bank_account_id = data.get('target_bank_account_id')
+        
+        if not amount:
+            return Response({'error': '\'amount\' is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        if not target_bank_account_id:
+            return Response({'error': '\'target_bank_account_id\' is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Convert amount to integer and check if it's valid
+        try:
+            amount = int(amount)
+        except ValueError:
+            return Response({'error': 'Invalid withdrawal amount. Must be a number.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if amount <= 0:
+            return Response({'error': 'Withdrawal amount must be positive.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Fetch the savings goal by ID
+        try:
+            goal = SavingsGoal.objects.get(id=id)
+        except SavingsGoal.DoesNotExist:
+            return Response({'error': 'Savings goal not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Validate that the target_bank_account_id belongs to the user
+        try:
+            target_bank_account = BankAccount.objects.get(id=target_bank_account_id, user=user)
+        except BankAccount.DoesNotExist:
+            return Response({"error": "Target bank account not found."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Check if the goal is complete enough to allow a withdrawal (e.g., 80% of the goal)
+        completion_percentage = (goal.saved_amount / goal.target_amount) * 100
+        if completion_percentage < 80:
+            return Response({'error': f'You must reach at least 80% of your goal to make a withdrawal.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Check if the withdrawal is within the allowed amount
+        if amount > goal.saved_amount:
+            return Response({'error': 'Insufficient funds.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Optionally, apply a penalty if withdrawn before the goal deadline
+        if goal.deadline:
+            # Ensure goal.deadline is a datetime object for comparison
+            goal_deadline_datetime = datetime.combine(goal.deadline, datetime.min.time())
+            
+            # Compare the goal deadline with the current time
+            if datetime.now() < goal_deadline_datetime:
+                penalty = calculate_penalty(amount)  # You would implement this function to apply a penalty
+                amount -= Decimal(penalty)
+                goal.saved_amount -= amount
+                goal.save()
+
+        # Generate a unique transaction ID (You can also use UUID or another method if needed)
+        transaction_id = str(uuid.uuid4())[:16]
+
+        # Log the transaction (this could be a simple database record)
+        transaction = Transaction.objects.create(
+            user=goal.user,
+            transaction_type='debit',  # 'credit' for deposits
+            amount=amount,
+            date=timezone.now().date(),
+            time=timezone.now().time(),
+            description=f"Withdrawal [Target Savings({goal.name}) > Bank] (Pending)",
+            transaction_id=transaction_id,
+        )
+
+        # Placeholder: Transfer funds to the user's local bank account
+        if amount < 500000:
+            print("Paystack in progresss...")
+            # Perform the withdrawal to the local bank using Paystack API
+            paystack_response = make_withdrawal_through_paystack(user, target_bank_account, amount)
+            
+            if paystack_response.get("status"):  # This checks if it's truthy
+                # Deduct the total amount (including service charge) from the source account
+                print("Paystack API Response:", paystack_response)
+
+                # Update the transaction database table.
+                transaction = Transaction(
+                    user=user,
+                    transaction_type="debit",
+                    amount=amount,
+                    service_charge=penalty,
+                    total_amount=amount,
+                    date=timezone.now().date(),
+                    time=timezone.now().time(),
+                    description=f"Withdrawal [Target Savings({goal.name}) > Bank] (Successful)",
+                    transaction_id=transaction_id,
+                )
+                transaction.save()
+
+                bank_name = target_bank_account.bank_name
+                # Send a confirmation email to the user
+                subject = f"Withdrawal from Target Savings({goal.name}) Successful!"
+                message = f"Hi {user.first_name},\n\nYour withdrawal of ₦{amount} from your Target Savings({goal.name}) account has been sent to your {bank_name} account successfully.\n\nThank you for using MyFund.\n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+                from_email = "MyFund <info@myfundmobile.com>"
+                recipient_list = [user.email]
+
+                send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+
+                return Response(
+                    {
+                        "success": True,
+                        "message": paystack_response.get("message"),
+                        "transaction_id": transaction_id,
+                        "updated_balance": goal.saved_amount,
+                    },
+                    status=status.HTTP_200_OK,
+                )
+            else:
+                return Response(
+                    {"error": "Withdrawal to local bank failed. Please try again later."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        else:
+            print("Admin processing the withdrawal...")
+            # Perform the withdrawal to the local bank through the Admin
+            response = make_withdrawal_through_admin(user, amount, transaction_id)
+
+            if response is not None:
+                return Response(
+                    {
+                        "success": True,
+                        "message": response.get("message"),
+                        "transaction_id": transaction_id,
+                        "updated_balance": goal.saved_amount,
+                    },
+                    status=status.HTTP_200_OK,
+                )
+            else:
+                return Response(
+                    {"error": "Withdrawal to local bank failed. Please try again later."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+    except SavingsGoal.DoesNotExist:
+        return Response({'error': 'Savings goal not found.'}, status=status.HTTP_404_NOT_FOUND)
+    except ValueError:
+        return Response({'error': 'Invalid withdrawal amount.'}, status=status.HTTP_400_BAD_REQUEST)
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# Function to calculate penalties if the user withdraws early
+def calculate_penalty(withdrawal_amount):
+    # Placeholder for penalty calculation logic
+    penalty_percentage = 0.10  # Example: 5% penalty
+    return withdrawal_amount * penalty_percentage
+
+
+# GET /savings/user/{user_id} - Fetch all savings goals of a user
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def fetch_user_savings_goals(request, user_id):
+    try:
+        # Fetch all savings goals for the given user
+        goals = SavingsGoal.objects.filter(user_id=user_id)
+        
+        # Serialize the savings goals data
+        serializer = SavingsGoalSerializer(goals, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    
+    except SavingsGoal.DoesNotExist:
+        return Response({'message': 'No savings goals found for this user.'}, status=status.HTTP_404_NOT_FOUND)
+
+# DELETE /savings/{id} - Delete a goal (if no active funds)
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def delete_savings_goal(request, id):
+    try:
+        # Fetch the savings goal by ID
+        goal = SavingsGoal.objects.get(id=id)
+
+        if goal.saved_amount > 0:
+            return Response({'error': 'Cannot delete goal with active funds.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Delete the goal
+        goal.delete()
+        return Response({'message': 'Savings goal deleted successfully.'}, status=status.HTTP_200_OK)
+
+    except SavingsGoal.DoesNotExist:
+        return Response({'error': 'Savings goal not found.'}, status=status.HTTP_404_NOT_FOUND)
