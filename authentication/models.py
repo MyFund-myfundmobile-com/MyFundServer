@@ -993,14 +993,14 @@ class UserPassword(models.Model):
 
 class Group(models.Model):
     GROUP_STATUS = [
-        ("Active", "Active"),
-        ("Completed", "Completed"),
-        ("Failed", "Failed"),
+        ("active", "Active"),
+        ("completed", "Completed"),
+        ("failed", "Failed"),
     ]
 
     GROUP_TYPE = [
-        ("Public", "Public"),
-        ("Private", "Private"),
+        ("public", "Public"),
+        ("private", "Private"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -1040,9 +1040,16 @@ class Contribution(models.Model):
         ("Pending", "Pending"),
         ("Confirmed", "Confirmed"),
         ("Failed", "Failed"),
+        ("Refunded", "Refunded"),
+    ]
+    
+    SOURCE_CHOICES = [
+        ("Savings", "Savings"),
+        ("Investment", "Investment"),
+        ("Wallet", "Wallet"),
     ]
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    id = models.AutoField(primary_key=True)
     group = models.ForeignKey(
         Group, on_delete=models.CASCADE, related_name="contributions"
     )
@@ -1051,7 +1058,28 @@ class Contribution(models.Model):
     )
     amount = models.DecimalField(max_digits=11, decimal_places=2, default=0)
     payment_status = models.CharField(max_length=10, choices=PAYMENT_STATUS)
+    source = models.CharField(max_length=10, choices=SOURCE_CHOICES)
+    ownership_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
-        return f"Contribution by {self.user.email} to Group {self.group.id} (Amount: {self.amount})"
+        return f"Contribution by {self.user.email} to Group {self.group.id} (Amount: {self.amount}, Source: {self.source}, Ownership: {self.ownership_percentage}%)"
+    
+
+class SavingsGoal(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    name = models.CharField(max_length=255)
+    target_amount = models.DecimalField(max_digits=10, decimal_places=2)
+    saved_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    deadline = models.DateField()
+    auto_debit_enabled = models.BooleanField(default=False)  # Changed to auto_debit_enabled
+    contribution_type = models.CharField(max_length=50, choices=[
+        ('daily', 'Daily'),
+        ('weekly', 'Weekly'),
+        ('monthly', 'Monthly'),
+    ])
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.name
