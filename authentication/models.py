@@ -127,6 +127,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     is_superuser = models.BooleanField(default=False)
 
     is_hired_referrer = models.BooleanField(default=False)
+    is_ambassador = models.BooleanField(default=False)
 
     objects = CustomUserManager()
 
@@ -1042,7 +1043,7 @@ class Contribution(models.Model):
         ("Failed", "Failed"),
         ("Refunded", "Refunded"),
     ]
-    
+
     SOURCE_CHOICES = [
         ("Savings", "Savings"),
         ("Investment", "Investment"),
@@ -1059,12 +1060,14 @@ class Contribution(models.Model):
     amount = models.DecimalField(max_digits=11, decimal_places=2, default=0)
     payment_status = models.CharField(max_length=10, choices=PAYMENT_STATUS)
     source = models.CharField(max_length=10, choices=SOURCE_CHOICES)
-    ownership_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    ownership_percentage = models.DecimalField(
+        max_digits=5, decimal_places=2, default=0
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
         return f"Contribution by {self.user.email} to Group {self.group.id} (Amount: {self.amount}, Source: {self.source}, Ownership: {self.ownership_percentage}%)"
-    
+
 
 class SavingsGoal(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -1073,12 +1076,17 @@ class SavingsGoal(models.Model):
     target_amount = models.DecimalField(max_digits=10, decimal_places=2)
     saved_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     deadline = models.DateField()
-    auto_debit_enabled = models.BooleanField(default=False)  # Changed to auto_debit_enabled
-    contribution_type = models.CharField(max_length=50, choices=[
-        ('daily', 'Daily'),
-        ('weekly', 'Weekly'),
-        ('monthly', 'Monthly'),
-    ])
+    auto_debit_enabled = models.BooleanField(
+        default=False
+    )  # Changed to auto_debit_enabled
+    contribution_type = models.CharField(
+        max_length=50,
+        choices=[
+            ("daily", "Daily"),
+            ("weekly", "Weekly"),
+            ("monthly", "Monthly"),
+        ],
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
