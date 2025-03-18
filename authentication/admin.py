@@ -84,6 +84,7 @@ class CustomUserAdmin(UserAdmin):
         "user_percentage_to_top_saver",
         "how_did_you_hear",
         "is_hired_referrer",
+        "is_ambassador",
     )
     list_filter = (
         "is_staff",
@@ -92,6 +93,7 @@ class CustomUserAdmin(UserAdmin):
         "how_did_you_hear",
         "date_joined",
         "is_hired_referrer",
+        "is_ambassador",
     )
     actions = [
         "send_custom_email",
@@ -99,6 +101,7 @@ class CustomUserAdmin(UserAdmin):
         "approve_kyc",
         "reject_kyc",
         "make_hired_referrer",
+        "make_ambassador",
     ]
 
     fieldsets = (
@@ -162,6 +165,9 @@ class CustomUserAdmin(UserAdmin):
 
     def make_hired_referrer(self, request, queryset):
         updated_count = queryset.update(is_hired_referrer=True)
+
+    def make_ambassador(self, request, queryset):
+        updated_count = queryset.update(is_ambassador=True)
 
     def view_kyc_details(self, request, queryset):
         if queryset.count() == 1:
