@@ -675,6 +675,9 @@ def profile_picture_update(request):
             file=profile_pic, file_name=f"profile_{user.id}.jpg"
         )
 
+        # Debugging: Log response from ImageKit
+        logger.info("ImageKit upload response: %s", upload)
+
         # Check if upload was successful
         if not upload or not hasattr(upload, "url") or not upload.url:
             logger.error("Image upload failed for user: %s", user.email)
@@ -4278,7 +4281,7 @@ def invite_to_group(request, group_id):
             """Send an Email to all the invited users."""
             # subject = "Invitation To Join Our Property Investment Group"
             # message = f"Hi {user.first_name},\n\nYour AutoSave have been activated. You are now saving ₦{amount} {frequency}.\n\nKeep growing your funds.🥂\n\n\nMyFund  \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-            # from_email = "MyFund <info@myfundmobile.com>"
+            # from_email = "MyFund <message@myfundmobile.com>"
             # recipient_list = [user.email]
 
             # try:

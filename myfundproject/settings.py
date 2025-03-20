@@ -148,8 +148,7 @@ MIDDLEWARE = [
     #   "channels.middleware.WebSocketMiddleware",
 ]
 
-CORS_ALLOW_ALL_ORIGINS = True
-
+CORS_ALLOW_ALL_ORIGINS = True  # Allow all origins
 CORS_ALLOWED_ORIGINS = [
     "https://tolulopeahmed.github.io",
     "https://10.10.4.82:8443",
@@ -157,7 +156,21 @@ CORS_ALLOWED_ORIGINS = [
     "http://192.168.238.34:8000",
     "https://myfund.onrender.com",
     "http://localhost:3000",
+    "https://myfundapi-myfund-07ce351a.koyeb.app",
+    "https://myfundmobile.com",
 ]
+
+CORS_ALLOW_CREDENTIALS = True  # Allow credentials (useful for auth)
+CORS_ALLOW_HEADERS = [
+    "content-type",
+    "authorization",
+    "x-requested-with",
+    "accept",
+    "origin",
+    "user-agent",
+    "x-csrftoken",
+]
+
 
 if KOYEB_EXTERNAL_HOSTNAME:
     CORS_ALLOWED_ORIGINS.append(KOYEB_EXTERNAL_HOSTNAME)
@@ -305,7 +318,7 @@ EMAIL_HOST_USER = "message@myfundmobile.com"
 EMAIL_HOST_PASSWORD = "AdminSecure123..."
 
 # Other settings
-DEFAULT_FROM_EMAIL = "MyFund <message@myfundmobile.com>"
+DEFAULT_FROM_EMAIL = "DR TEE <message@myfundmobile.com>"
 PROTOCOL = "https"
 
 AUTHENTICATION_BACKENDS = [
