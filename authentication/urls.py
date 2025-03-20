@@ -146,6 +146,9 @@ urlpatterns = [
         "withdraw-to-bank/", views.withdraw_to_local_bank, name="withdraw_to_local_bank"
     ),
     path(
+        "process-withdrawal-to-bank/", views.process_withdrawal_to_local_bank, name="process_withdrawal_to_local_bank"
+    ),
+    path(
         "wallet-to-wallet/",
         views.initiate_wallet_transfer,
         name="initiate-wallet-transfer",

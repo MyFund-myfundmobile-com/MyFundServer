@@ -557,62 +557,76 @@ class InvestTransferRequestAdmin(admin.ModelAdmin):
 
 @admin.register(WithdrawalsRequestToAdmin)
 class PendingWithdrawalsAdmin(admin.ModelAdmin):
-    list_display = ("user", "amount", "is_approved", "created_at")
+    list_display = ("user", "amount", "transaction_id",  "is_approved", "created_at")
     list_filter = ("is_approved",)
     actions = ["approve_withdrawal", "reject_withdrawal"]
 
     def approve_withdrawal(self, request, queryset):
+        # Loop through all selected withdrawal requests in the queryset
         for withdrawal_request in queryset:
+            
+            # Mark the withdrawal request as approved
             withdrawal_request.is_approved = True
             withdrawal_request.save()
 
+            # Retrieve the user and transaction details associated with the withdrawal request
             user = withdrawal_request.user
+            transaction_id = withdrawal_request.transaction_id
+            
+            # Fetch the corresponding withdrawal record for admin view using user and transaction ID
+            withdrawalRecord = WithdrawalsRequestToAdmin.objects.get(user=user, transaction_id=transaction_id)
+            
+            # Mark this withdrawal record as approved
+            withdrawalRecord.is_approved = True
+            withdrawalRecord.save()
 
-            # Assuming the withdrawal is subtracted from the user's savings
-            # user.savings -= int(withdrawal_request.amount)
-            # user.save()
+            # Retrieve the transaction record using user and transaction ID
+            transaction = Transaction.objects.get(user=user, transaction_id=transaction_id)
+            
+            # Update the transaction description to indicate approval (change "(Pending)" to "(Confirmed)")
+            transaction.description = transaction.description.replace("(Pending)", "(Confirmed)")
+            transaction.save()
+            
+            print(f"transaction.description = {transaction.description}")
 
-            # Create a debit transaction for the withdrawal
-            transaction = Transaction.objects.create(
-                user=user,
-                transaction_type="debit",  # Debiting the savings
-                amount=withdrawal_request.amount,
-                date=timezone.now().date(),
-                time=timezone.now().time(),
-                description="Withdrawal (Approved)",
-                transaction_id=str(uuid.uuid4())[:16],  # Full UUID for uniqueness
-            )
-
-            # Send an approval email
+            # Send an email to the user informing them of the withdrawal approval
             subject = "Withdrawal Approved! ✔"
             message = f"Hi {user.first_name}, \n\nYour withdrawal request of ₦{withdrawal_request.amount} has been approved and pay to your bank account.\n\nThank you for using MyFund."
             from_email = "MyFund <info@myfundmobile.com>"
             recipient_list = [user.email]
+            # Send the email; fail_silently=False means errors in sending email will be raised
             send_mail(subject, message, from_email, recipient_list, fail_silently=False)
 
-            # Update the user's monthly totals after approval
+            # Update the user's total savings and investment for the current month after the approval
             user.update_total_savings_and_investment_this_month()
 
+    # Set a short description for this action in the admin interface
     approve_withdrawal.short_description = "Approve selected withdrawals"
+
 
     def reject_withdrawal(self, request, queryset):
         for withdrawal_request in queryset:
             user = withdrawal_request.user
+            transaction_id = withdrawal_request.transaction_id
 
             # Assuming the withdrawal is subtracted from the user's savings
-            user.savings += int(withdrawal_request.amount)
+            user.wallet += int(withdrawal_request.amount)
             user.save()
+            
+            
 
             # Create a transaction record for rejection (e.g., no actual debit but tracking failure)
             transaction = Transaction.objects.create(
                 user=user,
-                transaction_type="debit",
+                transaction_type="credit",
                 amount=withdrawal_request.amount,
                 date=timezone.now().date(),
                 time=timezone.now().time(),
                 description="Withdrawal (Rejected)",
-                transaction_id=str(uuid.uuid4())[:16],
+                transaction_id=transaction_id,
             )
+            
+            transaction.save()
 
             # Send a rejection email
             subject = "Withdrawal Request Rejected ❌"
@@ -620,9 +634,6 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
             from_email = "MyFund <info@myfundmobile.com>"
             recipient_list = [user.email]
             send_mail(subject, message, from_email, recipient_list, fail_silently=False)
-
-            # Mark the withdrawal request as rejected instead of deleting it
-            withdrawal_request.delete()
 
     reject_withdrawal.short_description = "Reject selected withdrawals"
 
