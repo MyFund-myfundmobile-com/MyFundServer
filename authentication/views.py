@@ -2435,95 +2435,174 @@ def withdraw_to_local_bank(request):
 
         user.save()
 
-        """ 
-            IF amount < 500,000: 
-                paystack should process the withdrawal_to_bank
-            ELSE: 
-                admin should shouls process the withdrawal_to_bank
-        
-        """
 
-        if amount < 500000:
+        # print("Paystack processing the withdrawal...")
 
-            # print("Paystack processing the withdrawal...")
+        # Perform the withdrawal to the local bank using Paystack API
+        paystack_response = make_withdrawal_through_paystack(
+            user, target_bank_account, withdrawal_amount
+        )
+        print("Paystack API Response:", paystack_response)
 
-            # Perform the withdrawal to the local bank using Paystack API
-            paystack_response = make_withdrawal_through_paystack(
-                user, target_bank_account, withdrawal_amount
-            )
+        if paystack_response.get("status"):  # This checks if it's truthy
+            # Deduct the total amount (including service charge) from the source account
+            # Convert total_amount to Decimal
             print("Paystack API Response:", paystack_response)
 
-            if paystack_response.get("status"):  # This checks if it's truthy
-                # Deduct the total amount (including service charge) from the source account
-                # Convert total_amount to Decimal
-                print("Paystack API Response:", paystack_response)
+            # Update the transaction database table.
+            transaction = Transaction(
+                user=user,
+                transaction_type="debit",
+                amount=withdrawal_amount,
+                service_charge=service_charge,
+                total_amount=amount,
+                date=timezone.now().date(),
+                time=timezone.now().time(),
+                description=f"Withdrawal [{source_account.capitalize()} > Bank] (Successful)",
+                transaction_id=transaction_id,
+            )
+            transaction.save()
 
-                # Update the transaction database table.
-                transaction = Transaction(
-                    user=user,
-                    transaction_type="debit",
-                    amount=withdrawal_amount,
-                    service_charge=service_charge,
-                    total_amount=amount,
-                    date=timezone.now().date(),
-                    time=timezone.now().time(),
-                    description=f"Withdrawal [{source_account.capitalize()} > Bank] (Successful)",
-                    transaction_id=transaction_id,
-                )
-                transaction.save()
+            bank_name = target_bank_account.bank_name
+            # Send a confirmation email to the user
+            subject = f"Withdrawal from {source_account.capitalize()} Successful!"
+            message = f"Hi {user.first_name},\n\nYour withdrawal of ₦{amount} from your {source_account.capitalize()} account has been sent to your {bank_name} account successfully.\n\nThank you for using MyFund.\n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+            from_email = "MyFund <info@myfundmobile.com>"
+            recipient_list = [user.email]
 
-                bank_name = target_bank_account.bank_name
-                # Send a confirmation email to the user
-                subject = f"Withdrawal from {source_account.capitalize()} Successful!"
-                message = f"Hi {user.first_name},\n\nYour withdrawal of ₦{amount} from your {source_account.capitalize()} account has been sent to your {bank_name} account successfully.\n\nThank you for using MyFund.\n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-                from_email = "MyFund <info@myfundmobile.com>"
-                recipient_list = [user.email]
-
-                send_mail(
-                    subject, message, from_email, recipient_list, fail_silently=False
-                )
-
-                return Response(
-                    {
-                        "success": True,
-                        "message": paystack_response.get("message"),
-                        "transaction_id": transaction_id,
-                        "updated_balance": updated_balance,
-                    },
-                    status=status.HTTP_200_OK,
-                )
-            else:
-                print("Paystack withdrawal failed:", paystack_response)
-
-                return Response(
-                    {
-                        "error": "Withdrawal to local bank failed. Please try again later."
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-        else:
-            # Perform the withdrawal to the local bank through the Admin
-            response = make_withdrawal_through_admin(
-                user, withdrawal_amount, transaction_id
+            send_mail(
+                subject, message, from_email, recipient_list, fail_silently=False
             )
 
-            if response is not None:
-                return Response(
-                    {
-                        "success": True,
-                        "message": response.get("message"),
-                        "transaction_id": transaction_id,
-                        "updated_balance": updated_balance,
-                    },
-                    status=status.HTTP_200_OK,
-                )
-            else:
-                return Response(
-                    {
-                        "error": "Withdrawal to local bank failed. Please try again later."
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+            return Response(
+                {
+                    "success": True,
+                    "message": paystack_response.get("message"),
+                    "transaction_id": transaction_id,
+                    "updated_balance": updated_balance,
+                },
+                status=status.HTTP_200_OK,
+            )
+        else:
+            print("Paystack withdrawal failed:", paystack_response)
+
+            return Response(
+                {
+                    "error": "Withdrawal to local bank failed. Please try again later.",
+                    "transaction_id": transaction_id,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    except IntegrityError:
+        # Handle the case where a unique constraint (transaction_id) is violated
+        return Response(
+            {"error": "Transaction ID conflict. Please try again."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        return Response(
+            {"error": "An internal error occurred. Please try again later."},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def process_withdrawal_to_local_bank(request):
+    user = request.user
+    source_account = request.data.get(
+        "source_account", ""
+    )  # 'savings', 'investment', 'wallet'
+
+    # when source_account is not provided
+    if not source_account:
+        return Response(
+            {"error": '"source_account" was NOT provided.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+        
+    target_bank_account_id = request.data.get("target_bank_account_id", "")
+    # when target_bank_account_id is not provided
+    if not target_bank_account_id:
+        return Response(
+            {"error": '"target_bank_account_id" was NOT provided.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+        
+    transaction_id = request.data.get("transaction_id", "")
+    # when target_bank_account_id is not provided
+    if not transaction_id:
+        return Response(
+            {"error": '"transaction_id" was NOT provided.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+        
+    # when amount is not provided
+    if not request.data.get("amount", 0):
+        return Response(
+            {"error": '"amount" was NOT provided.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    amount = Decimal(request.data.get("amount", 0))
+
+    # Validate that the user has enough balance in the source account
+    if source_account == "savings" and user.savings < amount:
+        # print(f"user.savings({user.savings}) < withdrawal amount({amount})")
+        return Response(
+            {"error": "Insufficient savings balance."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    elif source_account == "investment" and user.investment < amount:
+        return Response(
+            {"error": "Insufficient investment balance."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    elif source_account == "wallet" and user.wallet < amount:
+        return Response(
+            {"error": "Insufficient wallet balance."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Validate that the target_bank_account_id belongs to the user
+    try:
+        target_bank_account = BankAccount.objects.get(
+            id=target_bank_account_id, user=user
+        )
+    except BankAccount.DoesNotExist:
+        return Response(
+            {"error": "Target bank account not found."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+
+    try:
+        # Perform the withdrawal to the local bank through the Admin
+        response = make_withdrawal_through_admin(
+            user, amount, transaction_id
+        )
+            
+        print("make_withdrawal_through_admin Response:", response)
+
+        if response:  # This checks if it's truthy
+
+            return Response(
+                {
+                    "success": True,
+                    "message": response.get("message"),
+                    "transaction_id": transaction_id
+                },
+                status=status.HTTP_200_OK,
+            )
+        else:
+
+            return Response(
+                {
+                    "error": "An error occured while processing your withdrawal. Please, try again."
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
     except IntegrityError:
         # Handle the case where a unique constraint (transaction_id) is violated
@@ -2628,25 +2707,11 @@ def make_withdrawal_through_admin(user, amount, transaction_id):
         # Send a pending quicksave email to the user
         user_subject = "Withdrawal Pending..."
         user_message = f"Hi {user.first_name},\n\nYour withdrawal of ₦{amount} is pending approval. We will notify you once it's processed. \n\nThank you for using MyFund. \n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-        user_email = user.email
+        user_email = [user.email]
 
         send_mail(
-            user_subject, user_message, from_email, [user_email], fail_silently=False
+            user_subject, user_message, from_email, user_email, fail_silently=False
         )
-
-        # # Create a pending transaction for the user with date and time
-        # current_datetime = timezone.now()  # Get the current date and time
-
-        # transaction = Transaction.objects.create(
-        #     user=user,
-        #     transaction_type="pending",
-        #     amount=amount,
-        #     date=current_datetime.date(),  # Set the date to the current date
-        #     time=current_datetime.time(),  # Set the time to the current time
-        #     description="Withdrawal {source_account.capitalize()} > Bank} (Pending)",
-        #     transaction_id=str(uuid.uuid4())[:10],
-        # )
-        # transaction.save()
 
         return {"message": "Withdrawal request created and pending admin approval"}
 
