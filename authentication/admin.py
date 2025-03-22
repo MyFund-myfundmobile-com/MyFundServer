@@ -664,22 +664,28 @@ class AutoInvestAdmin(admin.ModelAdmin):
     list_display = ("id", "user", "frequency", "amount", "active")
 
 
+from django.contrib import admin
+from .models import Transaction
+
+
 class TransactionAdmin(admin.ModelAdmin):
     list_display = (
         "user",
         "transaction_type",
+        "status",  # Added status here
         "amount",
         "date",
         "time",
         "description",
         "transaction_id",
     )
-    list_filter = ("transaction_type", "date")
+    list_filter = ("transaction_type", "status", "date")  # Added status filter
     search_fields = (
         "user__email",
         "description",
         "transaction_id",
         "transaction_type",
+        "status",  # Allow searching by status
         "amount",
     )
 
