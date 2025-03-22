@@ -19,6 +19,10 @@ from rest_framework.decorators import api_view, permission_classes
 from django.db.models import Sum
 from django.contrib.auth.hashers import make_password, check_password
 from django.db import transaction
+import logging
+from django.db.models import F
+
+logger = logging.getLogger(__name__)
 
 
 class CustomUserManager(BaseUserManager):
@@ -127,6 +131,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     is_superuser = models.BooleanField(default=False)
 
     is_hired_referrer = models.BooleanField(default=False)
+    is_ambassador = models.BooleanField(default=False)
 
     objects = CustomUserManager()
 
@@ -526,62 +531,74 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         msg.send()
 
     def confirm_referral_rewards(self, is_referrer):
-        if self.savings >= 20000 or self.investment > 0:
-            if self.referral:  # Ensure referral exists
-                transaction_id = str(uuid.uuid4())[:10]
+        if self.referral:  # Ensure the user has a referrer
+            # Check if it's the first time savings hit ₦20,000 or investments hit ₦100,000
+            first_time_savings_threshold = (
+                self.savings >= 20000 and (self.savings - 20000) < 500
+            )
+            first_time_investment_threshold = (
+                self.investment >= 100000 and (self.investment - 100000) < 500
+            )
 
-                # Credit referrer if applicable
-                if is_referrer:
-                    Transaction.objects.create(
-                        user=self.referral,
-                        transaction_type="credit",
-                        amount=500,
-                        description="Referral Reward (Confirmed)",
-                        transaction_id=transaction_id,
+            if first_time_savings_threshold or first_time_investment_threshold:
+
+                # Update referred user's pending transaction to confirmed
+                referred_transaction = Transaction.objects.filter(
+                    user=self, transaction_type="credit", status="pending"
+                ).first()
+
+                if referred_transaction:
+                    referred_transaction.status = "confirmed"
+                    referred_transaction.description = "Referral Reward"
+                    referred_transaction.save()
+
+                    # Ensure wallet and transaction amounts match correctly
+                    self.wallet = self.wallet + referred_transaction.amount
+                    self.pending_referral_reward = (
+                        self.pending_referral_reward - referred_transaction.amount
+                    )
+                    self.save(update_fields=["wallet", "pending_referral_reward"])
+
+                # Update referrer's pending transaction to confirmed
+                referrer_transaction = Transaction.objects.filter(
+                    user=self.referral,
+                    referral_email=self.email,  # Ensure it's the correct referral reward transaction
+                    transaction_type="credit",
+                    status="pending",
+                ).first()
+
+                if referrer_transaction:
+                    referrer_transaction.status = "confirmed"
+                    referrer_transaction.description = "Referral Reward"
+                    referrer_transaction.save()
+
+                    # Ensure wallet and transaction amounts match correctly
+                    self.referral.wallet = (
+                        self.referral.wallet + referrer_transaction.amount
+                    )
+                    self.referral.pending_referral_reward = (
+                        self.referral.pending_referral_reward
+                        - referrer_transaction.amount
+                    )
+                    self.referral.save(
+                        update_fields=["wallet", "pending_referral_reward"]
                     )
 
-                    # Deduct the credited amount from the pending referral rewards
-                    self.pending_referral_reward -= 500
-                    self.wallet += 500
-
-                    if not self.referral.is_hired_referrer:
-                        self.referral.pending_referral_reward -= 500
-                        self.referral.wallet += 500
-
-                    # Save the changes to the database for both users
-                    self.save()
-                    self.referral.save()
-
-                # Credit referred user
-                Transaction.objects.create(
-                    user=self,
-                    transaction_type="credit",
-                    amount=500,
-                    description="Referral Reward (Confirmed)",
-                    transaction_id=transaction_id,
-                )
-
-                # Update referred user wallet
-                self.wallet += 500
-                self.save()
-
-                # Deduct the pending referral reward
-                self.pending_referral_reward -= 500
-                self.referral.pending_referral_reward -= 500
-                self.save()
-                self.referral.save()
-
-                # Send referral reward confirmation emails
-                self.send_confirmation_email(self.referral, is_referrer=True)
+                # Send confirmation emails
                 self.send_confirmation_email(self, is_referrer=False)
+                self.send_confirmation_email(self.referral, is_referrer=True)
+
+                logger.info(
+                    f"Referral rewards confirmed for {self.email} and {self.referral.email}"
+                )
 
     def send_confirmation_email(self, user, is_referrer):
         if is_referrer:
-            subject = f"Congrats!🎊🥂 Referral Reward Confirmed!"
-            message = f"Congratulations {user.first_name},\n\nYou have received a referral reward of ₦500.00 in your wallet thanks to your referral.\n\nThank you for using MyFund!\n\nKeep growing your funds.🥂\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-        else:
             subject = f"Congrats!🎊🥂 Referral Reward for {self.first_name} Confirmed!"
-            message = f"Congratulations {self.first_name},\n\nYou have received a referral reward of ₦500.00 in your wallet for referring {user.first_name}.\n\nThank you for using MyFund and referring others!\n\nKeep growing your funds.🥂\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+            message = f"Congratulations {user.first_name},\n\nYou have received a referral reward of ₦500.00 in your wallet for referring {self.first_name}.\n\nThank you for using MyFund and referring others!\n\nKeep growing your funds.🥂\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+        else:
+            subject = f"Congrats!🎊🥂 Referral Reward Confirmed!"
+            message = f"Congratulations {self.first_name}, \n\nYou have received a referral reward of ₦500.00 in your wallet thanks to your referral.\n\nThank you for using MyFund!\n\nKeep growing your funds.🥂\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
 
         from_email = "MyFund <info@myfundmobile.com>"
         recipient_list = [user.email]
@@ -775,26 +792,36 @@ class Transaction(models.Model):
     TRANSACTION_TYPES = (
         ("credit", "Credit"),
         ("debit", "Debit"),
+    )
+
+    STATUS_TYPES = (
         ("pending", "Pending"),
         ("confirmed", "Confirmed"),
         ("failed", "Failed"),
     )
 
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
-    transaction_type = models.CharField(max_length=10, choices=TRANSACTION_TYPES)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, db_index=True
+    )
+    transaction_type = models.CharField(
+        max_length=20, choices=TRANSACTION_TYPES
+    )  # ⬅ Increase max_length
+    status = models.CharField(
+        max_length=20, choices=STATUS_TYPES, default="pending"
+    )  # ⬅ Increase max_length
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     date = models.DateTimeField(auto_now_add=True)
     time = models.TimeField(auto_now_add=True)
     description = models.CharField(max_length=255, default="No description available")
-    transaction_id = models.CharField(max_length=50, default="", unique=True)
-    service_charge = models.DecimalField(
-        max_digits=10, decimal_places=2, default=0.0
-    )  # Define a default value
+    transaction_id = models.CharField(
+        max_length=255, unique=True, blank=False, null=False, db_index=True
+    )
+    service_charge = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
     total_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
     referral_email = models.EmailField(max_length=255, blank=True, null=True)
 
     def __str__(self):
-        return f"{self.transaction_type} - {self.amount} - {self.date}"
+        return f"{self.transaction_type} - {self.amount} - {self.status} - {self.date}"
 
 
 class AutoSave(models.Model):
@@ -918,7 +945,7 @@ class BankTransferRequest(models.Model):
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     is_approved = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
-    transaction_id = models.CharField(max_length=10, unique=False, default="")
+    transaction_id = models.CharField(max_length=50, unique=False, default="")
 
 
 class InvestTransferRequest(models.Model):
@@ -932,9 +959,14 @@ class InvestTransferRequest(models.Model):
 class WithdrawalsRequestToAdmin(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     amount = models.DecimalField(max_digits=10, decimal_places=2)
-    transaction_id = models.CharField(max_length=20, unique=False, default="")
+    transaction_id = models.CharField(max_length=50, unique=False, default="")
     is_approved = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    # Add missing fields
+    source_account = models.CharField(max_length=255, default="savings")
+    target_bank = models.CharField(max_length=100, default="Palmpay")
+    target_account_number = models.CharField(max_length=50, default="8033924595")
 
 
 from django.db import models
@@ -993,14 +1025,14 @@ class UserPassword(models.Model):
 
 class Group(models.Model):
     GROUP_STATUS = [
-        ("Active", "Active"),
-        ("Completed", "Completed"),
-        ("Failed", "Failed"),
+        ("active", "Active"),
+        ("completed", "Completed"),
+        ("failed", "Failed"),
     ]
 
     GROUP_TYPE = [
-        ("Public", "Public"),
-        ("Private", "Private"),
+        ("public", "Public"),
+        ("private", "Private"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -1040,9 +1072,16 @@ class Contribution(models.Model):
         ("Pending", "Pending"),
         ("Confirmed", "Confirmed"),
         ("Failed", "Failed"),
+        ("Refunded", "Refunded"),
     ]
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    SOURCE_CHOICES = [
+        ("Savings", "Savings"),
+        ("Investment", "Investment"),
+        ("Wallet", "Wallet"),
+    ]
+
+    id = models.AutoField(primary_key=True)
     group = models.ForeignKey(
         Group, on_delete=models.CASCADE, related_name="contributions"
     )
@@ -1051,7 +1090,35 @@ class Contribution(models.Model):
     )
     amount = models.DecimalField(max_digits=11, decimal_places=2, default=0)
     payment_status = models.CharField(max_length=10, choices=PAYMENT_STATUS)
+    source = models.CharField(max_length=10, choices=SOURCE_CHOICES)
+    ownership_percentage = models.DecimalField(
+        max_digits=5, decimal_places=2, default=0
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
-        return f"Contribution by {self.user.email} to Group {self.group.id} (Amount: {self.amount})"
+        return f"Contribution by {self.user.email} to Group {self.group.id} (Amount: {self.amount}, Source: {self.source}, Ownership: {self.ownership_percentage}%)"
+
+
+class SavingsGoal(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    name = models.CharField(max_length=255)
+    target_amount = models.DecimalField(max_digits=10, decimal_places=2)
+    saved_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    deadline = models.DateField()
+    auto_debit_enabled = models.BooleanField(
+        default=False
+    )  # Changed to auto_debit_enabled
+    contribution_type = models.CharField(
+        max_length=50,
+        choices=[
+            ("daily", "Daily"),
+            ("weekly", "Weekly"),
+            ("monthly", "Monthly"),
+        ],
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.name
