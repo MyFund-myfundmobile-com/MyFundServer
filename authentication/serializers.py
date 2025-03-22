@@ -366,14 +366,7 @@ from .models import Transaction
 class TransactionSerializer(serializers.ModelSerializer):
     class Meta:
         model = Transaction
-        fields = (
-            "transaction_type",
-            "amount",
-            "date",
-            "time",
-            "transaction_id",
-            "description",
-        )
+        fields = "__all__"
 
 
 class QuickSaveSerializer(serializers.Serializer):
@@ -461,36 +454,135 @@ class EmailTemplateSerializer(serializers.ModelSerializer):
     class Meta:
         model = EmailTemplate
         fields = "__all__"
-        
+
 
 from rest_framework import serializers
 from .models import Group
 from authentication.models import CustomUser
 
+
 class GroupSerializer(serializers.ModelSerializer):
     # You may want to serialize user-related fields as well. For example, including the creator's username.
     created_by = serializers.SerializerMethodField()
-    
+
     def get_created_by(self, obj):
         return obj.created_by.email
-    
-    # Customizing `invited_users` to return email instead of the primary key
+
+    # Customizing `invited_users` to return unique emails instead of the primary key
     invited_users = serializers.SerializerMethodField()
+
+    # Customizing `contributors` to return unique emails instead of the primary key
     contributors = serializers.SerializerMethodField()
 
     def get_invited_users(self, obj):
-        return [user.email for user in obj.invited_users.all()]  # Get emails of all invited users
+        return list(
+            set(user.email for user in obj.invited_users.all())
+        )  # Get unique emails of invited users
 
     def get_contributors(self, obj):
-        return [user.email for user in obj.contributors.all()]  # Get emails of all contributors
-    
-    status = serializers.ChoiceField(choices=Group.GROUP_STATUS)  # Assuming you have defined choices for status
-    group_type = serializers.ChoiceField(choices=Group.GROUP_TYPE)  # Assuming choices are defined for group type
+        return list(
+            set(user.email for user in obj.contributors.all())
+        )  # Get unique emails of contributors
+
+    status = serializers.ChoiceField(
+        choices=Group.GROUP_STATUS
+    )  # Assuming you have defined choices for status
+    group_type = serializers.ChoiceField(
+        choices=Group.GROUP_TYPE
+    )  # Assuming choices are defined for group type
     created_at = serializers.DateTimeField(read_only=True)
-    
+
     class Meta:
         model = Group
-        fields = ['id', 'property_id', 'created_by', 'goal_amount', 'minimum_contribution', 'total_raised', 'status', 'group_type', 
-                  'invited_users', 'contributors', 'deadline', 'created_at']
-        # Exclude 'invited_users' and 'contributors' for public groups if you want
+        fields = [
+            "id",
+            "property_id",
+            "created_by",
+            "goal_amount",
+            "minimum_contribution",
+            "total_raised",
+            "status",
+            "group_type",
+            "invited_users",
+            "contributors",
+            "deadline",
+            "created_at",
+        ]
 
+
+# from rest_framework import serializers
+from .models import Contribution
+
+# from django.contrib.auth import get_user_model
+
+# User = get_user_model()
+
+
+class ContributionSerializer(serializers.ModelSerializer):
+    # Serializing the user field to return the user's email
+    user_email = serializers.SerializerMethodField()
+
+    def get_user_email(self, obj):
+        return obj.user.email  # Return user's email
+
+    # Serializing the group field to return the group id or name (can be customized)
+    group_id = serializers.SerializerMethodField()
+
+    def get_group_id(self, obj):
+        return (
+            obj.group.id
+        )  # Return group ID (you could customize this to return other group info)
+
+    # Choice fields for payment_status and source
+    payment_status = serializers.ChoiceField(choices=Contribution.PAYMENT_STATUS)
+    source = serializers.ChoiceField(choices=Contribution.SOURCE_CHOICES)
+
+    # If you want to include the ownership percentage, assuming it exists
+    ownership_percentage = serializers.SerializerMethodField()
+
+    def get_ownership_percentage(self, obj):
+        if obj.group.total_raised > 0:
+            # Calculate the ownership percentage
+            return (obj.amount / obj.group.goal_amount) * 100
+        return 0.0
+
+    # Created date field
+    created_at = serializers.DateTimeField(read_only=True)
+
+    class Meta:
+        model = Contribution
+        fields = [
+            "id",
+            "group_id",
+            "user_email",
+            "amount",
+            "payment_status",
+            "source",
+            "ownership_percentage",
+            "created_at",
+        ]
+
+
+from .models import SavingsGoal
+
+
+class SavingsGoalSerializer(serializers.ModelSerializer):
+
+    user = serializers.SerializerMethodField()
+
+    def get_user(self, obj):
+        return obj.user.email  # Return user's email
+
+    class Meta:
+        model = SavingsGoal
+        fields = [
+            "id",
+            "user",
+            "name",
+            "target_amount",
+            "saved_amount",
+            "deadline",
+            "auto_debit_enabled",
+            "contribution_type",
+            "created_at",
+        ]

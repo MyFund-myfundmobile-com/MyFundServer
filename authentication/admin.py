@@ -84,6 +84,7 @@ class CustomUserAdmin(UserAdmin):
         "user_percentage_to_top_saver",
         "how_did_you_hear",
         "is_hired_referrer",
+        "is_ambassador",
     )
     list_filter = (
         "is_staff",
@@ -92,6 +93,7 @@ class CustomUserAdmin(UserAdmin):
         "how_did_you_hear",
         "date_joined",
         "is_hired_referrer",
+        "is_ambassador",
     )
     actions = [
         "send_custom_email",
@@ -99,6 +101,7 @@ class CustomUserAdmin(UserAdmin):
         "approve_kyc",
         "reject_kyc",
         "make_hired_referrer",
+        "make_ambassador",
     ]
 
     fieldsets = (
@@ -162,6 +165,9 @@ class CustomUserAdmin(UserAdmin):
 
     def make_hired_referrer(self, request, queryset):
         updated_count = queryset.update(is_hired_referrer=True)
+
+    def make_ambassador(self, request, queryset):
+        updated_count = queryset.update(is_ambassador=True)
 
     def view_kyc_details(self, request, queryset):
         if queryset.count() == 1:
@@ -376,98 +382,61 @@ import uuid
 class BankTransferRequestAdmin(admin.ModelAdmin):
     list_display = ("user", "amount", "is_approved", "created_at")
     list_filter = ("is_approved",)
-    actions = ["approve_bank_transfer", "reject_bank_transfer"]
+    search_fields = ("user__email", "transaction_id", "amount")
+    actions = ["approve_bank_transfer"]
 
     def approve_bank_transfer(self, request, queryset):
-        approved_users = []
-
         for transfer_request in queryset:
+            user = transfer_request.user
+            transaction_id = transfer_request.transaction_id
+
+            # ✅ Check for existing pending transaction using transaction_id
+            transaction = Transaction.objects.filter(
+                user=user, transaction_id=transaction_id, status="pending"
+            ).first()
+
+            if transaction:
+                # ✅ Update transaction status
+                transaction.status = "confirmed"
+                transaction.description = "QuickSave (Transfer)"
+                transaction.save()
+            else:
+                # ❌ Log error if transaction is not found
+                print(
+                    f"❌ ERROR: Pending transaction {transaction_id} not found for {user.email}"
+                )
+                self.message_user(
+                    request,
+                    f"Pending transaction {transaction_id} not found for {user.email}!",
+                    level="error",
+                )
+                continue  # Skip processing this request
+
+            # ✅ Approve the transfer request
             transfer_request.is_approved = True
             transfer_request.save()
 
-            user = transfer_request.user
+            # ✅ Update user savings
             user.savings += int(transfer_request.amount)
             user.save()
 
-            # Create a transaction record
-            transaction = Transaction.objects.create(
-                user=user,
-                transaction_type="credit",
-                amount=transfer_request.amount,
-                date=timezone.now().date(),
-                time=timezone.now().time(),
-                description="QuickSave (Confirmed)",
-                transaction_id=str(uuid.uuid4())[:10],
-            )
+            # Call the confirm_referral_rewards method here
+            is_referrer = True
+            user.confirm_referral_rewards(is_referrer=is_referrer)
 
-            # Save the transaction
-            transaction.save()
-
-            # Send approval email
-            subject = "QuickSave Updated! ✔"
-            message = f"Hi {user.first_name},\n\nYour bank transfer for ₦{transfer_request.amount} has been approved!"
-            send_mail(subject, message, "MyFund <info@myfundmobile.com>", [user.email])
-
-            approved_users.append(user)
-
-            # Update total savings this month
+            # After processing an investment transfer transaction
             user.update_total_savings_and_investment_this_month()
 
-            # Check if user crossed referral reward threshold
-            if user.savings >= 20000 or user.investment >= 100000:
-                user.confirm_referral_rewards(is_referrer=False)  # For referred user
-
-                if user.referral:
-                    # Confirm and apply reward for referrer
-                    user.referral.confirm_referral_rewards(is_referrer=True)
-
-                    # Deduct the pending reward for both users
-                    user.pending_referral_reward -= 500
-                    user.referral.pending_referral_reward -= 500
-                    user.save()
-                    user.referral.save()
-
-                    # Send referral reward confirmation emails
-                    user.send_confirmation_email(user.referral, is_referrer=True)
-                    user.send_confirmation_email(user, is_referrer=False)
-
-        # Referral email notifications
-        for user in approved_users:
-            if user.savings >= 20000 or user.investment >= 100000:
-                if user.referral:
-                    # Notify referrer of the confirmed reward
-                    user.send_confirmation_email(user.referral, is_referrer=True)
-
-                # Notify referred user of their confirmed reward
-                user.send_confirmation_email(user, is_referrer=False)
-
-    approve_bank_transfer.short_description = "Approve selected bank transfers"
-
-    def reject_bank_transfer(self, request, queryset):
-        for transfer_request in queryset:
-            user = transfer_request.user
-
-            # Create a transaction record
-            transaction = Transaction.objects.create(
-                user=user,
-                transaction_type="debit",
-                amount=transfer_request.amount,
-                date=timezone.now().date(),
-                time=timezone.now().time(),
-                description="QuickSave (Failed)",
-                transaction_id=str(uuid.uuid4())[:10],
-            )
-            transaction.save()
-
-            # Send a rejection email to the user
-            subject = "QuickSave Failed!"
-            message = f"Hi {transfer_request.user.first_name}, \n\nYour bank transfer request for ₦{transfer_request.amount} could not be confirmed. Kindly check and try again.\n\nThank you for using MyFund."
+            # ✅ Send Approval Email
+            subject = "QuickSave Updated! ✔"
+            message = f"Hi {user.first_name},\n\nYour bank transfer of ₦{transfer_request.amount} has been approved and added to your savings!\n\Keep growing your funds! \n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
             send_mail(subject, message, "MyFund <info@myfundmobile.com>", [user.email])
 
-            # Delete the rejected request
-            transfer_request.delete()
+        self.message_user(
+            request, "Selected bank transfers approved successfully!", level="success"
+        )
 
-    reject_bank_transfer.short_description = "Reject selected bank transfers"
+    approve_bank_transfer.short_description = "Approve selected bank transfers"
 
 
 @admin.register(InvestTransferRequest)
@@ -549,76 +518,88 @@ class InvestTransferRequestAdmin(admin.ModelAdmin):
     reject_invest_transfer.short_description = "Reject selected investment transfers"
 
 
+from django.contrib import admin
+from django.db import transaction as db_transaction
+from django.core.mail import send_mail
+from .models import WithdrawalsRequestToAdmin, Transaction
+
+
 @admin.register(WithdrawalsRequestToAdmin)
 class PendingWithdrawalsAdmin(admin.ModelAdmin):
-    list_display = ("user", "amount", "is_approved", "created_at")
+    list_display = (
+        "user",
+        "amount",
+        "target_bank",
+        "target_account_number",
+        "transaction_id",
+        "is_approved",
+        "created_at",
+    )
     list_filter = ("is_approved",)
-    actions = ["approve_withdrawal", "reject_withdrawal"]
+    search_fields = (
+        "user__email",
+        "transaction_id",
+        "target_bank",
+        "target_account_number",
+    )
+    actions = ["approve_withdrawal"]
 
     def approve_withdrawal(self, request, queryset):
         for withdrawal_request in queryset:
-            withdrawal_request.is_approved = True
-            withdrawal_request.save()
-
             user = withdrawal_request.user
+            amount = withdrawal_request.amount
+            transaction_id = withdrawal_request.transaction_id
 
-            # Assuming the withdrawal is subtracted from the user's savings
-            # user.savings -= int(withdrawal_request.amount)
-            # user.save()
+            # Skip already approved requests
+            if withdrawal_request.is_approved:
+                continue
 
-            # Create a debit transaction for the withdrawal
-            transaction = Transaction.objects.create(
-                user=user,
-                transaction_type="debit",  # Debiting the savings
-                amount=withdrawal_request.amount,
-                date=timezone.now().date(),
-                time=timezone.now().time(),
-                description="Withdrawal (Approved)",
-                transaction_id=str(uuid.uuid4())[:16],  # Full UUID for uniqueness
-            )
+            with db_transaction.atomic():  # Ensure consistency
+                # Deduct amount from user's balance
+                if withdrawal_request.source_account == "savings":
+                    user.savings -= amount
+                elif withdrawal_request.source_account == "investment":
+                    user.investment -= amount
+                elif withdrawal_request.source_account == "wallet":
+                    user.wallet -= amount
 
-            # Send an approval email
-            subject = "Withdrawal Approved! ✔"
-            message = f"Hi {user.first_name}, \n\nYour withdrawal request of ₦{withdrawal_request.amount} has been approved and pay to your bank account.\n\nThank you for using MyFund."
-            from_email = "MyFund <info@myfundmobile.com>"
-            recipient_list = [user.email]
-            send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+                user.save()
 
-            # Update the user's monthly totals after approval
-            user.update_total_savings_and_investment_this_month()
+                # Mark withdrawal as approved
+                withdrawal_request.is_approved = True
+                withdrawal_request.save()
 
-    approve_withdrawal.short_description = "Approve selected withdrawals"
+                # Update the transaction record's status
+                try:
+                    transaction = Transaction.objects.get(
+                        user=user, transaction_id=transaction_id
+                    )
+                    transaction.status = "confirmed"  # Correct field update
+                    transaction.save()
+                except Transaction.DoesNotExist:
+                    self.message_user(
+                        request,
+                        f"Transaction {transaction_id} not found for user {user.email}!",
+                        level="error",
+                    )
+                    continue  # Skip this withdrawal if no matching transaction exists
 
-    def reject_withdrawal(self, request, queryset):
-        for withdrawal_request in queryset:
-            user = withdrawal_request.user
+                # Send email notification
+                subject = "Withdrawal Approved! ✔"
+                message = (
+                    f"Hi {user.first_name},\n\n"
+                    f"Your withdrawal of ₦{amount} to {withdrawal_request.target_bank} "
+                    f"({withdrawal_request.target_account_number}) has been processed successfully!\n\n"
+                    f"Thank you for using MyFund.\n\n"
+                    f"MyFund\nSave, Buy Properties, Earn Rent\n"
+                    f"www.myfundmobile.com\n"
+                    f"13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+                )
+                send_mail(
+                    subject, message, "MyFund <message@myfundmobile.com>", [user.email]
+                )
 
-            # Assuming the withdrawal is subtracted from the user's savings
-            user.savings += int(withdrawal_request.amount)
-            user.save()
-
-            # Create a transaction record for rejection (e.g., no actual debit but tracking failure)
-            transaction = Transaction.objects.create(
-                user=user,
-                transaction_type="debit",
-                amount=withdrawal_request.amount,
-                date=timezone.now().date(),
-                time=timezone.now().time(),
-                description="Withdrawal (Rejected)",
-                transaction_id=str(uuid.uuid4())[:16],
-            )
-
-            # Send a rejection email
-            subject = "Withdrawal Request Rejected ❌"
-            message = f"Hi {user.first_name}, \n\nYour withdrawal request of ₦{withdrawal_request.amount} was not approved. Please check your account details and try again.\n\nThank you for using MyFund."
-            from_email = "MyFund <info@myfundmobile.com>"
-            recipient_list = [user.email]
-            send_mail(subject, message, from_email, recipient_list, fail_silently=False)
-
-            # Mark the withdrawal request as rejected instead of deleting it
-            withdrawal_request.delete()
-
-    reject_withdrawal.short_description = "Reject selected withdrawals"
+        self.message_user(request, "Selected withdrawals have been approved.")
 
 
 @admin.register(Message)
@@ -701,6 +682,12 @@ class TransactionAdmin(admin.ModelAdmin):
         "transaction_type",
         "amount",
     )
+
+    def save_model(self, request, obj, form, change):
+        print(
+            f"DEBUG: Saving transaction: {obj.transaction_type} (Length: {len(obj.transaction_type)})"
+        )
+        super().save_model(request, obj, form, change)
 
 
 class PropertyAdmin(admin.ModelAdmin):
