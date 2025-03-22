@@ -60,6 +60,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     email = models.EmailField(unique=True)
     phone_number = models.CharField(max_length=15)
     referral = models.CharField(max_length=40, blank=True, null=True)
+    referral_reward_granted = models.BooleanField(default=False)
     otp = models.CharField(max_length=6, blank=True, null=True)
     reset_token = models.CharField(max_length=64, null=True, blank=True)
     reset_token_expires = models.DateTimeField(null=True, blank=True)
@@ -531,16 +532,17 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         msg.send()
 
     def confirm_referral_rewards(self, is_referrer):
-        if self.referral:  # Ensure the user has a referrer
-            # Check if it's the first time savings hit ₦20,000 or investments hit ₦100,000
-            first_time_savings_threshold = (
-                self.savings >= 20000 and (self.savings - 20000) < 500
-            )
-            first_time_investment_threshold = (
-                self.investment >= 100000 and (self.investment - 100000) < 500
-            )
+        if (
+            self.referral and not self.referral_reward_granted
+        ):  # Ensure the user has a referrer and hasn't received the reward before
+            # Check if savings or investment has crossed the threshold for the first time
+            first_time_savings_threshold = self.savings >= 20000
+            first_time_investment_threshold = self.investment >= 100000
 
             if first_time_savings_threshold or first_time_investment_threshold:
+                # Mark referral reward as granted to prevent duplicate credits
+                self.referral_reward_granted = True
+                self.save(update_fields=["referral_reward_granted"])
 
                 # Update referred user's pending transaction to confirmed
                 referred_transaction = Transaction.objects.filter(
@@ -553,10 +555,8 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                     referred_transaction.save()
 
                     # Ensure wallet and transaction amounts match correctly
-                    self.wallet = self.wallet + referred_transaction.amount
-                    self.pending_referral_reward = (
-                        self.pending_referral_reward - referred_transaction.amount
-                    )
+                    self.wallet += referred_transaction.amount
+                    self.pending_referral_reward -= referred_transaction.amount
                     self.save(update_fields=["wallet", "pending_referral_reward"])
 
                 # Update referrer's pending transaction to confirmed
@@ -573,13 +573,8 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                     referrer_transaction.save()
 
                     # Ensure wallet and transaction amounts match correctly
-                    self.referral.wallet = (
-                        self.referral.wallet + referrer_transaction.amount
-                    )
-                    self.referral.pending_referral_reward = (
-                        self.referral.pending_referral_reward
-                        - referrer_transaction.amount
-                    )
+                    self.referral.wallet += referrer_transaction.amount
+                    self.referral.pending_referral_reward -= referrer_transaction.amount
                     self.referral.save(
                         update_fields=["wallet", "pending_referral_reward"]
                     )
