@@ -446,76 +446,59 @@ class InvestTransferRequestAdmin(admin.ModelAdmin):
     actions = ["approve_invest_transfer", "reject_invest_transfer"]
 
     def approve_invest_transfer(self, request, queryset):
-        approved_users = []
+        for transfer_request in queryset:
+            user = transfer_request.user
+            transaction_id = transfer_request.transaction_id
 
-        for request in queryset:
-            request.is_approved = True
-            request.save()
+            # ✅ Check for existing pending transaction using transaction_id
+            transaction = Transaction.objects.filter(
+                user=user, transaction_id=transaction_id, status="pending"
+            ).first()
 
-            # Update user's investment
-            user = request.user
-            user.investment += int(request.amount)
+            if transaction:
+                # ✅ Update transaction status
+                transaction.status = "confirmed"
+                transaction.description = "QuickInvest (Transfer)"
+                transaction.save()
+            else:
+                # ❌ Log error if transaction is not found
+                print(
+                    f"❌ ERROR: Pending transaction {transaction_id} not found for {user.email}"
+                )
+                self.message_user(
+                    request,
+                    f"Pending transaction {transaction_id} not found for {user.email}!",
+                    level="error",
+                )
+                continue  # Skip processing this request
+
+            # ✅ Approve the transfer request
+            transfer_request.is_approved = True
+            transfer_request.save()
+
+            # ✅ Update user's investment
+            user.investment += int(transfer_request.amount)
             user.save()
 
             # Call the confirm_referral_rewards method here
             is_referrer = True
             user.confirm_referral_rewards(is_referrer=is_referrer)
 
-            # Create a transaction record
-            transaction = Transaction.objects.create(
-                user=user,
-                transaction_type="credit",
-                amount=request.amount,
-                date=timezone.now().date(),
-                time=timezone.now().time(),
-                description=f"QuickInvest (Confirmed)",
-                transaction_id=str(uuid.uuid4())[:10],
-            )
-            transaction.save()
-
-            # Send an approval email to the user
-            subject = "QuickInvest Updated! ✔"
-            message = f"Hi {user.first_name}, \n\nYour investment transfer request for ₦{request.amount} has been approved and credited to your INVESTMENT account!\n\nThank you for using MyFund. \n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-            from_email = "MyFund <info@myfundmobile.com>"
-            recipient_list = [user.email]
-
-            send_mail(subject, message, from_email, recipient_list, fail_silently=False)
-
-            approved_users.append(user)
-
             # After processing an investment transfer transaction
             user.update_total_savings_and_investment_this_month()
 
+            # ✅ Send Approval Email
+            subject = "QuickInvest Updated! ✔"
+            message = f"Hi {user.first_name},\n\nYour investment transfer of ₦{transfer_request.amount} has been approved and added to your investments!\n\nKeep growing your funds! \n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+            send_mail(subject, message, "MyFund <info@myfundmobile.com>", [user.email])
+
+        self.message_user(
+            request,
+            "Selected investment transfers approved successfully!",
+            level="success",
+        )
+
     approve_invest_transfer.short_description = "Approve selected investment transfers"
-
-    def reject_invest_transfer(self, request, queryset):
-        for request in queryset:
-            user = request.user
-
-            # Create a transaction record
-            transaction = Transaction.objects.create(
-                user=user,
-                transaction_type="debit",
-                amount=request.amount,
-                date=timezone.now().date(),
-                time=timezone.now().time(),
-                description=f"QuickInvest (Failed)",
-                transaction_id=str(uuid.uuid4())[:10],
-            )
-            transaction.save()
-
-            # Send a rejection email to the user
-            subject = "QuickInvest Failed. ❌"
-            message = f"Hi {request.user.first_name}, \n\nYour investment transfer request for ₦{request.amount} could not be confirmed. Kindly check and try again.\n\nThank you for using MyFund. \n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-            from_email = "MyFund <info@myfundmobile.com>"
-            recipient_list = [request.user.email]
-
-            send_mail(subject, message, from_email, recipient_list, fail_silently=False)
-
-            # Delete the rejected request
-            request.delete()
-
-    reject_invest_transfer.short_description = "Reject selected investment transfers"
 
 
 from django.contrib import admin
@@ -574,8 +557,10 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
                     transaction = Transaction.objects.get(
                         user=user, transaction_id=transaction_id
                     )
-                    transaction.status = "confirmed"  # Correct field update
-                    transaction.save()
+                    transaction.status = "confirmed"  # Update status
+                    transaction.description = f"{withdrawal_request.source_account.capitalize()} > Bank"  # Fix description update
+                    transaction.save()  # Save changes
+
                 except Transaction.DoesNotExist:
                     self.message_user(
                         request,

@@ -1373,7 +1373,7 @@ def quicksave(request):
 
     response = requests.post(paystack_url, json=payload, headers=headers)
     paystack_response = response.json()
-    print(paystack_response)
+    print("Paystack Response:", paystack_response)
 
     if paystack_response.get("status"):
         user = request.user
@@ -1381,14 +1381,13 @@ def quicksave(request):
         paystack_reference = paystack_response["data"]["reference"]
         paystack_status = paystack_response["data"]["status"]
 
-        #     Create a transaction record
+        # Create a transaction record with separate transaction_type and status
         Transaction.objects.create(
             user=user,
-            transaction_type="pending",
+            transaction_type="credit",
+            status="confirmed",
             amount=int(amount),
-            date=timezone.now().date(),
-            time=timezone.now().time(),
-            description="QuickSave (pending)",
+            description="QuickSave (Card)",
             transaction_id=paystack_reference,
         )
 
@@ -1404,7 +1403,9 @@ def quicksave(request):
                 status=status.HTTP_200_OK,
             )
         else:
-            paystack_display_text = paystack_response["data"]["display_text"]
+            paystack_display_text = paystack_response.get("data", {}).get(
+                "gateway_response", "No display text found"
+            )
 
             return Response(
                 {
@@ -1768,14 +1769,16 @@ def quickinvest(request):
         paystack_display_text = paystack_response["data"]["display_text"]
         paystack_status = paystack_response["data"]["status"]
 
+        # Determine transaction status based on Paystack response status
+        transaction_status = "confirmed" if paystack_status == "success" else "pending"
+
         # Create a transaction record
         Transaction.objects.create(
             user=user,
-            transaction_type="pending",
+            transaction_type="credit",
+            status=transaction_status,  # Update status based on response
             amount=int(amount),
-            date=timezone.now().date(),
-            time=timezone.now().time(),
-            description="QuickInvest (pending)",
+            description="QuickInvest (Card)",
             transaction_id=paystack_reference,
         )
 
@@ -2119,24 +2122,28 @@ def savings_to_investment(request):
         debit_transaction = Transaction(
             user=user,
             transaction_type="debit",
+            status="confirmed",
             amount=amount,
-            date=timezone.now().date(),
-            time=timezone.now().time(),
-            description="Withdrawal (Savings > Investment)",
+            description="Savings > Investment",
             transaction_id=debit_transaction_id,
+            service_charge=0.0,  # Default
+            total_amount=amount,  # No extra charges
         )
+
         debit_transaction.save()
 
         # Create a credit transaction record
         credit_transaction = Transaction(
             user=user,
             transaction_type="credit",
-            amount=int(amount),
-            date=timezone.now().date(),
-            time=timezone.now().time(),
+            status="confirmed",
+            amount=amount,
             description="QuickInvest",
             transaction_id=credit_transaction_id,
+            service_charge=0.0,  # Default
+            total_amount=amount,  # No extra charges
         )
+
         credit_transaction.save()
 
         # Perform the savings to investment transfer
@@ -2149,56 +2156,6 @@ def savings_to_investment(request):
                 "message": "Savings to investment transfer successful.",
                 "debit_transaction_id": debit_transaction_id,
                 "credit_transaction_id": credit_transaction_id,
-            },
-            status=status.HTTP_200_OK,
-        )
-
-    except IntegrityError:
-        # Handle the case where a unique constraint (transaction_id) is violated
-        return Response(
-            {"error": "Transaction ID conflict. Please try again."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-
-
-@api_view(["POST"])
-@permission_classes([IsAuthenticated])
-def investment_to_savings(request):
-    user = request.user
-    amount = Decimal(request.data.get("amount", 0))
-
-    # Validate that the user has enough investment balance
-    if user.investment < amount:
-        return Response(
-            {"error": "Insufficient investment balance."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-
-    # Generate a unique transaction ID
-    transaction_id = str(uuid.uuid4())[:16]
-
-    try:
-        # Create a transaction record with the details
-        transaction = Transaction(
-            user=user,
-            transaction_type="credit",  # Change to 'credit' for funds going back to savings
-            amount=amount,
-            date=timezone.now().date(),
-            time=timezone.now().time(),
-            description="Withdrawal (Investment > Savings)",  # Update description
-            transaction_id=transaction_id,
-        )
-        transaction.save()
-
-        # Perform the investment to savings transfer
-        user.investment -= amount
-        user.savings += amount  # Adjust savings
-        user.save()
-
-        return Response(
-            {
-                "message": "Investment to savings transfer successful.",
-                "transaction_id": transaction_id,
             },
             status=status.HTTP_200_OK,
         )
@@ -2228,17 +2185,29 @@ def wallet_to_savings(request):
     transaction_id = str(uuid.uuid4())[:16]
 
     try:
-        # Create a transaction record with the details
-        transaction = Transaction(
+        # Create a debit transaction for the wallet deduction
+        debit_transaction = Transaction(
             user=user,
-            transaction_type="credit",  # Debit for withdrawal
+            transaction_type="debit",
+            status="confirmed",
             amount=amount,
-            date=timezone.now().date(),
-            time=timezone.now().time(),
-            description="Withdrawal (Wallet > Savings)",
-            transaction_id=transaction_id,
+            total_amount=amount,
+            description="Wallet > Savings",
+            transaction_id=transaction_id + "-D",  # Append '-D' for clarity
         )
-        transaction.save()
+        debit_transaction.save()
+
+        # Create a credit transaction for the savings addition
+        credit_transaction = Transaction(
+            user=user,
+            transaction_type="credit",
+            status="confirmed",
+            amount=amount,
+            total_amount=amount,
+            description="QuickSave (Transfer)",
+            transaction_id=transaction_id + "-C",  # Append '-C' for clarity
+        )
+        credit_transaction.save()
 
         # Perform the wallet to savings transfer
         user.wallet -= amount
@@ -2278,17 +2247,29 @@ def wallet_to_investment(request):
     transaction_id = str(uuid.uuid4())[:16]
 
     try:
-        # Create a transaction record with the details
-        transaction = Transaction(
+        # Create a debit transaction for the wallet deduction
+        debit_transaction = Transaction(
             user=user,
-            transaction_type="debit",  # Debit for withdrawal
+            transaction_type="debit",
+            status="confirmed",
             amount=amount,
-            date=timezone.now().date(),
-            time=timezone.now().time(),
-            description="Withdrawal (Wallet > Investment)",
-            transaction_id=transaction_id,
+            total_amount=amount,
+            description="Wallet > Investment",
+            transaction_id=transaction_id + "-D",  # Append '-D' for clarity
         )
-        transaction.save()
+        debit_transaction.save()
+
+        # Create a credit transaction for the investment addition
+        credit_transaction = Transaction(
+            user=user,
+            transaction_type="credit",
+            status="confirmed",
+            amount=amount,
+            total_amount=amount,
+            description="QuickInvest (Transfer)",
+            transaction_id=transaction_id + "-C",  # Append '-C' for clarity
+        )
+        credit_transaction.save()
 
         # Perform the wallet to investment transfer
         user.wallet -= amount
@@ -2384,19 +2365,16 @@ def withdraw_to_local_bank(request):
     transaction_id = str(uuid.uuid4())[:16]
 
     try:
-        # Create a transaction record with the details
-        transaction = Transaction(
+        transaction = Transaction.objects.create(
             user=user,
             transaction_type="debit",
+            status="pending",
             amount=withdrawal_amount,
             service_charge=service_charge,
             total_amount=amount,
-            date=timezone.now().date(),
-            time=timezone.now().time(),
-            description=f"Withdrawal [{source_account.capitalize()} > Bank] (Pending)",
+            description=f"{source_account.capitalize()} > Bank",
             transaction_id=transaction_id,
         )
-        transaction.save()
 
         total_amount_decimal = Decimal(amount)
         print(
@@ -2458,17 +2436,8 @@ def withdraw_to_local_bank(request):
             print("Paystack API Response:", paystack_response)
 
             # Update the transaction database table.
-            transaction = Transaction(
-                user=user,
-                transaction_type="debit",
-                amount=withdrawal_amount,
-                service_charge=service_charge,
-                total_amount=amount,
-                date=timezone.now().date(),
-                time=timezone.now().time(),
-                description=f"Withdrawal [{source_account.capitalize()} > Bank] (Successful)",
-                transaction_id=transaction_id,
-            )
+            transaction.status = "confirmed"
+            transaction.description = f"{source_account.capitalize()} > Bank"
             transaction.save()
 
             bank_name = target_bank_account.bank_name
@@ -2586,7 +2555,7 @@ def process_withdrawal_to_local_bank(request):
 
     transaction_id = "".join(
         random.choices(string.ascii_uppercase + string.digits, k=8)
-    )  # Change k=10 for 10 characters
+    )
 
     with transaction.atomic():
         # Create withdrawal record
@@ -2595,20 +2564,28 @@ def process_withdrawal_to_local_bank(request):
             amount=amount,
             transaction_id=transaction_id,
             source_account=source_account,
-            target_bank=target_bank_account.bank_name,  # Fetching bank name from BankAccount model
-            target_account_number=target_bank_account.account_number,  # Fetching account number
-            is_approved=False,  # Pending approval
+            target_bank=target_bank_account.bank_name,
+            target_account_number=target_bank_account.account_number,
+            is_approved=False,
         )
 
-        # Create transaction record with correct fields
+        # Create transaction record
         Transaction.objects.create(
             user=user,
             transaction_id=transaction_id,
-            transaction_type="debit",  # Corrected: This is a debit transaction
-            status="pending",  # Corrected: Withdrawal is pending
+            transaction_type="debit",
+            status="pending",
             amount=amount,
-            description=f"{source_account} > Bank",
+            description=f"{source_account.capitalize()} > Bank . . .",
         )
+
+        # Send email acknowledgment to the user
+        subject = "Withdrawal Request Received"
+        message = f"Hi {user.first_name},\n\nYour withdrawal request of ₦{amount} is pending approval. You will be notified once it is processed.\n\nThank you for using MyFund.\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com"
+        from_email = "MyFund <info@myfundmobile.com>"
+        recipient_list = [user.email]
+
+        send_mail(subject, message, from_email, recipient_list, fail_silently=False)
 
     return Response(
         {
@@ -2756,29 +2733,29 @@ def initiate_wallet_transfer(request):
     target_user.save()
 
     # Generate unique transaction IDs
-    sender_transaction_id = str(uuid.uuid4())[:16]
-    target_transaction_id = str(uuid.uuid4())[:16]
+    sender_transaction_id = str(uuid.uuid4().hex)[:10]
+    target_transaction_id = str(uuid.uuid4().hex)[:10]
 
     # Create transaction records for sender and target
     sender_transaction = Transaction(
         user=sender,
         transaction_type="debit",
+        status="confirmed",
         amount=amount,
-        date=timezone.now().date(),
-        time=timezone.now().time(),
-        description=f"Sent to User",
+        description=f"Sent to {target_user.first_name}",
         transaction_id=sender_transaction_id,
+        total_amount=amount,
     )
     sender_transaction.save()
 
     target_transaction = Transaction(
         user=target_user,
         transaction_type="credit",
+        status="confirmed",
         amount=amount,
-        date=timezone.now().date(),
-        time=timezone.now().time(),
-        description=f"Received from User",
+        description=f"Received from {sender.first_name}",
         transaction_id=target_transaction_id,
+        total_amount=amount,
     )
     target_transaction.save()
 
@@ -2831,13 +2808,13 @@ def schedule_rent_reward(user_id, rent_reward, transaction_id, property_name):
     # Create a transaction for the rent reward with the unique transaction_id
     transaction = Transaction(
         user_id=user_id,
-        transaction_type="pending",
+        transaction_type="credit",
+        status="pending",
         amount=rent_reward,
-        description="Annual Rent (Pending)",
-        date=next_payment_date.date(),  # Use the calculated next_payment_date
-        time=next_payment_date.time(),  # Use the calculated next_payment_date
-        transaction_id=transaction_id,  # Include the unique transaction_id
+        description="Rent Reward",
+        transaction_id=str(uuid.uuid4())[:10],  # 10-character ID
     )
+
     transaction.save()
 
     # # Update the user's wallet with the rent reward
@@ -2919,13 +2896,13 @@ class BuyPropertyView(generics.CreateAPIView):
 
             transaction = Transaction(
                 user=user,
-                transaction_type="credit",
+                transaction_type="debit",
+                status="confirmed",
                 amount=total_price,
-                description=f"{property.name}",
-                date=timezone.now().date(),
-                time=timezone.now().time(),
-                transaction_id=generate_short_id(),
+                description=f"Purchase of {property.name}",
+                transaction_id=str(uuid.uuid4())[:10],  # 10-character ID
             )
+
             transaction.save()
 
             subject = f"Congratulations {user.first_name} on Your Property Purchase!"
@@ -2996,22 +2973,15 @@ class BuyPropertyView(generics.CreateAPIView):
 
                     rent_reward = total_price * 0.075
 
-                    transaction_id = str(uuid.uuid4())
-
-                    # Generate a unique ID with 15 characters
-                    def generate_short_id():
-                        unique_id = str(uuid.uuid4().int)
-                        return unique_id[:10]
-
                     transaction = Transaction(
                         user=user,
-                        transaction_type="credit",
+                        transaction_type="debit",
+                        status="confirmed",
                         amount=total_price,
-                        description=f"{property.name}",
-                        date=timezone.now().date(),
-                        time=timezone.now().time(),
-                        transaction_id=generate_short_id(),
+                        description=f"Property purchase: {property.name}",
+                        transaction_id=str(uuid.uuid4())[:10],  # 10-character ID
                     )
+
                     transaction.save()
 
                     subject = (
@@ -3257,10 +3227,6 @@ def initiate_invest_transfer(request):
         user = request.user
         amount = request.data.get("amount")
 
-        # Create an InvestTransferRequest record
-        request = InvestTransferRequest(user=user, amount=amount)
-        request.save()
-
         # Send an email to admin
         subject = f"[CHECK] {user.first_name} Made A QuickInvest Request"
         message = f"Hi Admin, \n\nAn investment transfer request of ₦{amount} has just been initiated by {user.first_name} ({user.email}).\n\nPlease log in to the admin panel for review.\n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
@@ -3285,15 +3251,29 @@ def initiate_invest_transfer(request):
         current_datetime = timezone.now()
         referral_email = user.referral.email if user.referral else None
 
+        # ✅ Generate a unique transaction ID
+        transaction_id = str(uuid.uuid4())[:10]
+
+        # ✅ Create an InvestTransferRequest record with transaction_id
+        invest_transfer_request = InvestTransferRequest(
+            user=user, amount=amount, transaction_id=transaction_id
+        )
+        invest_transfer_request.save()
+
+        # ✅ Create a pending transaction for the user
+        current_datetime = timezone.now()
+        referral_email = user.referral.email if user.referral else None
+
         transaction = Transaction.objects.create(
             user=user,
             referral_email=referral_email,
-            transaction_type="pending",
+            transaction_type="credit",
+            status="pending",
             amount=amount,
             date=current_datetime.date(),
             time=current_datetime.time(),
-            description="QuickInvest (Pending)",
-            transaction_id=str(uuid.uuid4())[:10],
+            description="QuickInvest . . .",
+            transaction_id=transaction_id,  # ✅ Ensure both records share the same transaction_id
         )
         transaction.save()
 
@@ -3454,7 +3434,7 @@ def paystack_submit_otp(request):
             user = transaction.user
 
             transaction.transaction_type = "credit"
-            transaction.description = description[0] + " (Confirmed)"
+            transaction.description = description[0] + " (Card)"
             transaction.save()
 
             amount = transaction.amount
@@ -3614,10 +3594,9 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         # Create a new transaction record for AutoSave
                         transaction = Transaction.objects.create(
                             user=user,
-                            transaction_type="pending",
+                            transaction_type="credit",  # Or "debit" depending on your use case
+                            status="pending",  # Pending by default
                             amount=int(amount),
-                            date=timezone.now().date(),
-                            time=timezone.now().time(),
                             description=f"{trans_description[1]} (pending)",
                             transaction_id=event["data"]["reference"],
                         )
@@ -3632,10 +3611,9 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         # Create a new transaction record for AutoInvest
                         transaction = Transaction.objects.create(
                             user=user,
-                            transaction_type="pending",
+                            transaction_type="credit",
+                            status="pending",
                             amount=int(amount),
-                            date=timezone.now().date(),
-                            time=timezone.now().time(),
                             description=f"{trans_description[1]} (pending)",
                             transaction_id=event["data"]["reference"],
                         )
@@ -3646,13 +3624,16 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                 # print(f"user: {user}")
 
                 if event["data"]["status"] != "success":
-                    transaction.transaction_type = "failed"
+                    transaction.status = "failed"
                     transaction.description = description[0] + " (Failed)"
                     transaction.save()
 
                 if event["data"]["status"] == "success":
-                    transaction.transaction_type = "credit"
-                    transaction.description = description[0] + " (Confirmed)"
+                    transaction.transaction_type = (
+                        "credit"  # Setting transaction type as 'credit' or 'debit'
+                    )
+                    transaction.status = "confirmed"
+                    transaction.description = description[0] + " (Card)"
                     transaction.save()
 
                     amount = transaction.amount
@@ -3753,10 +3734,9 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             #     Create a transaction record
                             Transaction.objects.create(
                                 user=user,
-                                transaction_type="pending",
+                                transaction_type="credit",
+                                status="pending",
                                 amount=int(amount),
-                                date=timezone.now().date(),
-                                time=timezone.now().time(),
                                 description="AutoSave (pending)",
                                 transaction_id=trans_ref,
                             )
@@ -3776,10 +3756,9 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             #     Create a transaction record
                             Transaction.objects.create(
                                 user=user,
-                                transaction_type="pending",
+                                transaction_type="credit",
+                                status="pending",
                                 amount=int(amount),
-                                date=timezone.now().date(),
-                                time=timezone.now().time(),
                                 description="AutoInvest (pending)",
                                 transaction_id=trans_ref,
                             )
@@ -4933,9 +4912,8 @@ def add_funds(request, id):
         transaction = Transaction.objects.create(
             user=request.user,
             transaction_type="credit",  # 'credit' for deposits
+            status="confirmed",
             amount=deposit_amount,
-            date=timezone.now().date(),
-            time=timezone.now().time(),
             description=f"Transfer [{source} > Target Savings({goal.name})] (Successful)",
             transaction_id=transaction_id,
         )
@@ -4966,7 +4944,6 @@ def add_funds(request, id):
         )
 
 
-# POST /savings/{id}/withdraw - Withdraw savings (if allowed)
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def withdraw_savings(request, id):
@@ -5062,9 +5039,8 @@ def withdraw_savings(request, id):
         transaction = Transaction.objects.create(
             user=goal.user,
             transaction_type="debit",  # 'credit' for deposits
+            status="pending",
             amount=amount,
-            date=timezone.now().date(),
-            time=timezone.now().time(),
             description=f"Withdrawal [Target Savings({goal.name}) > Bank] (Pending)",
             transaction_id=transaction_id,
         )
@@ -5085,11 +5061,10 @@ def withdraw_savings(request, id):
                 transaction = Transaction(
                     user=user,
                     transaction_type="debit",
+                    status="confirmed",
                     amount=amount,
                     service_charge=penalty,
                     total_amount=amount,
-                    date=timezone.now().date(),
-                    time=timezone.now().time(),
                     description=f"Withdrawal [Target Savings({goal.name}) > Bank] (Successful)",
                     transaction_id=transaction_id,
                 )

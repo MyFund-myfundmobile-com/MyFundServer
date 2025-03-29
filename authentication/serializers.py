@@ -325,6 +325,10 @@ class CardSerializer(serializers.ModelSerializer):
             "Content-Type": "application/json",
         }
 
+        print("Payload:", payload)
+        print("Headers:", headers)
+        print("User email:", user.email)
+
         response = requests.post(paystack_url, json=payload, headers=headers)
         paystack_response = response.json()
         print(paystack_response)

@@ -73,6 +73,10 @@ ALLOWED_HOSTS = [
     "10.10.10.27",
 ]
 
+SECURE_SSL_REDIRECT = False  # Disable forced HTTPS redirect
+SESSION_COOKIE_SECURE = False  # Prevent forcing HTTPS for cookies
+CSRF_COOKIE_SECURE = False  # Prevent CSRF issues with HTTPS
+
 
 KOYEB_EXTERNAL_HOSTNAME = os.environ.get("KOYEB_PUBLIC_DOMAIN")
 if KOYEB_EXTERNAL_HOSTNAME:
@@ -92,11 +96,11 @@ INSTALLED_APPS = [
     "rest_framework.authtoken",
     "authentication",
     "corsheaders",
-    # 'sslserver',
+    # "sslserver",
     "channels",
     "graphene_django",
     # 'django_socketio',
-    'django_celery_beat',
+    "django_celery_beat",
 ]
 
 
@@ -328,7 +332,7 @@ EMAIL_HOST_USER = "message@myfundmobile.com"
 EMAIL_HOST_PASSWORD = "AdminSecure123..."
 
 # Other settings
-DEFAULT_FROM_EMAIL = "DR TEE <message@myfundmobile.com>"
+DEFAULT_FROM_EMAIL = "MyFund <message@myfundmobile.com>"
 PROTOCOL = "https"
 
 AUTHENTICATION_BACKENDS = [
