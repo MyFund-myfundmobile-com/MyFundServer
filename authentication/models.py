@@ -634,8 +634,8 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                 "AutoSave",
                 "QuickInvest",
                 "AutoInvest",
-                "QuickSave (Confirmed)",
-                "QuickInvest (Confirmed)",
+                "QuickSave",
+                "QuickInvest",
             ],
         )
 
