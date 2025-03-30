@@ -872,7 +872,12 @@ class AutoInvest(models.Model):
     amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     frequency = models.CharField(
         max_length=10,
-        choices=[("daily", "Daily"), ("weekly", "Weekly"), ("monthly", "Monthly")],
+        choices=[
+            ("hourly", "Hourly"),
+            ("daily", "Daily"),
+            ("weekly", "Weekly"),
+            ("monthly", "Monthly"),
+        ],
     )
     active = models.BooleanField(default=True)
 

@@ -1761,12 +1761,17 @@ def quickinvest(request):
 
     response = requests.post(paystack_url, json=payload, headers=headers)
     paystack_response = response.json()
+    print(
+        "Paystack Response:", paystack_response
+    )  # Make sure this is logged in your backend console
 
     if paystack_response.get("status"):
         user = request.user
         paystack_message = paystack_response["message"]
         paystack_reference = paystack_response["data"]["reference"]
-        paystack_display_text = paystack_response["data"]["display_text"]
+        paystack_display_text = paystack_response["data"].get(
+            "display_text", "No display text provided"
+        )
         paystack_status = paystack_response["data"]["status"]
 
         # Determine transaction status based on Paystack response status
@@ -1834,7 +1839,7 @@ def autoinvest(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    valid_frequencies = ["daily", "weekly", "monthly"]
+    valid_frequencies = ["hourly", "daily", "weekly", "monthly"]
     if frequency not in valid_frequencies:
         return Response(
             {"error": "Invalid frequency. Choose 'daily', 'weekly', or 'monthly'."},
@@ -3594,10 +3599,14 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         # Create a new transaction record for AutoSave
                         transaction = Transaction.objects.create(
                             user=user,
-                            transaction_type="credit",  # Or "debit" depending on your use case
-                            status="pending",  # Pending by default
+                            transaction_type="credit",
+                            status=(
+                                "confirmed"
+                                if event["data"]["status"] == "success"
+                                else "pending"
+                            ),
                             amount=int(amount),
-                            description=f"{trans_description[1]} (pending)",
+                            description=f"{trans_description[1]} ",
                             transaction_id=event["data"]["reference"],
                         )
 
@@ -3612,9 +3621,13 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         transaction = Transaction.objects.create(
                             user=user,
                             transaction_type="credit",
-                            status="pending",
+                            status=(
+                                "confirmed"
+                                if event["data"]["status"] == "success"
+                                else "pending"
+                            ),
                             amount=int(amount),
-                            description=f"{trans_description[1]} (pending)",
+                            description=f"{trans_description[1]}",
                             transaction_id=event["data"]["reference"],
                         )
 
@@ -3735,9 +3748,9 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             Transaction.objects.create(
                                 user=user,
                                 transaction_type="credit",
-                                status="pending",
+                                status="confirmed",
                                 amount=int(amount),
-                                description="AutoSave (pending)",
+                                description="AutoSave",
                                 transaction_id=trans_ref,
                             )
                     except:
@@ -3757,9 +3770,9 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             Transaction.objects.create(
                                 user=user,
                                 transaction_type="credit",
-                                status="pending",
+                                status="confirmed",
                                 amount=int(amount),
-                                description="AutoInvest (pending)",
+                                description="AutoInvest",
                                 transaction_id=trans_ref,
                             )
                     except:
