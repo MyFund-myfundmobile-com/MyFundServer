@@ -32,6 +32,8 @@ from django.db import models
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 from .models import CustomUser, CustomUserMetrics, Referral, UserPassword
+import csv
+from django.http import HttpResponse
 
 
 class TransactionInline(admin.TabularInline):
@@ -96,12 +98,14 @@ class CustomUserAdmin(UserAdmin):
         "is_ambassador",
     )
     actions = [
+        "export_to_csv",  # Add export action
         "send_custom_email",
         "view_kyc_details",
         "approve_kyc",
         "reject_kyc",
         "make_hired_referrer",
         "make_ambassador",
+        "delete_selected",
     ]
 
     fieldsets = (
@@ -162,6 +166,75 @@ class CustomUserAdmin(UserAdmin):
     search_fields = ("email", "first_name", "last_name")
     ordering = ("email", "date_joined")
     inlines = [TransactionInline, UserPasswordInline]
+
+    def export_to_csv(self, request, queryset):
+        # Create the response object and set the content type
+        response = HttpResponse(content_type="text/csv")
+        response["Content-Disposition"] = 'attachment; filename="custom_users.csv"'
+
+        # Create the CSV writer
+        writer = csv.writer(response)
+        writer.writerow(
+            [
+                "ID",
+                "Email",
+                "First Name",
+                "Last Name",
+                "Phone Number",
+                "Date Joined",
+                "Profile Picture",
+                "KYC Updated",
+                "Is Staff",
+                "Is Active",
+                "Preferred Asset",
+                "Savings Goal Amount",
+                "Time Period",
+                "Savings",
+                "Investment",
+                "Properties",
+                "Wallet",
+                "Total Savings and Investments",
+                "Total Savings and Investments This Month",
+                "User Percentage to Top Saver",
+                "How Did You Hear",
+                "Is Hired Referrer",
+                "Is Ambassador",
+            ]
+        )
+
+        # Write user data rows
+        for user in queryset:
+            writer.writerow(
+                [
+                    user.id,
+                    user.email,
+                    user.first_name,
+                    user.last_name,
+                    user.phone_number,
+                    user.date_joined,
+                    user.profile_picture,
+                    user.kyc_updated,
+                    user.is_staff,
+                    user.is_active,
+                    user.preferred_asset,
+                    user.savings_goal_amount,
+                    user.time_period,
+                    user.savings,
+                    user.investment,
+                    user.properties,
+                    user.wallet,
+                    user.total_savings_and_investments,  # Ensure this is included for CSV
+                    user.total_savings_and_investments_this_month,
+                    user.user_percentage_to_top_saver(),
+                    user.how_did_you_hear,
+                    user.is_hired_referrer,
+                    user.is_ambassador,
+                ]
+            )
+
+        return response
+
+    export_to_csv.short_description = "Export selected users to CSV"
 
     def make_hired_referrer(self, request, queryset):
         updated_count = queryset.update(is_hired_referrer=True)
@@ -398,6 +471,7 @@ class BankTransferRequestAdmin(admin.ModelAdmin):
             if transaction:
                 # ✅ Update transaction status
                 transaction.status = "confirmed"
+                transaction.date = timezone.now()
                 transaction.description = "QuickSave (Transfer)"
                 transaction.save()
             else:
@@ -458,6 +532,7 @@ class InvestTransferRequestAdmin(admin.ModelAdmin):
             if transaction:
                 # ✅ Update transaction status
                 transaction.status = "confirmed"
+                transaction.date = timezone.now()
                 transaction.description = "QuickInvest (Transfer)"
                 transaction.save()
             else:
@@ -511,6 +586,7 @@ from .models import WithdrawalsRequestToAdmin, Transaction
 class PendingWithdrawalsAdmin(admin.ModelAdmin):
     list_display = (
         "user",
+        "source_account",  # Added this line to display source account
         "amount",
         "target_bank",
         "target_account_number",
@@ -518,11 +594,15 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
         "is_approved",
         "created_at",
     )
-    list_filter = ("is_approved",)
+    list_filter = (
+        "is_approved",
+        "source_account",
+    )  # Optionally, add source_account to filter options
     search_fields = (
         "user__email",
         "transaction_id",
         "target_bank",
+        "source_account",  # Added this line to allow searching by source account
         "target_account_number",
     )
     actions = ["approve_withdrawal"]
@@ -617,6 +697,12 @@ class BankAccountAdmin(admin.ModelAdmin):
         "is_default",
     )
     list_filter = ("is_default",)
+    search_fields = (
+        "user__email",
+        "bank_name",
+        "account_number",
+        "account_name",
+    )  # Add this line
 
 
 admin.site.register(BankAccount, BankAccountAdmin)
@@ -633,6 +719,7 @@ class CardAdmin(admin.ModelAdmin):
         "is_default",
     )
     list_filter = ("is_default",)
+    search_fields = ("user__email", "bank_name", "card_number")  # Add search options
 
 
 class AutoSaveAdmin(admin.ModelAdmin):
@@ -642,11 +729,13 @@ class AutoSaveAdmin(admin.ModelAdmin):
         "frequency",
         "amount",
         "active",
-    )  # Add 'amount' to the list of displayed fields
+    )
+    search_fields = ("user__email", "frequency")  # Add search options
 
 
 class AutoInvestAdmin(admin.ModelAdmin):
     list_display = ("id", "user", "frequency", "amount", "active")
+    search_fields = ("user__email", "frequency")  # Add search options
 
 
 from django.contrib import admin
@@ -698,6 +787,75 @@ class ReferralAdmin(admin.ModelAdmin):
         """Optimize the queryset by prefetching related user and referrer data."""
         qs = super().get_queryset(request)
         return qs.select_related("user", "referrer")
+
+
+from django.contrib import admin
+from .models import TopSaverHistory
+from django.db.models import F
+import csv
+from django.http import HttpResponse
+
+
+# Action to export to CSV
+def export_to_csv(modeladmin, request, queryset):
+    response = HttpResponse(content_type="text/csv")
+    response["Content-Disposition"] = "attachment; filename=top_savers.csv"
+
+    writer = csv.writer(response)
+    writer.writerow(["Month", "Year", "Rank", "User", "Total Savings"])
+
+    for obj in queryset:
+        writer.writerow(
+            [
+                obj.month,
+                obj.year,
+                obj.rank,
+                obj.user.first_name + " " + obj.user.last_name,
+                obj.total_savings,
+            ]
+        )
+
+    return response
+
+
+export_to_csv.short_description = "Export to CSV"
+
+
+# Custom Admin for TopSaverHistory
+class TopSaverHistoryAdmin(admin.ModelAdmin):
+    list_display = ("month", "year", "rank", "user", "total_savings")
+    search_fields = ("user__first_name", "user__last_name", "month", "year")
+    list_filter = ("month", "year")
+    ordering = ("-year", "-month", "rank")
+    list_per_page = 20
+    actions = [export_to_csv]
+
+    # Custom queryset to highlight the current month's top savers
+    def get_queryset(self, request):
+        queryset = super().get_queryset(request)
+
+        # Optionally, this filters to show the current month's data as well,
+        # you can customize this to suit your needs (e.g., current month vs historical).
+        now = timezone.now()
+        current_month = now.month
+        current_year = now.year
+
+        # Optionally, filter for current month only (if you want to show only current month by default)
+        # queryset = queryset.filter(month=current_month, year=current_year)
+
+        return queryset.order_by("-year", "-month", "rank")
+
+    # Optionally, add a method to highlight the current month in the admin list view
+    def is_current_month(self, obj):
+        now = timezone.now()
+        return obj.month == now.month and obj.year == now.year
+
+    is_current_month.boolean = True
+    is_current_month.short_description = "Current Month"
+
+
+# Register TopSaverHistory with customized admin
+admin.site.register(TopSaverHistory, TopSaverHistoryAdmin)
 
 
 admin.site.register(Card, CardAdmin)

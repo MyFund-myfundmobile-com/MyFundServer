@@ -623,33 +623,39 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         current_month = now.month
         current_year = now.year
 
-        # Filter credit transactions for savings and investments in the current month
-        savings_and_investment_credits = Transaction.objects.filter(
-            user=self,
-            transaction_type="credit",
-            date__month=current_month,
-            date__year=current_year,
-            description__in=[
-                "QuickSave",
-                "AutoSave",
-                "QuickInvest",
-                "AutoInvest",
-                "QuickSave",
-                "QuickInvest",
-            ],
-        )
+        # Use first_name or email instead of username
+        print(f"Calculating savings for User: {self.first_name} (ID: {self.id})")
 
-        # Sum the credit amounts
-        total_credits = savings_and_investment_credits.aggregate(
-            total_credits=Sum("amount")
-        )["total_credits"]
+        try:
+            # Filter confirmed credit transactions for the current month
+            savings_and_investment_credits = Transaction.objects.filter(
+                user=self,
+                transaction_type="credit",
+                status="confirmed",
+                date__month=current_month,
+                date__year=current_year,
+            )
 
-        if total_credits is not None:
-            self.total_savings_and_investments_this_month = total_credits
+            print(f"Total Transactions Found: {savings_and_investment_credits.count()}")
+
+            # Sum the credit amounts
+            total_credits = savings_and_investment_credits.aggregate(
+                total_credits=Sum("amount")
+            )["total_credits"]
+
+            print(f"Total Credits Calculated: {total_credits}")
+
+            if total_credits is not None:
+                self.total_savings_and_investments_this_month = total_credits
+            else:
+                self.total_savings_and_investments_this_month = 0
+
             self.save()
-        else:
-            self.total_savings_and_investments_this_month = 0
-            self.save()
+            print(
+                f"User {self.first_name} - Updated total savings: {self.total_savings_and_investments_this_month}"
+            )
+        except Exception as e:
+            print(f"Error calculating savings for {self.first_name}: {e}")
 
     def set_password(self, raw_password):
         with transaction.atomic():
@@ -680,6 +686,27 @@ class MonthlySavings(models.Model):
 
     class Meta:
         unique_together = ["user", "month", "year"]
+
+
+# models.py
+from django.db import models
+from django.utils import timezone
+
+
+class TopSaverHistory(models.Model):
+    month = models.PositiveIntegerField()
+    year = models.PositiveIntegerField()
+    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE)
+    total_savings = models.DecimalField(max_digits=10, decimal_places=2)
+    rank = models.PositiveIntegerField()
+
+    def __str__(self):
+        return (
+            f"Top Saver {self.rank} - {self.user.first_name} ({self.month}/{self.year})"
+        )
+
+    class Meta:
+        unique_together = ("month", "year", "rank")
 
 
 class PasswordReset(models.Model):
