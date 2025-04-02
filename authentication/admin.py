@@ -223,9 +223,7 @@ class CustomUserAdmin(UserAdmin):
                     user.investment,
                     user.properties,
                     user.wallet,
-                    user.total_savings_and_investments,  # Ensure this is included for CSV
                     user.total_savings_and_investments_this_month,
-                    user.user_percentage_to_top_saver(),
                     user.how_did_you_hear,
                     user.is_hired_referrer,
                     user.is_ambassador,
