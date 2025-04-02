@@ -412,33 +412,17 @@ class BuyPropertySerializer(serializers.Serializer):
 from django.db.models import Sum
 
 
+# serializers.py
 class CustomUserSerializer(serializers.ModelSerializer):
-    individual_percentage = serializers.SerializerMethodField()
-
     class Meta:
         model = CustomUser
-        fields = "__all__"
-
-    def get_individual_percentage(self, obj):
-        total_savings_this_month = obj.total_savings_and_investments_this_month
-
-        if total_savings_this_month > 0:
-            top_saver = (
-                CustomUser.objects.filter(
-                    total_savings_and_investments_this_month__gt=0
-                )
-                .order_by("-total_savings_and_investments_this_month")
-                .first()
-            )
-
-            if top_saver and top_saver.total_savings_and_investments_this_month > 0:
-                user_percentage = (
-                    total_savings_this_month
-                    / top_saver.total_savings_and_investments_this_month
-                ) * 100
-                return round(user_percentage, 1)
-
-        return None
+        fields = [
+            "id",
+            "first_name",
+            "profile_picture",
+            "email",
+            "total_savings_and_investments_this_month",
+        ]
 
 
 from .models import AlertMessage

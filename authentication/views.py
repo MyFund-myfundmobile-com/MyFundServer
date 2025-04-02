@@ -1561,16 +1561,32 @@ def autosave(request):
         )
 
     # Step 3: Save AutoSave record to the database
-    AutoSave.objects.create(
+    autosave_record = AutoSave.objects.create(
         user=user,
         frequency=frequency,
         amount=amount,
+        status="confirmed",  # Set status as confirmed
         paystack_sub_id=subscription_id,
         paystack_sub_code=subscription_code,
         paystack_sub_token=subscription_token,
         paystack_trans_ref=transaction_reference,
         active=True,
     )
+
+    # Create a Transaction record linked to this AutoSave
+    transaction_record = Transaction.objects.create(
+        user=user,
+        transaction_type="credit",
+        status="confirmed",  # Set status to confirmed
+        amount=amount,
+        description=f"AutoSave (Confirmed)",
+        transaction_id=transaction_reference,  # Using Paystack's transaction reference
+        service_charge=0.0,  # Adjust if needed
+        total_amount=amount,
+    )
+    # Force update the status to confirmed to override any default or later changes
+    transaction_record.status = "confirmed"
+    transaction_record.save(update_fields=["status"])
 
     # Send success notification email
     subject = "AutoSave Activated!"
@@ -1922,12 +1938,28 @@ def autoinvest(request):
             user=user,
             frequency=frequency,
             amount=amount,
+            status="confirmed",  # Add this line to set status as confirmed
             paystack_sub_id=subscription_id,
             paystack_sub_code=subscription_code,
             paystack_sub_token=subscription_token,
             paystack_trans_ref=transaction_reference,
             active=True,
         )
+
+        # Create a Transaction record linked to this AutoSave
+        transaction_record = Transaction.objects.create(
+            user=user,
+            transaction_type="credit",
+            status="confirmed",  # Set status to confirmed
+            amount=amount,
+            description=f"AutoInvest ({frequency.capitalize()})",
+            transaction_id=transaction_reference,  # Using Paystack's transaction reference
+            service_charge=0.0,  # Adjust if needed
+            total_amount=amount,
+        )
+        # Force update the status to confirmed to override any default or later changes
+        Transaction.objects.filter(id=transaction_record.id).update(status="confirmed")
+
         user.autoinvest_enabled = True
         user.save()
 
@@ -3031,28 +3063,139 @@ class BuyPropertyView(generics.CreateAPIView):
 
 
 from .serializers import CustomUserSerializer
+from django.db.models.functions import Coalesce  # Add this import
+from django.db.models import OuterRef, Subquery, DecimalField  # Add this line
+from django.db.models import Sum
+from django.utils import timezone
+from rest_framework.decorators import api_view, permission_classes
+from django.db.models import Q  # Make sure to import Q
+from .models import TopSaverHistory
 
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_top_savers(request):
-    users = CustomUser.objects.filter(total_savings_and_investments_this_month__gt=0)
+    now = timezone.now()
+    current_month = now.month
+    current_year = now.year
+
+    # Calculate and store top savers for the month
+    with transaction.atomic():
+        # Delete old top savers for the current month and year
+        TopSaverHistory.objects.filter(month=current_month, year=current_year).delete()
+
+    # 1. Update ALL users' current month totals
+    CustomUser.objects.all().update(
+        total_savings_and_investments_this_month=Coalesce(
+            Subquery(
+                Transaction.objects.filter(
+                    user=OuterRef("pk"),
+                    date__month=current_month,
+                    date__year=current_year,
+                )
+                .filter(
+                    Q(status="confirmed", transaction_type="credit")
+                    | Q(
+                        description__in=[
+                            "AutoSave (Confirmed)",
+                            "AutoInvest (Confirmed)",
+                        ]
+                    )
+                )
+                .values("user")
+                .annotate(total=Sum("amount"))
+                .values("total"),
+                output_field=DecimalField(),
+            ),
+            0,
+        )
+    )
+
+    # 2. Get ordered list of users
+    users = CustomUser.objects.filter(
+        total_savings_and_investments_this_month__gt=0
+    ).order_by("-total_savings_and_investments_this_month")
+
+    # 3. Get top amount once for consistent percentage calculations
+    top_amount = (
+        users.first().total_savings_and_investments_this_month
+        if users.exists() and users.first().total_savings_and_investments_this_month > 0
+        else 1
+    )
+
+    # 4. Serialize data with calculated percentages and save them to TopSaverHistory
     top_savers = []
-
+    rank = 1  # rank starts at 1 for top saver
     for user in users:
-        user.update_total_savings_and_investment_this_month()
-        serializer = CustomUserSerializer(user)
-        top_savers.append(serializer.data)
+        percentage = (
+            (user.total_savings_and_investments_this_month / top_amount * 100)
+            if top_amount > 0
+            else 0
+        )
+        # Save to the TopSaverHistory model
+        TopSaverHistory.objects.create(
+            month=current_month,
+            year=current_year,
+            user=user,
+            total_savings=user.total_savings_and_investments_this_month,
+            rank=rank,
+        )
 
-    top_savers.sort(key=lambda user: user["individual_percentage"], reverse=True)
+        top_savers.append(
+            {
+                "id": user.id,
+                "first_name": user.first_name,
+                "profile_picture": user.profile_picture,
+                "email": user.email,
+                "amount": float(user.total_savings_and_investments_this_month),
+                "percentage": round(percentage, 1),
+            }
+        )
+        rank += 1  # Increment rank for the next user
 
+    # 5. Get current user data
     current_user = request.user
-    current_user_serializer = CustomUserSerializer(current_user)
-    current_user_data = current_user_serializer.data
+    current_user_percentage = (
+        (current_user.total_savings_and_investments_this_month / top_amount * 100)
+        if top_amount > 0
+        else 0
+    )
 
-    response_data = {"top_savers": top_savers, "current_user": current_user_data}
+    return Response(
+        {
+            "top_savers": top_savers,
+            "current_user": {
+                "email": current_user.email,
+                "percentage": round(current_user_percentage, 1),
+                "amount": float(current_user.total_savings_and_investments_this_month),
+            },
+        }
+    )
 
-    return Response(response_data)
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def get_past_top_savers(request, month, year):
+    top_savers = TopSaverHistory.objects.filter(month=month, year=year).order_by("rank")
+
+    if not top_savers.exists():
+        return Response(
+            {"detail": f"No top savers found for {month}/{year}."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    past_top_savers = [
+        {
+            "id": saver.user.id,
+            "first_name": saver.user.first_name,
+            "profile_picture": saver.user.profile_picture,
+            "total_savings": float(saver.total_savings),
+            "rank": saver.rank,
+        }
+        for saver in top_savers
+    ]
+
+    return Response({"past_top_savers": past_top_savers})
 
 
 from .serializers import KYCUpdateSerializer
@@ -3603,7 +3746,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             status=(
                                 "confirmed"
                                 if event["data"]["status"] == "success"
-                                else "pending"
+                                else "confirmed"
                             ),
                             amount=int(amount),
                             description=f"{trans_description[1]} ",
@@ -3624,30 +3767,62 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             status=(
                                 "confirmed"
                                 if event["data"]["status"] == "success"
-                                else "pending"
+                                else "confirmed"
                             ),
                             amount=int(amount),
                             description=f"{trans_description[1]}",
                             transaction_id=event["data"]["reference"],
                         )
 
-                print(f"transaction: {transaction}")
-                description = transaction.description
-                description = description.split(" ")
-                # print(f"user: {user}")
+                print(f"transaction before update: {transaction}")
 
-                if event["data"]["status"] != "success":
-                    transaction.status = "failed"
-                    transaction.description = description[0] + " (Failed)"
-                    transaction.save()
-
-                if event["data"]["status"] == "success":
-                    transaction.transaction_type = (
-                        "credit"  # Setting transaction type as 'credit' or 'debit'
-                    )
-                    transaction.status = "confirmed"
-                    transaction.description = description[0] + " (Card)"
-                    transaction.save()
+                # Only update AutoSave transactions if they are not already confirmed
+                if transaction.description.lower().startswith("autosave"):
+                    # If already confirmed, do nothing.
+                    if transaction.status != "confirmed":
+                        autosave_rec = AutoSave.objects.filter(
+                            paystack_trans_ref=reference
+                        ).first()
+                        # Use the frequency from autosave_rec; if not available, fall back to the frequency sent in the event
+                        freq = (
+                            autosave_rec.frequency.capitalize()
+                            if autosave_rec and autosave_rec.frequency
+                            else event["data"].get("frequency", "").capitalize()
+                        )
+                        transaction.transaction_type = "credit"
+                        transaction.status = "confirmed"
+                        transaction.description = f"AutoSave ({freq})"
+                        transaction.save(
+                            update_fields=["transaction_type", "status", "description"]
+                        )
+                    else:
+                        # Already confirmed: ensure description includes the frequency.
+                        autosave_rec = AutoSave.objects.filter(
+                            paystack_trans_ref=reference
+                        ).first()
+                        freq = (
+                            autosave_rec.frequency.capitalize()
+                            if autosave_rec and autosave_rec.frequency
+                            else "Confirmed"
+                        )
+                        # Force-update description even if status is already confirmed
+                        transaction.description = f"AutoSave ({freq})"
+                        transaction.save(update_fields=["description"])
+                else:
+                    # For non-AutoSave transactions, follow your existing logic:
+                    if event["data"]["status"] != "success":
+                        base_desc = transaction.description.split(" ")[0]
+                        transaction.status = "failed"
+                        transaction.description = f"{base_desc} (Failed)"
+                        transaction.save(update_fields=["status", "description"])
+                    elif event["data"]["status"] == "success":
+                        base_desc = transaction.description.split(" ")[0]
+                        transaction.transaction_type = "credit"
+                        transaction.status = "confirmed"
+                        transaction.description = f"{base_desc} (Card)"
+                        transaction.save(
+                            update_fields=["transaction_type", "status", "description"]
+                        )
 
                     amount = transaction.amount
 
