@@ -1390,6 +1390,13 @@ def quicksave(request):
             description="QuickSave (Card)",
             transaction_id=paystack_reference,
         )
+        # Update user's savings balance
+        user.savings += int(amount)
+        user.save()
+
+        # Confirm referral rewards
+        is_referrer = True
+        user.confirm_referral_rewards(is_referrer=is_referrer)
 
         if paystack_response["data"]["status"] == "open_url":
             paystack_otp_url = paystack_response["data"]["url"]
@@ -1587,6 +1594,14 @@ def autosave(request):
     # Force update the status to confirmed to override any default or later changes
     transaction_record.status = "confirmed"
     transaction_record.save(update_fields=["status"])
+
+    # Update user's savings balance
+    user.savings += int(amount)
+    user.save()
+
+    # Confirm referral rewards
+    is_referrer = True
+    user.confirm_referral_rewards(is_referrer=is_referrer)
 
     # Send success notification email
     subject = "AutoSave Activated!"
@@ -1802,6 +1817,14 @@ def quickinvest(request):
             description="QuickInvest (Card)",
             transaction_id=paystack_reference,
         )
+        # Update user's investment balance if the transaction is confirmed
+        if transaction_status == "confirmed":
+            user.investment += int(amount)
+            user.save()
+
+            # Confirm referral rewards
+            is_referrer = True
+            user.confirm_referral_rewards(is_referrer=is_referrer)
 
         # Return a success response
         return Response(
@@ -1959,6 +1982,14 @@ def autoinvest(request):
         )
         # Force update the status to confirmed to override any default or later changes
         Transaction.objects.filter(id=transaction_record.id).update(status="confirmed")
+
+        # Update user's investment balance
+        user.investment += amount
+        user.save()
+
+        # Confirm referral rewards
+        is_referrer = True
+        user.confirm_referral_rewards(is_referrer=is_referrer)
 
         user.autoinvest_enabled = True
         user.save()
