@@ -155,10 +155,14 @@ urlpatterns = [
     path("buy-property/", BuyPropertyView.as_view(), name="buy-property"),
     # Top savers
     path("top-savers/", views.get_top_savers, name="top_savers"),
-    # KYC Update API
     path(
-        "update-kyc/", KYCUpdateView.as_view(), name="kyc-update"
-    ),  # Endpoint for KYC update
+        "top-savers/<int:month>/<int:year>/",
+        views.get_past_top_savers,
+        name="get_past_top_savers",
+    ),
+    # KYC Update API
+    path("update-kyc/", KYCUpdateView.as_view(), name="kyc-update"),
+    # Endpoint for KYC update
     path("get-kyc-status/", views.GetKYCStatusView.as_view(), name="get-kyc-status"),
     path(
         "kyc-approval/approve/<int:pk>/",
