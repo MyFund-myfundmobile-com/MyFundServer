@@ -2833,6 +2833,7 @@ from rest_framework import generics, status
 from rest_framework.response import Response
 from .models import Property, Transaction
 from .serializers import BuyPropertySerializer
+from .serializers import PropertySerializer
 from datetime import datetime, timedelta
 from django.utils import timezone
 import uuid
@@ -3059,6 +3060,31 @@ class BuyPropertyView(generics.CreateAPIView):
 
         return Response(
             {"detail": "Property purchased successfully."}, status=status.HTTP_200_OK
+        )
+        
+        
+@api_view(["GET"])
+def get_all_property_details(request):
+    try:
+        # Get all properties
+        properties = Property.objects.all()
+        print(f"properties {properties}")
+
+        if properties.exists():
+            # Serialize the properties data
+            serializer = PropertySerializer(properties, many=True)
+            return Response(serializer.data)
+        
+        # If no properties are found
+        return Response(
+            {"message": "No property found."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+    
+    except Property.DoesNotExist:
+        return Response(
+            {"message": "Error fetching properties."},
+            status=status.HTTP_404_NOT_FOUND,
         )
 
 
@@ -3905,57 +3931,64 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
 
                 print(f"sub_code: {sub_code}, sub_token: {sub_token}")
 
-                if not AutoSave.objects.get(
-                    paystack_trans_ref=trans_ref
-                ) or AutoInvest.objects.get(paystack_trans_ref=trans_ref):
+                
+                if AutoSave.objects.get(
+                    paystack_sub_code=sub_code,
+                    paystack_sub_token=sub_token,
+                ):
+                    # print(f"AutoSave has a record with the sub_code: {sub_code} and sub_token: {sub_token}")
 
-                    try:
-                        if AutoSave.objects.get(
-                            paystack_sub_code=sub_code,
-                            paystack_sub_token=sub_token,
-                        ):
 
-                            amount = (
-                                event["data"]["amount"] / 100
-                            )  # convert amount to naira
+                    amount = (
+                        event["data"]["amount"] / 100
+                    )  # convert amount to naira
 
-                            #     Create a transaction record
-                            Transaction.objects.create(
-                                user=user,
-                                transaction_type="credit",
-                                status="confirmed",
-                                amount=int(amount),
-                                description="AutoSave",
-                                transaction_id=trans_ref,
-                            )
-                    except:
-                        pass
+                    # Check if a transaction with the same transaction_id already exists
+                    existing_transaction = Transaction.objects.filter(transaction_id=trans_ref).first()
 
-                    try:
-                        if AutoInvest.objects.get(
-                            paystack_sub_code=sub_code,
-                            paystack_sub_token=sub_token,
-                        ):
-
-                            amount = (
-                                event["data"]["amount"] / 100
-                            )  # convert amount to naira
-
-                            #     Create a transaction record
-                            Transaction.objects.create(
-                                user=user,
-                                transaction_type="credit",
-                                status="confirmed",
-                                amount=int(amount),
-                                description="AutoInvest",
-                                transaction_id=trans_ref,
-                            )
-                    except:
-                        print(
-                            f'\n"invoice.create" details does not exist in MyFund database\n'
+                    if not existing_transaction:
+                        # Create a new transaction if not found
+                        Transaction.objects.create(
+                            user=user,
+                            transaction_type="credit",
+                            status="pending",
+                            amount=int(amount),
+                            description="AutoSave",
+                            transaction_id=trans_ref,
                         )
+                    
+                    return JsonResponse({"status": True}, status=status.HTTP_200_OK)
+                
+                elif AutoInvest.objects.get(
+                    paystack_sub_code=sub_code,
+                    paystack_sub_token=sub_token,
+                ):
+                    # print(f"AutoInvest has a record with the sub_code: {sub_code} and sub_token: {sub_token}")
 
-                return JsonResponse({"status": True}, status=status.HTTP_200_OK)
+                    amount = (
+                        event["data"]["amount"] / 100
+                    )  # convert amount to naira
+
+                    # Check if a transaction with the same transaction_id already exists
+                    existing_transaction = Transaction.objects.filter(transaction_id=trans_ref).first()
+
+                    if not existing_transaction:
+                        # Create a new transaction if not found
+                        Transaction.objects.create(
+                            user=user,
+                            transaction_type="credit",
+                            status="pending",
+                            amount=int(amount),
+                            description="AutoInvest",
+                            transaction_id=trans_ref,
+                        )
+                    
+                    return JsonResponse({"status": True}, status=status.HTTP_200_OK)
+                
+                else:                
+                    print(
+                        f'\n"invoice.create" details does not exist in MyFund database\n'
+                    )
 
             case "invoice.payment_failed":
 
