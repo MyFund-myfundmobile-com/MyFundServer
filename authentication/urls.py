@@ -153,6 +153,7 @@ urlpatterns = [
     path("get-user-by-email/", get_user_by_email, name="get-user-by-email"),
     # Property-related APIs
     path("buy-property/", BuyPropertyView.as_view(), name="buy-property"),
+    path("get-all-property-details/", views.get_all_property_details, name="get-all-property-details"),
     # Top savers
     path("top-savers/", views.get_top_savers, name="top_savers"),
     # KYC Update API
