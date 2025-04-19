@@ -1391,6 +1391,18 @@ def quicksave(request):
             transaction_id=paystack_reference,
         )
 
+        # Update user's savings
+        user.savings += int(amount)
+        user.save()
+
+        # ✅ Call the referral reward function after successful charge and balance update
+        user.confirm_referral_rewards(
+            is_referrer=False
+        )  # Assuming the charged user is the referred user
+
+        user.update_total_savings_and_investment_this_month()
+        user.save()
+
         if paystack_response["data"]["status"] == "open_url":
             paystack_otp_url = paystack_response["data"]["url"]
             return Response(
@@ -1565,28 +1577,12 @@ def autosave(request):
         user=user,
         frequency=frequency,
         amount=amount,
-        status="confirmed",  # Set status as confirmed
         paystack_sub_id=subscription_id,
         paystack_sub_code=subscription_code,
         paystack_sub_token=subscription_token,
         paystack_trans_ref=transaction_reference,
         active=True,
     )
-
-    # Create a Transaction record linked to this AutoSave
-    transaction_record = Transaction.objects.create(
-        user=user,
-        transaction_type="credit",
-        status="confirmed",  # Set status to confirmed
-        amount=amount,
-        description=f"AutoSave (Confirmed)",
-        transaction_id=transaction_reference,  # Using Paystack's transaction reference
-        service_charge=0.0,  # Adjust if needed
-        total_amount=amount,
-    )
-    # Force update the status to confirmed to override any default or later changes
-    transaction_record.status = "confirmed"
-    transaction_record.save(update_fields=["status"])
 
     # Send success notification email
     subject = "AutoSave Activated!"
@@ -1802,6 +1798,14 @@ def quickinvest(request):
             description="QuickInvest (Card)",
             transaction_id=paystack_reference,
         )
+
+        user.investment += int(amount)
+        user.save()
+
+        user.confirm_referral_rewards(is_referrer=False)
+        user.update_total_savings_and_investment_this_month()
+
+        user.save()
 
         # Return a success response
         return Response(
@@ -3752,31 +3756,68 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                 ).first()
                 user = CustomUser.objects.get(email=email)
 
-                # Check if transaction already exists
-                if transaction is None:
-                    # Create a record in the database if the event record does not exist
-                    trans_description = event["data"]["plan"]["name"]
-                    trans_description = trans_description.split(" ")
+                # Check if this is an AutoSave transaction
+                autosave = AutoSave.objects.filter(paystack_trans_ref=reference).first()
 
-                    amount = event["data"]["amount"] / 100  # convert amount to naira
-
-                    # Handle AutoSave case
-                    if (
-                        trans_description[1] == "AutoSave"
-                        or AutoSave.objects.filter(paystack_trans_ref=reference).first()
-                    ):
-                        # Create a new transaction record for AutoSave
+                if autosave:
+                    amount = (
+                        Decimal(event["data"]["amount"]) / 100
+                    )  # Use Decimal for precision
+                    if not transaction:
                         transaction = Transaction.objects.create(
                             user=user,
                             transaction_type="credit",
-                            status=(
-                                "confirmed"
-                                if event["data"]["status"] == "success"
-                                else "confirmed"
-                            ),
+                            status="confirmed",
+                            amount=amount,
+                            description=f"AutoSave ({autosave.frequency.capitalize()})",
+                            transaction_id=reference,
+                        )
+
+                    # Atomic update for savings
+                    CustomUser.objects.filter(pk=user.pk).update(
+                        savings=F("savings") + amount
+                    )
+
+                    # Refresh user instance
+                    user.refresh_from_db()
+
+                    # Update totals and process referrals
+                    user.update_total_savings_and_investment_this_month()
+                    user.confirm_referral_rewards(is_referrer=True)
+
+                    # Send success email
+                    subject = (
+                        f"AutoSave ({autosave.frequency.capitalize()}) Successful!"
+                    )
+                    message = f"Well done {user.first_name},\n\nYour AutoSave was successful and ₦{amount:,.2f} has been added to your SAVINGS account."
+                    from_email = "MyFund <info@myfundmobile.com>"
+                    recipient_list = [user.email]
+                    send_mail(
+                        subject,
+                        message,
+                        from_email,
+                        recipient_list,
+                        fail_silently=False,
+                    )
+
+                    # Update autosave record
+                    autosave.last_success = timezone.now()
+                    autosave.save()
+                    return  # Prevent double processing
+
+                else:
+                    # Handle regular transactions
+                    if transaction is None:
+                        trans_description = event["data"]["plan"]["name"].split(" ")
+                        amount = event["data"]["amount"] / 100
+
+                        Transaction.objects.create(
+                            user=user,
+                            transaction_type="credit",
+                            status="confirmed",
                             amount=int(amount),
-                            description=f"{trans_description[1]} ",
-                            transaction_id=event["data"]["reference"],
+                            description=f"{trans_description[1]}",
+                            transaction_id=reference,
                         )
 
                     # Handle AutoInvest case

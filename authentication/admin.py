@@ -121,6 +121,7 @@ class CustomUserAdmin(UserAdmin):
                     "is_staff",
                     "is_active",
                     "is_superuser",
+                    "is_ambassador",
                     "is_hired_referrer",
                     "groups",
                     "user_permissions",
@@ -787,11 +788,13 @@ class ReferralAdmin(admin.ModelAdmin):
         return qs.select_related("user", "referrer")
 
 
-from django.contrib import admin
-from .models import TopSaverHistory
 from django.db.models import F
 import csv
 from django.http import HttpResponse
+from django.contrib import admin
+from .models import TopSaverHistory
+from django.utils import timezone
+import calendar
 
 
 # Action to export to CSV
@@ -803,9 +806,12 @@ def export_to_csv(modeladmin, request, queryset):
     writer.writerow(["Month", "Year", "Rank", "User", "Total Savings"])
 
     for obj in queryset:
+        month_name = calendar.month_name[
+            obj.month
+        ]  # Convert month number to month name
         writer.writerow(
             [
-                obj.month,
+                month_name,  # Month name instead of number
                 obj.year,
                 obj.rank,
                 obj.user.first_name + " " + obj.user.last_name,
@@ -821,12 +827,25 @@ export_to_csv.short_description = "Export to CSV"
 
 # Custom Admin for TopSaverHistory
 class TopSaverHistoryAdmin(admin.ModelAdmin):
-    list_display = ("month", "year", "rank", "user", "total_savings")
+    list_display = (
+        "get_month_name",  # Use custom method for month name
+        "year",
+        "rank",
+        "user",
+        "total_savings",
+        "is_current_month",
+    )
     search_fields = ("user__first_name", "user__last_name", "month", "year")
     list_filter = ("month", "year")
     ordering = ("-year", "-month", "rank")
     list_per_page = 20
     actions = [export_to_csv]
+
+    # Method to convert month number to month name
+    def get_month_name(self, obj):
+        return calendar.month_name[obj.month]  # Convert month number to name
+
+    get_month_name.short_description = "Month"
 
     # Custom queryset to highlight the current month's top savers
     def get_queryset(self, request):

@@ -96,6 +96,7 @@ class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = CustomUser
         fields = [
+            # Existing fields
             "id",
             "first_name",
             "last_name",
@@ -108,6 +109,17 @@ class UserSerializer(serializers.ModelSerializer):
             "is_confirmed",
             "date_joined",
             "is_subscribed",
+            # New admin fields
+            "kyc_status",
+            "savings_goal_amount",
+            "savings",
+            "investment",
+            "properties",
+            "wallet",
+            "is_hired_referrer",
+            "is_ambassador",
+            "autosave_enabled",
+            "autoinvest_enabled",
         ]
 
     def get_date_joined(self, obj):
