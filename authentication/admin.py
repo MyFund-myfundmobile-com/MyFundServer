@@ -121,6 +121,7 @@ class CustomUserAdmin(UserAdmin):
                     "is_staff",
                     "is_active",
                     "is_superuser",
+                    "is_ambassador",
                     "is_hired_referrer",
                     "groups",
                     "user_permissions",
