@@ -120,6 +120,21 @@ class UserSerializer(serializers.ModelSerializer):
             "is_ambassador",
             "autosave_enabled",
             "autoinvest_enabled",
+            # KYC fields
+            "gender",
+            "relationship_status",
+            "employment_status",
+            "yearly_income",
+            "date_of_birth",
+            "address",
+            "mothers_maiden_name",
+            "identification_type",
+            "id_upload",
+            "next_of_kin_name",
+            "relationship_with_next_of_kin",
+            "next_of_kin_phone_number",
+            "state",
+            "country",
         ]
 
     def get_date_joined(self, obj):
