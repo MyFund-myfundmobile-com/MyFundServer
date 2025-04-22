@@ -810,6 +810,88 @@ class AccountBalance(models.Model):
     wallet = models.DecimalField(max_digits=10, decimal_places=2, default=0)
 
 
+from django.core.validators import RegexValidator
+
+
+class TargetSavings(models.Model):
+    CATEGORY_CHOICES = [
+        ("RENT_ACCOMMODATION", "Rent & Accommodation"),
+        ("EDUCATION", "Education"),
+        ("PHONE", "Phone/Gadget"),
+        ("CAR", "Car"),
+        ("BUSINESS", "Business"),
+        ("JAPA", "Japa"),
+        ("EMERGENCY", "Emergency"),
+        ("TRAVEL", "Travel"),
+        ("FEES_DEBT", "Fees/Debt"),
+        ("INVESTMENT", "Investment"),
+        ("GADGETS", "Gadgets"),
+        ("BIRTHDAY", "Birthday"),
+        ("ANNIVERSARY", "Anniversary"),
+        ("OTHERS", "Others"),
+    ]
+
+    FREQUENCY_CHOICES = [
+        ("DAILY", "Daily"),
+        ("WEEKLY", "Weekly"),
+        ("MONTHLY", "Monthly"),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="target_savings",
+    )
+    name = models.CharField(max_length=100)
+    target_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    current_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    start_date = models.DateField(auto_now_add=True)
+    end_date = models.DateField()
+    category = models.CharField(
+        max_length=20,
+        choices=CATEGORY_CHOICES,
+        validators=[
+            RegexValidator(
+                regex="^[A-Z_]+$", message="Category must be uppercase with underscores"
+            )
+        ],
+    )
+    is_active = models.BooleanField(default=True)
+    monthly_payment = models.DecimalField(
+        max_digits=12, decimal_places=2, blank=True, null=True
+    )
+
+    funding_source = models.CharField(
+        max_length=20,
+        choices=[
+            ("SAVINGS", "Savings"),
+            ("INVESTMENT", "Investment"),
+            ("CARD", "Card"),
+        ],
+        default="SAVINGS",
+    )
+    payment_method = models.CharField(
+        max_length=50, blank=True, null=True
+    )  # Store card ID if used
+    frequency = models.CharField(
+        max_length=10, choices=FREQUENCY_CHOICES, default="MONTHLY"
+    )
+    next_deduction = models.DateTimeField(null=True, blank=True)
+    cancellation_charge = models.DecimalField(
+        max_digits=12, decimal_places=2, default=0
+    )
+    is_cancelled = models.BooleanField(default=False)
+
+    @property
+    def progress_percentage(self):
+        if self.target_amount == 0:
+            return 0
+        return (self.current_amount / self.target_amount) * 100
+
+    def __str__(self):
+        return f"{self.user.email}'s {self.name} Target"
+
+
 class Transaction(models.Model):
     TRANSACTION_TYPES = (
         ("credit", "Credit"),
@@ -836,11 +918,18 @@ class Transaction(models.Model):
     time = models.TimeField(auto_now_add=True)
     description = models.CharField(max_length=255, default="No description available")
     transaction_id = models.CharField(
-        max_length=255, unique=True, blank=False, null=False, db_index=True
+        max_length=255,
+        unique=True,
+        default=uuid.uuid4,  # Add default generator
+        editable=False,
+        db_index=True,
     )
     service_charge = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
     total_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
     referral_email = models.EmailField(max_length=255, blank=True, null=True)
+    target_savings = models.ForeignKey(
+        TargetSavings, on_delete=models.SET_NULL, null=True, blank=True
+    )
 
     def __str__(self):
         return f"{self.transaction_type} - {self.amount} - {self.status} - {self.date}"
