@@ -12,6 +12,8 @@ from .models import (
     Transaction,
     AutoSave,
     WithdrawalsRequestToAdmin,
+    TargetSavings,
+    TopSaverHistory,
 )
 from django.core.mail import send_mail
 from django.urls import reverse
@@ -871,10 +873,36 @@ class TopSaverHistoryAdmin(admin.ModelAdmin):
     is_current_month.short_description = "Current Month"
 
 
+@admin.register(TargetSavings)
+class TargetSavingsAdmin(admin.ModelAdmin):
+    list_display = (
+        "user",
+        "name",
+        "target_amount",
+        "current_amount",
+        "progress_percentage",
+        "is_active",
+        "next_deduction",
+        "funding_source",
+    )
+    list_filter = ("is_active", "frequency", "category")
+    search_fields = ("user__email", "name")
+    readonly_fields = ("progress_percentage",)
+    fieldsets = (
+        (None, {"fields": ("user", "name", "target_amount", "current_amount")}),
+        ("Settings", {"fields": ("frequency", "funding_source", "payment_method")}),
+        ("Dates", {"fields": ("start_date", "end_date", "next_deduction")}),
+        ("Status", {"fields": ("is_active", "is_cancelled", "cancellation_charge")}),
+    )
+
+    def progress_percentage(self, obj):
+        return f"{obj.progress_percentage:.2f}%"
+
+    progress_percentage.short_description = "Progress"
+
+
 # Register TopSaverHistory with customized admin
 admin.site.register(TopSaverHistory, TopSaverHistoryAdmin)
-
-
 admin.site.register(Card, CardAdmin)
 admin.site.register(Transaction, TransactionAdmin)
 admin.site.register(AutoSave, AutoSaveAdmin)

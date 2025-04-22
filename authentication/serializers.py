@@ -259,9 +259,7 @@ class IncomingMessageSerializer(serializers.Serializer):
     # Add other fields as needed
 
 
-from .models import BankAccount, Card
-from rest_framework import generics
-from rest_framework.permissions import IsAuthenticated
+from .models import BankAccount, Card, TargetSavings
 
 
 class BankAccountSerializer(serializers.ModelSerializer):
@@ -274,6 +272,67 @@ class AccountBalancesSerializer(serializers.ModelSerializer):
     class Meta:
         model = CustomUser
         fields = ["savings", "investment", "properties", "wallet"]
+
+
+from decimal import Decimal
+
+from decimal import Decimal
+from rest_framework import serializers
+from .models import TargetSavings
+
+
+class TargetSavingsSerializer(serializers.ModelSerializer):
+    progress_percentage = serializers.DecimalField(
+        max_digits=5, decimal_places=2, read_only=True
+    )
+    target_amount = serializers.DecimalField(
+        max_digits=12, decimal_places=2, min_value=Decimal("100.00")
+    )
+    monthly_payment = serializers.DecimalField(
+        max_digits=12, decimal_places=2, min_value=Decimal("100.00")
+    )
+    start_date = serializers.DateField(format="%Y-%m-%d", required=False)
+    end_date = serializers.DateField(format="%Y-%m-%d", input_formats=["%Y-%m-%d"])
+
+    def validate(self, data):
+        # Ensure end_date is in the future
+        if data["end_date"] < timezone.now().date():
+            raise serializers.ValidationError(
+                {"end_date": "End date must be in the future"}
+            )
+        return data
+
+    class Meta:
+        model = TargetSavings
+        fields = [
+            "id",
+            "user",
+            "name",
+            "target_amount",
+            "current_amount",
+            "start_date",
+            "end_date",
+            "category",
+            "is_active",
+            "monthly_payment",
+            "frequency",
+            "funding_source",
+            "progress_percentage",
+        ]
+        read_only_fields = [
+            "user",
+            "current_amount",
+            "start_date",
+            "progress_percentage",
+            "is_active",
+        ]
+        extra_kwargs = {
+            "end_date": {"required": True},
+            "start_date": {"required": False},  # Let backend set this
+        }
+
+    def get_progress_percentage(self, obj):
+        return (obj.current_amount / obj.target_amount) * 100
 
 
 from django.utils import timezone
@@ -383,6 +442,7 @@ class TransactionSerializer(serializers.ModelSerializer):
     class Meta:
         model = Transaction
         fields = "__all__"
+        extra_kwargs = {"transaction_id": {"read_only": True}}
 
 
 class QuickSaveSerializer(serializers.Serializer):

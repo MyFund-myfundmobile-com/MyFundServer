@@ -5444,3 +5444,181 @@ def delete_savings_goal(request, id):
         return Response(
             {"error": "Savings goal not found."}, status=status.HTTP_404_NOT_FOUND
         )
+
+
+# views.py
+# Add these imports at the top of views.py
+from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIView
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from django.shortcuts import get_object_or_404
+from .serializers import TargetSavingsSerializer
+from .models import TargetSavings, Transaction
+from django.utils import timezone
+from dateutil.relativedelta import relativedelta
+from django.core.exceptions import ValidationError
+
+
+class TargetSavingsListCreate(ListCreateAPIView):
+    serializer_class = TargetSavingsSerializer
+    permission_classes = [IsAuthenticated]
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        data = serializer.validated_data
+        # In perform_create() method
+        frequency = data["frequency"].upper()  # Force uppercase
+        if frequency not in dict(TargetSavings.FREQUENCY_CHOICES):
+            raise ValidationError("Invalid frequency")
+        # Get required values
+        amount = Decimal(str(serializer.validated_data["monthly_payment"]))
+        funding_source = data["funding_source"]
+
+        # Validate balances
+        if funding_source == "SAVINGS" and user.savings < amount:
+            raise ValidationError("Insufficient savings balance")
+        if funding_source == "INVESTMENT" and user.investment < amount:
+            raise ValidationError("Insufficient investment balance")
+
+        # Deduct from source
+        setattr(
+            user, funding_source.lower(), getattr(user, funding_source.lower()) - amount
+        )
+        user.save()
+
+        # Create instance with initial amount
+        instance = serializer.save(
+            user=user, current_amount=amount, start_date=timezone.now().date()
+        )
+
+        # Create transaction
+        Transaction.objects.create(
+            user=user,
+            transaction_type="debit",
+            status="confirmed",
+            amount=amount,
+            description=f"{instance.name}",
+            service_charge=0,
+            total_amount=amount,
+            target_savings=instance,
+            transaction_id=f"[{instance.id}]-{uuid.uuid4().hex[:12]}_ACTIVE",  # Add this
+        )
+
+        # ——————————————
+        # Send “New Target Created” email
+        subject = f"Target Savings “{instance.name}” is Live!"
+        message = (
+            f"Hi {user.first_name},\n\n"
+            f"Well done! Your new Target Savings plan “{instance.name}” has just been set up with a ₦{amount:,} initial deposit.\n\n"
+            "Keep an eye on your progress and watch your savings grow! 🥂\n\n"
+            "Thanks for choosing MyFund!\n"
+            "MyFund \n Save, Buy Properties, Earn Rent\n"
+            "www.myfundmobile.com"
+        )
+        from_email = settings.DEFAULT_FROM_EMAIL  # e.g. "info@myfundmobile.com"
+        recipient_list = [user.email]
+        send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+        # ——————————————
+
+        # Schedule next deduction
+        instance.next_deduction = timezone.now() + relativedelta(months=1)
+        instance.save()
+
+    def get_queryset(self):
+        return TargetSavings.objects.filter(
+            user=self.request.user,
+            is_cancelled=False,  # Only include non-cancelled plans
+        ).prefetch_related("transaction_set")
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def target_savings_total(request):
+    total = (
+        TargetSavings.objects.filter(
+            user=request.user,
+            is_active=True,
+            is_cancelled=False,  # Only include non-cancelled plans
+        ).aggregate(total=Sum("current_amount"))["total"]
+        or 0
+    )
+    return Response({"total_target_savings": float(total)})
+
+
+class TargetSavingsRetrieveUpdateDestroy(RetrieveUpdateDestroyAPIView):
+    serializer_class = TargetSavingsSerializer
+    permission_classes = [IsAuthenticated]
+    lookup_field = "pk"
+
+    def get_queryset(self):
+        return TargetSavings.objects.filter(
+            user=self.request.user,
+            is_cancelled=False,  # Only include non-cancelled plans
+        )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def cancel_target_saving(request, pk):
+    # Get target savings instance
+    target = get_object_or_404(TargetSavings, pk=pk, user=request.user)
+
+    if target.is_cancelled:
+        return Response({"detail": "Plan already cancelled"}, status=400)
+
+    # Calculate return amount with 1% charge
+    return_amount = target.current_amount * Decimal("0.99")
+    charge = target.current_amount - return_amount
+
+    # Update user savings
+    user = request.user
+    user.savings += return_amount
+    user.save()
+
+    # Create transaction
+    Transaction.objects.create(
+        user=user,
+        transaction_type="credit",
+        status="confirmed",
+        amount=return_amount,
+        description=f"{target.name}",
+        service_charge=charge,
+        total_amount=return_amount,
+        target_savings=target,
+        transaction_id=f"[{target.id}]-{uuid.uuid4().hex[:12]}_CANCELLED",  # Add this
+    )
+
+    # ——————————————
+    # Send “Plan Cancelled” email
+    subject = f"Target Savings “{target.name}” Cancelled"
+    message = (
+        f"Hi {user.first_name},\n\n"
+        f"You’ve just cancelled your Target Savings plan “{target.name}” and we’ve refunded ₦{return_amount:,} "
+        "(minus our 1% processing fee).\n\n"
+        "You’ll forfeit any un‑accrued interest by cancelling early. If you change your mind, you can always set up a new plan.\n\n"
+        "Thanks for using MyFund!\n"
+        "MyFund – Save, Buy Properties, Earn Rent\n"
+        "www.myfundmobile.com"
+    )
+    from_email = settings.DEFAULT_FROM_EMAIL
+    recipient_list = [user.email]
+    send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+    # ——————————————
+
+    # Update target savings
+    target.is_active = False
+    target.is_cancelled = True
+    target.cancellation_charge = charge
+    target.save()
+
+    # Refresh user balances
+    user.refresh_from_db()
+
+    return Response(
+        {
+            "status": "cancelled",
+            "returned_amount": float(return_amount),
+            "new_balance": float(user.savings),
+        }
+    )

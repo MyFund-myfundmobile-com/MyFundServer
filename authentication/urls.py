@@ -23,6 +23,7 @@ from .views import (
     get_all_users,
     unsubscribe_user,
     resubscribe_user,
+    target_savings_total,
 )
 from django.views.decorators.csrf import csrf_exempt
 from authentication.views import CustomGraphQLView
@@ -241,21 +242,21 @@ urlpatterns = [
         views.get_user_contributions,
         name="get_user_contributions",
     ),
-    # Targeted Savings Plan
-    path("savings/create/", views.create_savings_goal, name="create_savings_goal"),
-    path("savings/<uuid:id>/", views.fetch_savings_goal, name="fetch_savings_goal"),
-    path("savings/deposit/<uuid:id>/", views.add_funds, name="add_funds"),
+    # Target Savings Plan using ViewSet
     path(
-        "savings/withdraw/<uuid:id>/", views.withdraw_savings, name="withdraw_savings"
+        "target-savings/",
+        views.TargetSavingsListCreate.as_view(),
+        name="target-savings-list",
     ),
     path(
-        "savings/user/<int:user_id>/",
-        views.fetch_user_savings_goals,
-        name="fetch_user_savings_goals",
+        "target-savings/<int:pk>/",
+        views.TargetSavingsRetrieveUpdateDestroy.as_view(),
+        name="target-savings-detail",
     ),
     path(
-        "savings/delete/<uuid:id>/",
-        views.delete_savings_goal,
-        name="delete_savings_goal",
+        "target-savings/<int:pk>/cancel/",
+        views.cancel_target_saving,
+        name="cancel-target-saving",
     ),
+    path("target-savings/total/", target_savings_total, name="target-savings-total"),
 ]
