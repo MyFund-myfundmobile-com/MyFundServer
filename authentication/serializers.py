@@ -494,6 +494,11 @@ class BuyPropertySerializer(serializers.Serializer):
     payment_source = serializers.ChoiceField(
         choices=["savings", "investment", "wallet", "saved_cards", "bank_transfer"]
     )
+    
+class PropertySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Property
+        fields = ['id', 'name', 'description', 'price', 'rent_reward', 'units_available', 'owner']
 
 
 from django.db.models import Sum
