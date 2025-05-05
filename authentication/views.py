@@ -5462,7 +5462,8 @@ from .serializers import TargetSavingsSerializer
 from .models import TargetSavings, Transaction
 from django.utils import timezone
 from dateutil.relativedelta import relativedelta
-from django.core.exceptions import ValidationError
+# from django.core.exceptions import ValidationError
+from rest_framework.exceptions import ValidationError
 
 
 class TargetSavingsListCreate(ListCreateAPIView):
@@ -5475,16 +5476,16 @@ class TargetSavingsListCreate(ListCreateAPIView):
         # In perform_create() method
         frequency = data["frequency"].upper()  # Force uppercase
         if frequency not in dict(TargetSavings.FREQUENCY_CHOICES):
-            raise ValidationError("Invalid frequency")
+            raise ValidationError({"detail": "Invalid frequency"})
         # Get required values
         amount = Decimal(str(serializer.validated_data["monthly_payment"]))
         funding_source = data["funding_source"]
 
         # Validate balances
         if funding_source == "SAVINGS" and user.savings < amount:
-            raise ValidationError("Insufficient savings balance")
+            raise ValidationError({"detail": "Insufficient savings balance"})
         if funding_source == "INVESTMENT" and user.investment < amount:
-            raise ValidationError("Insufficient investment balance")
+            raise ValidationError({"detail": "Insufficient savings balance"})
 
         # Deduct from source
         setattr(
