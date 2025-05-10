@@ -1329,31 +1329,34 @@ paystack_secret_key = os.environ.get(
     default="  ",
 )
 
+# views.py
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+import requests
+from django.conf import settings
+
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def quicksave(request):
-    # Get the selected card details from the request
     card_id = request.data.get("card_id")
     amount = request.data.get("amount")
+    if amount is None:
+        return Response({"error": "Amount required"}, status=400)
 
-    if amount == None:
-        return Response(
-            {"error": "Amount not inputted"},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-
-    # Retrieve the card details from your database
     try:
-        card = Card.objects.get(id=card_id)
+        card = Card.objects.get(id=card_id, user=request.user)
     except Card.DoesNotExist:
-        return Response(
-            {"error": "Selected card not found"}, status=status.HTTP_404_NOT_FOUND
-        )
+        return Response({"error": "Card not found"}, status=404)
 
-    # Use the card details to initiate a payment with Paystack
-    paystack_url = "https://api.paystack.co/charge"
+    try:
+        # Convert amount to integer
+        amount_kobo = int(float(amount) * 100)
+    except ValueError:
+        return Response({"error": "Invalid amount format"}, status=400)
 
+    # Paystack charge request
     payload = {
         "card": {
             "number": card.card_number,
@@ -1361,82 +1364,85 @@ def quicksave(request):
             "expiry_month": card.expiry_date.split("/")[0],
             "expiry_year": card.expiry_date.split("/")[1],
         },
-        "email": request.user.email,  # Assuming you have a user authenticated with a JWT token
-        "amount": int(amount) * 100,  # Amount in kobo (multiply by 100)
-        "pin": card.pin,
+        "email": request.user.email,
+        "amount": amount_kobo,
+        "metadata": {"purpose": "quicksave"},
     }
 
-    headers = {
-        "Authorization": f"Bearer {paystack_secret_key}",
-        "Content-Type": "application/json",
-    }
+    resp = requests.post(
+        "https://api.paystack.co/charge",
+        json=payload,
+        headers={
+            "Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}",
+            "Content-Type": "application/json",
+        },
+    )
 
-    response = requests.post(paystack_url, json=payload, headers=headers)
-    paystack_response = response.json()
-    print("Paystack Response:", paystack_response)
+    data = resp.json()
 
-    if paystack_response.get("status"):
-        user = request.user
-        paystack_message = paystack_response["message"]
-        paystack_reference = paystack_response["data"]["reference"]
-        paystack_status = paystack_response["data"]["status"]
+    if not data.get("status"):
+        return Response({"error": data.get("message", "Charge failed")}, status=400)
 
-        # Create a transaction record with separate transaction_type and status
-        Transaction.objects.create(
-            user=user,
-            transaction_type="credit",
-            status="confirmed",
-            amount=int(amount),
-            description="QuickSave (Card)",
-            transaction_id=paystack_reference,
-        )
+    reference = data["data"]["reference"]
 
-        # Update user's savings
-        user.savings += int(amount)
-        user.save()
+    # Create pending transaction
+    Transaction.objects.create(
+        user=request.user,
+        transaction_type="credit",
+        status="pending",
+        amount=float(amount),
+        description="QuickSave (Pending)",
+        transaction_id=reference,
+    )
 
-        # ✅ Call the referral reward function after successful charge and balance update
-        user.confirm_referral_rewards(
-            is_referrer=False
-        )  # Assuming the charged user is the referred user
+    return Response(
+        {"reference": reference, "message": "OTP required", "status": "otp_required"}
+    )
 
-        user.update_total_savings_and_investment_this_month()
-        user.save()
 
-        if paystack_response["data"]["status"] == "open_url":
-            paystack_otp_url = paystack_response["data"]["url"]
-            return Response(
-                {
-                    "message": paystack_message,
-                    "reference": paystack_reference,
-                    "open_url": paystack_otp_url,
-                    "status": paystack_status,
-                },
-                status=status.HTTP_200_OK,
-            )
-        else:
-            paystack_display_text = paystack_response.get("data", {}).get(
-                "gateway_response", "No display text found"
-            )
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def confirm_save_otp(request):
+    otp = request.data.get("otp")
+    reference = request.data.get("reference")
+    if not otp or not reference:
+        return Response({"error": "otp and reference required"}, status=400)
 
-            return Response(
-                {
-                    "message": paystack_message,
-                    "reference": paystack_reference,
-                    "display_text": paystack_display_text,
-                    "status": paystack_status,
-                },
-                status=status.HTTP_200_OK,
-            )
-    else:
-        # Payment failed, return an error response
-        return JsonResponse(
-            {
-                "message": paystack_response["data"]["message"],
-                "error": "QuickSave failed",
+    try:
+        # Submit OTP to Paystack
+        resp = requests.post(
+            "https://api.paystack.co/charge/submit_otp",
+            json={"otp": otp, "reference": reference},
+            headers={
+                "Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}",
+                "Content-Type": "application/json",
             },
-            status=status.HTTP_400_BAD_REQUEST,
         )
+        data = resp.json()
+
+        if not data.get("status") or data["data"].get("status") != "success":
+            return Response({"error": "OTP validation failed"}, status=400)
+
+        # Update existing transaction
+        transaction = Transaction.objects.get(transaction_id=reference)
+        transaction.status = "confirmed"
+        transaction.description = "QuickSave (Card)"
+        transaction.save()
+
+        # Update user balance
+        user = request.user
+        user.savings += transaction.amount
+        user.save()
+
+        return Response(
+            {"message": "QuickSave successful", "amount": transaction.amount}
+        )
+
+    except Transaction.DoesNotExist:
+        return Response({"error": "Transaction not found"}, status=404)
+    except Exception as e:
+        print(f"OTP Confirmation Error: {str(e)}")
+        return Response({"error": "Payment processing failed"}, status=500)
 
 
 import time
@@ -3716,7 +3722,7 @@ def paystack_webhook(request):
         message = f"Paystack Webhook Internal Server Error:  {e}"
 
         from_email = "MyFund <info@myfundmobile.com>"
-        recipient_list = ["care@myfundmobile.com", "sammy@myfundmobile.com"]
+        recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
 
         send_mail(subject, message, from_email, recipient_list, fail_silently=False)
 
@@ -3749,6 +3755,17 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
 
         match event["event"]:
             case "charge.success":
+                metadata = event["data"].get("metadata", {})
+                if metadata.get("purpose") == "quicksave":
+                    # Skip processing for OTP-based transactions
+                    transaction = Transaction.objects.filter(
+                        transaction_id=event["data"]["reference"]
+                    ).first()
+
+                    if transaction and transaction.status == "pending":
+                        print("Skipping webhook processing for pending OTP transaction")
+                        return
+
                 reference = event["data"]["reference"]
                 email = event["data"]["customer"]["email"]
                 transaction = Transaction.objects.filter(
@@ -4045,7 +4062,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                 message = f"Invoice Data:  \n\n{event_data}"
 
                 from_email = "MyFund <info@myfundmobile.com>"
-                recipient_list = ["care@myfundmobile.com", "sammy@myfundmobile.com"]
+                recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
 
                 return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
@@ -4099,7 +4116,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
         message = f"Paystack Webhook Internal Server Error:  {e}"
 
         from_email = "MyFund <info@myfundmobile.com>"
-        recipient_list = ["care@myfundmobile.com", "sammy@myfundmobile.com"]
+        recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
 
         send_mail(subject, message, from_email, recipient_list, fail_silently=False)
 
