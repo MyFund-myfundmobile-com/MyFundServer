@@ -108,6 +108,7 @@ urlpatterns = [
     ),
     # Savings-related APIs
     path("quicksave/", views.quicksave, name="quicksave"),
+    path("confirm-save-otp/", views.confirm_save_otp, name="confirm_save_otp"),
     path(
         "activate-autosave/", views.autosave, name="autosave"
     ),  # Make sure to use the correct view function
