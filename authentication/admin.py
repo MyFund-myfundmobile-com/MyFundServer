@@ -542,7 +542,7 @@ class BankTransferRequestAdmin(admin.ModelAdmin):
 
             # ✅ Send Approval Email
             subject = "QuickSave Updated! ✔"
-            message = f"Hi {user.first_name},\n\nYour bank transfer of ₦{transfer_request.amount} has been approved and added to your savings!\n\Keep growing your funds! \n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+            message = f"Hi {user.first_name},\n\nYour bank transfer of ₦{transfer_request.amount} has been approved and added to your savings!\n\nKeep growing your funds! \n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
             send_mail(subject, message, "MyFund <info@myfundmobile.com>", [user.email])
 
         self.message_user(
