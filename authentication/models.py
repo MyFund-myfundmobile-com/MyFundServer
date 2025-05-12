@@ -59,7 +59,6 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     last_name = models.CharField(max_length=30)
     email = models.EmailField(unique=True)
     phone_number = models.CharField(max_length=15)
-    referral = models.CharField(max_length=40, blank=True, null=True)
     referral_reward_granted = models.BooleanField(default=False)
     otp = models.CharField(max_length=6, blank=True, null=True)
     reset_token = models.CharField(max_length=64, null=True, blank=True)
@@ -905,8 +904,21 @@ class Transaction(models.Model):
     )
 
     user = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, db_index=True
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        db_index=True,
+        related_name="user_transactions",  # Changed from 'transactions'
     )
+
+    # Relationship for the referral user
+    referral = models.ForeignKey(
+        CustomUser,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="referral_transactions",  # Changed from 'transaction_referrer'
+    )
+
     transaction_type = models.CharField(
         max_length=20, choices=TRANSACTION_TYPES
     )  # ⬅ Increase max_length
@@ -1096,23 +1108,6 @@ class EmailTemplate(models.Model):
 
     def __str__(self):
         return self.title
-
-
-class Referral(models.Model):
-    user = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="referred_by"
-    )
-    referrer = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="referrals"
-    )
-
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        unique_together = ("user", "referrer")  # Ensure a user-referrer pair is unique
-
-    def __str__(self):
-        return f"{self.user.first_name} referred by {self.referrer.first_name}"
 
 
 class UserPassword(models.Model):

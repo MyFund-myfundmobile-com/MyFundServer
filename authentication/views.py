@@ -26,7 +26,7 @@ from django.contrib.auth import logout
 from django.shortcuts import render, redirect
 from django.core.exceptions import ObjectDoesNotExist
 from django.utils import timezone
-from authentication.models import CustomUser, Referral
+from authentication.models import CustomUser
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from .serializers import UserProfileUpdateSerializer
@@ -4156,13 +4156,31 @@ def get_all_users(request):
     elif date_range == "yearly":
         start_date = now - timedelta(days=365)
 
-    # Filter users based on the date range and exclude unsubscribed users
+    # Base queryset
+    users = CustomUser.objects.filter(is_subscribed=True)
+
+    # Apply date filtering if needed
     if start_date:
-        users = CustomUser.objects.filter(
-            date_joined__gte=start_date, is_subscribed=True
-        )
-    else:
-        users = CustomUser.objects.filter(is_subscribed=True)
+        users = users.filter(date_joined__gte=start_date)
+
+    users = users.annotate(
+        total_referrals=Count(
+            "referral_transactions",
+            filter=Q(
+                referral_transactions__description__icontains="referral reward",
+                referral_transactions__status="pending",
+            ),
+        ),
+        confirmed_referrals=Count(
+            "referral_transactions",
+            filter=Q(
+                referral_transactions__description__icontains="referral reward",
+                referral_transactions__status="confirmed",
+            ),
+        ),
+    ).select_related(
+        "referral"
+    )  # Optimize foreign key access
 
     serializer = UserSerializer(users, many=True)
     return Response(serializer.data, status=status.HTTP_200_OK)

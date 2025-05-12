@@ -92,6 +92,8 @@ class UserSerializer(serializers.ModelSerializer):
     profile_picture = serializers.SerializerMethodField()
     date_joined = serializers.DateTimeField(format="%d %b. %Y   |   %I:%M%p")
     is_subscribed = serializers.BooleanField(read_only=True)
+    total_referrals = serializers.SerializerMethodField()
+    confirmed_referrals = serializers.SerializerMethodField()
 
     class Meta:
         model = CustomUser
@@ -135,7 +137,24 @@ class UserSerializer(serializers.ModelSerializer):
             "next_of_kin_phone_number",
             "state",
             "country",
+            # Add new referral fields
+            "total_referrals",
+            "confirmed_referrals",
         ]
+
+    def get_total_referrals(self, obj):
+        return Transaction.objects.filter(
+            referral_email__iexact=obj.email,
+            description__icontains="referral reward",
+            status="pending",
+        ).count()
+
+    def get_confirmed_referrals(self, obj):
+        return Transaction.objects.filter(
+            referral_email__iexact=obj.email,
+            description__icontains="referral reward",
+            status="confirmed",
+        ).count()
 
     def get_date_joined(self, obj):
         return obj.date_joined.strftime("%d %b. %Y   |   %I:%M%p")
