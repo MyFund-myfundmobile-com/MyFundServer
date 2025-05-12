@@ -33,13 +33,16 @@ from django.db.models import (
 from django.db import models
 from django.db.models.functions import Coalesce
 from django.utils import timezone
-from .models import CustomUser, CustomUserMetrics, Referral, UserPassword
+from .models import CustomUser, CustomUserMetrics, UserPassword, Transaction
 import csv
 from django.http import HttpResponse
+from django.utils.html import format_html
+from django.urls import reverse
 
 
 class TransactionInline(admin.TabularInline):
     model = Transaction
+    fk_name = "user"
     extra = 0
     fields = (
         "transaction_type",
@@ -71,14 +74,9 @@ class CustomUserAdmin(UserAdmin):
         "first_name",
         "last_name",
         "phone_number",
+        "total_referrals",
+        "confirmed_referrals",
         "date_joined",
-        "profile_picture",
-        "kyc_updated",
-        "is_staff",
-        "is_active",
-        "preferred_asset",
-        "savings_goal_amount",
-        "time_period",
         "savings",
         "investment",
         "properties",
@@ -89,6 +87,10 @@ class CustomUserAdmin(UserAdmin):
         "how_did_you_hear",
         "is_hired_referrer",
         "is_ambassador",
+        "kyc_updated",
+        "is_staff",
+        "is_active",
+        "profile_picture",
     )
     list_filter = (
         "is_staff",
@@ -131,6 +133,15 @@ class CustomUserAdmin(UserAdmin):
             },
         ),
         (
+            "Referral Stats",
+            {
+                "fields": (
+                    "total_referrals",
+                    "confirmed_referrals",
+                )
+            },
+        ),
+        (
             "Account Balances",
             {"fields": ("savings", "investment", "properties", "wallet")},
         ),  # Add account balances fields
@@ -169,6 +180,33 @@ class CustomUserAdmin(UserAdmin):
     search_fields = ("email", "first_name", "last_name")
     ordering = ("email", "date_joined")
     inlines = [TransactionInline, UserPasswordInline]
+
+    def total_referrals(self, obj):
+        return Transaction.objects.filter(referral_email=obj.email).count()
+
+    def confirmed_referrals(self, obj):
+        return Transaction.objects.filter(
+            referral_email=obj.email, status="confirmed"
+        ).count()
+
+    total_referrals.short_description = "Total Signups"
+    confirmed_referrals.short_description = "Confirmed Signups"
+
+    total_referrals.short_description = "Total Referrals"
+
+    confirmed_referrals.short_description = "Confirmed Referrals"
+
+    def total_referrals_display(self, obj):
+        return getattr(obj, "_total_referrals", 0)
+
+    total_referrals_display.short_description = "Total Referrals"
+    total_referrals_display.admin_order_field = "_total_referrals"
+
+    def confirmed_referrals_display(self, obj):
+        return getattr(obj, "_confirmed_referrals", 0)
+
+    confirmed_referrals_display.short_description = "Confirmed Referrals"
+    confirmed_referrals_display.admin_order_field = "_confirmed_referrals"
 
     def export_to_csv(self, request, queryset):
         # Create the response object and set the content type
@@ -412,8 +450,8 @@ class CustomUserAdmin(UserAdmin):
 
         total_savings_and_investments_this_month = (
             CustomUser.objects.filter(
-                transaction__date__year=current_month_start.year,
-                transaction__date__month=current_month_start.month,
+                user_transactions__date__year=current_month_start.year,  # ✅ Fixed
+                user_transactions__date__month=current_month_start.month,
             ).aggregate(
                 total_savings_and_investments_this_month=Sum(
                     "total_savings_and_investments_this_month"
@@ -753,8 +791,13 @@ class TransactionAdmin(admin.ModelAdmin):
         "time",
         "description",
         "transaction_id",
+        "is_referral_transaction",
     )
-    list_filter = ("transaction_type", "status", "date")  # Added status filter
+    list_filter = (
+        "transaction_type",
+        "status",
+        ("date", admin.DateFieldListFilter),
+    )
     search_fields = (
         "user__email",
         "description",
@@ -762,7 +805,14 @@ class TransactionAdmin(admin.ModelAdmin):
         "transaction_type",
         "status",  # Allow searching by status
         "amount",
+        "referral__user__email",
     )
+
+    def is_referral_transaction(self, obj):
+        return bool(obj.referral_email)
+
+    is_referral_transaction.boolean = True
+    is_referral_transaction.short_description = "Is Referral?"
 
     def save_model(self, request, obj, form, change):
         print(
@@ -776,18 +826,6 @@ class PropertyAdmin(admin.ModelAdmin):
     list_editable = [
         "units_available"
     ]  # Make the units_available field editable in the list view
-
-
-class ReferralAdmin(admin.ModelAdmin):
-    list_display = ("user", "referrer", "created_at")
-    search_fields = ("user__email", "referrer__email")
-    list_filter = ("created_at",)
-    ordering = ("-created_at",)
-
-    def get_queryset(self, request):
-        """Optimize the queryset by prefetching related user and referrer data."""
-        qs = super().get_queryset(request)
-        return qs.select_related("user", "referrer")
 
 
 from django.db.models import F
@@ -908,4 +946,3 @@ admin.site.register(Transaction, TransactionAdmin)
 admin.site.register(AutoSave, AutoSaveAdmin)
 admin.site.register(AutoInvest, AutoInvestAdmin)
 admin.site.register(Property, PropertyAdmin)
-admin.site.register(Referral, ReferralAdmin)
