@@ -92,8 +92,8 @@ class UserSerializer(serializers.ModelSerializer):
     profile_picture = serializers.SerializerMethodField()
     date_joined = serializers.DateTimeField(format="%d %b. %Y   |   %I:%M%p")
     is_subscribed = serializers.BooleanField(read_only=True)
-    total_referrals = serializers.SerializerMethodField()
-    confirmed_referrals = serializers.SerializerMethodField()
+    total_referrals = serializers.IntegerField(read_only=True)
+    confirmed_referrals = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = CustomUser
@@ -141,20 +141,6 @@ class UserSerializer(serializers.ModelSerializer):
             "total_referrals",
             "confirmed_referrals",
         ]
-
-    def get_total_referrals(self, obj):
-        return Transaction.objects.filter(
-            referral_email__iexact=obj.email,
-            description__icontains="referral reward",
-            status="pending",
-        ).count()
-
-    def get_confirmed_referrals(self, obj):
-        return Transaction.objects.filter(
-            referral_email__iexact=obj.email,
-            description__icontains="referral reward",
-            status="confirmed",
-        ).count()
 
     def get_date_joined(self, obj):
         return obj.date_joined.strftime("%d %b. %Y   |   %I:%M%p")
@@ -513,11 +499,20 @@ class BuyPropertySerializer(serializers.Serializer):
     payment_source = serializers.ChoiceField(
         choices=["savings", "investment", "wallet", "saved_cards", "bank_transfer"]
     )
-    
+
+
 class PropertySerializer(serializers.ModelSerializer):
     class Meta:
         model = Property
-        fields = ['id', 'name', 'description', 'price', 'rent_reward', 'units_available', 'owner']
+        fields = [
+            "id",
+            "name",
+            "description",
+            "price",
+            "rent_reward",
+            "units_available",
+            "owner",
+        ]
 
 
 from django.db.models import Sum

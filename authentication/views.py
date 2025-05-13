@@ -3071,8 +3071,8 @@ class BuyPropertyView(generics.CreateAPIView):
         return Response(
             {"detail": "Property purchased successfully."}, status=status.HTTP_200_OK
         )
-        
-        
+
+
 @api_view(["GET"])
 def get_all_property_details(request):
     try:
@@ -3084,13 +3084,13 @@ def get_all_property_details(request):
             # Serialize the properties data
             serializer = PropertySerializer(properties, many=True)
             return Response(serializer.data)
-        
+
         # If no properties are found
         return Response(
             {"message": "No property found."},
             status=status.HTTP_404_NOT_FOUND,
         )
-    
+
     except Property.DoesNotExist:
         return Response(
             {"message": "Error fetching properties."},
@@ -3726,9 +3726,7 @@ def paystack_webhook(request):
 
         send_mail(subject, message, from_email, recipient_list, fail_silently=False)
 
-        return JsonResponse(
-            {"error": str(e)}, status=status.HTTP_200_OK
-        )
+        return JsonResponse({"error": str(e)}, status=status.HTTP_200_OK)
 
 
 from .models import WithdrawalsRequestToAdmin
@@ -3845,9 +3843,12 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         trans_description[1] if len(trans_description) > 1 else ""
                     )
 
-                    if trans_type == "AutoInvest" or AutoInvest.objects.filter(
-                        paystack_trans_ref=reference
-                    ).first():
+                    if (
+                        trans_type == "AutoInvest"
+                        or AutoInvest.objects.filter(
+                            paystack_trans_ref=reference
+                        ).first()
+                    ):
                         transaction = Transaction.objects.create(
                             user=user,
                             transaction_type="credit",
@@ -3980,7 +3981,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     user.confirm_referral_rewards(is_referrer=True)
                     user.update_total_savings_and_investment_this_month()
                     user.save()
-                    
+
                 print(f"transaction after update: {transaction}")
 
                 return JsonResponse({"status": True}, status=status.HTTP_200_OK)
@@ -3994,20 +3995,18 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
 
                 print(f"sub_code: {sub_code}, sub_token: {sub_token}")
 
-                
                 if AutoSave.objects.get(
                     paystack_sub_code=sub_code,
                     paystack_sub_token=sub_token,
                 ):
                     # print(f"AutoSave has a record with the sub_code: {sub_code} and sub_token: {sub_token}")
 
-
-                    amount = (
-                        event["data"]["amount"] / 100
-                    )  # convert amount to naira
+                    amount = event["data"]["amount"] / 100  # convert amount to naira
 
                     # Check if a transaction with the same transaction_id already exists
-                    existing_transaction = Transaction.objects.filter(transaction_id=trans_ref).first()
+                    existing_transaction = Transaction.objects.filter(
+                        transaction_id=trans_ref
+                    ).first()
 
                     if not existing_transaction:
                         # Create a new transaction if not found
@@ -4019,21 +4018,21 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             description="AutoSave",
                             transaction_id=trans_ref,
                         )
-                    
+
                     return JsonResponse({"status": True}, status=status.HTTP_200_OK)
-                
+
                 elif AutoInvest.objects.get(
                     paystack_sub_code=sub_code,
                     paystack_sub_token=sub_token,
                 ):
                     # print(f"AutoInvest has a record with the sub_code: {sub_code} and sub_token: {sub_token}")
 
-                    amount = (
-                        event["data"]["amount"] / 100
-                    )  # convert amount to naira
+                    amount = event["data"]["amount"] / 100  # convert amount to naira
 
                     # Check if a transaction with the same transaction_id already exists
-                    existing_transaction = Transaction.objects.filter(transaction_id=trans_ref).first()
+                    existing_transaction = Transaction.objects.filter(
+                        transaction_id=trans_ref
+                    ).first()
 
                     if not existing_transaction:
                         # Create a new transaction if not found
@@ -4045,10 +4044,10 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             description="AutoInvest",
                             transaction_id=trans_ref,
                         )
-                    
+
                     return JsonResponse({"status": True}, status=status.HTTP_200_OK)
-                
-                else:                
+
+                else:
                     print(
                         f'\n"invoice.create" details does not exist in MyFund database\n'
                     )
@@ -4120,9 +4119,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
 
         send_mail(subject, message, from_email, recipient_list, fail_silently=False)
 
-        return JsonResponse(
-            {"error": str(e)}, status=status.HTTP_200_OK
-        )
+        return JsonResponse({"error": str(e)}, status=status.HTTP_200_OK)
 
 
 # ------------------------------ ADMIN SECTION FUNCTIONS
@@ -4133,11 +4130,14 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from .serializers import UserSerializer
 from django.shortcuts import get_object_or_404
+from django.db import connection  # Add this import at the top
+import time
 
 
 @api_view(["GET"])
-# @permission_classes([IsAuthenticated])
 def get_all_users(request):
+    start = time.time()
+
     date_range = request.query_params.get("date_range", None)
     now = timezone.now()
     start_date = None
@@ -4163,27 +4163,23 @@ def get_all_users(request):
     if start_date:
         users = users.filter(date_joined__gte=start_date)
 
+    # Annotate counts - MATCHING THE ADMIN IMPLEMENTATION
     users = users.annotate(
         total_referrals=Count(
-            "referral_transactions",
-            filter=Q(
-                referral_transactions__description__icontains="referral reward",
-                referral_transactions__status="pending",
-            ),
+            "user_transactions",  # Changed from referral_transactions to match your Transaction model
+            filter=Q(user_transactions__description__icontains="referral reward"),
+            distinct=True,
         ),
         confirmed_referrals=Count(
-            "referral_transactions",
-            filter=Q(
-                referral_transactions__description__icontains="referral reward",
-                referral_transactions__status="confirmed",
-            ),
+            "user_transactions",  # Changed from referral_transactions to match your Transaction model
+            filter=Q(user_transactions__description__icontains="referral reward")
+            & Q(user_transactions__status="confirmed"),
+            distinct=True,
         ),
-    ).select_related(
-        "referral"
-    )  # Optimize foreign key access
+    ).select_related("referral")
 
     serializer = UserSerializer(users, many=True)
-    return Response(serializer.data, status=status.HTTP_200_OK)
+    return Response(serializer.data)
 
 
 @api_view(["POST"])
@@ -5497,6 +5493,7 @@ from .serializers import TargetSavingsSerializer
 from .models import TargetSavings, Transaction
 from django.utils import timezone
 from dateutil.relativedelta import relativedelta
+
 # from django.core.exceptions import ValidationError
 from rest_framework.exceptions import ValidationError
 
