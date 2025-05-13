@@ -531,12 +531,14 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         msg.send()
 
     def confirm_referral_rewards(self, is_referrer):
-        if (
-            self.referral and not self.referral_reward_granted
-        ):  # Ensure the user has a referrer and hasn't received the reward before
+        if self.referral and not self.referral_reward_granted:
+            # Determine the savings threshold based on whether referrer is an ambassador
+            savings_threshold = 10000 if self.referral.is_ambassador else 20000
+            investment_threshold = 100000  # Keep investment threshold the same
+
             # Check if savings or investment has crossed the threshold for the first time
-            first_time_savings_threshold = self.savings >= 20000
-            first_time_investment_threshold = self.investment >= 100000
+            first_time_savings_threshold = self.savings >= savings_threshold
+            first_time_investment_threshold = self.investment >= investment_threshold
 
             if first_time_savings_threshold or first_time_investment_threshold:
                 # Mark referral reward as granted to prevent duplicate credits
@@ -561,7 +563,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                 # Update referrer's pending transaction to confirmed
                 referrer_transaction = Transaction.objects.filter(
                     user=self.referral,
-                    referral_email=self.email,  # Ensure it's the correct referral reward transaction
+                    referral_email=self.email,
                     transaction_type="credit",
                     status="pending",
                 ).first()
@@ -588,11 +590,29 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
 
     def send_confirmation_email(self, user, is_referrer):
         if is_referrer:
+            ambassador_note = (
+                "\n\nP.S. As one of our valued Ambassadors, you qualified for early rewards. Keep up the great work!"
+                if user.is_ambassador
+                else ""
+            )
             subject = f"Congrats!🎊🥂 Referral Reward for {self.first_name} Confirmed!"
-            message = f"Congratulations {user.first_name},\n\nYou have received a referral reward of ₦500.00 in your wallet for referring {self.first_name}.\n\nThank you for using MyFund and referring others!\n\nKeep growing your funds.🥂\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+            message = (
+                f"Congratulations {user.first_name},\n\n"
+                f"You have received a referral reward of ₦500.00 in your wallet for referring {self.first_name}."
+                f"{ambassador_note}"
+                f"\n\nThank you for using MyFund and referring others!"
+                f"\n\nKeep growing your funds.🥂"
+                f"\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+            )
         else:
             subject = f"Congrats!🎊🥂 Referral Reward Confirmed!"
-            message = f"Congratulations {self.first_name}, \n\nYou have received a referral reward of ₦500.00 in your wallet thanks to your referral.\n\nThank you for using MyFund!\n\nKeep growing your funds.🥂\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+            message = (
+                f"Congratulations {self.first_name}, \n\n"
+                f"You have received a referral reward of ₦500.00 in your wallet thanks to your referral."
+                f"\n\nThank you for using MyFund!"
+                f"\n\nKeep growing your funds.🥂"
+                f"\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+            )
 
         from_email = "MyFund <info@myfundmobile.com>"
         recipient_list = [user.email]

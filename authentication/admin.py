@@ -23,6 +23,7 @@ from django.contrib import admin
 from django.db.models import (
     Sum,
     F,
+    Count,
     Case,
     When,
     IntegerField,
@@ -74,8 +75,8 @@ class CustomUserAdmin(UserAdmin):
         "first_name",
         "last_name",
         "phone_number",
-        "total_referrals",
-        "confirmed_referrals",
+        "get_total_referrals",
+        "get_confirmed_referrals",
         "date_joined",
         "savings",
         "investment",
@@ -101,6 +102,8 @@ class CustomUserAdmin(UserAdmin):
         "is_hired_referrer",
         "is_ambassador",
     )
+    readonly_fields = ("get_total_referrals", "get_confirmed_referrals", "date_joined")
+
     actions = [
         "export_to_csv",  # Add export action
         "send_custom_email",
@@ -136,8 +139,8 @@ class CustomUserAdmin(UserAdmin):
             "Referral Stats",
             {
                 "fields": (
-                    "total_referrals",
-                    "confirmed_referrals",
+                    "get_total_referrals",
+                    "get_confirmed_referrals",
                 )
             },
         ),
@@ -181,32 +184,27 @@ class CustomUserAdmin(UserAdmin):
     ordering = ("email", "date_joined")
     inlines = [TransactionInline, UserPasswordInline]
 
-    def total_referrals(self, obj):
+    def get_total_referrals(self, obj):
         return Transaction.objects.filter(referral_email=obj.email).count()
 
-    def confirmed_referrals(self, obj):
+    get_total_referrals.short_description = "Total Referrals"
+
+    def get_confirmed_referrals(self, obj):
         return Transaction.objects.filter(
             referral_email=obj.email, status="confirmed"
         ).count()
 
-    total_referrals.short_description = "Total Signups"
-    confirmed_referrals.short_description = "Confirmed Signups"
+    get_confirmed_referrals.short_description = "Confirmed Referrals"
 
-    total_referrals.short_description = "Total Referrals"
-
-    confirmed_referrals.short_description = "Confirmed Referrals"
-
-    def total_referrals_display(self, obj):
-        return getattr(obj, "_total_referrals", 0)
-
-    total_referrals_display.short_description = "Total Referrals"
-    total_referrals_display.admin_order_field = "_total_referrals"
-
-    def confirmed_referrals_display(self, obj):
-        return getattr(obj, "_confirmed_referrals", 0)
-
-    confirmed_referrals_display.short_description = "Confirmed Referrals"
-    confirmed_referrals_display.admin_order_field = "_confirmed_referrals"
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+        return qs.annotate(
+            _total_referrals=Count("referral_transactions"),
+            _confirmed_referrals=Count(
+                "referral_transactions",
+                filter=Q(referral_transactions__status="confirmed"),
+            ),
+        )
 
     def export_to_csv(self, request, queryset):
         # Create the response object and set the content type
@@ -828,7 +826,7 @@ class PropertyAdmin(admin.ModelAdmin):
     ]  # Make the units_available field editable in the list view
 
 
-from django.db.models import F
+from django.db.models import F, Count, Q
 import csv
 from django.http import HttpResponse
 from django.contrib import admin
