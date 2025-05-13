@@ -225,7 +225,7 @@ def generate_otp():
 
 
 def send_otp_email(user, otp):
-    subject = "[OTP] Did You Just Signup?"
+    subject = f"[OTP-{otp}] Did You Just Signup?"
     current_year = datetime.now().year  # Get the current year
     logo_url = (
         "https://drive.google.com/uc?export=view&id=1MorbW_xLg4k2txNQdhUnBVxad8xeni-N"
@@ -658,71 +658,82 @@ def update_user_profile(request):
         )
 
 
+import time
+import logging
+from rest_framework import status
+from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.decorators import api_view, permission_classes, parser_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from imagekitio import ImageKit
+from django.conf import settings
+
+logger = logging.getLogger(__name__)
+
+imagekit = ImageKit(
+    private_key=settings.IMAGEKIT_PRIVATE_KEY,
+    public_key=settings.IMAGEKIT_PUBLIC_KEY,
+    url_endpoint=settings.IMAGEKIT_URL_ENDPOINT,
+)
+
+
 @api_view(["PATCH"])
 @permission_classes([IsAuthenticated])
+@parser_classes([MultiPartParser, FormParser])
 def profile_picture_update(request):
-    """
-    Updates the authenticated user's profile picture.
-    """
     user = request.user
-
-    if "profile_picture" not in request.FILES:
-        logger.warning("No profile picture provided for user: %s", user.email)
+    pic = request.FILES.get("profile_picture")
+    if not pic:
         return Response(
-            {"error": "No image was provided."},
-            status=status.HTTP_400_BAD_REQUEST,
+            {"error": "No image file provided"}, status=status.HTTP_400_BAD_REQUEST
         )
+
+    # optional: enforce size/type here…
+
+    ext = pic.name.rsplit(".", 1)[-1]
+    filename = f"profile_{user.id}_{int(time.time())}.{ext}"
 
     try:
-        profile_pic = request.FILES["profile_picture"]  # Ensure file is from FILES
-
-        # Upload image to ImageKit
-        upload = imagekit.upload_file(
-            file=profile_pic, file_name=f"profile_{user.id}.jpg"
+        # upload to ImageKit
+        result = imagekit.upload_file(
+            file=pic,
+            file_name=filename,
+            options={
+                "folder": "/profile_pictures/",
+                "tags": [f"user_{user.id}"],
+            },
         )
+        url = result["response"]["url"]
 
-        # Debugging: Log response from ImageKit
-        logger.info("ImageKit upload response: %s", upload)
-
-        # Check if upload was successful
-        if not upload or not hasattr(upload, "url") or not upload.url:
-            logger.error("Image upload failed for user: %s", user.email)
-            return Response(
-                {"error": "Image upload failed, please try again."},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-
-        # Update user's profile picture
-        user.profile_picture = upload.url
+        user.profile_picture = url
         user.save()
-
-        logger.info("Profile picture updated successfully for user: %s", user.email)
-
-        updated_user_data = {
-            "firstName": user.first_name,
-            "lastName": user.last_name,
-            "mobileNumber": user.phone_number,
-            "email": user.email,
-            "profile_picture": user.profile_picture,
-        }
 
         return Response(
             {
-                "message": "Profile picture updated successfully.",
-                "user": updated_user_data,
+                "message": "Profile picture updated successfully",
+                "profile_picture": url,
             },
             status=status.HTTP_200_OK,
         )
 
     except Exception as e:
-        logger.error(
-            "Error updating profile picture for user %s: %s", user.email, str(e)
-        )
+        logger.error("ImageKit upload failed: %s", e)
+        # fallback to local
+        from django.core.files.storage import FileSystemStorage
+
+        fs = FileSystemStorage()
+        local_name = fs.save(filename, pic)
+        local_url = request.build_absolute_uri(fs.url(local_name))
+        user.profile_picture = local_url
+        user.save()
+
         return Response(
             {
-                "error": f"An error occurred while updating the profile picture: {str(e)}"
+                "message": "Profile picture saved locally",
+                "profile_picture": local_url,
+                "warning": "Cloud upload failed, using local storage",
             },
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status=status.HTTP_200_OK,
         )
 
 
