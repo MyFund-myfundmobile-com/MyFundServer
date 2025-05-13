@@ -923,12 +923,14 @@ class Transaction(models.Model):
         max_length=20, choices=TRANSACTION_TYPES
     )  # ⬅ Increase max_length
     status = models.CharField(
-        max_length=20, choices=STATUS_TYPES, default="pending"
+        max_length=20, choices=STATUS_TYPES, default="pending", db_index=True
     )  # ⬅ Increase max_length
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     date = models.DateTimeField(auto_now_add=True)
     time = models.TimeField(auto_now_add=True)
-    description = models.CharField(max_length=255, default="No description available")
+    description = models.CharField(
+        max_length=255, default="No description available", db_index=True
+    )
     transaction_id = models.CharField(
         max_length=255,
         unique=True,
@@ -938,7 +940,9 @@ class Transaction(models.Model):
     )
     service_charge = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
     total_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
-    referral_email = models.EmailField(max_length=255, blank=True, null=True)
+    referral_email = models.EmailField(
+        max_length=255, blank=True, null=True, db_index=True
+    )
     target_savings = models.ForeignKey(
         TargetSavings, on_delete=models.SET_NULL, null=True, blank=True
     )
