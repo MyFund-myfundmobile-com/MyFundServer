@@ -591,7 +591,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     def send_confirmation_email(self, user, is_referrer):
         if is_referrer:
             ambassador_note = (
-                "\n\nP.S. As one of our valued Ambassadors, you qualified for early rewards. Keep up the great work!"
+                "\n\nP.S. As our valued Ambassador, you qualified for early referral rewards. Keep up the great work!"
                 if user.is_ambassador
                 else ""
             )
