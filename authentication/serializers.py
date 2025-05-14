@@ -680,3 +680,14 @@ class SavingsGoalSerializer(serializers.ModelSerializer):
             "contribution_type",
             "created_at",
         ]
+
+
+from rest_framework import serializers
+from .models import MonthlyFinancialRecord
+
+
+class MonthlyFinancialRecordSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MonthlyFinancialRecord
+        fields = ["month", "total_savings", "total_investments"]
+        read_only_fields = ["created_at", "updated_at"]
