@@ -24,6 +24,9 @@ from .views import (
     unsubscribe_user,
     resubscribe_user,
     target_savings_total,
+    CurrentMonthFinancialView,
+    FinancialHistoryView,
+    AllUsersMonthlyTotalsView,
 )
 from django.views.decorators.csrf import csrf_exempt
 from authentication.views import CustomGraphQLView
@@ -155,7 +158,11 @@ urlpatterns = [
     path("get-user-by-email/", get_user_by_email, name="get-user-by-email"),
     # Property-related APIs
     path("buy-property/", BuyPropertyView.as_view(), name="buy-property"),
-    path("get-all-property-details/", views.get_all_property_details, name="get-all-property-details"),
+    path(
+        "get-all-property-details/",
+        views.get_all_property_details,
+        name="get-all-property-details",
+    ),
     # Top savers
     path("top-savers/", views.get_top_savers, name="top_savers"),
     path(
@@ -260,4 +267,12 @@ urlpatterns = [
         name="cancel-target-saving",
     ),
     path("target-savings/total/", target_savings_total, name="target-savings-total"),
+    # MonthlyFinancial APIs
+    path(
+        "current-month/",
+        CurrentMonthFinancialView.as_view(),
+        name="current-month-financial",
+    ),
+    path("history/", FinancialHistoryView.as_view(), name="financial-history"),
+    path("admin-totals/", AllUsersMonthlyTotalsView.as_view(), name="all-users-totals"),
 ]

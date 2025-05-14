@@ -1257,3 +1257,25 @@ class SavingsGoal(models.Model):
 
     def __str__(self):
         return self.name
+
+
+from django.db import models
+from django.contrib.auth import get_user_model
+
+User = get_user_model()
+
+
+class MonthlyFinancialRecord(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    month = models.DateField()  # Stores first day of each month
+    total_savings = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    total_investments = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ("user", "month")
+        ordering = ["-month"]
+
+    def __str__(self):
+        return f"{self.user.email} - {self.month.strftime('%B %Y')}"

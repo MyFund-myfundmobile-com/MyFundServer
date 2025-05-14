@@ -5671,3 +5671,74 @@ def cancel_target_saving(request, pk):
             "new_balance": float(user.savings),
         }
     )
+
+
+from rest_framework import generics
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from django.utils import timezone
+from datetime import timedelta
+from .models import MonthlyFinancialRecord
+from .serializers import MonthlyFinancialRecordSerializer
+from django.db.models import Sum
+
+
+class CurrentMonthFinancialView(generics.RetrieveAPIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        today = timezone.now().date()
+        first_day_of_month = today.replace(day=1)
+
+        # Get or create record for current month
+        record, created = MonthlyFinancialRecord.objects.get_or_create(
+            user=request.user,
+            month=first_day_of_month,
+            defaults={
+                "total_savings": request.user.account_balance.savings,
+                "total_investments": request.user.account_balance.investments,
+            },
+        )
+
+        # Update if not created and values might have changed
+        if not created:
+            record.total_savings = request.user.account_balance.savings
+            record.total_investments = request.user.account_balance.investments
+            record.save()
+
+        serializer = MonthlyFinancialRecordSerializer(record)
+        return Response(serializer.data)
+
+
+class FinancialHistoryView(generics.ListAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = MonthlyFinancialRecordSerializer
+
+    def get_queryset(self):
+        # Return last 12 months of data
+        one_year_ago = timezone.now().date() - timedelta(days=365)
+        return MonthlyFinancialRecord.objects.filter(
+            user=self.request.user, month__gte=one_year_ago
+        ).order_by("-month")
+
+
+class AllUsersMonthlyTotalsView(generics.ListAPIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        if not request.user.is_staff:
+            return Response({"detail": "Permission denied"}, status=403)
+
+        current_month = timezone.now().date().replace(day=1)
+        totals = MonthlyFinancialRecord.objects.filter(month=current_month).aggregate(
+            total_savings=Sum("total_savings"),
+            total_investments=Sum("total_investments"),
+        )
+
+        return Response(
+            {
+                "month": current_month.strftime("%B %Y"),
+                "total_savings": totals["total_savings"] or 0,
+                "total_investments": totals["total_investments"] or 0,
+            }
+        )
