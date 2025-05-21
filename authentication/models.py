@@ -958,6 +958,12 @@ class Transaction(models.Model):
         editable=False,
         db_index=True,
     )
+    paystack_access_code = models.CharField(
+        max_length=255,
+        unique=True,
+        null=True, 
+        editable=False,
+    )
     service_charge = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
     total_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
     referral_email = models.EmailField(
