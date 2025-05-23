@@ -1356,12 +1356,14 @@ def quicksave(request):
     if amount is None:
         return Response({"error": "amount required"}, status=400)
     
+    if int(amount) < 100:
+        return Response({"error": "Amount cannot be less than #100"}, status=400)
 
     try:
         # Convert amount to integer
         amount_kobo = int(float(amount) * 100)
     except ValueError:
-        return Response({"error": "Invalid amount format"}, status=400)
+        return Response({"error": "Invalid amount format"}, status=400)    
 
     # Paystack charge request
     payload = {
@@ -1402,7 +1404,7 @@ def quicksave(request):
     return Response(
         {
             "status": "transaction_initiated",
-            "message": "Authorization of QuickSave transaction required",
+            "message": "Authorization of QuickSave transaction on Paystack required",
             "authorization_url": f"{data["data"]["authorization_url"]}",
             "access_code": f"{access_code}"        
         }
@@ -1809,7 +1811,7 @@ def quickinvest(request):
     return Response(
         {
             "status": "transaction_initiated",
-            "message": "Authorization of QickInvest transaction required",
+            "message": "Authorization of QickInvest transaction on Paystack required",
             "authorization_url": f"{data["data"]["authorization_url"]}",
             "access_code": f"{access_code}"        
         }
