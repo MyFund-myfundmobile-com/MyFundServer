@@ -1351,37 +1351,28 @@ from django.conf import settings
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def quicksave(request):
-    card_id = request.data.get("card_id")
     amount = request.data.get("amount")
+    
     if amount is None:
-        return Response({"error": "Amount required"}, status=400)
-
-    try:
-        card = Card.objects.get(id=card_id, user=request.user)
-    except Card.DoesNotExist:
-        return Response({"error": "Card not found"}, status=404)
+        return Response({"error": "amount required"}, status=400)
+    
+    if int(amount) < 100:
+        return Response({"error": "Amount cannot be less than #100"}, status=400)
 
     try:
         # Convert amount to integer
         amount_kobo = int(float(amount) * 100)
     except ValueError:
-        return Response({"error": "Invalid amount format"}, status=400)
+        return Response({"error": "Invalid amount format"}, status=400)    
 
     # Paystack charge request
     payload = {
-        "card": {
-            "number": card.card_number,
-            "cvv": card.cvv,
-            "expiry_month": card.expiry_date.split("/")[0],
-            "expiry_year": card.expiry_date.split("/")[1],
-        },
         "email": request.user.email,
         "amount": amount_kobo,
-        "metadata": {"purpose": "quicksave"},
     }
 
     resp = requests.post(
-        "https://api.paystack.co/charge",
+        "https://api.paystack.co/transaction/initialize",
         json=payload,
         headers={
             "Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}",
@@ -1390,11 +1381,14 @@ def quicksave(request):
     )
 
     data = resp.json()
+    
+    # print(f"\n\npaystack response:\n {data}\n\n")
 
     if not data.get("status"):
-        return Response({"error": data.get("message", "Charge failed")}, status=400)
+        return Response({"error": f"Charge Failed: {data}"}, status=400)
 
     reference = data["data"]["reference"]
+    access_code = data["data"]["access_code"]
 
     # Create pending transaction
     Transaction.objects.create(
@@ -1402,58 +1396,66 @@ def quicksave(request):
         transaction_type="credit",
         status="pending",
         amount=float(amount),
-        description="QuickSave (Pending)",
+        description="QuickSave",
         transaction_id=reference,
+        paystack_access_code=access_code,
     )
 
     return Response(
-        {"reference": reference, "message": "OTP required", "status": "otp_required"}
+        {
+            "status": "transaction_initiated",
+            "message": "Authorization of QuickSave transaction on Paystack required",
+            "authorization_url": f"{data["data"]["authorization_url"]}",
+            "access_code": f"{access_code}"        
+        }
     )
 
 
-@api_view(["POST"])
-@permission_classes([IsAuthenticated])
-def confirm_save_otp(request):
-    otp = request.data.get("otp")
-    reference = request.data.get("reference")
-    if not otp or not reference:
-        return Response({"error": "otp and reference required"}, status=400)
+# @api_view(["POST"])
+# @permission_classes([IsAuthenticated])
+# def confirm_save_otp(request):
+#     otp = request.data.get("otp")
+#     reference = request.data.get("reference")
+#     if not otp or not reference:
+#         return Response({"error": "otp and reference required"}, status=400)
 
-    try:
-        # Submit OTP to Paystack
-        resp = requests.post(
-            "https://api.paystack.co/charge/submit_otp",
-            json={"otp": otp, "reference": reference},
-            headers={
-                "Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}",
-                "Content-Type": "application/json",
-            },
-        )
-        data = resp.json()
+#     try:
+#         # Submit OTP to Paystack
+#         resp = requests.post(
+#             "https://api.paystack.co/charge/submit_otp",
+#             json={"otp": otp, "reference": reference},
+#             headers={
+#                 "Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}",
+#                 "Content-Type": "application/json",
+#             },
+#         )
+#         data = resp.json()
+        
+#         print(f"\n\npaystack response:\n {data}\n\n")
 
-        if not data.get("status") or data["data"].get("status") != "success":
-            return Response({"error": "OTP validation failed"}, status=400)
+#         if not data.get("status") or data["data"].get("status") != "success":
+#             return Response({"error": "OTP validation failed"}, status=400)
 
-        # Update existing transaction
-        transaction = Transaction.objects.get(transaction_id=reference)
-        transaction.status = "confirmed"
-        transaction.description = "QuickSave (Card)"
-        transaction.save()
+#         # Update existing transaction
+#         transaction = Transaction.objects.get(transaction_id=reference)
+#         transaction.status = "confirmed"
+#         transaction.description = "QuickSave (Bank)"
+#         transaction.save()
 
-        # Update user balance
-        user = request.user
-        user.savings += transaction.amount
-        user.save()
+#         # Update user balance
+#         user = request.user
+#         user.savings += transaction.amount
+#         user.save()
 
-        return Response(
-            {"message": "QuickSave successful", "amount": transaction.amount}
-        )
+#         return Response(
+#             {"message": "QuickSave successful", "amount": transaction.amount}
+#         )
 
-    except Transaction.DoesNotExist:
-        return Response({"error": "Transaction not found"}, status=404)
-    except Exception as e:
-        print(f"OTP Confirmation Error: {str(e)}")
-        return Response({"error": "Payment processing failed"}, status=500)
+#     except Transaction.DoesNotExist:
+#         return Response({"error": "Transaction not found"}, status=404)
+#     except Exception as e:
+#         print(f"OTP Confirmation Error: {str(e)}")
+#         return Response({"error": "Payment processing failed"}, status=500)
 
 
 import time
@@ -1756,93 +1758,64 @@ def get_autosave_status(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def quickinvest(request):
-    # Get the selected card details from the request
-    card_id = request.data.get("card_id")
     amount = request.data.get("amount")
+    
+    if amount is None:
+        return Response({"error": "amount required"}, status=400)
+    
+    if int(amount) < 100000:
+        return Response({"error": "QuickInvest cannot be less than #100000"})
 
-    # Retrieve the card details from your database
     try:
-        card = Card.objects.get(id=card_id)
-    except Card.DoesNotExist:
-        return Response(
-            {"error": "Selected card not found"}, status=status.HTTP_404_NOT_FOUND
-        )
+        # Convert amount to integer
+        amount_kobo = int(float(amount) * 100)
+    except ValueError:
+        return Response({"error": "Invalid amount format"}, status=400)
 
-    # Use the card details to initiate a payment with Paystack
-    paystack_url = "https://api.paystack.co/charge"
-
+    # Paystack charge request
     payload = {
-        "card": {
-            "number": card.card_number,
-            "cvv": card.cvv,
-            "expiry_month": card.expiry_date.split("/")[0],
-            "expiry_year": card.expiry_date.split("/")[1],
-        },
         "email": request.user.email,
-        "amount": int(amount) * 100,  # Amount in kobo (multiply by 100)
-        "pin": card.pin,
+        "amount": amount_kobo,
     }
 
-    headers = {
-        "Authorization": f"Bearer {paystack_secret_key}",
-        "Content-Type": "application/json",
-    }
+    resp = requests.post(
+        "https://api.paystack.co/transaction/initialize",
+        json=payload,
+        headers={
+            "Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}",
+            "Content-Type": "application/json",
+        },
+    )
 
-    response = requests.post(paystack_url, json=payload, headers=headers)
-    paystack_response = response.json()
-    print(
-        "Paystack Response:", paystack_response
-    )  # Make sure this is logged in your backend console
+    data = resp.json()
+    
+    # print(f"\n\npaystack response:\n {data}\n\n")
 
-    if paystack_response.get("status"):
-        user = request.user
-        paystack_message = paystack_response["message"]
-        paystack_reference = paystack_response["data"]["reference"]
-        paystack_display_text = paystack_response["data"].get(
-            "display_text", "No display text provided"
-        )
-        paystack_status = paystack_response["data"]["status"]
+    if not data.get("status"):
+        return Response({"error": f"Charge Failed: {data}"}, status=400)
 
-        # Determine transaction status based on Paystack response status
-        transaction_status = "confirmed" if paystack_status == "success" else "pending"
+    reference = data["data"]["reference"]
+    access_code = data["data"]["access_code"]
 
-        # Create a transaction record
-        Transaction.objects.create(
-            user=user,
-            transaction_type="credit",
-            status=transaction_status,  # Update status based on response
-            amount=int(amount),
-            description="QuickInvest (Card)",
-            transaction_id=paystack_reference,
-        )
+    # Create pending transaction
+    Transaction.objects.create(
+        user=request.user,
+        transaction_type="credit",
+        status="pending",
+        amount=float(amount),
+        description="QuickInvest",
+        transaction_id=reference,
+        paystack_access_code=access_code,
+    )
 
-        user.investment += int(amount)
-        user.save()
-
-        user.confirm_referral_rewards(is_referrer=False)
-        user.update_total_savings_and_investment_this_month()
-
-        user.save()
-
-        # Return a success response
-        return Response(
-            {
-                "message": paystack_message,
-                "reference": paystack_reference,
-                "display_text": paystack_display_text,
-                "status": paystack_status,
-            },
-            status=status.HTTP_200_OK,
-        )
-    else:
-        # Payment failed, return an error response
-        return Response(
-            {
-                "message": paystack_response["data"]["message"],
-                "error": "QuickInvest failed",
-            },
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+    return Response(
+        {
+            "status": "transaction_initiated",
+            "message": "Authorization of QickInvest transaction on Paystack required",
+            "authorization_url": f"{data["data"]["authorization_url"]}",
+            "access_code": f"{access_code}"        
+        }
+    )
 
 
 from .models import AutoInvest
@@ -3692,7 +3665,7 @@ def paystack_webhook(request):
 
         header_data = request.headers
 
-        ip_address = request.headers.get("Cf-Connecting-Ip")
+        ip_address = request.headers.get("Cf-Connecting-Ip") or request.get("ip_address")
 
         ip_is_paystack = ip_address in paystack_ips
 
@@ -3764,31 +3737,84 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
 
         match event["event"]:
             case "charge.success":
-                metadata = event["data"].get("metadata", {})
-                if metadata.get("purpose") == "quicksave":
-                    # Skip processing for OTP-based transactions
-                    transaction = Transaction.objects.filter(
-                        transaction_id=event["data"]["reference"]
-                    ).first()
+                # metadata = event["data"].get("metadata", {})
+                # if metadata.get("purpose") == "quicksave":
+                #     # Skip processing for OTP-based transactions
+                #     transaction = Transaction.objects.filter(
+                #         transaction_id=event["data"]["reference"]
+                #     ).first()
 
-                    if transaction and transaction.status == "pending":
-                        print("Skipping webhook processing for pending OTP transaction")
-                        return
+                #     if transaction and transaction.status == "pending":
+                #         print("Skipping webhook processing for pending OTP transaction")
+                #         return
 
                 reference = event["data"]["reference"]
+                payment_channel = event["data"]["channel"]
                 email = event["data"]["customer"]["email"]
-                transaction = Transaction.objects.filter(
-                    transaction_id=reference
-                ).first()
-                user = CustomUser.objects.get(email=email)
-
-                # Check if this is an AutoSave transaction
-                autosave = AutoSave.objects.filter(paystack_trans_ref=reference).first()
-
-                if autosave:
-                    amount = (
+                amount = (
                         Decimal(event["data"]["amount"]) / 100
-                    )  # Use Decimal for precision
+                    )
+                transaction = Transaction.objects.get(
+                    transaction_id=reference, amount=amount
+                )         
+                user = CustomUser.objects.get(email=email)
+                # Check if this is an AutoSave transaction
+                autosave = AutoSave.objects.filter(paystack_trans_ref=reference).first()                
+                # autoinvest = AutoInvest.objects.filter(paystack_trans_ref=reference).first()
+
+
+                if transaction.description.lower().startswith("quicksave"):
+                    
+                    # print("\n====QuickSave Webhook Processing ====\n")
+                    transaction.description = f"QuickSave ({payment_channel})"
+                    transaction.status = "confirmed"
+                    transaction.save()
+                    
+                    
+                    user.savings += int(amount)
+                    # user.confirm_referral_rewards(is_referrer=True)
+                    user.update_total_savings_and_investment_this_month()
+                    user.save()
+                    
+                    subject = "QuickSave Successful!"
+                    message = f"Well done {user.first_name},\n\nYour QuickSave was successful and ₦{amount} has been successfully added to your SAVINGS account. \n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+                    from_email = "MyFund <info@myfundmobile.com>"
+                    recipient_list = [user.email]
+
+                    send_mail(
+                        subject,
+                        message,
+                        from_email,
+                        recipient_list,
+                        fail_silently=False,
+                    )
+                
+                elif transaction.description.lower().startswith("quickinvest"):
+                    transaction.description = f"QuickInvest ({payment_channel})"
+                    transaction.status = "confirmed"
+                    transaction.save()
+                    
+                    
+                    user.investment += int(amount)
+                    # user.confirm_referral_rewards(is_referrer=True)
+                    user.update_total_savings_and_investment_this_month()
+                    user.save()
+                    
+                    subject = "QuickInvest Successful!"
+                    message = f"Well done {user.first_name},\n\nYour QuickInvest was successful and ₦{amount} has been successfully added to your INVESTMENTS account. \n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+                    from_email = "MyFund <info@myfundmobile.com>"
+                    recipient_list = [user.email]
+
+                    send_mail(
+                        subject,
+                        message,
+                        from_email,
+                        recipient_list,
+                        fail_silently=False,
+                    )
+                    
+                elif autosave:
+                    # Use Decimal for precision
                     if not transaction:
                         transaction = Transaction.objects.create(
                             user=user,
@@ -3924,38 +3950,8 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         )
 
                     amount = transaction.amount
+                    description = transaction.description
 
-                    if description[0] == "QuickInvest":
-                        user.investment += int(amount)
-
-                        subject = "QuickInvest Successful!"
-                        message = f"Well done {user.first_name},\n\nYour QuickInvest was successful and ₦{amount} has been successfully added to your INVESTMENTS account. \n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-                        from_email = "MyFund <info@myfundmobile.com>"
-                        recipient_list = [user.email]
-
-                        send_mail(
-                            subject,
-                            message,
-                            from_email,
-                            recipient_list,
-                            fail_silently=False,
-                        )
-
-                    if description[0] == "QuickSave":
-                        user.savings += int(amount)
-
-                        subject = "QuickSave Successful!"
-                        message = f"Well done {user.first_name},\n\nYour QuickSave was successful and ₦{amount} has been successfully added to your SAVINGS account. \n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-                        from_email = "MyFund <info@myfundmobile.com>"
-                        recipient_list = [user.email]
-
-                        send_mail(
-                            subject,
-                            message,
-                            from_email,
-                            recipient_list,
-                            fail_silently=False,
-                        )
 
                     if description[0] == "AutoSave":
                         user.savings += int(amount)
