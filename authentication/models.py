@@ -1121,13 +1121,24 @@ class WithdrawalsRequestToAdmin(models.Model):
     is_approved = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
-    # Add missing fields
+    # Add missing fields (from your previous code)
     source_account = models.CharField(max_length=255, default="savings")
     target_bank = models.CharField(max_length=100, default="Palmpay")
     target_account_number = models.CharField(max_length=50, default="8033924595")
 
+    # >>> ADD THESE TWO NEW FIELDS <<<
+    withdrawal_type = models.CharField(
+        max_length=50, default="immediate"
+    )  # e.g., 'immediate' or 'scheduled'
+    scheduled_processing_date = models.DateField(
+        null=True, blank=True
+    )  # Date when scheduled withdrawal should be processed
 
-from django.db import models
+    def __str__(self):
+        return f"Withdrawal request for {self.user.email} - {self.amount}"
+
+    class Meta:
+        ordering = ["-created_at"]  # Optional: order by most recent first
 
 
 class EmailTemplate(models.Model):

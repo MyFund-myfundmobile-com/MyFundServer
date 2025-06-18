@@ -326,7 +326,7 @@ def send_welcome_email(user):
 
 
 def send_otp_reset_email(user, otp):
-    subject = "[OTP] Password Reset - {otp}"
+    subject = f"[OTP] Password Reset - {otp}"
     current_year = datetime.now().year
     logo_url = (
         "https://drive.google.com/uc?export=view&id=1MorbW_xLg4k2txNQdhUnBVxad8xeni-N"
@@ -2515,6 +2515,10 @@ def withdraw_to_local_bank(request):
 
 
 import string
+import random
+import string
+from decimal import Decimal, InvalidOperation
+from datetime import datetime, timedelta  # Import these
 
 
 @api_view(["POST"])
@@ -2523,20 +2527,24 @@ def process_withdrawal_to_local_bank(request):
     user = request.user
     data = request.data
 
-    print("Received withdrawal request:", data)  # Debugging log
+    print("✅ STEP 1: Received withdrawal request:", data)
 
     source_account = data.get("source_account", "").strip().lower()
     target_bank_account_id = data.get("target_bank_account_id")
     amount = data.get("amount")
+    withdrawal_type = (
+        data.get("withdrawal_type", "immediate").strip().lower()
+    )  # Capture withdrawal type
 
-    # Validate fields
     if not source_account:
+        print("❌ source_account not provided.")
         return Response(
             {"error": '"source_account" was NOT provided.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
     if not target_bank_account_id:
+        print("❌ target_bank_account_id not provided.")
         return Response(
             {"error": '"target_bank_account_id" was NOT provided.'},
             status=status.HTTP_400_BAD_REQUEST,
@@ -2545,40 +2553,57 @@ def process_withdrawal_to_local_bank(request):
     try:
         target_bank_account_id = int(target_bank_account_id)
         amount = Decimal(amount)
-    except (ValueError, TypeError, InvalidOperation):
+        print("✅ STEP 2: Parsed target_bank_account_id and amount.")
+    except (ValueError, TypeError, InvalidOperation) as e:
+        print(f"❌ STEP 2 ERROR: Invalid input for amount or bank_account_id: {e}")
         return Response(
             {"error": '"amount" or "target_bank_account_id" is invalid.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
     if amount <= 0:
+        print("❌ STEP 3: Invalid amount <= 0.")
         return Response(
             {"error": "Invalid withdrawal amount."}, status=status.HTTP_400_BAD_REQUEST
         )
 
-    # Check user balance
-    if source_account == "savings" and user.savings < amount:
+    # Check user balance (ensure these attributes exist on your User model or a related profile)
+    # The deduction will now happen within the atomic block, but this initial check is still crucial.
+    if source_account == "savings":
+        if not hasattr(user, "savings") or user.savings < amount:
+            print("❌ STEP 4: Insufficient savings balance or attribute missing.")
+            return Response(
+                {"error": "Insufficient savings balance."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+    elif source_account == "investment":
+        if not hasattr(user, "investment") or user.investment < amount:
+            print("❌ STEP 4: Insufficient investment balance or attribute missing.")
+            return Response(
+                {"error": "Insufficient investment balance."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+    elif source_account == "wallet":
+        if not hasattr(user, "wallet") or user.wallet < amount:
+            print("❌ STEP 4: Insufficient wallet balance or attribute missing.")
+            return Response(
+                {"error": "Insufficient wallet balance."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+    else:
+        print("❌ STEP 4: Invalid source account specified.")
         return Response(
-            {"error": "Insufficient savings balance."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-    elif source_account == "investment" and user.investment < amount:
-        return Response(
-            {"error": "Insufficient investment balance."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-    elif source_account == "wallet" and user.wallet < amount:
-        return Response(
-            {"error": "Insufficient wallet balance."},
+            {"error": "Invalid source account."},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    # Validate target bank account
     try:
         target_bank_account = BankAccount.objects.get(
             id=target_bank_account_id, user=user
         )
+        print("✅ STEP 5: Target bank account validated.")
     except BankAccount.DoesNotExist:
+        print("❌ STEP 5: Target bank account not found.")
         return Response(
             {"error": "Target bank account not found."},
             status=status.HTTP_400_BAD_REQUEST,
@@ -2587,44 +2612,170 @@ def process_withdrawal_to_local_bank(request):
     transaction_id = "".join(
         random.choices(string.ascii_uppercase + string.digits, k=8)
     )
+    print(f"✅ STEP 6: Generated transaction_id {transaction_id}")
+    current_datetime = datetime.now()
+    processing_date = None
+    if withdrawal_type == "scheduled":
+        if source_account == "savings":
+            processing_date = current_datetime + timedelta(days=30)
+        elif source_account == "investment":
+            processing_date = current_datetime + timedelta(days=90)
+        # Wallet is always immediate, so no scheduled date calculation needed here
 
-    with transaction.atomic():
-        # Create withdrawal record
-        withdrawal = WithdrawalsRequestToAdmin.objects.create(
-            user=user,
-            amount=amount,
-            transaction_id=transaction_id,
-            source_account=source_account,
-            target_bank=target_bank_account.bank_name,
-            target_account_number=target_bank_account.account_number,
-            is_approved=False,
+    try:
+        with transaction.atomic():
+            # --- DEDUCT AMOUNT FROM USER'S BALANCE HERE ---
+            if source_account == "savings":
+                user.savings -= amount
+            elif source_account == "investment":
+                user.investment -= amount
+            elif source_account == "wallet":
+                user.wallet -= amount
+            user.save()  # Save the updated balance
+            print(
+                f"✅ STEP 7: Amount {amount} deducted from user's {source_account} balance."
+            )
+
+            # Withdrawal record
+            withdrawal = WithdrawalsRequestToAdmin.objects.create(
+                user=user,
+                amount=amount,
+                transaction_id=transaction_id,
+                source_account=source_account,
+                target_bank=target_bank_account.bank_name,
+                target_account_number=target_bank_account.account_number,
+                withdrawal_type=withdrawal_type,  # Save the withdrawal type
+                scheduled_processing_date=(
+                    processing_date.date() if processing_date else None
+                ),  # Save the date part only
+                is_approved=False,  # Remains False until admin action
+            )
+            print("✅ STEP 8: Withdrawal record created.")
+
+            # Transaction record - Status is "pending" because it's waiting for admin approval,
+            # but the amount is already "debited" from the user's perspective.
+            Transaction.objects.create(
+                user=user,
+                transaction_id=transaction_id,
+                transaction_type="debit",
+                status="pending",  # Status is pending approval by admin
+                amount=amount,
+                description=f"{source_account.capitalize()} > Bank . . .",  # More descriptive
+            )
+            print("✅ STEP 9: Transaction record created.")
+
+            # --- Send email to user (dynamically based on withdrawal_type) ---
+            subject = "Withdrawal Request Received"
+            user_message_body = ""
+            if withdrawal_type == "immediate":
+                user_message_body = (
+                    f"Your immediate withdrawal request of ₦{amount:,.2f} from your {source_account.capitalize()} account to "
+                    f"{target_bank_account.bank_name} ({target_bank_account.account_name} - {target_bank_account.account_number}) "
+                    "has been successfully submitted. The amount has been deducted and is pending approval. You will be notified once it is completed."
+                )
+            elif withdrawal_type == "scheduled" and processing_date:
+                user_message_body = (
+                    f"Your scheduled withdrawal request of ₦{amount:,.2f} from your {source_account.capitalize()} account to "
+                    f"{target_bank_account.bank_name} ({target_bank_account.account_name} - {target_bank_account.account_number}) "
+                    f"has been successfully submitted. The amount has been deducted and it is scheduled to be processed into your account on {processing_date.strftime('%A, %B %d, %Y')}."
+                )
+            else:  # Fallback for unexpected withdrawal type or missing date
+                user_message_body = (
+                    f"Your withdrawal request of ₦{amount:,.2f} from your {source_account.capitalize()} account to "
+                    f"{target_bank_account.bank_name} ({target_bank_account.account_name} - {target_bank_account.account_number}) "
+                    "has been successfully submitted. The amount has been deducted and is pending approval. You will be notified once it is processed."
+                )
+
+            user_message = (
+                f"Hi {user.first_name},\n\n"
+                f"{user_message_body}\n\n"
+                "Thank you for using MyFund.\n\n"
+                "MyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com"
+            )
+            from_email = "MyFund <info@myfundmobile.com>"
+            recipient_list = [user.email]
+
+            try:
+                send_mail(
+                    subject,
+                    user_message,
+                    from_email,
+                    recipient_list,
+                    fail_silently=False,
+                )
+                print("✅ STEP 10: Email sent to user.")
+            except Exception as e:
+                print(f"❌ STEP 10 ERROR: Error sending email to user: {e}")
+                # Log this error but continue, as the core transaction is done
+
+            # --- Send email to admin (with more details and correct recipients) ---
+            admin_subject = (
+                f"[CHECK] {user.first_name} Wants to Withdraw ₦{amount:,.2f}"
+            )
+            admin_message = f"""
+            Hi Admin,
+
+            A new withdrawal request has been submitted. The user's account has already been debited.
+            Please review this request and process the payment manually.
+
+            User: {user.first_name} {user.last_name}
+            Email: {user.email}
+            Transaction ID: {transaction_id}
+            Amount: ₦{amount:,.2f}
+            Source Account: {source_account.capitalize()}
+            Withdrawal Type: {withdrawal_type.capitalize()}
+            Target Bank: {target_bank_account.bank_name}
+            Target Account Name: {target_bank_account.account_name}
+            Target Account Number: {target_bank_account.account_number}
+            Request Date: {withdrawal.created_at.strftime('%Y-%m-%d %H:%M:%S')}
+            """
+            if withdrawal_type == "scheduled" and processing_date:
+                admin_message += f"Scheduled Processing Date: {processing_date.strftime('%A, %B %d, %Y')}\n"
+
+            admin_message += f"""
+            
+            Please log in to the admin panel to mark this request as 'Approved' once payment has been made.
+
+            Best regards,
+            MyFund
+            """
+            admin_recipient_list = [
+                "company@myfundmobile.com"
+            ]  # Changed to the specified admin email
+
+            try:
+                send_mail(
+                    admin_subject,
+                    admin_message,
+                    from_email,
+                    admin_recipient_list,  # Only the main recipient list
+                    fail_silently=False,
+                )
+                print("✅ STEP 11: Admin notified.")
+            except Exception as e:
+                print(f"❌ STEP 11 ERROR: Error sending email to admin: {e}")
+                # Log this error but continue
+
+        return Response(
+            {
+                "message": "Withdrawal request created and pending approval. Amount deducted from your account.",
+                "transaction_id": transaction_id,
+            },
+            status=status.HTTP_201_CREATED,
         )
 
-        # Create transaction record
-        Transaction.objects.create(
-            user=user,
-            transaction_id=transaction_id,
-            transaction_type="debit",
-            status="pending",
-            amount=amount,
-            description=f"{source_account.capitalize()} > Bank . . .",
+    except Exception as e:
+        print("❌ STEP 12: Exception occurred during transaction block.")
+        print(f"❌ ERROR: {str(e)}")
+        import traceback
+
+        traceback.print_exc()
+        return Response(
+            {
+                "error": "An error occurred while processing your request. Please try again."
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
-
-        # Send email acknowledgment to the user
-        subject = "Withdrawal Request Received"
-        message = f"Hi {user.first_name},\n\nYour withdrawal request of ₦{amount} is pending approval. You will be notified once it is processed.\n\nThank you for using MyFund.\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com"
-        from_email = "MyFund <info@myfundmobile.com>"
-        recipient_list = [user.email]
-
-        send_mail(subject, message, from_email, recipient_list, fail_silently=False)
-
-    return Response(
-        {
-            "message": "Withdrawal request created and pending approval.",
-            "transaction_id": transaction_id,
-        },
-        status=status.HTTP_201_CREATED,
-    )
 
 
 import logging
@@ -5543,7 +5694,7 @@ class TargetSavingsListCreate(ListCreateAPIView):
         # Create transaction
         Transaction.objects.create(
             user=user,
-            transaction_type="debit",
+            transaction_type="credit",
             status="confirmed",
             amount=amount,
             description=f"{instance.name}",
@@ -5627,7 +5778,7 @@ def cancel_target_saving(request, pk):
     # Create transaction
     Transaction.objects.create(
         user=user,
-        transaction_type="credit",
+        transaction_type="debit",
         status="confirmed",
         amount=return_amount,
         description=f"{target.name}",
