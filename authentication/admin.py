@@ -622,29 +622,33 @@ from .models import WithdrawalsRequestToAdmin, Transaction
 @admin.register(WithdrawalsRequestToAdmin)
 class PendingWithdrawalsAdmin(admin.ModelAdmin):
     list_display = (
+        "is_approved",
         "user",
-        "source_account",  # Added this line to display source account
+        "source_account",
+        "withdrawal_type",
         "amount",
         "target_bank",
         "target_account_number",
-        "transaction_id",
-        "is_approved",
         "created_at",
+        "scheduled_processing_date",
+        "transaction_id",
     )
     list_filter = (
         "is_approved",
         "source_account",
-    )  # Optionally, add source_account to filter options
+        "withdrawal_type",  # Good to filter by type
+    )
     search_fields = (
         "user__email",
         "transaction_id",
         "target_bank",
-        "source_account",  # Added this line to allow searching by source account
+        "source_account",
         "target_account_number",
     )
     actions = ["approve_withdrawal"]
 
     def approve_withdrawal(self, request, queryset):
+        approved_count = 0
         for withdrawal_request in queryset:
             user = withdrawal_request.user
             amount = withdrawal_request.amount
@@ -655,15 +659,8 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
                 continue
 
             with db_transaction.atomic():  # Ensure consistency
-                # Deduct amount from user's balance
-                if withdrawal_request.source_account == "savings":
-                    user.savings -= amount
-                elif withdrawal_request.source_account == "investment":
-                    user.investment -= amount
-                elif withdrawal_request.source_account == "wallet":
-                    user.wallet -= amount
-
-                user.save()
+                # --- REMOVED DEDUCTION LOGIC HERE ---
+                # The deduction now happens in the view when the request is initially made.
 
                 # Mark withdrawal as approved
                 withdrawal_request.is_approved = True
@@ -671,37 +668,65 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
 
                 # Update the transaction record's status
                 try:
-                    transaction = Transaction.objects.get(
+                    transaction_record = Transaction.objects.get(
                         user=user, transaction_id=transaction_id
                     )
-                    transaction.status = "confirmed"  # Update status
-                    transaction.description = f"{withdrawal_request.source_account.capitalize()} > Bank"  # Fix description update
-                    transaction.save()  # Save changes
+                    transaction_record.status = (
+                        "confirmed"  # Update status to confirmed
+                    )
+                    transaction_record.description = f"Withdrawal from {withdrawal_request.source_account.capitalize()} to Bank (Confirmed)"  # Updated description
+                    transaction_record.save()  # Save changes
+                    approved_count += 1
 
                 except Transaction.DoesNotExist:
                     self.message_user(
                         request,
-                        f"Transaction {transaction_id} not found for user {user.email}!",
-                        level="error",
+                        f"Warning: Corresponding transaction {transaction_id} not found for user {user.email}. Withdrawal request marked as approved.",
+                        level="warning",  # Changed to warning as it's not a critical failure if the request is approved
                     )
-                    continue  # Skip this withdrawal if no matching transaction exists
+                    continue  # Continue processing other requests even if transaction record is missing (but ideally it should exist)
 
                 # Send email notification
                 subject = "Withdrawal Approved! ✔"
                 message = (
                     f"Hi {user.first_name},\n\n"
-                    f"Your withdrawal of ₦{amount} to {withdrawal_request.target_bank} "
-                    f"({withdrawal_request.target_account_number}) has been processed successfully!\n\n"
+                    f"Good news! Your withdrawal of ₦{amount:,.2f} from your {withdrawal_request.source_account.capitalize()} account to {withdrawal_request.target_bank} "
+                    f"({withdrawal_request.target_account_number}) has been approved and processed successfully.\n\n"
+                    f"Transaction ID: {transaction_id}\n\n"
                     f"Thank you for using MyFund.\n\n"
                     f"MyFund\nSave, Buy Properties, Earn Rent\n"
                     f"www.myfundmobile.com\n"
                     f"13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
                 )
-                send_mail(
-                    subject, message, "MyFund <message@myfundmobile.com>", [user.email]
-                )
+                try:
+                    send_mail(
+                        subject,
+                        message,
+                        "MyFund <info@myfundmobile.com>",  # Use info@myfundmobile.com for consistency
+                        [user.email],
+                        fail_silently=False,
+                    )
+                except Exception as e:
+                    self.message_user(
+                        request,
+                        f"Error sending email for withdrawal {transaction_id}: {e}",
+                        level="error",
+                    )
 
-        self.message_user(request, "Selected withdrawals have been approved.")
+        if approved_count > 0:
+            self.message_user(
+                request,
+                f"{approved_count} selected withdrawal(s) have been approved and confirmed.",
+            )
+        else:
+            self.message_user(
+                request,
+                "No new withdrawals were approved (they might have already been approved).",
+            )
+
+    approve_withdrawal.short_description = (
+        "Approve selected withdrawal requests (mark as paid)"
+    )
 
 
 @admin.register(Message)
