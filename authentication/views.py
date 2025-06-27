@@ -3296,22 +3296,20 @@ def get_top_savers(request):
 
     # 4. Serialize data with calculated percentages and save them to TopSaverHistory
     top_savers = []
-    rank = 1
+    rank = 1  # rank starts at 1 for top saver
     for user in users:
         percentage = (
             (user.total_savings_and_investments_this_month / top_amount * 100)
             if top_amount > 0
             else 0
         )
-
-        TopSaverHistory.objects.update_or_create(
+        # Save to the TopSaverHistory model
+        TopSaverHistory.objects.create(
             month=current_month,
             year=current_year,
+            user=user,
+            total_savings=user.total_savings_and_investments_this_month,
             rank=rank,
-            defaults={
-                "user": user,
-                "total_savings": user.total_savings_and_investments_this_month,
-            },
         )
 
         top_savers.append(
@@ -3324,8 +3322,7 @@ def get_top_savers(request):
                 "percentage": round(percentage, 1),
             }
         )
-        rank += 1
-
+        rank += 1  # Increment rank for the next user
 
     # 5. Get current user data
     current_user = request.user
