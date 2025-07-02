@@ -25,6 +25,16 @@ from django.db.models import F
 logger = logging.getLogger(__name__)
 
 
+def default_notification_preferences():
+    return {
+        "transaction_credits": True,
+        "transaction_debits": True,
+        "system_messages": True,
+        "admin_messages": True,
+        "pending_transactions": True,
+    }
+
+
 class CustomUserManager(BaseUserManager):
     def create_user(self, email, password=None, **extra_fields):
         if not email:
@@ -137,6 +147,12 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
 
     USERNAME_FIELD = "email"
     REQUIRED_FIELDS = ["first_name", "last_name", "phone_number"]
+
+    # Push notifications-related fields
+    expo_push_token = models.CharField(max_length=200, blank=True, null=True)
+    notification_preferences = models.JSONField(
+        default=default_notification_preferences
+    )
 
     # KYC-related fields
     gender = models.CharField(
@@ -961,7 +977,7 @@ class Transaction(models.Model):
     paystack_access_code = models.CharField(
         max_length=255,
         unique=True,
-        null=True, 
+        null=True,
         editable=False,
     )
     service_charge = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
@@ -975,6 +991,33 @@ class Transaction(models.Model):
 
     def __str__(self):
         return f"{self.transaction_type} - {self.amount} - {self.status} - {self.date}"
+
+
+class PushNotifications(models.Model):
+    NOTIFICATION_TYPES = (
+        ("CREDIT", "Credit Transaction"),
+        ("DEBIT", "Debit Transaction"),
+        ("SYSTEM", "System Notification"),
+        ("ADMIN", "Admin Message"),
+        ("GROUP", "Group Contribution"),
+        ("PENDING", "Pending Transaction"),
+    )
+
+    user = models.ForeignKey(
+        CustomUser, on_delete=models.CASCADE, related_name="push_notifications"
+    )
+    title = models.CharField(max_length=255)
+    message = models.TextField()
+    is_read = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    notification_type = models.CharField(max_length=20, choices=NOTIFICATION_TYPES)
+    data = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.title} - {self.user.email}"
 
 
 class AutoSave(models.Model):
@@ -1170,9 +1213,51 @@ class UserPassword(models.Model):
         return f"Password record for {self.user.email}"
 
 
-# from django.db import models
-# import uuid
-# from django.contrib.auth.models import User  # Assuming you are using Django's default User model
+from django.db import models
+from django.utils import timezone
+from django.contrib.auth import get_user_model
+
+User = get_user_model()
+
+
+class Notification(models.Model):
+    NOTIFICATION_TYPES = [
+        ("TRANSACTION", "Transaction"),
+        ("MESSAGE", "Message"),
+        ("SYSTEM", "System"),
+        ("ADMIN", "Admin"),
+        ("UPDATE", "App Update"),
+    ]
+
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="notifications"
+    )
+    notification_type = models.CharField(max_length=20, choices=NOTIFICATION_TYPES)
+    title = models.CharField(max_length=100)
+    message = models.TextField()
+    is_read = models.BooleanField(default=False)
+    created_at = models.DateTimeField(default=timezone.now)
+    data = models.JSONField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.notification_type} notification for {self.user.email}"
+
+
+class DeviceToken(models.Model):
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="device_tokens"
+    )
+    token = models.CharField(max_length=255, unique=True)
+    device_type = models.CharField(
+        max_length=10, choices=[("IOS", "iOS"), ("ANDROID", "Android")]
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.user.email}'s {self.device_type} device"
 
 
 class Group(models.Model):

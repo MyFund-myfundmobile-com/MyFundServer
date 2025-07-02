@@ -27,6 +27,13 @@ from .views import (
     CurrentMonthFinancialView,
     FinancialHistoryView,
     AllUsersMonthlyTotalsView,
+    NotificationListCreateView,
+    mark_notification_as_read,
+    mark_all_notifications_as_read,
+    send_admin_notification,
+    get_my_push_notifications,
+    send_admin_push_notification,
+    save_expo_push_token,
 )
 from django.views.decorators.csrf import csrf_exempt
 from authentication.views import CustomGraphQLView
@@ -111,7 +118,6 @@ urlpatterns = [
     ),
     # Savings-related APIs
     path("quicksave/", views.quicksave, name="quicksave"),
-    # path("confirm-save-otp/", views.confirm_save_otp, name="confirm_save_otp"),
     path(
         "activate-autosave/", views.autosave, name="autosave"
     ),  # Make sure to use the correct view function
@@ -275,4 +281,31 @@ urlpatterns = [
     ),
     path("history/", FinancialHistoryView.as_view(), name="financial-history"),
     path("admin-totals/", AllUsersMonthlyTotalsView.as_view(), name="all-users-totals"),
+    # Notification URLs
+    path(
+        "notifications/",
+        NotificationListCreateView.as_view(),
+        name="notifications-list",
+    ),
+    path(
+        "notifications/<int:pk>/read/",
+        mark_notification_as_read,
+        name="mark-notification-read",
+    ),
+    path(
+        "notifications/mark-all-read/",
+        mark_all_notifications_as_read,
+        name="mark-all-notifications-read",
+    ),
+    path(
+        "admin/send-notification/",
+        send_admin_notification,
+        name="send-admin-notification",
+    ),
+    # PushNotification URLs
+    path(
+        "push-notifications/", get_my_push_notifications, name="get_push_notifications"
+    ),
+    path("admin/send-push/", send_admin_push_notification, name="send_admin_push"),
+    path("push/save-token/", save_expo_push_token, name="save_push_token"),
 ]
