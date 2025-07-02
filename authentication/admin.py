@@ -962,6 +962,39 @@ class TargetSavingsAdmin(admin.ModelAdmin):
     progress_percentage.short_description = "Progress"
 
 
+from django.contrib import admin
+from .models import Notification
+
+
+@admin.register(Notification)
+class NotificationAdmin(admin.ModelAdmin):
+    list_display = ("user", "notification_type", "title", "is_read", "created_at")
+    list_filter = ("notification_type", "is_read", "created_at")
+    search_fields = ("user__email", "title", "message")
+    readonly_fields = ("created_at",)
+    actions = ["mark_as_read", "mark_as_unread"]
+
+    def mark_as_read(self, request, queryset):
+        queryset.update(is_read=True)
+
+    mark_as_read.short_description = "Mark selected notifications as read"
+
+    def mark_as_unread(self, request, queryset):
+        queryset.update(is_read=False)
+
+    mark_as_unread.short_description = "Mark selected notifications as unread"
+
+
+from .models import PushNotifications
+
+
+@admin.register(PushNotifications)
+class PushNotificationsAdmin(admin.ModelAdmin):
+    list_display = ["user", "title", "notification_type", "is_read", "created_at"]
+    list_filter = ["notification_type", "is_read"]
+    search_fields = ["title", "message", "user__email"]
+
+
 # Register TopSaverHistory with customized admin
 admin.site.register(TopSaverHistory, TopSaverHistoryAdmin)
 admin.site.register(Card, CardAdmin)

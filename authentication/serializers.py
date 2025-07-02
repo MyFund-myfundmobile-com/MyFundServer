@@ -691,3 +691,30 @@ class MonthlyFinancialRecordSerializer(serializers.ModelSerializer):
         model = MonthlyFinancialRecord
         fields = ["month", "total_savings", "total_investments"]
         read_only_fields = ["created_at", "updated_at"]
+
+
+from .models import Notification
+
+
+class NotificationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Notification
+        fields = [
+            "id",
+            "notification_type",
+            "title",
+            "message",
+            "is_read",
+            "created_at",
+            "data",
+        ]
+        read_only_fields = ["id", "created_at"]
+
+
+from .models import PushNotifications
+
+
+class PushNotificationsSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PushNotifications
+        fields = "__all__"

@@ -1352,20 +1352,18 @@ from django.conf import settings
 @permission_classes([IsAuthenticated])
 def quicksave(request):
     amount = request.data.get("amount")
-    
+
     if amount is None:
         return Response({"error": "amount required"}, status=400)
-    
-    if int(amount) < 100:
+
+    if int(float(amount)) < 100:
         return Response({"error": "Amount cannot be less than #100"}, status=400)
 
     try:
-        # Convert amount to integer
         amount_kobo = int(float(amount) * 100)
     except ValueError:
-        return Response({"error": "Invalid amount format"}, status=400)    
+        return Response({"error": "Invalid amount format"}, status=400)
 
-    # Paystack charge request
     payload = {
         "email": request.user.email,
         "amount": amount_kobo,
@@ -1381,8 +1379,6 @@ def quicksave(request):
     )
 
     data = resp.json()
-    
-    # print(f"\n\npaystack response:\n {data}\n\n")
 
     if not data.get("status"):
         return Response({"error": f"Charge Failed: {data}"}, status=400)
@@ -1390,7 +1386,6 @@ def quicksave(request):
     reference = data["data"]["reference"]
     access_code = data["data"]["access_code"]
 
-    # Create pending transaction
     Transaction.objects.create(
         user=request.user,
         transaction_type="credit",
@@ -1401,61 +1396,37 @@ def quicksave(request):
         paystack_access_code=access_code,
     )
 
+    # ✅ Send QuickSave confirmation email
+    subject = "QuickSave Started!"
+    message = f"""Hi {request.user.first_name},
+
+    Your QuickSave of ₦{amount} has been initiated successfully.
+
+    Please complete the payment via Paystack to fund your savings.
+
+    Grow your funds with MyFund. 🥂
+
+    — MyFund
+    Save, Buy Properties, Earn Rent
+    www.myfundmobile.com
+    13 Gbajabiamila Street, Ayobo, Lagos
+    """
+    from_email = "MyFund <info@myfundmobile.com>"
+    recipient_list = [request.user.email]
+
+    try:
+        send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+    except Exception as e:
+        print("Email error:", e)
+
     return Response(
         {
             "status": "transaction_initiated",
             "message": "Authorization of QuickSave transaction on Paystack required",
-            "authorization_url": f"{data["data"]["authorization_url"]}",
-            "access_code": f"{access_code}"        
+            "authorization_url": data["data"]["authorization_url"],
+            "access_code": access_code,
         }
     )
-
-
-# @api_view(["POST"])
-# @permission_classes([IsAuthenticated])
-# def confirm_save_otp(request):
-#     otp = request.data.get("otp")
-#     reference = request.data.get("reference")
-#     if not otp or not reference:
-#         return Response({"error": "otp and reference required"}, status=400)
-
-#     try:
-#         # Submit OTP to Paystack
-#         resp = requests.post(
-#             "https://api.paystack.co/charge/submit_otp",
-#             json={"otp": otp, "reference": reference},
-#             headers={
-#                 "Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}",
-#                 "Content-Type": "application/json",
-#             },
-#         )
-#         data = resp.json()
-        
-#         print(f"\n\npaystack response:\n {data}\n\n")
-
-#         if not data.get("status") or data["data"].get("status") != "success":
-#             return Response({"error": "OTP validation failed"}, status=400)
-
-#         # Update existing transaction
-#         transaction = Transaction.objects.get(transaction_id=reference)
-#         transaction.status = "confirmed"
-#         transaction.description = "QuickSave (Bank)"
-#         transaction.save()
-
-#         # Update user balance
-#         user = request.user
-#         user.savings += transaction.amount
-#         user.save()
-
-#         return Response(
-#             {"message": "QuickSave successful", "amount": transaction.amount}
-#         )
-
-#     except Transaction.DoesNotExist:
-#         return Response({"error": "Transaction not found"}, status=404)
-#     except Exception as e:
-#         print(f"OTP Confirmation Error: {str(e)}")
-#         return Response({"error": "Payment processing failed"}, status=500)
 
 
 import time
@@ -1759,10 +1730,10 @@ def get_autosave_status(request):
 @permission_classes([IsAuthenticated])
 def quickinvest(request):
     amount = request.data.get("amount")
-    
+
     if amount is None:
         return Response({"error": "amount required"}, status=400)
-    
+
     if int(amount) < 100000:
         return Response({"error": "QuickInvest cannot be less than #100000"})
 
@@ -1788,7 +1759,7 @@ def quickinvest(request):
     )
 
     data = resp.json()
-    
+
     # print(f"\n\npaystack response:\n {data}\n\n")
 
     if not data.get("status"):
@@ -1813,7 +1784,7 @@ def quickinvest(request):
             "status": "transaction_initiated",
             "message": "Authorization of QickInvest transaction on Paystack required",
             "authorization_url": f"{data["data"]["authorization_url"]}",
-            "access_code": f"{access_code}"        
+            "access_code": f"{access_code}",
         }
     )
 
@@ -3480,6 +3451,87 @@ def get_alert_messages(request):
 from .models import BankTransferRequest, InvestTransferRequest
 
 
+from rest_framework import status, generics
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.decorators import api_view, permission_classes
+from .models import Notification, User  # Changed from relative import to direct import
+from .serializers import NotificationSerializer
+from django.shortcuts import get_object_or_404
+
+
+class NotificationListCreateView(generics.ListCreateAPIView):
+    serializer_class = NotificationSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return Notification.objects.filter(user=self.request.user).order_by(
+            "-created_at"
+        )
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def mark_notification_as_read(request, pk):
+    notification = get_object_or_404(Notification, pk=pk, user=request.user)
+    notification.is_read = True
+    notification.save()
+    return Response(status=status.HTTP_200_OK)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def mark_all_notifications_as_read(request):
+    Notification.objects.filter(user=request.user, is_read=False).update(is_read=True)
+    return Response(status=status.HTTP_200_OK)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def send_admin_notification(request):
+    if not request.user.is_staff:
+        return Response(
+            {"detail": "Permission denied"}, status=status.HTTP_403_FORBIDDEN
+        )
+
+    user_id = request.data.get("user_id")
+    title = request.data.get("title")
+    message = request.data.get("message")
+
+    if not all([user_id, title, message]):
+        return Response(
+            {"detail": "Missing required fields"}, status=status.HTTP_400_BAD_REQUEST
+        )
+
+    try:
+        user = User.objects.get(pk=user_id)
+    except User.DoesNotExist:
+        return Response({"detail": "User not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    notification = Notification.objects.create(
+        user=user, notification_type="ADMIN", title=title, message=message
+    )
+
+    return Response(
+        NotificationSerializer(notification).data, status=status.HTTP_201_CREATED
+    )
+
+
+# Add this utility function to your views.py or create a separate utils.py
+def create_notification(user, notification_type, title, message, data=None):
+    notification = Notification.objects.create(
+        user=user,
+        notification_type=notification_type,
+        title=title,
+        message=message,
+        data=data or {},
+    )
+    return notification
+
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def initiate_bank_transfer(request):
@@ -3816,7 +3868,9 @@ def paystack_webhook(request):
 
         header_data = request.headers
 
-        ip_address = request.headers.get("Cf-Connecting-Ip") or request.get("ip_address")
+        ip_address = request.headers.get("Cf-Connecting-Ip") or request.get(
+            "ip_address"
+        )
 
         ip_is_paystack = ip_address in paystack_ips
 
@@ -3902,31 +3956,27 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                 reference = event["data"]["reference"]
                 payment_channel = event["data"]["channel"]
                 email = event["data"]["customer"]["email"]
-                amount = (
-                        Decimal(event["data"]["amount"]) / 100
-                    )
+                amount = Decimal(event["data"]["amount"]) / 100
                 transaction = Transaction.objects.get(
                     transaction_id=reference, amount=amount
-                )         
+                )
                 user = CustomUser.objects.get(email=email)
                 # Check if this is an AutoSave transaction
-                autosave = AutoSave.objects.filter(paystack_trans_ref=reference).first()                
+                autosave = AutoSave.objects.filter(paystack_trans_ref=reference).first()
                 # autoinvest = AutoInvest.objects.filter(paystack_trans_ref=reference).first()
 
-
                 if transaction.description.lower().startswith("quicksave"):
-                    
+
                     # print("\n====QuickSave Webhook Processing ====\n")
                     transaction.description = f"QuickSave ({payment_channel})"
                     transaction.status = "confirmed"
                     transaction.save()
-                    
-                    
+
                     user.savings += int(amount)
                     # user.confirm_referral_rewards(is_referrer=True)
                     user.update_total_savings_and_investment_this_month()
                     user.save()
-                    
+
                     subject = "QuickSave Successful!"
                     message = f"Well done {user.first_name},\n\nYour QuickSave was successful and ₦{amount} has been successfully added to your SAVINGS account. \n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
                     from_email = "MyFund <info@myfundmobile.com>"
@@ -3939,18 +3989,17 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         recipient_list,
                         fail_silently=False,
                     )
-                
+
                 elif transaction.description.lower().startswith("quickinvest"):
                     transaction.description = f"QuickInvest ({payment_channel})"
                     transaction.status = "confirmed"
                     transaction.save()
-                    
-                    
+
                     user.investment += int(amount)
                     # user.confirm_referral_rewards(is_referrer=True)
                     user.update_total_savings_and_investment_this_month()
                     user.save()
-                    
+
                     subject = "QuickInvest Successful!"
                     message = f"Well done {user.first_name},\n\nYour QuickInvest was successful and ₦{amount} has been successfully added to your INVESTMENTS account. \n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
                     from_email = "MyFund <info@myfundmobile.com>"
@@ -3963,7 +4012,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         recipient_list,
                         fail_silently=False,
                     )
-                    
+
                 elif autosave:
                     # Use Decimal for precision
                     if not transaction:
@@ -4102,7 +4151,6 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
 
                     amount = transaction.amount
                     description = transaction.description
-
 
                     if description[0] == "AutoSave":
                         user.savings += int(amount)
@@ -5889,3 +5937,52 @@ class AllUsersMonthlyTotalsView(generics.ListAPIView):
                 "total_investments": totals["total_investments"] or 0,
             }
         )
+
+
+from .models import PushNotifications
+from .serializers import PushNotificationsSerializer
+from .utils import send_push_notification
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def get_my_push_notifications(request):
+    user = request.user
+    notifs = PushNotifications.objects.filter(user=user)
+    serializer = PushNotificationsSerializer(notifs, many=True)
+    return Response(serializer.data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def send_admin_push_notification(request):
+    user_ids = request.data.get("user_ids")
+    title = request.data.get("title")
+    message = request.data.get("message")
+
+    from .models import CustomUser
+
+    users = CustomUser.objects.filter(id__in=user_ids)
+
+    for user in users:
+        send_push_notification(user, title, message, notif_type="ADMIN")
+
+    return Response({"message": "Notifications sent"}, status=status.HTTP_200_OK)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def save_expo_push_token(request):
+    user = request.user
+    token = request.data.get("expo_push_token")
+
+    if not token:
+        return Response(
+            {"error": "No push token provided"}, status=status.HTTP_400_BAD_REQUEST
+        )
+
+    user.expo_push_token = token
+    user.save()
+    return Response(
+        {"message": "Expo push token saved successfully."}, status=status.HTTP_200_OK
+    )
