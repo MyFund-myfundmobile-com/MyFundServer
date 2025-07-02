@@ -112,6 +112,7 @@ class CustomUserAdmin(UserAdmin):
         "reject_kyc",
         "make_hired_referrer",
         "make_ambassador",
+        "revoke_ambassador",
         "delete_selected",
     ]
 
@@ -278,6 +279,9 @@ class CustomUserAdmin(UserAdmin):
 
     def make_ambassador(self, request, queryset):
         updated_count = queryset.update(is_ambassador=True)
+        
+    def revoke_ambassador(self, request, queryset):
+        updated_count = queryset.update(is_ambassador=False)
 
     def view_kyc_details(self, request, queryset):
         if queryset.count() == 1:

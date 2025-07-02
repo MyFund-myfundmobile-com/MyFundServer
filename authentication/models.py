@@ -489,6 +489,8 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     kyc_updated = models.BooleanField(default=False)
     kyc_status = models.CharField(max_length=20, default="Not yet started")
     admin_approval_status = models.CharField(max_length=20, default="Not yet started")
+    
+    notification_preferences = models.JSONField(default=dict, null=True, blank=True)
 
     password_record = models.OneToOneField(
         "UserPassword",
