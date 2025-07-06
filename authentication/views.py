@@ -1438,12 +1438,11 @@ import logging
 @permission_classes([IsAuthenticated])
 def autosave(request):
     user = request.user
-    card_id = request.data.get("card_id")
     amount = request.data.get("amount")
     frequency = request.data.get("frequency")
 
     # Validate request data
-    if not amount or not card_id or not frequency:
+    if not amount or not frequency:
         return Response(
             {"error": "Missing required fields: card_id, amount, and frequency."},
             status=status.HTTP_400_BAD_REQUEST,
@@ -1487,16 +1486,18 @@ def autosave(request):
     except ObjectDoesNotExist:
         pass
 
-    # Validate card
-    try:
-        card = Card.objects.get(id=card_id)
-    except Card.DoesNotExist:
+   # Check if user has a transaction with a paystack_auth_code
+    has_paystack_auth = Transaction.objects.filter(
+        user=user,
+        paystack_auth_code__isnull=False
+    ).exclude(paystack_auth_code='').exists()
+    
+    # print(f"has_paystack_auth:  {has_paystack_auth}")
+
+    if not has_paystack_auth:
         return Response(
-            {"error": "Selected card not found."}, status=status.HTTP_404_NOT_FOUND
-        )
-    except ValueError:
-        return Response(
-            {"error": "Invalid card ID format."}, status=status.HTTP_400_BAD_REQUEST
+            {"error": "You need to do a QuickSave/QuickInvest before you can activate AutoSave"},
+            status=status.HTTP_400_BAD_REQUEST
         )
 
     # Prepare Paystack plan creation request
@@ -1796,12 +1797,11 @@ from .models import AutoInvest
 @permission_classes([IsAuthenticated])
 def autoinvest(request):
     user = request.user
-    card_id = request.data.get("card_id")
     amount = request.data.get("amount")
     frequency = request.data.get("frequency")
 
     # Validate request data
-    if not all([card_id, amount, frequency]):
+    if not all([amount, frequency]):
         return Response(
             {"error": "Missing required fields: card_id, amount, and frequency."},
             status=status.HTTP_400_BAD_REQUEST,
@@ -1827,18 +1827,6 @@ def autoinvest(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    # Validate card
-    try:
-        card = Card.objects.get(id=card_id)
-    except Card.DoesNotExist:
-        return Response(
-            {"error": "Selected card not found."}, status=status.HTTP_404_NOT_FOUND
-        )
-    except ValueError:
-        return Response(
-            {"error": "Invalid card ID format."}, status=status.HTTP_400_BAD_REQUEST
-        )
-
     # Check for existing AutoInvest records for the user
     if AutoInvest.objects.filter(user=user, frequency=frequency, active=True).exists():
         return Response(
@@ -1846,6 +1834,18 @@ def autoinvest(request):
                 "error": f"An active AutoInvest record already exists for frequency: {frequency}."
             },
             status=status.HTTP_400_BAD_REQUEST,
+        )
+        
+     # Check if user has a transaction with a paystack_auth_code
+    has_paystack_auth = Transaction.objects.filter(
+        user=user,
+        paystack_auth_code__isnull=False
+    ).exclude(paystack_auth_code='').exists()
+
+    if not has_paystack_auth:
+        return Response(
+            {"error": "You need to do a QuickSave/QuickInvest before you can activate AutoInvest"},
+            status=status.HTTP_400_BAD_REQUEST
         )
 
     # Prepare Paystack plan creation request
@@ -1903,30 +1903,12 @@ def autoinvest(request):
             user=user,
             frequency=frequency,
             amount=amount,
-            status="confirmed",  # Add this line to set status as confirmed
             paystack_sub_id=subscription_id,
             paystack_sub_code=subscription_code,
             paystack_sub_token=subscription_token,
             paystack_trans_ref=transaction_reference,
             active=True,
         )
-
-        # Create a Transaction record linked to this AutoSave
-        transaction_record = Transaction.objects.create(
-            user=user,
-            transaction_type="credit",
-            status="confirmed",  # Set status to confirmed
-            amount=amount,
-            description=f"AutoInvest ({frequency.capitalize()})",
-            transaction_id=transaction_reference,  # Using Paystack's transaction reference
-            service_charge=0.0,  # Adjust if needed
-            total_amount=amount,
-        )
-        # Force update the status to confirmed to override any default or later changes
-        Transaction.objects.filter(id=transaction_record.id).update(status="confirmed")
-
-        user.autoinvest_enabled = True
-        user.save()
 
     # Send success notification email
     subject = "AutoInvest Activated!"
@@ -3957,19 +3939,21 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                 payment_channel = event["data"]["channel"]
                 email = event["data"]["customer"]["email"]
                 amount = Decimal(event["data"]["amount"]) / 100
+                paystack_auth_code = event["data"]["authorization"]["authorization_code"]
                 transaction = Transaction.objects.get(
                     transaction_id=reference, amount=amount
                 )
                 user = CustomUser.objects.get(email=email)
                 # Check if this is an AutoSave transaction
                 autosave = AutoSave.objects.filter(paystack_trans_ref=reference).first()
-                # autoinvest = AutoInvest.objects.filter(paystack_trans_ref=reference).first()
+                autoinvest = AutoInvest.objects.filter(paystack_trans_ref=reference).first()
 
                 if transaction.description.lower().startswith("quicksave"):
 
                     # print("\n====QuickSave Webhook Processing ====\n")
                     transaction.description = f"QuickSave ({payment_channel})"
                     transaction.status = "confirmed"
+                    transaction.paystack_auth_code = paystack_auth_code
                     transaction.save()
 
                     user.savings += int(amount)
@@ -3993,6 +3977,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                 elif transaction.description.lower().startswith("quickinvest"):
                     transaction.description = f"QuickInvest ({payment_channel})"
                     transaction.status = "confirmed"
+                    transaction.paystack_auth_code = paystack_auth_code
                     transaction.save()
 
                     user.investment += int(amount)
@@ -4055,6 +4040,50 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     # Update autosave record
                     autosave.last_success = timezone.now()
                     autosave.save()
+                    return  # Prevent double processing
+                
+                elif autoinvest:
+                    # Use Decimal for precision
+                    if not transaction:
+                        transaction = Transaction.objects.create(
+                            user=user,
+                            transaction_type="credit",
+                            status="confirmed",
+                            amount=amount,
+                            description=f"AutoInvest ({autosave.frequency.capitalize()})",
+                            transaction_id=reference,
+                        )
+
+                    # Atomic update for savings
+                    CustomUser.objects.filter(pk=user.pk).update(
+                        savings=F("savings") + amount
+                    )
+
+                    # Refresh user instance
+                    user.refresh_from_db()
+
+                    # Update totals and process referrals
+                    user.update_total_savings_and_investment_this_month()
+                    user.confirm_referral_rewards(is_referrer=True)
+
+                    # Send success email
+                    subject = (
+                        f"AutoInvest ({autosave.frequency.capitalize()}) Successful!"
+                    )
+                    message = f"Well done {user.first_name},\n\nYour AutoInvest was successful and ₦{amount:,.2f} has been added to your SAVINGS account."
+                    from_email = "MyFund <info@myfundmobile.com>"
+                    recipient_list = [user.email]
+                    send_mail(
+                        subject,
+                        message,
+                        from_email,
+                        recipient_list,
+                        fail_silently=False,
+                    )
+
+                    # Update autosave record
+                    autoinvest.last_success = timezone.now()
+                    autoinvest.save()
                     return  # Prevent double processing
 
                 else:
