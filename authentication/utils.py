@@ -1,46 +1,62 @@
 import requests
-import logging
-import socket
+from .models import PushNotifications
+from django.utils import timezone
 
 EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
 
 
-def send_push_notification(user, title, message, data={}, notif_type="SYSTEM"):
-    if not user.expo_push_token:
-        return
+def send_push_notification(user, title, message, data=None, notif_type="SYSTEM"):
+    data = data or {}
+    tokens = user.expo_push_tokens or []
 
-    prefs = user.notification_preferences or {}
-    if not prefs.get(notif_type.lower(), True):
-        return
-
-    from .models import PushNotifications
-
-    PushNotifications.objects.create(
+    notification = PushNotifications.objects.create(
         user=user,
         title=title,
         message=message,
         notification_type=notif_type,
         data=data,
     )
+    print(f"📝 Created notification ID {notification.id} for {user.email}")
 
-    # 🔒 Avoid Expo push during local development
-    if socket.gethostbyname(socket.gethostname()).startswith("172."):
-        print("🚫 Skipping Expo push in local environment.")
-        return
+    if not tokens:
+        print(f"❌ No push tokens for {user.email}")
+        return None
 
-    payload = {
-        "to": user.expo_push_token,
-        "sound": "default",
-        "title": title,
-        "body": message,
-        "data": data,
-    }
+    success_count = 0
+    for token_entry in tokens:
+        token = token_entry.get("token")
+        if not token:
+            continue
 
-    try:
-        response = requests.post(EXPO_PUSH_URL, json=payload, timeout=5)
-        if response.status_code != 200:
-            logging.warning(
-                f"Expo push failed: {response.status_code} - {response.text}"
+        payload = {
+            "to": token,
+            "sound": "default",
+            "title": title,
+            "body": message,
+            "data": {**data, "notification_id": str(notification.id)},
+            "channelId": "default",
+            "priority": "high",
+        }
+
+        headers = {
+            "Accept": "application/json",
+            "Accept-encoding": "gzip, deflate",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            response = requests.post(
+                EXPO_PUSH_URL, json=payload, headers=headers, timeout=10
             )
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Expo push request failed: {str(e)}")
+            res_data = response.json()
+            print(f"📤 Sent to {token}: {res_data}")
+
+            if res_data.get("data", {}).get("status") != "ok":
+                print(f"❌ Failed for token: {token}")
+            else:
+                success_count += 1
+
+        except Exception as e:
+            print(f"🔥 Error sending to {token}: {str(e)}")
+
+    return {"sent": success_count, "total": len(tokens)}
