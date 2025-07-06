@@ -973,6 +973,12 @@ class Transaction(models.Model):
         editable=False,
         db_index=True,
     )
+    paystack_auth_code = models.CharField(
+        max_length=255,
+        editable=False,
+        default='',
+        blank=True,
+    )
     paystack_access_code = models.CharField(
         max_length=255,
         null=True,
@@ -997,7 +1003,7 @@ class Transaction(models.Model):
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.transaction_type} - {self.amount} - {self.status} - {self.date}"
+        return f"{self.transaction_type} - {self.amount} - {self.status} - {self.paystack_auth_code} - {self.date}"
 
 
 class PushNotifications(models.Model):
