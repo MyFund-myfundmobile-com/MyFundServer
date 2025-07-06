@@ -149,7 +149,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     REQUIRED_FIELDS = ["first_name", "last_name", "phone_number"]
 
     # Push notifications-related fields
-    expo_push_token = models.CharField(max_length=200, blank=True, null=True)
+    expo_push_tokens = models.JSONField(default=list)
     notification_preferences = models.JSONField(
         default=default_notification_preferences
     )
@@ -489,7 +489,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     kyc_updated = models.BooleanField(default=False)
     kyc_status = models.CharField(max_length=20, default="Not yet started")
     admin_approval_status = models.CharField(max_length=20, default="Not yet started")
-    
+
     notification_preferences = models.JSONField(default=dict, null=True, blank=True)
 
     password_record = models.OneToOneField(
@@ -945,24 +945,21 @@ class Transaction(models.Model):
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         db_index=True,
-        related_name="user_transactions",  # Changed from 'transactions'
+        related_name="user_transactions",
     )
 
-    # Relationship for the referral user
     referral = models.ForeignKey(
         CustomUser,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="referral_transactions",  # Changed from 'transaction_referrer'
+        related_name="referral_transactions",
     )
 
-    transaction_type = models.CharField(
-        max_length=20, choices=TRANSACTION_TYPES
-    )  # ⬅ Increase max_length
+    transaction_type = models.CharField(max_length=20, choices=TRANSACTION_TYPES)
     status = models.CharField(
         max_length=20, choices=STATUS_TYPES, default="pending", db_index=True
-    )  # ⬅ Increase max_length
+    )
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     date = models.DateTimeField(auto_now_add=True)
     time = models.TimeField(auto_now_add=True)
@@ -972,16 +969,20 @@ class Transaction(models.Model):
     transaction_id = models.CharField(
         max_length=255,
         unique=True,
-        default=uuid.uuid4,  # Add default generator
+        default=uuid.uuid4,
         editable=False,
         db_index=True,
     )
     paystack_access_code = models.CharField(
         max_length=255,
-        unique=True,
         null=True,
         editable=False,
+        db_index=True,
     )
+    paystack_auth_code = models.CharField(
+        max_length=255, null=True, blank=True, default=None, editable=False
+    )
+
     service_charge = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
     total_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
     referral_email = models.EmailField(
@@ -990,6 +991,10 @@ class Transaction(models.Model):
     target_savings = models.ForeignKey(
         TargetSavings, on_delete=models.SET_NULL, null=True, blank=True
     )
+
+    def save(self, *args, **kwargs):
+        self.total_amount = self.amount + self.service_charge
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.transaction_type} - {self.amount} - {self.status} - {self.date}"

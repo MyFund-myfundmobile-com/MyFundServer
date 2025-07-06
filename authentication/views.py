@@ -5975,14 +5975,23 @@ def send_admin_push_notification(request):
 def save_expo_push_token(request):
     user = request.user
     token = request.data.get("expo_push_token")
+    device_type = request.data.get("device_type", "unknown")
 
     if not token:
-        return Response(
-            {"error": "No push token provided"}, status=status.HTTP_400_BAD_REQUEST
-        )
+        return Response({"error": "No token provided"}, status=400)
 
-    user.expo_push_token = token
-    user.save()
-    return Response(
-        {"message": "Expo push token saved successfully."}, status=status.HTTP_200_OK
+    # Remove old duplicates
+    user.expo_push_tokens = [
+        entry for entry in user.expo_push_tokens if entry["token"] != token
+    ]
+
+    user.expo_push_tokens.append(
+        {
+            "token": token,
+            "device_type": device_type.lower(),
+            "last_seen": timezone.now().isoformat(),
+        }
     )
+
+    user.save()
+    return Response({"message": "Token saved"})

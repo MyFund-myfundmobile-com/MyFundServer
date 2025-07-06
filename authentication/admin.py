@@ -279,7 +279,7 @@ class CustomUserAdmin(UserAdmin):
 
     def make_ambassador(self, request, queryset):
         updated_count = queryset.update(is_ambassador=True)
-        
+
     def revoke_ambassador(self, request, queryset):
         updated_count = queryset.update(is_ambassador=False)
 
@@ -989,14 +989,87 @@ class NotificationAdmin(admin.ModelAdmin):
     mark_as_unread.short_description = "Mark selected notifications as unread"
 
 
-from .models import PushNotifications
+from django import forms
+from django.contrib import admin, messages
+from .models import PushNotifications, CustomUser
+from .utils import send_push_notification
+
+
+class PushNotificationAdminForm(forms.ModelForm):
+    send_to_all = forms.BooleanField(required=False, label="Send to all users")
+
+    class Meta:
+        model = PushNotifications
+        fields = [
+            "user",
+            "title",
+            "message",
+            "notification_type",
+            "data",
+            "send_to_all",
+        ]
 
 
 @admin.register(PushNotifications)
 class PushNotificationsAdmin(admin.ModelAdmin):
-    list_display = ["user", "title", "notification_type", "is_read", "created_at"]
+    list_display = [
+        "user",
+        "title",
+        "notification_type",
+        "is_read",
+        "created_at",
+        "platform",
+    ]
     list_filter = ["notification_type", "is_read"]
     search_fields = ["title", "message", "user__email"]
+    form = PushNotificationAdminForm
+
+    def get_form(self, request, obj=None, **kwargs):
+        form_class = super().get_form(request, obj, **kwargs)
+
+        class AdminFormWithRequest(form_class):
+            def __init__(self2, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self2.request = request  # Access to admin request if needed
+
+        return AdminFormWithRequest
+
+    def save_model(self, request, obj, form, change):
+        title = form.cleaned_data["title"]
+        message = form.cleaned_data["message"]
+        notif_type = form.cleaned_data["notification_type"]
+        data = form.cleaned_data.get("data") or {}
+        send_to_all = form.cleaned_data.get("send_to_all", False)
+
+        if send_to_all:
+            users = CustomUser.objects.filter(is_active=True)
+        else:
+            users = [form.cleaned_data["user"]]
+
+        count_sent = 0
+        count_total = 0
+
+        for user in users:
+            response = send_push_notification(
+                user=user,
+                title=title,
+                message=message,
+                data=data,
+                notif_type=notif_type,
+            )
+            count_total += 1
+            if response:
+                count_sent += 1
+
+        messages.success(
+            request,
+            f"✅ Push created for {count_total} user(s), sent successfully to {count_sent}.",
+        )
+
+    def platform(self, obj):
+        tokens = obj.user.expo_push_tokens or []
+        platforms = {t.get("device_type", "Unknown").capitalize() for t in tokens}
+        return ", ".join(platforms) if platforms else "Unknown"
 
 
 # Register TopSaverHistory with customized admin
