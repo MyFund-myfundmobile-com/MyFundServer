@@ -1784,7 +1784,7 @@ def quickinvest(request):
         {
             "status": "transaction_initiated",
             "message": "Authorization of QickInvest transaction on Paystack required",
-            "authorization_url": f"{data["data"]["authorization_url"]}",
+            "authorization_url": f'{data["data"]["authorization_url"]}',
             "access_code": f"{access_code}",
         }
     )
@@ -2835,92 +2835,93 @@ def make_withdrawal_through_admin(user, amount, transaction_id):
 
 from decimal import Decimal
 
+from decimal import Decimal, InvalidOperation
+from django.core.mail import send_mail
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework import status
+import uuid
+
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def initiate_wallet_transfer(request):
     sender = request.user
     data = request.data
-    target_email = data.get(
-        "recipient_email"
-    )  # Update to match the key in the request data
-    amount = Decimal(data.get("amount"))
+    target_email = data.get("recipient_email")
 
-    # Verify that the sender has enough balance in their wallet
+    try:
+        amount = Decimal(str(data.get("amount")))
+    except (InvalidOperation, TypeError, ValueError):
+        return Response(
+            {"error": "Invalid amount format."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if amount <= 0:
+        return Response(
+            {"error": "Amount must be greater than 0."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Check sender balance
     if sender.wallet < amount:
         return Response(
             {"error": "Insufficient balance in the wallet."},
-            status=status.HTTP_BAD_REQUEST,
+            status=status.HTTP_400_BAD_REQUEST,
         )
 
-    # Find the target user by email
+    # Find recipient
     try:
         target_user = CustomUser.objects.get(email=target_email)
     except CustomUser.DoesNotExist:
         return Response(
-            {"error": "Target user not found."}, status=status.HTTP_404_NOT_FOUND
-        )  # Use the correct status code
+            {"error": "Target user not found."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
 
-    # Perform the wallet-to-wallet transfer
+    # Perform transfer
     sender.wallet -= amount
     target_user.wallet += amount
     sender.save()
     target_user.save()
 
-    # Generate unique transaction IDs
-    sender_transaction_id = str(uuid.uuid4().hex)[:10]
-    target_transaction_id = str(uuid.uuid4().hex)[:10]
-
-    # Create transaction records for sender and target
-    sender_transaction = Transaction(
+    # Create transactions
+    sender_transaction = Transaction.objects.create(
         user=sender,
         transaction_type="debit",
         status="confirmed",
         amount=amount,
-        description=f"Sent to {target_user.first_name}",
-        transaction_id=sender_transaction_id,
         total_amount=amount,
+        transaction_id=str(uuid.uuid4().hex)[:10],
+        description=f"Sent to {target_user.first_name}",
     )
-    sender_transaction.save()
 
-    target_transaction = Transaction(
+    target_transaction = Transaction.objects.create(
         user=target_user,
         transaction_type="credit",
         status="confirmed",
         amount=amount,
-        description=f"Received from {sender.first_name}",
-        transaction_id=target_transaction_id,
         total_amount=amount,
+        transaction_id=str(uuid.uuid4().hex)[:10],
+        description=f"Received from {sender.first_name}",
     )
-    target_transaction.save()
 
-    # Send confirmation emails to both users
-    subject_sender = f"You Sent ₦{amount} to {target_user.first_name}"
-    message_sender = f"Hi {sender.first_name}, \n\nYou have successfully transferred ₦{amount} to {target_user.first_name} ({target_user.email}). \n\nThank you for using MyFund!\n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-    from_email_sender = (
-        "MyFund <info@myfundmobile.com>"  # Replace with a valid sender email
-    )
-    recipient_list_sender = [sender.email]
-
-    subject_target = f"You Received ₦{amount} from {sender.first_name}"
-    message_target = f"Hi {target_user.first_name}, \n\nYou have received ₦{amount} from {sender.first_name} ({sender.email}). \n\nThank you for using MyFund!\n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-    from_email_target = (
-        "MyFund <info@myfundmobile.com>"  # Replace with a valid target email
-    )
-    recipient_list_target = [target_user.email]
-
+    # Send confirmation emails
     send_mail(
-        subject_sender,
-        message_sender,
-        from_email_sender,
-        recipient_list_sender,
+        f"You Sent ₦{amount} to {target_user.first_name}",
+        f"Hi {sender.first_name},\n\nYou have successfully transferred ₦{amount} to {target_user.first_name} ({target_user.email}).\n\nThank you for using MyFund!",
+        "MyFund <info@myfundmobile.com>",
+        [sender.email],
         fail_silently=False,
     )
+
     send_mail(
-        subject_target,
-        message_target,
-        from_email_target,
-        recipient_list_target,
+        f"You Received ₦{amount} from {sender.first_name}",
+        f"Hi {target_user.first_name},\n\nYou have received ₦{amount} from {sender.first_name} ({sender.email}).\n\nThank you for using MyFund!",
+        "MyFund <info@myfundmobile.com>",
+        [target_user.email],
         fail_silently=False,
     )
 
@@ -6039,6 +6040,7 @@ def save_expo_push_token(request):
     user = request.user
     token = request.data.get("expo_push_token")
     device_type = request.data.get("device_type", "unknown")
+    app_version = request.data.get("app_version")
 
     if not token:
         return Response({"error": "No token provided"}, status=400)
@@ -6048,13 +6050,15 @@ def save_expo_push_token(request):
         entry for entry in user.expo_push_tokens if entry["token"] != token
     ]
 
-    user.expo_push_tokens.append(
-        {
-            "token": token,
-            "device_type": device_type.lower(),
-            "last_seen": timezone.now().isoformat(),
-        }
-    )
+    new_token = {
+        "token": token,
+        "device_type": device_type.lower(),
+        "last_seen": timezone.now().isoformat(),
+    }
 
+    if app_version:
+        new_token["app_version"] = app_version
+
+    user.expo_push_tokens.append(new_token)
     user.save()
     return Response({"message": "Token saved"})

@@ -107,7 +107,7 @@ INSTALLED_APPS = [
     # "sslserver",
     "channels",
     "graphene_django",
-    # 'django_socketio',
+    "django_extensions",
     "django_celery_beat",
 ]
 
