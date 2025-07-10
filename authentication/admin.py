@@ -41,6 +41,11 @@ from django.utils.html import format_html
 from django.urls import reverse
 
 
+@admin.action(description="Say Hello")
+def say_hello(modeladmin, request, queryset):
+    messages.success(request, "👋 Hello from admin action!")
+
+
 class TransactionInline(admin.TabularInline):
     model = Transaction
     fk_name = "user"
@@ -114,6 +119,8 @@ class CustomUserAdmin(UserAdmin):
         "make_ambassador",
         "revoke_ambassador",
         "delete_selected",
+        "notify_outdated_users",
+        "say_hello",
     ]
 
     fieldsets = (
@@ -274,14 +281,31 @@ class CustomUserAdmin(UserAdmin):
 
     export_to_csv.short_description = "Export selected users to CSV"
 
-    def make_hired_referrer(self, request, queryset):
-        updated_count = queryset.update(is_hired_referrer=True)
+    @admin.action(description="Notify users with outdated app versions")
+    def notify_outdated_users(self, request, queryset):
+        from packaging import version
+        from .utils import send_push_notification
 
-    def make_ambassador(self, request, queryset):
-        updated_count = queryset.update(is_ambassador=True)
+        MIN_REQUIRED_VERSION = "3.1.7"
+        count = 0
 
-    def revoke_ambassador(self, request, queryset):
-        updated_count = queryset.update(is_ambassador=False)
+        for user in queryset:
+            tokens = user.expo_push_tokens or []
+            for token in tokens:
+                app_version = token.get("app_version")
+                if app_version and version.parse(app_version) < version.parse(
+                    MIN_REQUIRED_VERSION
+                ):
+                    send_push_notification(
+                        user,
+                        "Update Required",
+                        "A new version of MyFund is available. Please update to enjoy full features.",
+                        notif_type="VERSION",
+                    )
+                    count += 1
+                    break  # Notify once per user
+
+        messages.success(request, f"✅ Sent update notice to {count} user(s).")
 
     def view_kyc_details(self, request, queryset):
         if queryset.count() == 1:

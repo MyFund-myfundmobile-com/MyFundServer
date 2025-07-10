@@ -929,6 +929,9 @@ class TargetSavings(models.Model):
         return f"{self.user.email}'s {self.name} Target"
 
 
+from decimal import Decimal, InvalidOperation
+
+
 class Transaction(models.Model):
     TRANSACTION_TYPES = (
         ("credit", "Credit"),
@@ -999,7 +1002,12 @@ class Transaction(models.Model):
     )
 
     def save(self, *args, **kwargs):
-        self.total_amount = self.amount + self.service_charge
+        try:
+            if isinstance(self.service_charge, float):
+                self.service_charge = Decimal(str(self.service_charge))
+            self.total_amount = self.amount + self.service_charge
+        except (TypeError, InvalidOperation):
+            raise ValueError("Amount or service charge is not a valid Decimal.")
         super().save(*args, **kwargs)
 
     def __str__(self):
