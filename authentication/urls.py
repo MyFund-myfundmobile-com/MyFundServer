@@ -15,6 +15,7 @@ from .views import (
     UserTransactionListView,
     UserCardListView,
     AccountBalancesAPIView,
+    delete_my_account,
     send_email,
     save_template,
     delete_template,
@@ -157,10 +158,11 @@ urlpatterns = [
         name="process_withdrawal_to_local_bank",
     ),
     path(
-        "wallet-to-wallet/",
-        views.initiate_wallet_transfer,
-        name="initiate-wallet-transfer",
+        "wallet-transfer/",
+        views.wallet_transfer_view,  # ✅ updated view name
+        name="wallet_transfer",  # same name, no issue
     ),
+    path("delete-my-account/", delete_my_account, name="delete-my-account"),
     path("get-user-by-email/", get_user_by_email, name="get-user-by-email"),
     # Property-related APIs
     path("buy-property/", BuyPropertyView.as_view(), name="buy-property"),

@@ -369,6 +369,76 @@ def test_email(request):
     return HttpResponse("Test email sent. This shows the email system is working")
 
 
+from rest_framework.test import force_authenticate
+from rest_framework.request import Request
+from rest_framework.parsers import JSONParser
+from django.http import JsonResponse
+
+from rest_framework.test import APIRequestFactory, force_authenticate
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def delete_my_account(request):
+    user = request.user
+    print(f"⚠️ Deletion request for: {user.email}")
+
+    total_funds = user.savings + user.investment + user.wallet
+
+    # Case 1: No funds — delete immediately
+    if total_funds == 0:
+        user.delete()
+        print("✅ User deleted immediately. No funds.")
+        return Response({"message": "Account deleted successfully."})
+
+    # Case 2: Has funds — require a bank account
+    target_bank_account = user.bank_accounts.first()
+    if not target_bank_account:
+        print("❌ No bank account found. Cannot proceed with withdrawal.")
+        return Response(
+            {"error": "No bank account available for withdrawal."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        factory = APIRequestFactory()
+
+        for source, balance in [
+            ("savings", user.savings),
+            ("investment", user.investment),
+            ("wallet", user.wallet),
+        ]:
+            if balance > 0:
+                print(f"💸 Withdrawing ₦{balance} from {source}")
+                data = {
+                    "source_account": source,
+                    "amount": str(balance),
+                    "withdrawal_type": "immediate",
+                    "target_bank_account_id": target_bank_account.id,
+                }
+                mock_request = factory.post("/api/withdraw/", data, format="json")
+                force_authenticate(mock_request, user=user)
+
+                # ✅ Call the actual decorated view function
+                response = process_withdrawal_to_local_bank(mock_request)
+                if response.status_code not in (200, 201):
+                    raise Exception(f"Failed withdrawal from {source}: {response.data}")
+
+        user.delete()
+        print("✅ User account deleted after triggering withdrawals.")
+        return Response({"message": "Account deleted and withdrawals triggered."})
+
+    except Exception as e:
+        print("❌ Failed to process withdrawal before deletion.")
+        import traceback
+
+        traceback.print_exc()
+        return Response(
+            {"error": "Failed to process withdrawal before account deletion."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+
 class CustomObtainAuthToken(ObtainAuthToken):
     def post(self, request, *args, **kwargs):
         serializer = self.serializer_class(data=request.data)
@@ -1105,6 +1175,7 @@ def add_bank_account(request):
             )
 
         # Save bank account
+        # Save bank account
         bank_account = BankAccount.objects.create(
             user=request.user,
             bank_name=bank_name,
@@ -1114,6 +1185,9 @@ def add_bank_account(request):
             is_default=False,
             paystack_recipient_code=paystack_recipient_code,
         )
+
+        # 🔥 Link the bank account to the user's ManyToMany field
+        request.user.bank_accounts.add(bank_account)
 
         logger.info("Bank account added successfully for user: %s", request.user.email)
 
@@ -2846,7 +2920,7 @@ import uuid
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
-def initiate_wallet_transfer(request):
+def wallet_transfer_view(request):  # ✅ NEW NAME
     sender = request.user
     data = request.data
     target_email = data.get("recipient_email")
