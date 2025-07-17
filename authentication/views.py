@@ -1157,7 +1157,7 @@ def add_bank_account(request):
     # Validate required fields
     if not all([bank_name, account_number, account_name, bank_code]):
         error_message = (
-            "All fields (bank_name, account_number, account_name, bank_code) are required."
+            "All fields (bankName, accountNumber, accountName, bankCode) are required."
         )
         logger.error(error_message)
         return Response({"error": error_message}, status=status.HTTP_400_BAD_REQUEST)
@@ -1426,82 +1426,108 @@ from django.conf import settings
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def quicksave(request):
-    amount = request.data.get("amount")
-
-    if amount is None:
-        return Response({"error": "amount required"}, status=400)
-
-    if int(float(amount)) < 100:
-        return Response({"error": "Amount cannot be less than #100"}, status=400)
-
     try:
-        amount_kobo = int(float(amount) * 100)
-    except ValueError:
-        return Response({"error": "Invalid amount format"}, status=400)
+        amount = request.data.get("amount")
+        card_id = request.data.get("card_id")
 
-    payload = {
-        "email": request.user.email,
-        "amount": amount_kobo,
-    }
+        if not amount:
+            return Response({"error": "Amount is required"}, status=400)
 
-    resp = requests.post(
-        "https://api.paystack.co/transaction/initialize",
-        json=payload,
-        headers={
-            "Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}",
-            "Content-Type": "application/json",
-        },
-    )
+        if not card_id:
+            return Response({"error": "Card selection is required"}, status=400)
 
-    data = resp.json()
+        try:
+            amount_kobo = int(float(amount) * 100)
+            if amount_kobo < 10000:  # ₦100 in kobo
+                return Response(
+                    {"error": "Amount cannot be less than ₦100"}, status=400
+                )
+        except ValueError:
+            return Response({"error": "Invalid amount format"}, status=400)
 
-    if not data.get("status"):
-        return Response({"error": f"Charge Failed: {data}"}, status=400)
+        # Verify the card belongs to the user
+        try:
+            card = Card.objects.get(id=card_id, user=request.user)
+        except Card.DoesNotExist:
+            return Response({"error": "Invalid card selected"}, status=400)
 
-    reference = data["data"]["reference"]
-    access_code = data["data"]["access_code"]
-
-    Transaction.objects.create(
-        user=request.user,
-        transaction_type="credit",
-        status="pending",
-        amount=float(amount),
-        description="QuickSave",
-        transaction_id=reference,
-        paystack_access_code=access_code,
-    )
-
-    # ✅ Send QuickSave confirmation email
-    subject = "QuickSave Started!"
-    message = f"""Hi {request.user.first_name},
-
-    Your QuickSave of ₦{amount} has been initiated successfully.
-
-    Please complete the payment via Paystack to fund your savings.
-
-    Grow your funds with MyFund. 🥂
-
-    — MyFund
-    Save, Buy Properties, Earn Rent
-    www.myfundmobile.com
-    13 Gbajabiamila Street, Ayobo, Lagos
-    """
-    from_email = "MyFund <info@myfundmobile.com>"
-    recipient_list = [request.user.email]
-
-    try:
-        send_mail(subject, message, from_email, recipient_list, fail_silently=False)
-    except Exception as e:
-        print("Email error:", e)
-
-    return Response(
-        {
-            "status": "transaction_initiated",
-            "message": "Authorization of QuickSave transaction on Paystack required",
-            "authorization_url": data["data"]["authorization_url"],
-            "access_code": access_code,
+        payload = {
+            "email": request.user.email,
+            "amount": amount_kobo,
+            "reference": f"QS-{uuid.uuid4().hex[:10]}",
+            "metadata": {
+                "user_id": request.user.id,
+                "card_id": card_id,
+                "purpose": "QuickSave",
+            },
         }
-    )
+
+        # Make request to Paystack
+        resp = requests.post(
+            "https://api.paystack.co/transaction/initialize",
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}",
+                "Content-Type": "application/json",
+            },
+            timeout=30,  # 30 seconds timeout
+        )
+
+        # Check if request to Paystack was successful
+        if resp.status_code != 200:
+            error_message = resp.json().get("message", "Payment initialization failed")
+            return Response({"error": error_message}, status=400)
+
+        data = resp.json()
+
+        if not data.get("status"):
+            return Response(
+                {
+                    "error": f"Payment initialization failed: {data.get('message', 'Unknown error')}"
+                },
+                status=400,
+            )
+
+        reference = data["data"]["reference"]
+        access_code = data["data"]["access_code"]
+
+        # Create transaction record
+        Transaction.objects.create(
+            user=request.user,
+            transaction_type="credit",
+            status="pending",
+            amount=float(amount),
+            description="QuickSave",
+            transaction_id=reference,
+            paystack_access_code=access_code,
+        )
+
+        # Send confirmation email
+        send_quicksave_email(request.user, amount)
+
+        return Response(
+            {
+                "status": "transaction_initiated",
+                "message": "Authorization of QuickSave transaction on Paystack required",
+                "authorization_url": data["data"]["authorization_url"],
+                "access_code": access_code,
+                "reference": reference,
+            }
+        )
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Paystack API error: {str(e)}")
+        return Response(
+            {
+                "error": "Payment service temporarily unavailable. Please try again later."
+            },
+            status=503,
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error in quicksave: {str(e)}")
+        return Response(
+            {"error": "An unexpected error occurred. Please try again."}, status=500
+        )
 
 
 import time
@@ -1561,18 +1587,21 @@ def autosave(request):
     except ObjectDoesNotExist:
         pass
 
-   # Check if user has a transaction with a paystack_auth_code
-    has_paystack_auth = Transaction.objects.filter(
-        user=user,
-        paystack_auth_code__isnull=False
-    ).exclude(paystack_auth_code='').exists()
-    
+    # Check if user has a transaction with a paystack_auth_code
+    has_paystack_auth = (
+        Transaction.objects.filter(user=user, paystack_auth_code__isnull=False)
+        .exclude(paystack_auth_code="")
+        .exists()
+    )
+
     # print(f"has_paystack_auth:  {has_paystack_auth}")
 
     if not has_paystack_auth:
         return Response(
-            {"error": "You need to do a QuickSave/QuickInvest before you can activate AutoSave"},
-            status=status.HTTP_400_BAD_REQUEST
+            {
+                "error": "You need to do a QuickSave/QuickInvest before you can activate AutoSave"
+            },
+            status=status.HTTP_400_BAD_REQUEST,
         )
 
     # Prepare Paystack plan creation request
@@ -1910,17 +1939,20 @@ def autoinvest(request):
             },
             status=status.HTTP_400_BAD_REQUEST,
         )
-        
-     # Check if user has a transaction with a paystack_auth_code
-    has_paystack_auth = Transaction.objects.filter(
-        user=user,
-        paystack_auth_code__isnull=False
-    ).exclude(paystack_auth_code='').exists()
+
+    # Check if user has a transaction with a paystack_auth_code
+    has_paystack_auth = (
+        Transaction.objects.filter(user=user, paystack_auth_code__isnull=False)
+        .exclude(paystack_auth_code="")
+        .exists()
+    )
 
     if not has_paystack_auth:
         return Response(
-            {"error": "You need to do a QuickSave/QuickInvest before you can activate AutoInvest"},
-            status=status.HTTP_400_BAD_REQUEST
+            {
+                "error": "You need to do a QuickSave/QuickInvest before you can activate AutoInvest"
+            },
+            status=status.HTTP_400_BAD_REQUEST,
         )
 
     # Prepare Paystack plan creation request
@@ -2378,7 +2410,7 @@ def withdraw_to_local_bank(request):
             {"error": '"amount" was NOT provided.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
-    amount = Decimal(request.data.get("amount", 0)).quantize(Decimal('0.00'), rounding=ROUND_HALF_EVEN)
+    amount = Decimal(request.data.get("amount", 0))
 
     # Validate that the user has enough balance in the source account
     if source_account == "savings" and user.savings < amount:
@@ -2846,7 +2878,7 @@ def make_withdrawal_through_paystack(user, target_bank_account, amount):
     headers = {
         "Authorization": f"Bearer {paystack_secret_key}",
         "Content-Type": "application/json",
-    }   
+    }
     data = {
         "source": "balance",
         "amount": int(amount * 100),  # Amount in kobo (100 kobo = 1 Naira)
@@ -4004,13 +4036,35 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                 payment_channel = event["data"]["channel"]
                 email = event["data"]["customer"]["email"]
                 amount = Decimal(event["data"]["amount"]) / 100
-                paystack_auth_code = event["data"]["authorization"]["authorization_code"]
-                
+                paystack_auth_code = event["data"]["authorization"][
+                    "authorization_code"
+                ]
+
+                try:
+                    transaction = Transaction.objects.get(
+                        transaction_id=reference, amount=amount
+                    )
+                except Transaction.DoesNotExist:
+                    transaction = None
+                    # Log or handle the error appropriately
+                    print(
+                        f"No Transaction found with reference {reference} and amount {amount}."
+                    )
+
+                    # Send an email of the error that ocurred
+                    subject = "[Webhook Error] Referrence ID NOT Found in DB"
+                    message = f"No Transaction found with reference {reference} and amount {amount}."
+
+                    from_email = "MyFund <info@myfundmobile.com>"
+                    recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
+
+                    pass
+
                 try:
                     user = CustomUser.objects.get(email=email)
                 except CustomUser.DoesNotExist:
                     user = None
-                    
+
                     # Send an email of the error that ocurred
                     subject = "[Webhook Error] User NOT Found in DB"
                     message = f"No user found with email {email}."
@@ -4018,24 +4072,6 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     from_email = "MyFund <info@myfundmobile.com>"
                     recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
 
-                    send_mail(subject, message, from_email, recipient_list, fail_silently=False)
-                    
-                    return JsonResponse({"status": True}, status=status.HTTP_200_OK)
-                
-                try:
-                    transaction = Transaction.objects.get(transaction_id=reference, amount=amount)
-                except Transaction.DoesNotExist:
-                    transaction = None
-                    # Log or handle the error appropriately
-                    print(f"No Transaction found with reference {reference} and amount {amount}.")
-                    
-                    # Send an email of the error that ocurred
-                    subject = "[Webhook Error] Referrence ID NOT Found in DB"
-                    message = f"No Transaction found with reference {reference} and amount {amount}."
-
-                    from_email = "MyFund <info@myfundmobile.com>"
-                    recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
-                    
                     send_mail(
                         subject,
                         message,
@@ -4044,11 +4080,14 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         fail_silently=False,
                     )
 
-                
+                    return JsonResponse({"status": True}, status=status.HTTP_200_OK)
+
                 autosave = AutoSave.objects.filter(paystack_trans_ref=reference).first()
-                
-                autoinvest = AutoInvest.objects.filter(paystack_trans_ref=reference).first()
-                                 
+
+                autoinvest = AutoInvest.objects.filter(
+                    paystack_trans_ref=reference
+                ).first()
+
                 if transaction.description.lower().startswith("quicksave"):
 
                     # print("\n====QuickSave Webhook Processing ====\n")
@@ -4074,8 +4113,10 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         recipient_list,
                         fail_silently=False,
                     )
-                    
-                    return JsonResponse({"status": True}, status=status.HTTP_200_OK) # Prevent double processing
+
+                    return JsonResponse(
+                        {"status": True}, status=status.HTTP_200_OK
+                    )  # Prevent double processing
 
                 elif transaction.description.lower().startswith("quickinvest"):
                     transaction.description = f"QuickInvest ({payment_channel})"
@@ -4100,8 +4141,10 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         recipient_list,
                         fail_silently=False,
                     )
-                    
-                    return JsonResponse({"status": True}, status=status.HTTP_200_OK) # Prevent double processing
+
+                    return JsonResponse(
+                        {"status": True}, status=status.HTTP_200_OK
+                    )  # Prevent double processing
 
                 elif autosave:
                     # Use Decimal for precision
@@ -4145,8 +4188,10 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     # Update autosave record
                     autosave.last_success = timezone.now()
                     autosave.save()
-                    return JsonResponse({"status": True}, status=status.HTTP_200_OK) # Prevent double processing
-                
+                    return JsonResponse(
+                        {"status": True}, status=status.HTTP_200_OK
+                    )  # Prevent double processing
+
                 elif autoinvest:
                     # Use Decimal for precision
                     if not transaction:
@@ -4189,7 +4234,9 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     # Update autosave record
                     autoinvest.last_success = timezone.now()
                     autoinvest.save()
-                    return JsonResponse({"status": True}, status=status.HTTP_200_OK) # Prevent double processing
+                    return JsonResponse(
+                        {"status": True}, status=status.HTTP_200_OK
+                    )  # Prevent double processing
 
                 else:
                     # Handle regular transactions
@@ -4232,7 +4279,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             description=f"{trans_type}",
                             transaction_id=event["data"]["reference"],
                         )
-                        
+
                         user.investment += int(amount)
                         # user.confirm_referral_rewards(is_referrer=True)
                         user.update_total_savings_and_investment_this_month()
@@ -4259,7 +4306,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         transaction.save(
                             update_fields=["transaction_type", "status", "description"]
                         )
-                        
+
                         user.savings += int(amount)
                         # user.confirm_referral_rewards(is_referrer=True)
                         user.update_total_savings_and_investment_this_month()
