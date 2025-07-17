@@ -49,6 +49,7 @@ import hmac
 from dotenv import load_dotenv
 import logging
 from django.db.models import Min
+from decimal import Decimal, ROUND_HALF_EVEN
 
 
 load_dotenv()
@@ -1156,7 +1157,7 @@ def add_bank_account(request):
     # Validate required fields
     if not all([bank_name, account_number, account_name, bank_code]):
         error_message = (
-            "All fields (bankName, accountNumber, accountName, bankCode) are required."
+            "All fields (bank_name, account_number, account_name, bank_code) are required."
         )
         logger.error(error_message)
         return Response({"error": error_message}, status=status.HTTP_400_BAD_REQUEST)
@@ -2377,7 +2378,7 @@ def withdraw_to_local_bank(request):
             {"error": '"amount" was NOT provided.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
-    amount = Decimal(request.data.get("amount", 0))
+    amount = Decimal(request.data.get("amount", 0)).quantize(Decimal('0.00'), rounding=ROUND_HALF_EVEN)
 
     # Validate that the user has enough balance in the source account
     if source_account == "savings" and user.savings < amount:
@@ -2416,8 +2417,8 @@ def withdraw_to_local_bank(request):
         service_charge_percentage = 15
 
     # Calculate the service charge and total withdrawal amount
-    service_charge = (service_charge_percentage / 100) * float(amount)
-    withdrawal_amount = float(amount) - service_charge
+    service_charge = Decimal((service_charge_percentage / 100) * float(amount))
+    withdrawal_amount = amount - service_charge
 
     # Generate a unique transaction ID
     transaction_id = str(uuid.uuid4())[:16]
@@ -2845,7 +2846,7 @@ def make_withdrawal_through_paystack(user, target_bank_account, amount):
     headers = {
         "Authorization": f"Bearer {paystack_secret_key}",
         "Content-Type": "application/json",
-    }
+    }   
     data = {
         "source": "balance",
         "amount": int(amount * 100),  # Amount in kobo (100 kobo = 1 Naira)
@@ -4006,22 +4007,6 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                 paystack_auth_code = event["data"]["authorization"]["authorization_code"]
                 
                 try:
-                    transaction = Transaction.objects.get(transaction_id=reference, amount=amount)
-                except Transaction.DoesNotExist:
-                    transaction = None
-                    # Log or handle the error appropriately
-                    print(f"No Transaction found with reference {reference} and amount {amount}.")
-                    
-                    # Send an email of the error that ocurred
-                    subject = "[Webhook Error] Referrence ID NOT Found in DB"
-                    message = f"No Transaction found with reference {reference} and amount {amount}."
-
-                    from_email = "MyFund <info@myfundmobile.com>"
-                    recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
-                    
-                    pass
-
-                try:
                     user = CustomUser.objects.get(email=email)
                 except CustomUser.DoesNotExist:
                     user = None
@@ -4036,6 +4021,28 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     send_mail(subject, message, from_email, recipient_list, fail_silently=False)
                     
                     return JsonResponse({"status": True}, status=status.HTTP_200_OK)
+                
+                try:
+                    transaction = Transaction.objects.get(transaction_id=reference, amount=amount)
+                except Transaction.DoesNotExist:
+                    transaction = None
+                    # Log or handle the error appropriately
+                    print(f"No Transaction found with reference {reference} and amount {amount}.")
+                    
+                    # Send an email of the error that ocurred
+                    subject = "[Webhook Error] Referrence ID NOT Found in DB"
+                    message = f"No Transaction found with reference {reference} and amount {amount}."
+
+                    from_email = "MyFund <info@myfundmobile.com>"
+                    recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
+                    
+                    send_mail(
+                        subject,
+                        message,
+                        from_email,
+                        recipient_list,
+                        fail_silently=False,
+                    )
 
                 
                 autosave = AutoSave.objects.filter(paystack_trans_ref=reference).first()
@@ -4330,70 +4337,70 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                 return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
             case "invoice.create":
-                # sub_code = event["data"]["subscription"]["subscription_code"]
-                # sub_token = event["data"]["subscription"]["email_token"]
-                # email = event["data"]["customer"]["email"]
-                # trans_ref = event["data"]["transaction"]["reference"]
-                # user = CustomUser.objects.get(email=email)
+                sub_code = event["data"]["subscription"]["subscription_code"]
+                sub_token = event["data"]["subscription"]["email_token"]
+                email = event["data"]["customer"]["email"]
+                trans_ref = event["data"]["transaction"]["reference"]
+                user = CustomUser.objects.get(email=email)
 
-                # print(f"sub_code: {sub_code}, sub_token: {sub_token}")
+                print(f"sub_code: {sub_code}, sub_token: {sub_token}")
 
-                # if AutoSave.objects.get(
-                #     paystack_sub_code=sub_code,
-                #     paystack_sub_token=sub_token,
-                # ):
-                #     # print(f"AutoSave has a record with the sub_code: {sub_code} and sub_token: {sub_token}")
+                if AutoSave.objects.get(
+                    paystack_sub_code=sub_code,
+                    paystack_sub_token=sub_token,
+                ):
+                    # print(f"AutoSave has a record with the sub_code: {sub_code} and sub_token: {sub_token}")
 
-                #     amount = event["data"]["amount"] / 100  # convert amount to naira
+                    amount = event["data"]["amount"] / 100  # convert amount to naira
 
-                #     # Check if a transaction with the same transaction_id already exists
-                #     existing_transaction = Transaction.objects.filter(
-                #         transaction_id=trans_ref
-                #     ).first()
+                    # Check if a transaction with the same transaction_id already exists
+                    existing_transaction = Transaction.objects.filter(
+                        transaction_id=trans_ref
+                    ).first()
 
-                #     if not existing_transaction:
-                #         # Create a new transaction if not found
-                #         Transaction.objects.create(
-                #             user=user,
-                #             transaction_type="credit",
-                #             status="pending",
-                #             amount=int(amount),
-                #             description="AutoSave",
-                #             transaction_id=trans_ref,
-                #         )
+                    if not existing_transaction:
+                        # Create a new transaction if not found
+                        Transaction.objects.create(
+                            user=user,
+                            transaction_type="credit",
+                            status="pending",
+                            amount=int(amount),
+                            description="AutoSave",
+                            transaction_id=trans_ref,
+                        )
 
-                #     return JsonResponse({"status": True}, status=status.HTTP_200_OK)
+                    return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
-                # elif AutoInvest.objects.get(
-                #     paystack_sub_code=sub_code,
-                #     paystack_sub_token=sub_token,
-                # ):
-                #     # print(f"AutoInvest has a record with the sub_code: {sub_code} and sub_token: {sub_token}")
+                elif AutoInvest.objects.get(
+                    paystack_sub_code=sub_code,
+                    paystack_sub_token=sub_token,
+                ):
+                    # print(f"AutoInvest has a record with the sub_code: {sub_code} and sub_token: {sub_token}")
 
-                #     amount = event["data"]["amount"] / 100  # convert amount to naira
+                    amount = event["data"]["amount"] / 100  # convert amount to naira
 
-                #     # Check if a transaction with the same transaction_id already exists
-                #     existing_transaction = Transaction.objects.filter(
-                #         transaction_id=trans_ref
-                #     ).first()
+                    # Check if a transaction with the same transaction_id already exists
+                    existing_transaction = Transaction.objects.filter(
+                        transaction_id=trans_ref
+                    ).first()
 
-                #     if not existing_transaction:
-                #         # Create a new transaction if not found
-                #         Transaction.objects.create(
-                #             user=user,
-                #             transaction_type="credit",
-                #             status="pending",
-                #             amount=int(amount),
-                #             description="AutoInvest",
-                #             transaction_id=trans_ref,
-                #         )
+                    if not existing_transaction:
+                        # Create a new transaction if not found
+                        Transaction.objects.create(
+                            user=user,
+                            transaction_type="credit",
+                            status="pending",
+                            amount=int(amount),
+                            description="AutoInvest",
+                            transaction_id=trans_ref,
+                        )
 
-                #     return JsonResponse({"status": True}, status=status.HTTP_200_OK)
+                    return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
-                # else:
-                #     print(
-                #         f'\n"invoice.create" details does not exist in MyFund database\n'
-                #     )
+                else:
+                    print(
+                        f'\n"invoice.create" details does not exist in MyFund database\n'
+                    )
                 return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
             case "invoice.payment_failed":
