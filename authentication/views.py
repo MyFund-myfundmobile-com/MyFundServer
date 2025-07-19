@@ -1427,17 +1427,16 @@ from django.conf import settings
 @permission_classes([IsAuthenticated])
 def quicksave(request):
     amount = request.data.get("amount")
-
+    
+    
     if amount is None:
         return Response({"error": "amount required"}, status=400)
 
-    if int(float(amount)) < 100:
+    if int(amount) < 100:
         return Response({"error": "Amount cannot be less than #100"}, status=400)
 
-    try:
-        amount_kobo = int(float(amount) * 100)
-    except ValueError:
-        return Response({"error": "Invalid amount format"}, status=400)
+    # Convert amount to kobo and to int (Paystack requires integer amount in kobo)
+    amount_kobo = int(amount * 100)
 
     payload = {
         "email": request.user.email,
@@ -1465,7 +1464,7 @@ def quicksave(request):
         user=request.user,
         transaction_type="credit",
         status="pending",
-        amount=float(amount),
+        amount= Decimal(amount),
         description="QuickSave",
         transaction_id=reference,
         paystack_access_code=access_code,
@@ -1811,14 +1810,11 @@ def quickinvest(request):
         return Response({"error": "amount required"}, status=400)
 
     if int(amount) < 100000:
-        return Response({"error": "QuickInvest cannot be less than #100000"})
+        return Response({"error": "Amount cannot be less than #100,000"}, status=400)
 
-    try:
-        # Convert amount to integer
-        amount_kobo = int(float(amount) * 100)
-    except ValueError:
-        return Response({"error": "Invalid amount format"}, status=400)
-
+    # Convert amount to kobo and to int (Paystack requires integer amount in kobo)
+    amount_kobo = int(amount * 100)
+    
     # Paystack charge request
     payload = {
         "email": request.user.email,
@@ -1849,7 +1845,7 @@ def quickinvest(request):
         user=request.user,
         transaction_type="credit",
         status="pending",
-        amount=float(amount),
+        amount=Decimal(amount),
         description="QuickInvest",
         transaction_id=reference,
         paystack_access_code=access_code,
@@ -3284,74 +3280,74 @@ def get_top_savers(request):
         # Delete old top savers for the current month and year
         TopSaverHistory.objects.filter(month=current_month, year=current_year).delete()
 
-    # 1. Update ALL users' current month totals
-    CustomUser.objects.all().update(
-        total_savings_and_investments_this_month=Coalesce(
-            Subquery(
-                Transaction.objects.filter(
-                    user=OuterRef("pk"),
-                    date__month=current_month,
-                    date__year=current_year,
-                )
-                .filter(
-                    Q(status="confirmed", transaction_type="credit")
-                    | Q(
-                        description__in=[
-                            "AutoSave (Confirmed)",
-                            "AutoInvest (Confirmed)",
-                        ]
+        # 1. Update ALL users' current month totals
+        CustomUser.objects.all().update(
+            total_savings_and_investments_this_month=Coalesce(
+                Subquery(
+                    Transaction.objects.filter(
+                        user=OuterRef("pk"),
+                        date__month=current_month,
+                        date__year=current_year,
                     )
-                )
-                .values("user")
-                .annotate(total=Sum("amount"))
-                .values("total"),
-                output_field=DecimalField(),
-            ),
-            0,
-        )
-    )
-
-    # 2. Get ordered list of users
-    users = CustomUser.objects.filter(
-        total_savings_and_investments_this_month__gt=0
-    ).order_by("-total_savings_and_investments_this_month")
-
-    # 3. Get top amount once for consistent percentage calculations
-    top_amount = (
-        users.first().total_savings_and_investments_this_month
-        if users.exists() and users.first().total_savings_and_investments_this_month > 0
-        else 1
-    )
-
-    # 4. Serialize data with calculated percentages and save them to TopSaverHistory
-    top_savers = []
-    rank = 1  # rank starts at 1 for top saver
-    for user in users:
-        percentage = (
-            (user.total_savings_and_investments_this_month / top_amount * 100)
-            if top_amount > 0
-            else 0
-        )
-        # Save to the TopSaverHistory model
-        TopSaverHistory.objects.create(
-            month=current_month,
-            year=current_year,
-            user=user,
-            total_savings=user.total_savings_and_investments_this_month,
-            rank=rank,
+                    .filter(
+                        Q(status="confirmed", transaction_type="credit")
+                        | Q(
+                            description__in=[
+                                "AutoSave (Confirmed)",
+                                "AutoInvest (Confirmed)",
+                            ]
+                        )
+                    )
+                    .values("user")
+                    .annotate(total=Sum("amount"))
+                    .values("total"),
+                    output_field=DecimalField(),
+                ),
+                0,
+            )
         )
 
-        top_savers.append(
-            {
-                "id": user.id,
-                "first_name": user.first_name,
-                "profile_picture": user.profile_picture,
-                "email": user.email,
-                "amount": float(user.total_savings_and_investments_this_month),
-                "percentage": round(percentage, 1),
-            }
+        # 2. Get ordered list of users
+        users = CustomUser.objects.filter(
+            total_savings_and_investments_this_month__gt=0
+        ).order_by("-total_savings_and_investments_this_month")
+
+        # 3. Get top amount once for consistent percentage calculations
+        top_amount = (
+            users.first().total_savings_and_investments_this_month
+            if users.exists() and users.first().total_savings_and_investments_this_month > 0
+            else 1
         )
-        rank += 1  # Increment rank for the next user
+
+        # 4. Serialize data with calculated percentages and save them to TopSaverHistory
+        top_savers = []
+        rank = 1  # rank starts at 1 for top saver
+        for user in users:
+            percentage = (
+                (user.total_savings_and_investments_this_month / top_amount * 100)
+                if top_amount > 0
+                else 0
+            )
+            # Save to the TopSaverHistory model
+            TopSaverHistory.objects.create(
+                month=current_month,
+                year=current_year,
+                user=user,
+                total_savings=user.total_savings_and_investments_this_month,
+                rank=rank,
+            )
+
+            top_savers.append(
+                {
+                    "id": user.id,
+                    "first_name": user.first_name,
+                    "profile_picture": user.profile_picture,
+                    "email": user.email,
+                    "amount": float(user.total_savings_and_investments_this_month),
+                    "percentage": round(percentage, 1),
+                }
+            )
+            rank += 1  # Increment rank for the next user
 
     # 5. Get current user data
     current_user = request.user
