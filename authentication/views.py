@@ -2369,7 +2369,8 @@ def withdraw_to_local_bank(request):
             {"error": '"amount" was NOT provided.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
-    amount = Decimal(request.data.get("amount", 0))
+        
+    amount = Decimal(request.data.get("amount", 0)).quantize(Decimal('0.00'), rounding=ROUND_HALF_EVEN)
 
     # Validate that the user has enough balance in the source account
     if source_account == "savings" and user.savings < amount:
