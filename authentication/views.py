@@ -1426,108 +1426,70 @@ from django.conf import settings
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def quicksave(request):
-    try:
-        amount = request.data.get("amount")
-        card_id = request.data.get("card_id")
+    amount = request.data.get("amount")
+    
+    
+    if amount is None:
+        return Response({"error": "amount required"}, status=400)
 
-        if not amount:
-            return Response({"error": "Amount is required"}, status=400)
+    if int(amount) < 100:
+        return Response({"error": "Amount cannot be less than #100"}, status=400)
 
-        if not card_id:
-            return Response({"error": "Card selection is required"}, status=400)
+    # Convert amount to kobo and to int (Paystack requires integer amount in kobo)
+    amount_kobo = int(amount * 100)
 
-        try:
-            amount_kobo = int(float(amount) * 100)
-            if amount_kobo < 10000:  # ₦100 in kobo
-                return Response(
-                    {"error": "Amount cannot be less than ₦100"}, status=400
-                )
-        except ValueError:
-            return Response({"error": "Invalid amount format"}, status=400)
+    payload = {
+        "email": request.user.email,
+        "amount": amount_kobo,
+    }
 
-        # Verify the card belongs to the user
-        try:
-            card = Card.objects.get(id=card_id, user=request.user)
-        except Card.DoesNotExist:
-            return Response({"error": "Invalid card selected"}, status=400)
+    # Make request to Paystack
+    resp = requests.post(
+        "https://api.paystack.co/transaction/initialize",
+        json=payload,
+        headers={
+            "Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}",
+            "Content-Type": "application/json",
+        },
+        timeout=30,  # 30 seconds timeout
+    )
 
-        payload = {
-            "email": request.user.email,
-            "amount": amount_kobo,
-            "reference": f"QS-{uuid.uuid4().hex[:10]}",
-            "metadata": {
-                "user_id": request.user.id,
-                "card_id": card_id,
-                "purpose": "QuickSave",
+    # Check if request to Paystack was successful
+    if resp.status_code != 200:
+        error_message = resp.json().get("message", "Payment initialization failed")
+        return Response({"error": error_message}, status=400)
+
+    data = resp.json()
+
+    if not data.get("status"):
+        return Response(
+            {
+                "error": f"Payment initialization failed: {data.get('message', 'Unknown error')}"
             },
+            status=400,
+        )
+
+    reference = data["data"]["reference"]
+    access_code = data["data"]["access_code"]
+
+    Transaction.objects.create(
+        user=request.user,
+        transaction_type="credit",
+        status="pending",
+        amount= Decimal(amount),
+        description="QuickSave",
+        transaction_id=reference,
+        paystack_access_code=access_code,
+    )
+
+    return Response(
+        {
+            "status": "transaction_initiated",
+            "message": "Authorization of QuickSave transaction on Paystack required",
+            "authorization_url": data["data"]["authorization_url"],
+            "access_code": access_code,
         }
-
-        # Make request to Paystack
-        resp = requests.post(
-            "https://api.paystack.co/transaction/initialize",
-            json=payload,
-            headers={
-                "Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}",
-                "Content-Type": "application/json",
-            },
-            timeout=30,  # 30 seconds timeout
-        )
-
-        # Check if request to Paystack was successful
-        if resp.status_code != 200:
-            error_message = resp.json().get("message", "Payment initialization failed")
-            return Response({"error": error_message}, status=400)
-
-        data = resp.json()
-
-        if not data.get("status"):
-            return Response(
-                {
-                    "error": f"Payment initialization failed: {data.get('message', 'Unknown error')}"
-                },
-                status=400,
-            )
-
-        reference = data["data"]["reference"]
-        access_code = data["data"]["access_code"]
-
-        # Create transaction record
-        Transaction.objects.create(
-            user=request.user,
-            transaction_type="credit",
-            status="pending",
-            amount=float(amount),
-            description="QuickSave",
-            transaction_id=reference,
-            paystack_access_code=access_code,
-        )
-
-        # Send confirmation email
-        send_quicksave_email(request.user, amount)
-
-        return Response(
-            {
-                "status": "transaction_initiated",
-                "message": "Authorization of QuickSave transaction on Paystack required",
-                "authorization_url": data["data"]["authorization_url"],
-                "access_code": access_code,
-                "reference": reference,
-            }
-        )
-
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Paystack API error: {str(e)}")
-        return Response(
-            {
-                "error": "Payment service temporarily unavailable. Please try again later."
-            },
-            status=503,
-        )
-    except Exception as e:
-        logger.error(f"Unexpected error in quicksave: {str(e)}")
-        return Response(
-            {"error": "An unexpected error occurred. Please try again."}, status=500
-        )
+    )
 
 
 import time
@@ -1840,14 +1802,11 @@ def quickinvest(request):
         return Response({"error": "amount required"}, status=400)
 
     if int(amount) < 100000:
-        return Response({"error": "QuickInvest cannot be less than #100000"})
+        return Response({"error": "Amount cannot be less than #100,000"}, status=400)
 
-    try:
-        # Convert amount to integer
-        amount_kobo = int(float(amount) * 100)
-    except ValueError:
-        return Response({"error": "Invalid amount format"}, status=400)
-
+    # Convert amount to kobo and to int (Paystack requires integer amount in kobo)
+    amount_kobo = int(amount * 100)
+    
     # Paystack charge request
     payload = {
         "email": request.user.email,
@@ -1878,7 +1837,7 @@ def quickinvest(request):
         user=request.user,
         transaction_type="credit",
         status="pending",
-        amount=float(amount),
+        amount=Decimal(amount),
         description="QuickInvest",
         transaction_id=reference,
         paystack_access_code=access_code,
@@ -3316,74 +3275,74 @@ def get_top_savers(request):
         # Delete old top savers for the current month and year
         TopSaverHistory.objects.filter(month=current_month, year=current_year).delete()
 
-    # 1. Update ALL users' current month totals
-    CustomUser.objects.all().update(
-        total_savings_and_investments_this_month=Coalesce(
-            Subquery(
-                Transaction.objects.filter(
-                    user=OuterRef("pk"),
-                    date__month=current_month,
-                    date__year=current_year,
-                )
-                .filter(
-                    Q(status="confirmed", transaction_type="credit")
-                    | Q(
-                        description__in=[
-                            "AutoSave (Confirmed)",
-                            "AutoInvest (Confirmed)",
-                        ]
+        # 1. Update ALL users' current month totals
+        CustomUser.objects.all().update(
+            total_savings_and_investments_this_month=Coalesce(
+                Subquery(
+                    Transaction.objects.filter(
+                        user=OuterRef("pk"),
+                        date__month=current_month,
+                        date__year=current_year,
                     )
-                )
-                .values("user")
-                .annotate(total=Sum("amount"))
-                .values("total"),
-                output_field=DecimalField(),
-            ),
-            0,
-        )
-    )
-
-    # 2. Get ordered list of users
-    users = CustomUser.objects.filter(
-        total_savings_and_investments_this_month__gt=0
-    ).order_by("-total_savings_and_investments_this_month")
-
-    # 3. Get top amount once for consistent percentage calculations
-    top_amount = (
-        users.first().total_savings_and_investments_this_month
-        if users.exists() and users.first().total_savings_and_investments_this_month > 0
-        else 1
-    )
-
-    # 4. Serialize data with calculated percentages and save them to TopSaverHistory
-    top_savers = []
-    rank = 1  # rank starts at 1 for top saver
-    for user in users:
-        percentage = (
-            (user.total_savings_and_investments_this_month / top_amount * 100)
-            if top_amount > 0
-            else 0
-        )
-        # Save to the TopSaverHistory model
-        TopSaverHistory.objects.create(
-            month=current_month,
-            year=current_year,
-            user=user,
-            total_savings=user.total_savings_and_investments_this_month,
-            rank=rank,
+                    .filter(
+                        Q(status="confirmed", transaction_type="credit")
+                        | Q(
+                            description__in=[
+                                "AutoSave (Confirmed)",
+                                "AutoInvest (Confirmed)",
+                            ]
+                        )
+                    )
+                    .values("user")
+                    .annotate(total=Sum("amount"))
+                    .values("total"),
+                    output_field=DecimalField(),
+                ),
+                0,
+            )
         )
 
-        top_savers.append(
-            {
-                "id": user.id,
-                "first_name": user.first_name,
-                "profile_picture": user.profile_picture,
-                "email": user.email,
-                "amount": float(user.total_savings_and_investments_this_month),
-                "percentage": round(percentage, 1),
-            }
+        # 2. Get ordered list of users
+        users = CustomUser.objects.filter(
+            total_savings_and_investments_this_month__gt=0
+        ).order_by("-total_savings_and_investments_this_month")
+
+        # 3. Get top amount once for consistent percentage calculations
+        top_amount = (
+            users.first().total_savings_and_investments_this_month
+            if users.exists() and users.first().total_savings_and_investments_this_month > 0
+            else 1
         )
-        rank += 1  # Increment rank for the next user
+
+        # 4. Serialize data with calculated percentages and save them to TopSaverHistory
+        top_savers = []
+        rank = 1  # rank starts at 1 for top saver
+        for user in users:
+            percentage = (
+                (user.total_savings_and_investments_this_month / top_amount * 100)
+                if top_amount > 0
+                else 0
+            )
+            # Save to the TopSaverHistory model
+            TopSaverHistory.objects.create(
+                month=current_month,
+                year=current_year,
+                user=user,
+                total_savings=user.total_savings_and_investments_this_month,
+                rank=rank,
+            )
+
+            top_savers.append(
+                {
+                    "id": user.id,
+                    "first_name": user.first_name,
+                    "profile_picture": user.profile_picture,
+                    "email": user.email,
+                    "amount": float(user.total_savings_and_investments_this_month),
+                    "percentage": round(percentage, 1),
+                }
+            )
+            rank += 1  # Increment rank for the next user
 
     # 5. Get current user data
     current_user = request.user
