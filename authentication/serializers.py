@@ -12,9 +12,12 @@ logger = logging.getLogger(__name__)
 
 
 class SignupSerializer(serializers.ModelSerializer):
-    referral = serializers.CharField(
-        max_length=40, required=False
-    )  # Allow referral code to be optional
+    referral = serializers.EmailField(
+        required=False,
+        allow_blank=True,  # This allows empty string as valid input
+        allow_null=True,  # This allows null as valid input
+        label="Referral Email (optional)",
+    )
     how_did_you_hear = serializers.ChoiceField(
         choices=[
             ("SM", "Social Media - Facebook, Instagram, etc."),
