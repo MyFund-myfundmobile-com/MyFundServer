@@ -260,22 +260,22 @@ urlpatterns = [
         name="get_user_contributions",
     ),
     # Target Savings Plan using ViewSet
-    path(
-        "target-savings/",
-        views.TargetSavingsListCreate.as_view(),
-        name="target-savings-list",
-    ),
-    path(
-        "target-savings/<int:pk>/",
-        views.TargetSavingsRetrieveUpdateDestroy.as_view(),
-        name="target-savings-detail",
-    ),
-    path(
-        "target-savings/<int:pk>/cancel/",
-        views.cancel_target_saving,
-        name="cancel-target-saving",
-    ),
-    path("target-savings/total/", target_savings_total, name="target-savings-total"),
+    # path(
+    #     "target-savings/",
+    #     views.TargetSavingsListCreate.as_view(),
+    #     name="target-savings-list",
+    # ),
+    # path(
+    #     "target-savings/<int:pk>/",
+    #     views.TargetSavingsRetrieveUpdateDestroy.as_view(),
+    #     name="target-savings-detail",
+    # ),
+    # path(
+    #     "target-savings/<int:pk>/cancel/",
+    #     views.cancel_target_saving,
+    #     name="cancel-target-saving",
+    # ),
+    # path("target-savings/total/", target_savings_total, name="target-savings-total"),
     # MonthlyFinancial APIs
     path(
         "current-month/",
