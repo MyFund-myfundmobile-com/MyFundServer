@@ -2849,19 +2849,7 @@ def make_withdrawal_through_paystack(user, target_bank_account, amount):
         "recipient": target_bank_account.paystack_recipient_code,  # Paystack recipient code of the target bank account
     }
 
-    # Log the Paystack API request
-    print("Paystack API Request:")
-    print("URL:", url)
-    print("Headers:", headers)
-    print("Data:", data)
-
     response = requests.post(url, headers=headers, json=data)
-
-    # Log the Paystack API response for debugging
-    print("Paystack API Response Status Code:", response.status_code)
-    print(
-        "Paystack API Response Text:", response.text
-    )  # This will print the response body
 
     return response.json()
 
@@ -3275,12 +3263,11 @@ def get_top_savers(request):
     current_month = now.month
     current_year = now.year
 
-    # Calculate and store top savers for the month
     with transaction.atomic():
-        # Delete old top savers for the current month and year
+        # Delete existing top savers for the current month/year
         TopSaverHistory.objects.filter(month=current_month, year=current_year).delete()
 
-        # 1. Update ALL users' current month totals
+        # 1. Update user savings totals for current month
         CustomUser.objects.all().update(
             total_savings_and_investments_this_month=Coalesce(
                 Subquery(
@@ -3307,64 +3294,62 @@ def get_top_savers(request):
             )
         )
 
-        # 2. Get ordered list of users
+        # 2. Get top savers
         users = CustomUser.objects.filter(
             total_savings_and_investments_this_month__gt=0
         ).order_by("-total_savings_and_investments_this_month")
 
-        # 3. Get top amount once for consistent percentage calculations
         top_amount = (
             users.first().total_savings_and_investments_this_month
             if users.exists()
-            and users.first().total_savings_and_investments_this_month > 0
             else 1
         )
 
-        # 4. Serialize data with calculated percentages and save them to TopSaverHistory
+        # 3. Build TopSaverHistory records
         top_savers = []
-        rank = 1  # rank starts at 1 for top saver
+        top_history_entries = []
+        rank = 1
+
         for user in users:
-            percentage = (
-                (user.total_savings_and_investments_this_month / top_amount * 100)
-                if top_amount > 0
-                else 0
-            )
-            # Save to the TopSaverHistory model
-            TopSaverHistory.objects.create(
-                month=current_month,
-                year=current_year,
-                user=user,
-                total_savings=user.total_savings_and_investments_this_month,
-                rank=rank,
+            amount = user.total_savings_and_investments_this_month
+            percentage = round((amount / top_amount) * 100, 1) if top_amount > 0 else 0
+
+            top_history_entries.append(
+                TopSaverHistory(
+                    month=current_month,
+                    year=current_year,
+                    user=user,
+                    total_savings=amount,
+                    rank=rank
+                )
             )
 
-            top_savers.append(
-                {
-                    "id": user.id,
-                    "first_name": user.first_name,
-                    "profile_picture": user.profile_picture,
-                    "email": user.email,
-                    "amount": float(user.total_savings_and_investments_this_month),
-                    "percentage": round(percentage, 1),
-                }
-            )
-            rank += 1  # Increment rank for the next user
+            top_savers.append({
+                "id": user.id,
+                "first_name": user.first_name,
+                "profile_picture": user.profile_picture,
+                "email": user.email,
+                "amount": float(amount),
+                "percentage": percentage,
+            })
 
-    # 5. Get current user data
+            rank += 1
+
+        # 4. Bulk insert TopSaverHistory
+        TopSaverHistory.objects.bulk_create(top_history_entries)
+
+    # 5. Prepare response for current user
     current_user = request.user
-    current_user_percentage = (
-        (current_user.total_savings_and_investments_this_month / top_amount * 100)
-        if top_amount > 0
-        else 0
-    )
+    current_user_amount = current_user.total_savings_and_investments_this_month
+    current_user_percentage = round((current_user_amount / top_amount) * 100, 1) if top_amount > 0 else 0
 
     return Response(
         {
             "top_savers": top_savers,
             "current_user": {
                 "email": current_user.email,
-                "percentage": round(current_user_percentage, 1),
-                "amount": float(current_user.total_savings_and_investments_this_month),
+                "percentage": current_user_percentage,
+                "amount": float(current_user_amount),
             },
         }
     )
