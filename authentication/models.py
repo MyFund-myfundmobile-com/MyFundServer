@@ -928,6 +928,98 @@ class TargetSavings(models.Model):
     def __str__(self):
         return f"{self.user.email}'s {self.name} Target"
 
+    def process_deduction(self):
+        """Process the periodic deduction for this target savings"""
+        from django.db import transaction
+        from authentication.models import Transaction, CustomUser
+
+        try:
+            with transaction.atomic():
+                user = CustomUser.objects.get(id=self.user.id)
+                amount = self.monthly_payment
+
+                # Check funding source and balance
+                if self.funding_source == "SAVINGS" and user.savings >= amount:
+                    user.savings -= amount
+                    source = "savings"
+                elif self.funding_source == "INVESTMENT" and user.investment >= amount:
+                    user.investment -= amount
+                    source = "investment"
+                elif self.funding_source == "CARD":
+                    # Implement card payment processing here
+                    card_charge_success = True  # Replace with actual card processing
+                    if not card_charge_success:
+                        raise Exception("Card payment failed")
+                    source = "card"
+                else:
+                    # Insufficient funds - deactivate and notify
+                    self.is_active = False
+                    self.save()
+                    self.send_failed_deduction_email()
+                    return False
+
+                # Update balances
+                user.save()
+                self.current_amount += amount
+
+                # Schedule next deduction
+                if self.frequency == "DAILY":
+                    self.next_deduction = timezone.now() + timedelta(days=1)
+                elif self.frequency == "WEEKLY":
+                    self.next_deduction = timezone.now() + timedelta(weeks=1)
+                else:  # MONTHLY
+                    self.next_deduction = timezone.now() + relativedelta(months=1)
+                self.save()
+
+                # Create transaction record
+                Transaction.objects.create(
+                    user=user,
+                    transaction_type="credit",
+                    status="confirmed",
+                    amount=amount,
+                    description=f"Automatic {self.get_frequency_display().lower()} deduction for {self.name}",
+                    service_charge=0,
+                    total_amount=amount,
+                    target_savings=self,
+                    source=source,
+                    transaction_id=f"[{self.id}]-{uuid.uuid4().hex[:12]}_AUTO",
+                )
+
+                return True
+
+        except Exception as e:
+            logger.error(
+                f"Error processing deduction for target savings {self.id}: {str(e)}"
+            )
+            self.is_active = False
+            self.save()
+            return False
+
+    def send_failed_deduction_email(self):
+        """Send email notification about failed deduction"""
+        from django.core.mail import send_mail
+        from django.conf import settings
+
+        subject = f"Target Savings Deduction Failed - {self.name}"
+        message = (
+            f"Hi {self.user.first_name},\n\n"
+            f"The automatic deduction of ₦{self.monthly_payment} for your target savings "
+            f"'{self.name}' failed due to insufficient funds in your {self.get_funding_source_display()} account. "
+            "This may affect the achievement of your goal.\n\n"
+            "To ensure you meet your target, you can manually transfer the required amount "
+            "to your target savings. Please note that if the targets aren't completed by the "
+            "maturity date, you may not receive the expected interest.\n\n"
+            "MyFund Team"
+        )
+
+        send_mail(
+            subject,
+            message,
+            settings.DEFAULT_FROM_EMAIL,
+            [self.user.email],
+            fail_silently=False,
+        )
+
 
 from decimal import Decimal, InvalidOperation
 
@@ -979,7 +1071,7 @@ class Transaction(models.Model):
     paystack_auth_code = models.CharField(
         max_length=255,
         editable=False,
-        default='',
+        default="",
         blank=True,
     )
     paystack_access_code = models.CharField(
