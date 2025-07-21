@@ -142,6 +142,23 @@ REST_FRAMEWORK = {
     "DEFAULT_TOKEN_EXPIRE_TIME": 60 * 60 * 24,  # Default is 1 day in seconds
 }
 
+# Celery settings
+from celery.schedules import crontab
+
+CELERY_BROKER_URL = "redis://localhost:6379/0"
+CELERY_RESULT_BACKEND = "redis://localhost:6379/0"
+CELERY_ACCEPT_CONTENT = ["json"]
+CELERY_TASK_SERIALIZER = "json"
+CELERY_RESULT_SERIALIZER = "json"
+CELERY_TIMEZONE = "Africa/Lagos"
+
+CELERY_BEAT_SCHEDULE = {
+    "daily_target_savings_deductions": {
+        "task": "authentication.tasks.run_daily_target_savings_deductions",
+        "schedule": crontab(minute=0, hour=2),  # every day at 2AM
+    },
+}
+
 
 MEDIA_URL = "/media/"
 MEDIA_ROOT = os.path.join(BASE_DIR, "media")

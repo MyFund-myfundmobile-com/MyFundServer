@@ -357,6 +357,25 @@ class TargetSavingsSerializer(serializers.ModelSerializer):
     def get_progress_percentage(self, obj):
         return (obj.current_amount / obj.target_amount) * 100
 
+    def create(self, validated_data):
+        """Override create to set initial next_deduction"""
+        from django.utils import timezone
+        from datetime import timedelta
+
+        target = super().create(validated_data)
+
+        # Set initial next deduction time based on frequency
+        now = timezone.now()
+        if target.frequency == "DAILY":
+            target.next_deduction = now + timedelta(days=1)
+        elif target.frequency == "WEEKLY":
+            target.next_deduction = now + timedelta(weeks=1)
+        else:  # MONTHLY
+            target.next_deduction = now + timedelta(days=30)
+        target.save()
+
+        return target
+
 
 from django.utils import timezone
 import requests, uuid

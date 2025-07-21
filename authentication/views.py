@@ -1427,8 +1427,7 @@ from django.conf import settings
 @permission_classes([IsAuthenticated])
 def quicksave(request):
     amount = request.data.get("amount")
-    
-    
+
     if amount is None:
         return Response({"error": "amount required"}, status=400)
 
@@ -1476,7 +1475,7 @@ def quicksave(request):
         user=request.user,
         transaction_type="credit",
         status="pending",
-        amount= Decimal(amount),
+        amount=Decimal(amount),
         description="QuickSave",
         transaction_id=reference,
         paystack_access_code=access_code,
@@ -1806,7 +1805,7 @@ def quickinvest(request):
 
     # Convert amount to kobo and to int (Paystack requires integer amount in kobo)
     amount_kobo = int(amount * 100)
-    
+
     # Paystack charge request
     payload = {
         "email": request.user.email,
@@ -2342,26 +2341,30 @@ def wallet_to_investment(request):
         )
 
 
+from decimal import Decimal, ROUND_HALF_EVEN
+import uuid
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from django.db import IntegrityError
+from django.core.mail import send_mail
+from authentication.models import BankAccount, Transaction, WithdrawalsRequestToAdmin
+
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def withdraw_to_local_bank(request):
     user = request.user
-    source_account = request.data.get(
-        "source_account", ""
-    )  # 'savings', 'investment', 'wallet'
-
-    # when source_account is not provided
-    if not source_account:
-        return Response(
-            {"error": '"source_account" was NOT provided.'},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+    source_account = request.data.get("source_account", "").strip().lower()
     target_bank_account_id = request.data.get("target_bank_account_id", "")
-    # when target_bank_account_id is not provided
+    amount_raw = request.data.get("amount", 0)
+
+    # 1️⃣ Validate inputs
+    if not source_account:
+        return Response({"error": '"source_account" was NOT provided.'}, status=400)
     if not target_bank_account_id:
         return Response(
-            {"error": '"target_bank_account_id" was NOT provided.'},
-            status=status.HTTP_400_BAD_REQUEST,
+            {"error": '"target_bank_account_id" was NOT provided.'}, status=400
         )
     # when amount is not provided
     if not request.data.get("amount", 0):
@@ -2369,53 +2372,39 @@ def withdraw_to_local_bank(request):
             {"error": '"amount" was NOT provided.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
-        
-    amount = Decimal(request.data.get("amount", 0)).quantize(Decimal('0.00'), rounding=ROUND_HALF_EVEN)
 
-    # Validate that the user has enough balance in the source account
+    amount = Decimal(request.data.get("amount", 0)).quantize(
+        Decimal("0.00"), rounding=ROUND_HALF_EVEN
+    )
+
+    # 2️⃣ Check user balance (do NOT debit yet)
     if source_account == "savings" and user.savings < amount:
-        # print(f"user.savings({user.savings}) < withdrawal amount({amount})")
-        return Response(
-            {"error": "Insufficient savings balance."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+        return Response({"error": "Insufficient savings balance."}, status=400)
     if source_account == "investment" and user.investment < amount:
-        return Response(
-            {"error": "Insufficient investment balance."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-    elif source_account == "wallet" and user.wallet < amount:
-        return Response(
-            {"error": "Insufficient wallet balance."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+        return Response({"error": "Insufficient investment balance."}, status=400)
+    if source_account == "wallet" and user.wallet < amount:
+        return Response({"error": "Insufficient wallet balance."}, status=400)
 
-    # Validate that the target_bank_account_id belongs to the user
+    # 3️⃣ Verify bank account ownership
     try:
         target_bank_account = BankAccount.objects.get(
             id=target_bank_account_id, user=user
         )
     except BankAccount.DoesNotExist:
-        return Response(
-            {"error": "Target bank account not found."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+        return Response({"error": "Target bank account not found."}, status=400)
 
-    # Calculate the service charge based on the source account
-    service_charge_percentage = 0.0
-    if source_account == "savings":
-        service_charge_percentage = 10
-    elif source_account == "investment":
-        service_charge_percentage = 15
-
-    # Calculate the service charge and total withdrawal amount
-    service_charge = Decimal((service_charge_percentage / 100) * float(amount))
+    # 4️⃣ Compute service charge & net amount
+    pct = (
+        10
+        if source_account == "savings"
+        else 15 if source_account == "investment" else 0
+    )
+    service_charge = (pct / Decimal(100)) * amount
     withdrawal_amount = amount - service_charge
-
-    # Generate a unique transaction ID
     transaction_id = str(uuid.uuid4())[:16]
 
     try:
+        # 5️⃣ Create pending transaction
         transaction = Transaction.objects.create(
             user=user,
             transaction_type="debit",
@@ -2427,111 +2416,126 @@ def withdraw_to_local_bank(request):
             transaction_id=transaction_id,
         )
 
-        total_amount_decimal = Decimal(amount)
-        print(
-            f"Before deduction - {source_account.capitalize()} balance: {user.savings if source_account == 'savings' else user.investment if source_account == 'investment' else user.wallet}"
-        )
-
-        if source_account == "savings":
-            if user.savings >= total_amount_decimal:
-                user.savings -= total_amount_decimal
-                user.save()
-            else:
-                # print(f"user.savings({user.savings}) < total_amount_decimal({total_amount_decimal})")
-                return Response(
-                    {"error": "Insufficient savings balance."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-        elif source_account == "investment":
-            if user.investment >= total_amount_decimal:
-                user.investment -= total_amount_decimal
-                user.save()
-            else:
-                return Response(
-                    {"error": "Insufficient investment balance."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-        elif source_account == "wallet":
-            if user.wallet >= total_amount_decimal:
-                user.wallet -= total_amount_decimal
-                user.save()
-            else:
-                return Response(
-                    {"error": "Insufficient wallet balance."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-        print(
-            f"After deduction - {source_account.capitalize()} balance: {user.savings if source_account == 'savings' else user.investment if source_account == 'investment' else user.wallet}"
-        )
-
-        updated_balance = {
-            "savings": user.savings,
-            "investment": user.investment,
-            "wallet": user.wallet,
-        }
-
-        user.save()
-
-        # print("Paystack processing the withdrawal...")
-
-        # Perform the withdrawal to the local bank using Paystack API
+        # 6️⃣ Hit Paystack first
         paystack_response = make_withdrawal_through_paystack(
             user, target_bank_account, withdrawal_amount
         )
         print("Paystack API Response:", paystack_response)
 
-        if paystack_response.get("status"):  # This checks if it's truthy
-            # Deduct the total amount (including service charge) from the source account
-            # Convert total_amount to Decimal
-            print("Paystack API Response:", paystack_response)
+        if paystack_response.get("status"):
+            # 7️⃣ On success, debit user
+            if source_account == "savings":
+                user.savings -= amount
+            elif source_account == "investment":
+                user.investment -= amount
+            else:
+                user.wallet -= amount
+            user.save()
 
-            # Update the transaction database table.
             transaction.status = "confirmed"
-            transaction.description = f"{source_account.capitalize()} > Bank"
             transaction.save()
 
-            bank_name = target_bank_account.bank_name
-            # Send a confirmation email to the user
-            subject = f"Withdrawal from {source_account.capitalize()} Successful!"
-            message = f"Hi {user.first_name},\n\nYour withdrawal of ₦{amount} from your {source_account.capitalize()} account has been sent to your {bank_name} account successfully.\n\nThank you for using MyFund.\n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-            from_email = "MyFund <info@myfundmobile.com>"
-            recipient_list = [user.email]
-
-            send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+            # 8️⃣ Email user
+            subj = f"Withdrawal Successful: ₦{amount}"
+            msg = (
+                f"Hi {user.first_name},\n\n"
+                f"Your withdrawal of ₦{amount} from your {source_account} account has been sent to {target_bank_account.bank_name}.\n\n"
+                "Thank you for using MyFund! 🥂\n\n"
+                "MyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n"
+                "13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+            )
+            try:
+                send_mail(subj, msg, "MyFund <info@myfundmobile.com>", [user.email])
+            except:
+                pass
 
             return Response(
                 {
                     "success": True,
                     "message": paystack_response.get("message"),
                     "transaction_id": transaction_id,
-                    "updated_balance": updated_balance,
+                    "updated_balance": {
+                        "savings": user.savings,
+                        "investment": user.investment,
+                        "wallet": user.wallet,
+                    },
                 },
-                status=status.HTTP_200_OK,
+                status=200,
             )
-        else:
-            print("Paystack withdrawal failed:", paystack_response)
 
-            return Response(
-                {
-                    "error": "Withdrawal to local bank failed. Please try again later.",
-                    "transaction_id": transaction_id,
-                },
-                status=status.HTTP_400_BAD_REQUEST,
+        # 9️⃣ On PAYSTACK FAILURE → **manual fallback**:
+        # — first, **debit** the user so their balance reflects the pending withdrawal
+        if source_account == "savings":
+            user.savings -= amount
+        elif source_account == "investment":
+            user.investment -= amount
+        else:
+            user.wallet -= amount
+        user.save()
+
+        # — record the admin‐processed request
+        WithdrawalsRequestToAdmin.objects.create(
+            user=user,
+            amount=amount,
+            transaction_id=transaction_id,
+            source_account=source_account,
+            target_bank=target_bank_account.bank_name,
+            target_account_number=target_bank_account.account_number,
+            withdrawal_type="immediate",
+            is_approved=False,
+        )
+
+        # — notify the user
+        subj_user = f"Withdrawal of ₦{amount} Processing..."
+        msg_user = (
+            f"Hi {user.first_name},\n\n"
+            f"We've received your request to withdraw ₦{amount}. It'll be processed within the hour.\n\n"
+            "Thank you for using MyFund!\n\n"
+            "MyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n"
+            "13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+        )
+        try:
+            send_mail(
+                subj_user, msg_user, "MyFund <info@myfundmobile.com>", [user.email]
             )
+        except:
+            pass
+
+        # — notify admin
+        subj_admin = f"[CHECK] {user.first_name} Wants to Withdraw ₦{amount}"
+        msg_admin = (
+            f"User: {user.first_name} {user.last_name}\n"
+            f"Amount: ₦{amount}\n"
+            f"Bank: {target_bank_account.bank_name} ({target_bank_account.account_number})\n"
+            f"Transaction ID: {transaction_id}\n"
+            "Reason: automatic Paystack withdrawal failed; manual processing required."
+        )
+        try:
+            send_mail(
+                subj_admin,
+                msg_admin,
+                "MyFund <info@myfundmobile.com>",
+                ["admin@myfundmobile.com"],
+            )
+        except:
+            pass
+
+        # 0️⃣ Return 200 with success:false so front end enters “processing” flow
+        return Response(
+            {
+                "success": False,
+                "message": "Automatic withdrawal failed. We’re processing it manually.",
+                "transaction_id": transaction_id,
+            },
+            status=200,
+        )
 
     except IntegrityError:
-        # Handle the case where a unique constraint (transaction_id) is violated
-        return Response(
-            {"error": "Transaction ID conflict. Please try again."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+        return Response({"error": "Transaction conflict, please retry."}, status=400)
+
     except Exception as e:
-        print(f"Error: {str(e)}")
-        return Response(
-            {"error": "An internal error occurred. Please try again later."},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
+        print("Error in withdraw_to_local_bank:", e)
+        return Response({"error": "Server error, please try again later."}, status=500)
 
 
 import string
@@ -3311,7 +3315,8 @@ def get_top_savers(request):
         # 3. Get top amount once for consistent percentage calculations
         top_amount = (
             users.first().total_savings_and_investments_this_month
-            if users.exists() and users.first().total_savings_and_investments_this_month > 0
+            if users.exists()
+            and users.first().total_savings_and_investments_this_month > 0
             else 1
         )
 
@@ -6150,3 +6155,105 @@ def save_expo_push_token(request):
     user.expo_push_tokens.append(new_token)
     user.save()
     return Response({"message": "Token saved"})
+
+
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+from django.utils.timezone import now
+from django.db.models import Count, Q
+from authentication.models import CustomUser
+
+
+class TopReferralsAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get_profile_pic_url(self, user_obj):
+        pic = user_obj.profile_picture
+        if not pic:
+            return None
+        if hasattr(pic, "url"):
+            return pic.url
+        if isinstance(pic, str):
+            return pic
+        return None
+
+    def get(self, request):
+        user = request.user
+        start_of_month = now().replace(day=1)
+
+        referrals_this_month = CustomUser.objects.filter(
+            date_joined__gte=start_of_month, referral__isnull=False
+        )
+
+        referrer_stats = referrals_this_month.values("referral").annotate(
+            monthly_signups=Count("id"),
+            monthly_confirmed=Count("id", filter=Q(is_confirmed=True)),
+        )
+
+        referrer_ids = [stat["referral"] for stat in referrer_stats]
+        referrer_users = CustomUser.objects.in_bulk(referrer_ids)
+
+        top_users = []
+        for stat in referrer_stats:
+            referrer = referrer_users.get(stat["referral"])
+            if not referrer:
+                continue
+
+            total = CustomUser.objects.filter(
+                referral=referrer, date_joined__gte=start_of_month
+            ).count()
+            confirmed = CustomUser.objects.filter(
+                referral=referrer, is_confirmed=True, date_joined__gte=start_of_month
+            ).count()
+
+            top_users.append(
+                {
+                    "id": referrer.id,
+                    "first_name": referrer.first_name,
+                    "last_name": referrer.last_name,
+                    "email": referrer.email,
+                    "profile_picture": self.get_profile_pic_url(referrer),
+                    "monthly_signups": stat["monthly_signups"],
+                    "monthly_confirmed": stat["monthly_confirmed"],
+                    "total_referrals": total,
+                    "confirmed_referrals": confirmed,
+                }
+            )
+
+        top_users.sort(
+            key=lambda x: (x["monthly_confirmed"], x["monthly_signups"]), reverse=True
+        )
+
+        curr_stats_month = CustomUser.objects.filter(
+            referral=user, date_joined__gte=start_of_month
+        )
+        curr_stats_confirmed = curr_stats_month.filter(is_confirmed=True)
+
+        current_user_stats = {
+            "id": user.id,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "email": user.email,
+            "profile_picture": self.get_profile_pic_url(user),
+            "monthly_signups": curr_stats_month.count(),
+            "monthly_confirmed": curr_stats_confirmed.count(),
+            "total_referrals": CustomUser.objects.filter(referral=user).count(),
+            "confirmed_referrals": CustomUser.objects.filter(
+                referral=user, is_confirmed=True
+            ).count(),
+        }
+
+        user_rank = next(
+            (i for i, u in enumerate(top_users) if u["email"] == user.email), -1
+        )
+
+        response = {
+            "top_referrers": top_users,
+            "current_user": current_user_stats,
+            "rank": (user_rank + 1) if user_rank >= 0 else None,
+        }
+
+        print("🎯 TopReferralsAPIView response:", response)
+
+        return Response(response)
