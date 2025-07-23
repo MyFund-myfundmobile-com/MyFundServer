@@ -114,6 +114,7 @@ class CustomUserAdmin(UserAdmin):
         "make_ambassador",
         "revoke_ambassador",
         "delete_selected",
+        "deactivate_user"
     ]
 
     fieldsets = (
@@ -294,6 +295,13 @@ class CustomUserAdmin(UserAdmin):
             )
 
     view_kyc_details.short_description = "View KYC Details"
+
+    # === add code
+    def deactivate_user(self, request, queryset):
+        queryset.update(is_active=False)
+
+    deactivate_user.short_description = "Deactivate user"
+
 
     def approve_kyc(self, request, queryset):
         updated_users = []
@@ -825,6 +833,7 @@ class TransactionAdmin(admin.ModelAdmin):
         "status",
         ("date", admin.DateFieldListFilter),
     )
+    # error comes
     search_fields = (
         "user__email",
         "description",
@@ -832,7 +841,8 @@ class TransactionAdmin(admin.ModelAdmin):
         "transaction_type",
         "status",  # Allow searching by status
         "amount",
-        "referral__user__email",
+        # "referral__user__email",
+        "referral_email",
     )
 
     def is_referral_transaction(self, obj):
