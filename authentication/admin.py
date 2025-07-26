@@ -39,6 +39,7 @@ import csv
 from django.http import HttpResponse
 from django.utils.html import format_html
 from django.urls import reverse
+from .utils import send_push_notification
 
 
 @admin.action(description="Say Hello")
@@ -71,6 +72,9 @@ class UserPasswordInline(admin.StackedInline):
     model = UserPassword
     can_delete = False
     verbose_name_plural = "Password"
+
+
+from .utils import send_push_notification  # assuming utils is in authentication
 
 
 class CustomUserAdmin(UserAdmin):
@@ -341,6 +345,17 @@ class CustomUserAdmin(UserAdmin):
                     subject, message, from_email, recipient_list, fail_silently=False
                 )
 
+                # Send push notification
+                send_push_notification(
+                    user=user,
+                    title="KYC Verified ✅",
+                    message="Hi {}, your KYC has been verified. You can now enjoy full access.".format(
+                        user.first_name
+                    ),
+                    data={"kyc_status": "verified"},
+                    notif_type="ACCOUNT",
+                )
+
             else:
                 rejected_users.append(user)
 
@@ -359,8 +374,6 @@ class CustomUserAdmin(UserAdmin):
             self.message_user(
                 request, f"{message_bit} already approved for KYC update."
             )
-
-        # Redirect to the changelist view after processing
 
     approve_kyc.short_description = "Approve KYC Details"
 
@@ -407,7 +420,7 @@ class CustomUserAdmin(UserAdmin):
 
     def user_percentage_to_top_saver(self, obj):
         top_saver = (
-            CustomUser.objects.all()
+            CustomUser.objects.filter(is_deleted=False)
             .order_by("-total_savings_and_investments_this_month")
             .first()
         )
@@ -567,9 +580,23 @@ class BankTransferRequestAdmin(admin.ModelAdmin):
             user.update_total_savings_and_investment_this_month()
 
             # ✅ Send Approval Email
-            subject = "QuickSave Updated! ✔"
+            subject = "QuickSave Updated! ✅"
             message = f"Hi {user.first_name},\n\nYour bank transfer of ₦{transfer_request.amount} has been approved and added to your savings!\n\nKeep growing your funds! \n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
             send_mail(subject, message, "MyFund <info@myfundmobile.com>", [user.email])
+
+            send_push_notification(
+                user=user,
+                title="QuickSave Approved ✅",
+                message="Hi {}, your transfer of ₦{:,} has been added to your Savings account. Check to confirm.".format(
+                    user.first_name, int(transfer_request.amount)
+                ),
+                data={
+                    "amount": str(transfer_request.amount),
+                    "transaction_id": transaction_id,
+                    "type": "QuickSave",
+                },
+                notif_type="CREDIT",
+            )
 
         self.message_user(
             request, "Selected bank transfers approved successfully!", level="success"
@@ -631,6 +658,20 @@ class InvestTransferRequestAdmin(admin.ModelAdmin):
             subject = "QuickInvest Updated! ✔"
             message = f"Hi {user.first_name},\n\nYour investment transfer of ₦{transfer_request.amount} has been approved and added to your investments!\n\nKeep growing your funds! \n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
             send_mail(subject, message, "MyFund <info@myfundmobile.com>", [user.email])
+
+            send_push_notification(
+                user=user,
+                title="QuickInvest Approved ✅",
+                message="Hi {}, your transfer of ₦{:,} has been added to your Investment account. Check to confirm.".format(
+                    user.first_name, int(transfer_request.amount)
+                ),
+                data={
+                    "amount": str(transfer_request.amount),
+                    "transaction_id": transaction_id,
+                    "type": "QuickInvest",
+                },
+                notif_type="CREDIT",
+            )
 
         self.message_user(
             request,
@@ -702,9 +743,26 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
                     transaction_record.status = (
                         "confirmed"  # Update status to confirmed
                     )
-                    transaction_record.description = f"Withdrawal from {withdrawal_request.source_account.capitalize()} to Bank (Confirmed)"  # Updated description
+                    transaction_record.description = f"{withdrawal_request.source_account.capitalize()} > Bank"  # Updated description
                     transaction_record.save()  # Save changes
                     approved_count += 1
+
+                    # ✅ Send push notification
+                    send_push_notification(
+                        user=user,
+                        title="Withdrawal Approved! ✅",
+                        message="Your withdrawal of ₦{:,} to your {} has been approved and processed. Thank you for using MyFund.".format(
+                            int(amount), withdrawal_request.target_bank
+                        ),
+                        data={
+                            "amount": str(amount),
+                            "transaction_id": transaction_id,
+                            "source_account": withdrawal_request.source_account,
+                            "type": "Withdrawal",
+                            "status": "confirmed",
+                        },
+                        notif_type="DEBIT",  # Can use DEBIT or SYSTEM depending on your preference
+                    )
 
                 except Transaction.DoesNotExist:
                     self.message_user(
