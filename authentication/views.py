@@ -1636,6 +1636,7 @@ def autosave(request):
         paystack_sub_id=subscription_id,
         paystack_sub_code=subscription_code,
         paystack_sub_token=subscription_token,
+        paystack_plan_code=plan_code,
         paystack_trans_ref=transaction_reference,
         active=True,
     )
@@ -1971,6 +1972,7 @@ def autoinvest(request):
             paystack_sub_id=subscription_id,
             paystack_sub_code=subscription_code,
             paystack_sub_token=subscription_token,
+            paystack_plan_code=plan_code,
             paystack_trans_ref=transaction_reference,
             active=True,
         )
@@ -3989,27 +3991,8 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                 paystack_auth_code = event["data"]["authorization"][
                     "authorization_code"
                 ]
-
-                try:
-                    transaction = Transaction.objects.get(
-                        transaction_id=reference, amount=amount
-                    )
-                except Transaction.DoesNotExist:
-                    transaction = None
-                    # Log or handle the error appropriately
-                    print(
-                        f"No Transaction found with reference {reference} and amount {amount}."
-                    )
-
-                    # Send an email of the error that ocurred
-                    subject = "[Webhook Error] Referrence ID NOT Found in DB"
-                    message = f"No Transaction found with reference {reference} and amount {amount}."
-
-                    from_email = "MyFund <info@myfundmobile.com>"
-                    recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
-
-                    pass
-
+                plan_code = event["data"]["plan"]["plan_code"] if event["data"]["plan"] else None
+                
                 try:
                     user = CustomUser.objects.get(email=email)
                 except CustomUser.DoesNotExist:
@@ -4031,14 +4014,119 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     )
 
                     return JsonResponse({"status": True}, status=status.HTTP_200_OK)
+                
+                try:
+                    transaction = Transaction.objects.get(
+                        transaction_id=reference, amount=amount
+                    )
+                except Transaction.DoesNotExist:
+                    transaction = None
 
-                autosave = AutoSave.objects.filter(paystack_trans_ref=reference).first()
+                    # Send an email of the error that ocurred
+                    subject = "[Webhook Error] Referrence ID NOT Found in DB"
+                    message = f"No Transaction found with reference {reference} and amount {amount}."
 
-                autoinvest = AutoInvest.objects.filter(
-                    paystack_trans_ref=reference
-                ).first()
+                    from_email = "MyFund <info@myfundmobile.com>"
+                    recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
 
-                if transaction.description.lower().startswith("quicksave"):
+                    pass
+                
+                # Determine if this is an AutoSave/AutoInvest (has plan_code) or QuickSave/QuickInvest (no plan_code)
+                if plan_code:
+                    # AutoSave or AutoInvest flow
+                    autosave = AutoSave.objects.filter(user=user, paystack_plan_code=plan_code, active=True).first()
+                    autoinvest = None
+                    if not autosave:
+                        autoinvest = AutoInvest.objects.filter(user=user, paystack_plan_code=plan_code, active=True).first()
+
+                    target = autosave if autosave else autoinvest
+                    
+                    if not target:
+                        # Send an email of the error that ocurred
+                        subject = "[Webhook Error] Referrence ID NOT Found in DB"
+                        message = f"No Transaction found with reference {reference} and amount {amount}."
+
+                        from_email = "MyFund <info@myfundmobile.com>"
+                        recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
+                        
+                        return
+
+                    # Create a new confirmed Transaction for this autosave/autoinvest payment
+                    if autosave:
+                        # Create transaction if it doesn't exist
+                        if not transaction:
+                            transaction = Transaction.objects.create(
+                                user=user,
+                                transaction_type="credit",
+                                status="confirmed",
+                                amount=Decimal(amount),
+                                description=f"AutoSave ({autosave.frequency.capitalize()})",
+                                transaction_id=reference,
+                                paystack_auth_code=paystack_auth_code,
+                            )
+
+                        # Atomically update user's savings
+                        transaction.status = "confirmed"
+                        transaction.paystack_auth_code = paystack_auth_code
+                        transaction.save()
+
+                        user.savings += int(amount)
+                        user.update_total_savings_and_investment_this_month()                       
+                        user.save()
+
+                        # Send success email
+                        subject = f"AutoSave ({autosave.frequency.capitalize()}) Successful!"
+                        message = (
+                            f"Well done {user.first_name},\n\n"
+                            f"Your AutoSave was successful and ₦{Decimal(amount):,.2f} has been added to your SAVINGS account."
+                        )
+                        from_email = "MyFund <info@myfundmobile.com>"
+                        recipient_list = [user.email]
+                        send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+                        
+                        print("AutoSave Successfully Credited your Account.")
+
+                        return JsonResponse({"status": True}, status=status.HTTP_200_OK)
+
+
+                    elif autoinvest:
+                        # Create transaction if it doesn't exist
+                        if not transaction:
+                            transaction = Transaction.objects.create(
+                                user=user,
+                                transaction_type="credit",
+                                status="confirmed",
+                                amount=Decimal(amount),
+                                description=f"AutoInvest ({autoinvest.frequency.capitalize()})",
+                                transaction_id=reference,
+                                paystack_auth_code=paystack_auth_code,
+                            )
+
+                        # Atomically update user's savings
+                        transaction.status = "confirmed"
+                        transaction.paystack_auth_code = paystack_auth_code
+                        transaction.save()
+
+                        user.investment += int(amount)
+                        # user.confirm_referral_rewards(is_referrer=True)
+                        user.update_total_savings_and_investment_this_month()
+                        user.save()
+
+                        # Send success email
+                        subject = f"AutoInvest ({autoinvest.frequency.capitalize()}) Successful!"
+                        message = (
+                            f"Well done {user.first_name},\n\n"
+                            f"Your AutoInvest was successful and ₦{Decimal(amount):,.2f} has been added to your INVESTMENT account."
+                        )
+                        from_email = "MyFund <info@myfundmobile.com>"
+                        recipient_list = [user.email]
+                        send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+                        
+                        print("AutoInvest Successfully Credited your Account.")
+
+                        return JsonResponse({"status": True}, status=status.HTTP_200_OK)
+                    
+                elif transaction and transaction.description.lower().startswith("quicksave"):
 
                     # print("\n====QuickSave Webhook Processing ====\n")
                     transaction.description = f"QuickSave ({payment_channel})"
@@ -4063,12 +4151,14 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         recipient_list,
                         fail_silently=False,
                     )
-
+                    
+                    print("QuickSave Successfully Credited your Account.")
+                    
                     return JsonResponse(
                         {"status": True}, status=status.HTTP_200_OK
                     )  # Prevent double processing
 
-                elif transaction.description.lower().startswith("quickinvest"):
+                elif transaction and transaction.description.lower().startswith("quickinvest"):
                     transaction.description = f"QuickInvest ({payment_channel})"
                     transaction.status = "confirmed"
                     transaction.paystack_auth_code = paystack_auth_code
@@ -4091,99 +4181,9 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         recipient_list,
                         fail_silently=False,
                     )
+                    
+                    print("QuickInvest Successfully Credited your Account.")
 
-                    return JsonResponse(
-                        {"status": True}, status=status.HTTP_200_OK
-                    )  # Prevent double processing
-
-                elif autosave:
-                    # Use Decimal for precision
-                    if not transaction:
-                        transaction = Transaction.objects.create(
-                            user=user,
-                            transaction_type="credit",
-                            status="confirmed",
-                            amount=amount,
-                            description=f"AutoSave ({autosave.frequency.capitalize()})",
-                            transaction_id=reference,
-                        )
-
-                    # Atomic update for savings
-                    CustomUser.objects.filter(pk=user.pk).update(
-                        savings=F("savings") + amount
-                    )
-
-                    # Refresh user instance
-                    user.refresh_from_db()
-
-                    # Update totals and process referrals
-                    user.update_total_savings_and_investment_this_month()
-                    user.confirm_referral_rewards(is_referrer=True)
-
-                    # Send success email
-                    subject = (
-                        f"AutoSave ({autosave.frequency.capitalize()}) Successful!"
-                    )
-                    message = f"Well done {user.first_name},\n\nYour AutoSave was successful and ₦{amount:,.2f} has been added to your SAVINGS account."
-                    from_email = "MyFund <info@myfundmobile.com>"
-                    recipient_list = [user.email]
-                    send_mail(
-                        subject,
-                        message,
-                        from_email,
-                        recipient_list,
-                        fail_silently=False,
-                    )
-
-                    # Update autosave record
-                    autosave.last_success = timezone.now()
-                    autosave.save()
-                    return JsonResponse(
-                        {"status": True}, status=status.HTTP_200_OK
-                    )  # Prevent double processing
-
-                elif autoinvest:
-                    # Use Decimal for precision
-                    if not transaction:
-                        transaction = Transaction.objects.create(
-                            user=user,
-                            transaction_type="credit",
-                            status="confirmed",
-                            amount=amount,
-                            description=f"AutoInvest ({autosave.frequency.capitalize()})",
-                            transaction_id=reference,
-                        )
-
-                    # Atomic update for savings
-                    CustomUser.objects.filter(pk=user.pk).update(
-                        savings=F("savings") + amount
-                    )
-
-                    # Refresh user instance
-                    user.refresh_from_db()
-
-                    # Update totals and process referrals
-                    user.update_total_savings_and_investment_this_month()
-                    user.confirm_referral_rewards(is_referrer=True)
-
-                    # Send success email
-                    subject = (
-                        f"AutoInvest ({autosave.frequency.capitalize()}) Successful!"
-                    )
-                    message = f"Well done {user.first_name},\n\nYour AutoInvest was successful and ₦{amount:,.2f} has been added to your SAVINGS account."
-                    from_email = "MyFund <info@myfundmobile.com>"
-                    recipient_list = [user.email]
-                    send_mail(
-                        subject,
-                        message,
-                        from_email,
-                        recipient_list,
-                        fail_silently=False,
-                    )
-
-                    # Update autosave record
-                    autoinvest.last_success = timezone.now()
-                    autoinvest.save()
                     return JsonResponse(
                         {"status": True}, status=status.HTTP_200_OK
                     )  # Prevent double processing
@@ -4238,7 +4238,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                 print(f"transaction before update: {transaction}")
 
                 # Only update AutoSave transactions if they are not already confirmed
-                if transaction.description.lower().startswith("autosave"):
+                if transaction and transaction.description.lower().startswith("autosave"):
                     # If already confirmed, do nothing.
                     if transaction.status != "confirmed":
                         autosave_rec = AutoSave.objects.filter(
@@ -4331,74 +4331,73 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
 
                 print(f"transaction after update: {transaction}")
 
-                return JsonResponse({"status": True}, status=status.HTTP_200_OK)
-
+                return
             case "invoice.create":
-                sub_code = event["data"]["subscription"]["subscription_code"]
-                sub_token = event["data"]["subscription"]["email_token"]
-                email = event["data"]["customer"]["email"]
-                trans_ref = event["data"]["transaction"]["reference"]
-                user = CustomUser.objects.get(email=email)
+                # sub_code = event["data"]["subscription"]["subscription_code"]
+                # sub_token = event["data"]["subscription"]["email_token"]
+                # email = event["data"]["customer"]["email"]
+                # trans_ref = event["data"]["transaction"]["reference"]
+                # user = CustomUser.objects.get(email=email)
 
-                print(f"sub_code: {sub_code}, sub_token: {sub_token}")
+                # print(f"sub_code: {sub_code}, sub_token: {sub_token}")
 
-                if AutoSave.objects.get(
-                    paystack_sub_code=sub_code,
-                    paystack_sub_token=sub_token,
-                ):
-                    # print(f"AutoSave has a record with the sub_code: {sub_code} and sub_token: {sub_token}")
+                # if AutoSave.objects.get(
+                #     paystack_sub_code=sub_code,
+                #     paystack_sub_token=sub_token,
+                # ):
+                #     # print(f"AutoSave has a record with the sub_code: {sub_code} and sub_token: {sub_token}")
 
-                    amount = event["data"]["amount"] / 100  # convert amount to naira
+                #     amount = event["data"]["amount"] / 100  # convert amount to naira
 
-                    # Check if a transaction with the same transaction_id already exists
-                    existing_transaction = Transaction.objects.filter(
-                        transaction_id=trans_ref
-                    ).first()
+                #     # Check if a transaction with the same transaction_id already exists
+                #     existing_transaction = Transaction.objects.filter(
+                #         transaction_id=trans_ref
+                #     ).first()
 
-                    if not existing_transaction:
-                        # Create a new transaction if not found
-                        Transaction.objects.create(
-                            user=user,
-                            transaction_type="credit",
-                            status="pending",
-                            amount=int(amount),
-                            description="AutoSave",
-                            transaction_id=trans_ref,
-                        )
+                #     if not existing_transaction:
+                #         # Create a new transaction if not found
+                #         Transaction.objects.create(
+                #             user=user,
+                #             transaction_type="credit",
+                #             status="pending",
+                #             amount=int(amount),
+                #             description="AutoSave",
+                #             transaction_id=trans_ref,
+                #         )
 
-                    return JsonResponse({"status": True}, status=status.HTTP_200_OK)
+                #     return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
-                elif AutoInvest.objects.get(
-                    paystack_sub_code=sub_code,
-                    paystack_sub_token=sub_token,
-                ):
-                    # print(f"AutoInvest has a record with the sub_code: {sub_code} and sub_token: {sub_token}")
+                # elif AutoInvest.objects.get(
+                #     paystack_sub_code=sub_code,
+                #     paystack_sub_token=sub_token,
+                # ):
+                #     # print(f"AutoInvest has a record with the sub_code: {sub_code} and sub_token: {sub_token}")
 
-                    amount = event["data"]["amount"] / 100  # convert amount to naira
+                #     amount = event["data"]["amount"] / 100  # convert amount to naira
 
-                    # Check if a transaction with the same transaction_id already exists
-                    existing_transaction = Transaction.objects.filter(
-                        transaction_id=trans_ref
-                    ).first()
+                #     # Check if a transaction with the same transaction_id already exists
+                #     existing_transaction = Transaction.objects.filter(
+                #         transaction_id=trans_ref
+                #     ).first()
 
-                    if not existing_transaction:
-                        # Create a new transaction if not found
-                        Transaction.objects.create(
-                            user=user,
-                            transaction_type="credit",
-                            status="pending",
-                            amount=int(amount),
-                            description="AutoInvest",
-                            transaction_id=trans_ref,
-                        )
+                #     if not existing_transaction:
+                #         # Create a new transaction if not found
+                #         Transaction.objects.create(
+                #             user=user,
+                #             transaction_type="credit",
+                #             status="pending",
+                #             amount=int(amount),
+                #             description="AutoInvest",
+                #             transaction_id=trans_ref,
+                #         )
 
-                    return JsonResponse({"status": True}, status=status.HTTP_200_OK)
+                #     return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
-                else:
-                    print(
-                        f'\n"invoice.create" details does not exist in MyFund database\n'
-                    )
-                return JsonResponse({"status": True}, status=status.HTTP_200_OK)
+                # else:
+                #     print(
+                #         f'\n"invoice.create" details does not exist in MyFund database\n'
+                #     )
+                return
 
             case "invoice.payment_failed":
 
