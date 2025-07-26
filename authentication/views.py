@@ -50,6 +50,7 @@ from dotenv import load_dotenv
 import logging
 from django.db.models import Min
 from decimal import Decimal, ROUND_HALF_EVEN
+from .utils import send_push_notification
 
 
 load_dotenv()
@@ -1659,6 +1660,20 @@ def autosave(request):
     user.autosave_enabled = True
     user.save()
 
+    # After user.autosave_enabled = True and user.save()
+    send_push_notification(
+        user=user,
+        title="AutoSave Activated! ✅",
+        message=f"Well done {user.first_name}! You're now saving ₦{amount} {frequency}. Keep growing your funds.",
+        data={
+            "amount": str(amount),
+            "frequency": frequency,
+            "type": "AutoSave",
+            "status": "activated",
+        },
+        notif_type="SYSTEM",
+    )
+
     return Response({"message": "AutoSave activated"}, status=status.HTTP_200_OK)
 
 
@@ -2414,7 +2429,7 @@ def withdraw_to_local_bank(request):
             amount=withdrawal_amount,
             service_charge=service_charge,
             total_amount=amount,
-            description=f"{source_account.capitalize()} > Bank",
+            description=f"{source_account.capitalize()} > Bank . . .",
             transaction_id=transaction_id,
         )
 
@@ -2485,6 +2500,21 @@ def withdraw_to_local_bank(request):
             target_account_number=target_bank_account.account_number,
             withdrawal_type="immediate",
             is_approved=False,
+        )
+
+        # 🔔 Send push notification on Paystack failure (manual processing fallback)
+        send_push_notification(
+            user=user,
+            title="Withdrawal Processing... ⏳",
+            message="Your withdrawal request has been received and will be processed shortly. You'll get a confirmation by mail once it's completed.",
+            data={
+                "amount": str(amount),
+                "transaction_id": transaction_id,
+                "source_account": source_account,
+                "type": "Withdrawal",
+                "status": "pending_manual",
+            },
+            notif_type="PENDING",  # Suitable here since it's in progress
         )
 
         # — notify the user
@@ -2734,6 +2764,24 @@ def process_withdrawal_to_local_bank(request):
                 print(f"❌ STEP 10 ERROR: Error sending email to user: {e}")
                 # Log this error but continue, as the core transaction is done
 
+            # ✅ STEP 10.1: Send push notification to user
+            send_push_notification(
+                user=user,
+                title="Withdrawal Request Pending ⏳",
+                message="Your withdrawal of ₦{:,} from your {} account is pending approval. We'll notify you once it’s processed.".format(
+                    int(amount), source_account.capitalize()
+                ),
+                data={
+                    "amount": str(amount),
+                    "transaction_id": transaction_id,
+                    "source_account": source_account,
+                    "type": "Withdrawal",
+                    "status": "pending",
+                },
+                notif_type="PENDING",
+            )
+            print("✅ STEP 10.2: Push notification sent to user.")
+
             # --- Send email to admin (with more details and correct recipients) ---
             admin_subject = (
                 f"[CHECK] {user.first_name} Wants to Withdraw ₦{amount:,.2f}"
@@ -2947,6 +2995,23 @@ def wallet_transfer_view(request):  # ✅ NEW NAME
     target_user.wallet += amount
     sender.save()
     target_user.save()
+
+    # Push notification to recipient
+    send_push_notification(
+        user=target_user,
+        title="You've Received ₦{:,} from {}".format(amount, sender.first_name),
+        message=f"{sender.first_name} just sent you ₦{amount}. Check your Wallet.",
+        data={"amount": str(amount), "from": sender.email},
+        notif_type="CREDIT",
+    )
+
+    send_push_notification(
+        user=sender,
+        title="You sent ₦{:,} to {}".format(amount, target_user.first_name),
+        message=f"You successfully sent ₦{amount} to {target_user.first_name}.",
+        data={"amount": str(amount), "to": target_user.email},
+        notif_type="DEBIT",
+    )
 
     # Create transactions
     sender_transaction = Transaction.objects.create(
@@ -3322,18 +3387,20 @@ def get_top_savers(request):
                     year=current_year,
                     user=user,
                     total_savings=amount,
-                    rank=rank
+                    rank=rank,
                 )
             )
 
-            top_savers.append({
-                "id": user.id,
-                "first_name": user.first_name,
-                "profile_picture": user.profile_picture,
-                "email": user.email,
-                "amount": float(amount),
-                "percentage": percentage,
-            })
+            top_savers.append(
+                {
+                    "id": user.id,
+                    "first_name": user.first_name,
+                    "profile_picture": user.profile_picture,
+                    "email": user.email,
+                    "amount": float(amount),
+                    "percentage": percentage,
+                }
+            )
 
             rank += 1
 
@@ -3343,7 +3410,9 @@ def get_top_savers(request):
     # 5. Prepare response for current user
     current_user = request.user
     current_user_amount = current_user.total_savings_and_investments_this_month
-    current_user_percentage = round((current_user_amount / top_amount) * 100, 1) if top_amount > 0 else 0
+    current_user_percentage = (
+        round((current_user_amount / top_amount) * 100, 1) if top_amount > 0 else 0
+    )
 
     return Response(
         {
@@ -3390,7 +3459,6 @@ class KYCUpdateView(generics.UpdateAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_object(self):
-        # Use the authenticated user as the object to update
         return self.request.user
 
     def update(self, request, *args, **kwargs):
@@ -3399,24 +3467,63 @@ class KYCUpdateView(generics.UpdateAPIView):
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)
 
+        # If not yet approved, mark as pending and notify user by email
         if user.kyc_status != "Updated!":
-            user.kyc_status = (
-                "Pending..."  # Only update to "Pending..." if not already "Updated!"
-            )
+            user.kyc_status = "Pending..."
             user.save()
 
-        # Notify admin that a KYC update is pending approval
-        admin_email = ["info@myfundmobile.com", "company@myfundmobile.com"]
-        subject = f"KYC Update for {user.first_name} Pending Approval"
-        message = f"Hello Admin, \n\n{user.first_name} {user.last_name} ({user.email}) has submitted a KYC update for approval. Please review it in the <a href='https://myfundapi-myfund-07ce351a.koyeb.app/admin/login/?next=/admin/'>admin panel</a>.\n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-        from_email = "MyFund <info@myfundmobile.com>"
+            # 1️⃣ Email to user
+            user_subject = "KYC Update Received... 🕒"
+            user_message = (
+                f"Hi {user.first_name},\n\n"
+                "We’ve received your updated KYC details. "
+                "Our team will review them shortly, and we’ll let you know once it’s approved.\n\n"
+                "Thank you for using MyFund.\n\n"
+                "MyFund\nSave, Buy Properties, Earn Rent\n"
+                "www.myfundmobile.com\n"
+                "13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+            )
+            send_mail(
+                user_subject,
+                user_message,
+                "MyFund <info@myfundmobile.com>",
+                [user.email],
+                fail_silently=False,
+            )
 
-        send_mail(subject, message, from_email, admin_email, fail_silently=False)
+        # 2️⃣ Push notification to user
+        send_push_notification(
+            user=user,
+            title="KYC Update Submitted... 🕒",
+            message="Thanks for updating your KYC details. We’ll notify you once it’s approved. Thank you for using MyFund.",
+            data={"kyc_status": user.kyc_status},
+            notif_type="SYSTEM",
+        )
+
+        # 3️⃣ Notify admin
+        admin_email = ["info@myfundmobile.com", "company@myfundmobile.com"]
+        admin_subject = f"KYC Update for {user.first_name} Pending Approval"
+        admin_message = (
+            f"Hello Admin,\n\n"
+            f"{user.first_name} {user.last_name} ({user.email}) has submitted a KYC update. "
+            "Please review it in the admin panel:\n"
+            "https://myfundapi-myfund-07ce351a.koyeb.app/admin/login/?next=/admin/.\n\n"
+            "MyFund\nSave, Buy Properties, Earn Rent\n"
+            "www.myfundmobile.com\n"
+            "13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+        )
+        send_mail(
+            admin_subject,
+            admin_message,
+            "MyFund <info@myfundmobile.com>",
+            admin_email,
+            fail_silently=False,
+        )
 
         return Response(serializer.data)
 
 
-kyc_update_view = KYCUpdateView.as_view()
+view = KYCUpdateView.as_view()
 
 
 class GetKYCStatusView(APIView):
@@ -3607,6 +3714,21 @@ def initiate_bank_transfer(request):
         )
         transaction.save()
 
+        send_push_notification(
+            user=user,
+            title="QuickSave Pending ⏳",
+            message="Your transfer of ₦{:,} is pending approval. We'll notify you once it’s confirmed. Thank you for using MyFund.".format(
+                int(amount)
+            ),
+            data={
+                "amount": str(amount),
+                "transaction_id": transaction_id,
+                "type": "QuickSave",
+                "status": "pending",
+            },
+            notif_type="PENDING",
+        )
+
         # ✅ Notify Admin
         subject = f"[CHECK] {user.first_name} Made A QuickSave Request"
         message = f"Hi Admin,\n\nA bank transfer request of ₦{amount} has been initiated by {user.first_name} {user.last_name} ({user.email}).\n\nReview here: https://myfundapi-myfund-07ce351a.koyeb.app/admin/\n\nMyFund Team"
@@ -3658,6 +3780,21 @@ def initiate_invest_transfer(request):
 
         send_mail(
             user_subject, user_message, from_email, [user_email], fail_silently=False
+        )
+
+        send_push_notification(
+            user=user,
+            title="QuickInvest Pending ⏳",
+            message="Your transfer of ₦{:,} is pending approval. We'll notify you once it’s confirmed.".format(
+                int(amount)
+            ),
+            data={
+                "amount": str(amount),
+                "transaction_id": transaction_id,
+                "type": "QuickInvest",
+                "status": "pending",
+            },
+            notif_type="PENDING",
         )
 
         # Create a pending transaction for the user with date and time
@@ -3991,8 +4128,12 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                 paystack_auth_code = event["data"]["authorization"][
                     "authorization_code"
                 ]
-                plan_code = event["data"]["plan"]["plan_code"] if event["data"]["plan"] else None
-                
+                plan_code = (
+                    event["data"]["plan"]["plan_code"]
+                    if event["data"]["plan"]
+                    else None
+                )
+
                 try:
                     user = CustomUser.objects.get(email=email)
                 except CustomUser.DoesNotExist:
@@ -4014,7 +4155,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     )
 
                     return JsonResponse({"status": True}, status=status.HTTP_200_OK)
-                
+
                 try:
                     transaction = Transaction.objects.get(
                         transaction_id=reference, amount=amount
@@ -4030,25 +4171,32 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
 
                     pass
-                
+
                 # Determine if this is an AutoSave/AutoInvest (has plan_code) or QuickSave/QuickInvest (no plan_code)
                 if plan_code:
                     # AutoSave or AutoInvest flow
-                    autosave = AutoSave.objects.filter(user=user, paystack_plan_code=plan_code, active=True).first()
+                    autosave = AutoSave.objects.filter(
+                        user=user, paystack_plan_code=plan_code, active=True
+                    ).first()
                     autoinvest = None
                     if not autosave:
-                        autoinvest = AutoInvest.objects.filter(user=user, paystack_plan_code=plan_code, active=True).first()
+                        autoinvest = AutoInvest.objects.filter(
+                            user=user, paystack_plan_code=plan_code, active=True
+                        ).first()
 
                     target = autosave if autosave else autoinvest
-                    
+
                     if not target:
                         # Send an email of the error that ocurred
                         subject = "[Webhook Error] Referrence ID NOT Found in DB"
                         message = f"No Transaction found with reference {reference} and amount {amount}."
 
                         from_email = "MyFund <info@myfundmobile.com>"
-                        recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
-                        
+                        recipient_list = [
+                            "info@myfundmobile.com",
+                            "sammy@myfundmobile.com",
+                        ]
+
                         return
 
                     # Create a new confirmed Transaction for this autosave/autoinvest payment
@@ -4071,23 +4219,30 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         transaction.save()
 
                         user.savings += int(amount)
-                        user.update_total_savings_and_investment_this_month()                       
+                        user.update_total_savings_and_investment_this_month()
                         user.save()
 
                         # Send success email
-                        subject = f"AutoSave ({autosave.frequency.capitalize()}) Successful!"
+                        subject = (
+                            f"AutoSave ({autosave.frequency.capitalize()}) Successful!"
+                        )
                         message = (
                             f"Well done {user.first_name},\n\n"
                             f"Your AutoSave was successful and ₦{Decimal(amount):,.2f} has been added to your SAVINGS account."
                         )
                         from_email = "MyFund <info@myfundmobile.com>"
                         recipient_list = [user.email]
-                        send_mail(subject, message, from_email, recipient_list, fail_silently=False)
-                        
+                        send_mail(
+                            subject,
+                            message,
+                            from_email,
+                            recipient_list,
+                            fail_silently=False,
+                        )
+
                         print("AutoSave Successfully Credited your Account.")
 
                         return JsonResponse({"status": True}, status=status.HTTP_200_OK)
-
 
                     elif autoinvest:
                         # Create transaction if it doesn't exist
@@ -4120,13 +4275,21 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         )
                         from_email = "MyFund <info@myfundmobile.com>"
                         recipient_list = [user.email]
-                        send_mail(subject, message, from_email, recipient_list, fail_silently=False)
-                        
+                        send_mail(
+                            subject,
+                            message,
+                            from_email,
+                            recipient_list,
+                            fail_silently=False,
+                        )
+
                         print("AutoInvest Successfully Credited your Account.")
 
                         return JsonResponse({"status": True}, status=status.HTTP_200_OK)
-                    
-                elif transaction and transaction.description.lower().startswith("quicksave"):
+
+                elif transaction and transaction.description.lower().startswith(
+                    "quicksave"
+                ):
 
                     # print("\n====QuickSave Webhook Processing ====\n")
                     transaction.description = f"QuickSave ({payment_channel})"
@@ -4151,14 +4314,32 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         recipient_list,
                         fail_silently=False,
                     )
-                    
-                    print("QuickSave Successfully Credited your Account.")
-                    
+
+                    # Update autosave record
+                    autosave.last_success = timezone.now()
+                    autosave.save()
+
+                    send_push_notification(
+                        user=user,
+                        title="AutoSave Successful! ✅",
+                        message=f"Your scheduled AutoSave of ₦{amount:,.2f} has just been deposited into your savings. Thank you for using MyFund!",
+                        data={
+                            "amount": str(amount),
+                            "frequency": autosave.frequency,
+                            "transaction_id": reference,
+                            "type": "AutoSave",
+                            "status": "confirmed",
+                        },
+                        notif_type="CREDIT",
+                    )
+
                     return JsonResponse(
                         {"status": True}, status=status.HTTP_200_OK
                     )  # Prevent double processing
 
-                elif transaction and transaction.description.lower().startswith("quickinvest"):
+                elif transaction and transaction.description.lower().startswith(
+                    "quickinvest"
+                ):
                     transaction.description = f"QuickInvest ({payment_channel})"
                     transaction.status = "confirmed"
                     transaction.paystack_auth_code = paystack_auth_code
@@ -4181,7 +4362,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         recipient_list,
                         fail_silently=False,
                     )
-                    
+
                     print("QuickInvest Successfully Credited your Account.")
 
                     return JsonResponse(
@@ -4238,7 +4419,9 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                 print(f"transaction before update: {transaction}")
 
                 # Only update AutoSave transactions if they are not already confirmed
-                if transaction and transaction.description.lower().startswith("autosave"):
+                if transaction and transaction.description.lower().startswith(
+                    "autosave"
+                ):
                     # If already confirmed, do nothing.
                     if transaction.status != "confirmed":
                         autosave_rec = AutoSave.objects.filter(
@@ -6146,6 +6329,8 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.utils.timezone import now
 from django.db.models import Count, Q
+from django.core.mail import send_mail
+from authentication.utils import send_push_notification
 from authentication.models import CustomUser
 
 
@@ -6162,82 +6347,105 @@ class TopReferralsAPIView(APIView):
             return pic
         return None
 
+    def send_rank_notification(self, user, old_rank, new_rank):
+        """Notify a user about rank changes (up/down)"""
+        if new_rank < old_rank:
+            subject = f"🎉 You moved up to #{new_rank}!"
+            message = f"Hi {user.first_name}, your rank improved from #{old_rank} to #{new_rank}!"
+        else:
+            subject = f"📉 Your rank changed to #{new_rank}"
+            message = f"Hi {user.first_name}, your rank changed from #{old_rank} to #{new_rank}."
+
+        send_mail(
+            subject,
+            message,
+            "MyFund <info@myfundmobile.com>",
+            [user.email],
+            fail_silently=False,
+        )
+        send_push_notification(
+            user=user,
+            title=subject,
+            message=message,
+            data={"old_rank": old_rank, "new_rank": new_rank},
+            notif_type="SYSTEM",
+        )
+
     def get(self, request):
         user = request.user
-        start_of_month = now().replace(day=1)
+        start_of_month = now().replace(day=1, hour=0, minute=0, second=0)
 
-        referrals_this_month = CustomUser.objects.filter(
-            date_joined__gte=start_of_month, referral__isnull=False
+        # Fetch all referrers and their counts
+        referrers = (
+            CustomUser.objects.filter(
+                referral__isnull=False, date_joined__gte=start_of_month
+            )
+            .values("referral")
+            .annotate(
+                signups=Count("id"),
+                confirmed=Count(
+                    "id", filter=Q(referral_reward_confirmed_at__gte=start_of_month)
+                ),
+            )
+            .order_by("-confirmed", "-signups")
         )
 
-        referrer_stats = referrals_this_month.values("referral").annotate(
-            monthly_signups=Count("id"),
-            monthly_confirmed=Count("id", filter=Q(is_confirmed=True)),
-        )
+        # Map referral IDs to their stats
+        referrer_stats = {stat["referral"]: stat for stat in referrers}
+        referrer_users = CustomUser.objects.in_bulk(referrer_stats.keys())
 
-        referrer_ids = [stat["referral"] for stat in referrer_stats]
-        referrer_users = CustomUser.objects.in_bulk(referrer_ids)
-
-        top_users = []
-        for stat in referrer_stats:
-            referrer = referrer_users.get(stat["referral"])
-            if not referrer:
+        # Build leaderboard
+        leaderboard = []
+        for ref_id, stats in referrer_stats.items():
+            ref_user = referrer_users.get(ref_id)
+            if not ref_user:
                 continue
 
-            total = CustomUser.objects.filter(
-                referral=referrer, date_joined__gte=start_of_month
-            ).count()
-            confirmed = CustomUser.objects.filter(
-                referral=referrer, is_confirmed=True, date_joined__gte=start_of_month
-            ).count()
-
-            top_users.append(
+            leaderboard.append(
                 {
-                    "id": referrer.id,
-                    "first_name": referrer.first_name,
-                    "last_name": referrer.last_name,
-                    "email": referrer.email,
-                    "profile_picture": self.get_profile_pic_url(referrer),
-                    "monthly_signups": stat["monthly_signups"],
-                    "monthly_confirmed": stat["monthly_confirmed"],
-                    "total_referrals": total,
-                    "confirmed_referrals": confirmed,
+                    "id": ref_user.id,
+                    "email": ref_user.email,
+                    "signups": stats["signups"],
+                    "confirmed": stats["confirmed"],
+                    "current_rank": None,  # Will be set later
                 }
             )
 
-        top_users.sort(
-            key=lambda x: (x["monthly_confirmed"], x["monthly_signups"]), reverse=True
+        # Sort and assign ranks
+        leaderboard.sort(key=lambda x: (-x["confirmed"], -x["signups"]))
+        for idx, entry in enumerate(leaderboard, 1):
+            entry["current_rank"] = idx
+
+        # Compare with previous ranks and notify
+        for entry in leaderboard:
+            user = CustomUser.objects.get(id=entry["id"])
+            old_rank = user.last_referral_rank
+            new_rank = entry["current_rank"]
+
+            if old_rank is not None and old_rank != new_rank:
+                self.send_rank_notification(user, old_rank, new_rank)
+                user.last_referral_rank = new_rank
+                user.save(update_fields=["last_referral_rank"])
+
+        # Prepare response
+        current_user_entry = next(
+            (entry for entry in leaderboard if entry["email"] == user.email), None
+        )
+        current_user_rank = (
+            current_user_entry["current_rank"] if current_user_entry else None
         )
 
-        curr_stats_month = CustomUser.objects.filter(
-            referral=user, date_joined__gte=start_of_month
+        return Response(
+            {
+                "top_referrers": leaderboard[:50],
+                "current_user": {
+                    "rank": current_user_rank,
+                    "signups": (
+                        current_user_entry["signups"] if current_user_entry else 0
+                    ),
+                    "confirmed": (
+                        current_user_entry["confirmed"] if current_user_entry else 0
+                    ),
+                },
+            }
         )
-        curr_stats_confirmed = curr_stats_month.filter(is_confirmed=True)
-
-        current_user_stats = {
-            "id": user.id,
-            "first_name": user.first_name,
-            "last_name": user.last_name,
-            "email": user.email,
-            "profile_picture": self.get_profile_pic_url(user),
-            "monthly_signups": curr_stats_month.count(),
-            "monthly_confirmed": curr_stats_confirmed.count(),
-            "total_referrals": CustomUser.objects.filter(referral=user).count(),
-            "confirmed_referrals": CustomUser.objects.filter(
-                referral=user, is_confirmed=True
-            ).count(),
-        }
-
-        user_rank = next(
-            (i for i, u in enumerate(top_users) if u["email"] == user.email), -1
-        )
-
-        response = {
-            "top_referrers": top_users,
-            "current_user": current_user_stats,
-            "rank": (user_rank + 1) if user_rank >= 0 else None,
-        }
-
-        print("🎯 TopReferralsAPIView response:", response)
-
-        return Response(response)

@@ -75,8 +75,10 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     reset_token_expires = models.DateTimeField(null=True, blank=True)
     profile_picture = models.CharField(max_length=200, null=True, blank=True)
     is_confirmed = models.BooleanField(default=False)
+    referral_reward_confirmed_at = models.DateTimeField(null=True, blank=True)
     is_subscribed = models.BooleanField(default=True)
     date_joined = models.DateTimeField(auto_now_add=True, db_index=True)
+    is_deleted = models.BooleanField(default=False)
 
     @property
     def full_name(self):
@@ -88,6 +90,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     pending_referral_reward = models.DecimalField(
         max_digits=10, decimal_places=2, default=0
     )
+    last_referral_rank = models.IntegerField(null=True, blank=True)
 
     how_did_you_hear = models.CharField(
         max_length=50,
@@ -521,6 +524,10 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     def myfund_pin_encrypted(self):
         return self.myfund_pin
 
+    def delete(self, *args, **kwargs):
+        self.is_deleted = True
+        self.save()
+
     def generate_reset_token(self):
         token = "".join(random.choices(string.ascii_letters + string.digits, k=64))
         self.reset_token = token
@@ -550,20 +557,24 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
 
     def confirm_referral_rewards(self, is_referrer):
         if self.referral and not self.referral_reward_granted:
-            # Determine the savings threshold based on whether referrer is an ambassador
             savings_threshold = 10000 if self.referral.is_ambassador else 20000
-            investment_threshold = 100000  # Keep investment threshold the same
+            investment_threshold = 100000
 
-            # Check if savings or investment has crossed the threshold for the first time
-            first_time_savings_threshold = self.savings >= savings_threshold
-            first_time_investment_threshold = self.investment >= investment_threshold
+            qualifies_by_savings = self.savings >= savings_threshold
+            qualifies_by_investment = self.investment >= investment_threshold
 
-            if first_time_savings_threshold or first_time_investment_threshold:
-                # Mark referral reward as granted to prevent duplicate credits
+            if qualifies_by_savings or qualifies_by_investment:
+                current_time = timezone.now()
                 self.referral_reward_granted = True
-                self.save(update_fields=["referral_reward_granted"])
+                self.referral_reward_confirmed_at = current_time
+                self.save(
+                    update_fields=[
+                        "referral_reward_granted",
+                        "referral_reward_confirmed_at",
+                    ]
+                )
 
-                # Update referred user's pending transaction to confirmed
+                # Confirm referred transaction
                 referred_transaction = Transaction.objects.filter(
                     user=self, transaction_type="credit", status="pending"
                 ).first()
@@ -573,12 +584,11 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                     referred_transaction.description = "Referral Reward"
                     referred_transaction.save()
 
-                    # Ensure wallet and transaction amounts match correctly
                     self.wallet += referred_transaction.amount
                     self.pending_referral_reward -= referred_transaction.amount
                     self.save(update_fields=["wallet", "pending_referral_reward"])
 
-                # Update referrer's pending transaction to confirmed
+                # Confirm referrer transaction
                 referrer_transaction = Transaction.objects.filter(
                     user=self.referral,
                     referral_email=self.email,
@@ -591,14 +601,44 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                     referrer_transaction.description = "Referral Reward"
                     referrer_transaction.save()
 
-                    # Ensure wallet and transaction amounts match correctly
                     self.referral.wallet += referrer_transaction.amount
                     self.referral.pending_referral_reward -= referrer_transaction.amount
                     self.referral.save(
                         update_fields=["wallet", "pending_referral_reward"]
                     )
 
-                # Send confirmation emails
+                from .utils import send_push_notification
+
+                if referred_transaction:
+                    send_push_notification(
+                        user=self,
+                        title="Referral Reward Received! 🎉",
+                        message=f"You've got ₦{referred_transaction.amount:,} for referring {self.referral.first_name}. Thank you for using MyFund!",
+                        data={
+                            "amount": str(referred_transaction.amount),
+                            "transaction_id": referred_transaction.transaction_id,
+                            "type": "Referral",
+                            "role": "referred",
+                            "status": "confirmed",
+                        },
+                        notif_type="CREDIT",
+                    )
+
+                if referrer_transaction:
+                    send_push_notification(
+                        user=self.referral,
+                        title="Referral Reward Confirmed! 🎊",
+                        message=f"You've earned ₦{referrer_transaction.amount:,} for referring {self.first_name} and improved your chances for more rewards. Check the Referral List for your ranking. Keep it up!",
+                        data={
+                            "amount": str(referrer_transaction.amount),
+                            "transaction_id": referrer_transaction.transaction_id,
+                            "type": "Referral",
+                            "role": "referrer",
+                            "status": "confirmed",
+                        },
+                        notif_type="CREDIT",
+                    )
+
                 self.send_confirmation_email(self, is_referrer=False)
                 self.send_confirmation_email(self.referral, is_referrer=True)
 
@@ -733,7 +773,14 @@ from django.utils import timezone
 class TopSaverHistory(models.Model):
     month = models.PositiveIntegerField()
     year = models.PositiveIntegerField()
-    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE)
+    user = models.ForeignKey(
+        CustomUser,
+        on_delete=models.SET_NULL,  # previously models.CASCADE
+        related_name="top_saver_history",
+        null=True,  # important to allow nulls if we're setting null
+        blank=True,
+    )
+
     total_savings = models.DecimalField(max_digits=10, decimal_places=2)
     rank = models.PositiveIntegerField()
 
