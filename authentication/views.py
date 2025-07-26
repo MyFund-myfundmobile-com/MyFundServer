@@ -6327,7 +6327,7 @@ def save_expo_push_token(request):
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from django.utils.timezone import now
+from django.utils import timezone
 from django.db.models import Count, Q
 from django.core.mail import send_mail
 from authentication.utils import send_push_notification
@@ -6348,14 +6348,41 @@ class TopReferralsAPIView(APIView):
         return None
 
     def send_rank_notification(self, user, old_rank, new_rank):
-        """Notify a user about rank changes (up/down)"""
+        """Sends consistent email + push notifications for rank changes."""
         if new_rank < old_rank:
-            subject = f"🎉 You moved up to #{new_rank}!"
-            message = f"Hi {user.first_name}, your rank improved from #{old_rank} to #{new_rank}!"
+            subject = f"🎉 Congrats! You're Now #{new_rank} on MyFund!"
+            message = (
+                f"Hi {user.first_name},\n\n"
+                f"Great news! Your referral rank improved from #{old_rank} to #{new_rank}. "
+                "Keep referring friends to climb higher!\n\n"
+                "Thank you for using MyFund.\n\n"
+                "MyFund\nSave, Buy Properties, Earn Rent\n"
+                "www.myfundmobile.com\n"
+                "13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+            )
+            push_title = f"🎉 Rank Improved! Now #{new_rank}"
+            push_message = (
+                f"Hi {user.first_name}, you moved up to #{new_rank} (from #{old_rank}). "
+                "Keep referring to earn more rewards!"
+            )
         else:
-            subject = f"📉 Your rank changed to #{new_rank}"
-            message = f"Hi {user.first_name}, your rank changed from #{old_rank} to #{new_rank}."
+            subject = f"📉 Your MyFund Rank Changed to #{new_rank}"
+            message = (
+                f"Hi {user.first_name},\n\n"
+                f"Your referral rank changed from #{old_rank} to #{new_rank}. "
+                "Share your referral link to move back up!\n\n"
+                "Thank you for using MyFund.\n\n"
+                "MyFund\nSave, Buy Properties, Earn Rent\n"
+                "www.myfundmobile.com\n"
+                "13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+            )
+            push_title = f"📉 Rank Changed to #{new_rank}"
+            push_message = (
+                f"Hi {user.first_name}, your rank is now #{new_rank} (was #{old_rank}). "
+                "Refer more friends to climb higher!"
+            )
 
+        # Send email
         send_mail(
             subject,
             message,
@@ -6363,89 +6390,105 @@ class TopReferralsAPIView(APIView):
             [user.email],
             fail_silently=False,
         )
+
+        # Send push notification
         send_push_notification(
             user=user,
-            title=subject,
-            message=message,
-            data={"old_rank": old_rank, "new_rank": new_rank},
+            title=push_title,
+            message=push_message,
+            data={"old_rank": old_rank, "new_rank": new_rank, "type": "ReferralRank"},
             notif_type="SYSTEM",
         )
 
     def get(self, request):
         user = request.user
-        start_of_month = now().replace(day=1, hour=0, minute=0, second=0)
+        now = timezone.now()
+        start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
-        # Fetch all referrers and their counts
-        referrers = (
+        # Get referral performance
+        ref_stats = (
             CustomUser.objects.filter(
-                referral__isnull=False, date_joined__gte=start_of_month
+                referral__isnull=False,
+                date_joined__gte=start_of_month,
             )
             .values("referral")
             .annotate(
-                signups=Count("id"),
-                confirmed=Count(
-                    "id", filter=Q(referral_reward_confirmed_at__gte=start_of_month)
+                monthly_signups=Count("id"),
+                monthly_confirmed=Count(
+                    "id",
+                    filter=Q(
+                        referral_reward_confirmed_at__gte=start_of_month,
+                        referral_reward_granted=True,
+                    ),
                 ),
             )
-            .order_by("-confirmed", "-signups")
+            .order_by("-monthly_confirmed", "-monthly_signups")
         )
 
-        # Map referral IDs to their stats
-        referrer_stats = {stat["referral"]: stat for stat in referrers}
-        referrer_users = CustomUser.objects.in_bulk(referrer_stats.keys())
+        ref_ids = [stat["referral"] for stat in ref_stats]
+        ref_users = CustomUser.objects.in_bulk(ref_ids)
 
-        # Build leaderboard
-        leaderboard = []
-        for ref_id, stats in referrer_stats.items():
-            ref_user = referrer_users.get(ref_id)
+        top_users = []
+        for stat in ref_stats:
+            ref_user = ref_users.get(stat["referral"])
             if not ref_user:
                 continue
-
-            leaderboard.append(
+            top_users.append(
                 {
                     "id": ref_user.id,
+                    "first_name": ref_user.first_name,
+                    "last_name": ref_user.last_name,
                     "email": ref_user.email,
-                    "signups": stats["signups"],
-                    "confirmed": stats["confirmed"],
-                    "current_rank": None,  # Will be set later
+                    "profile_picture": self.get_profile_pic_url(ref_user),
+                    "monthly_signups": stat["monthly_signups"],
+                    "monthly_confirmed": stat["monthly_confirmed"],
                 }
             )
 
-        # Sort and assign ranks
-        leaderboard.sort(key=lambda x: (-x["confirmed"], -x["signups"]))
-        for idx, entry in enumerate(leaderboard, 1):
-            entry["current_rank"] = idx
+        # Sort and rank
+        top_users.sort(key=lambda x: (-x["monthly_confirmed"], -x["monthly_signups"]))
 
-        # Compare with previous ranks and notify
-        for entry in leaderboard:
-            user = CustomUser.objects.get(id=entry["id"])
-            old_rank = user.last_referral_rank
-            new_rank = entry["current_rank"]
+        rank_changes = {}
+        for index, user_data in enumerate(top_users):
+            u = CustomUser.objects.get(id=user_data["id"])
+            new_rank = index + 1
+            old_rank = u.last_referral_rank or 0
 
-            if old_rank is not None and old_rank != new_rank:
-                self.send_rank_notification(user, old_rank, new_rank)
-                user.last_referral_rank = new_rank
-                user.save(update_fields=["last_referral_rank"])
+            if old_rank != new_rank:
+                rank_changes[u] = (old_rank, new_rank)
+                u.last_referral_rank = new_rank
+                u.save(update_fields=["last_referral_rank"])
 
-        # Prepare response
-        current_user_entry = next(
-            (entry for entry in leaderboard if entry["email"] == user.email), None
+        # Send notifications
+        for user_obj, (old_rank, new_rank) in rank_changes.items():
+            self.send_rank_notification(user_obj, old_rank, new_rank)
+
+        # Current user stats
+        my_signups = CustomUser.objects.filter(
+            referral=user, date_joined__gte=start_of_month
         )
-        current_user_rank = (
-            current_user_entry["current_rank"] if current_user_entry else None
+        my_confirmed = my_signups.filter(
+            referral_reward_confirmed_at__gte=start_of_month,
+            referral_reward_granted=True,
         )
+
+        current_user_stats = {
+            "id": user.id,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "email": user.email,
+            "profile_picture": self.get_profile_pic_url(user),
+            "monthly_signups": my_signups.count(),
+            "monthly_confirmed": my_confirmed.count(),
+            "rank": next(
+                (i + 1 for i, u in enumerate(top_users) if u["email"] == user.email),
+                None,
+            ),
+        }
 
         return Response(
             {
-                "top_referrers": leaderboard[:50],
-                "current_user": {
-                    "rank": current_user_rank,
-                    "signups": (
-                        current_user_entry["signups"] if current_user_entry else 0
-                    ),
-                    "confirmed": (
-                        current_user_entry["confirmed"] if current_user_entry else 0
-                    ),
-                },
+                "top_referrers": top_users[:50],
+                "current_user": current_user_stats,
             }
         )
