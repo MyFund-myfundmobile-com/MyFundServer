@@ -1152,6 +1152,7 @@ class AutoSave(models.Model):
     paystack_sub_id = models.CharField(max_length=255, null=True, blank=True)
     paystack_sub_code = models.CharField(max_length=255, null=True, blank=True)
     paystack_sub_token = models.CharField(max_length=255, null=True, blank=True)
+    paystack_plan_code = models.CharField(max_length=255, null=True, blank=True)
     paystack_trans_ref = models.CharField(max_length=255, null=True, blank=True)
 
     def __str__(self):
@@ -1170,11 +1171,13 @@ class AutoSave(models.Model):
                 "paystack_sub_id": self.paystack_sub_id,
                 "paystack_sub_code": self.paystack_sub_code,
                 "paystack_sub_token": self.paystack_sub_token,
+                "paystack_plan_code": self.paystack_plan_code,
                 "paystack_trans_ref": self.paystack_trans_ref,
             }
             if self.paystack_sub_id
             or self.paystack_sub_code
             or self.paystack_sub_token
+            or self.paystack_plan_code
             or self.paystack_trans_ref
             else {"message": "No Paystack details"}
         )
@@ -1199,6 +1202,7 @@ class AutoInvest(models.Model):
     paystack_sub_id = models.CharField(max_length=255, null=True, blank=True)
     paystack_sub_code = models.CharField(max_length=255, null=True, blank=True)
     paystack_sub_token = models.CharField(max_length=255, null=True, blank=True)
+    paystack_plan_code = models.CharField(max_length=255, null=True, blank=True)
     paystack_trans_ref = models.CharField(max_length=255, null=True, blank=True)
 
     def __str__(self):
@@ -1217,11 +1221,13 @@ class AutoInvest(models.Model):
                 "paystack_sub_id": self.paystack_sub_id,
                 "paystack_sub_code": self.paystack_sub_code,
                 "paystack_sub_token": self.paystack_sub_token,
+                "paystack_plan_code": self.paystack_plan_code,
                 "paystack_trans_ref": self.paystack_trans_ref,
             }
             if self.paystack_sub_id
             or self.paystack_sub_code
             or self.paystack_sub_token
+            or self.paystack_plan_code
             or self.paystack_trans_ref
             else {"message": "No Paystack details"}
         )
