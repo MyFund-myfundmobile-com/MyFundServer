@@ -1560,7 +1560,7 @@ def autosave(request):
     if not has_paystack_auth:
         return Response(
             {
-                "error": "You need to do a QuickSave/QuickInvest before you can activate AutoSave"
+                "Error": "You need to activate your card first with a charge of N100"
             },
             status=status.HTTP_400_BAD_REQUEST,
         )
@@ -1909,7 +1909,7 @@ def autoinvest(request):
     if not has_paystack_auth:
         return Response(
             {
-                "error": "You need to do a QuickSave/QuickInvest before you can activate AutoInvest"
+                "Error": "You need to activate your card first with a charge of N100"
             },
             status=status.HTTP_400_BAD_REQUEST,
         )
