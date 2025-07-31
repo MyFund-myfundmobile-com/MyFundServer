@@ -443,16 +443,24 @@ def delete_my_account(request):
 
 class CustomObtainAuthToken(ObtainAuthToken):
     def post(self, request, *args, **kwargs):
-        serializer = self.serializer_class(data=request.data)
-        serializer.is_valid(raise_exception=True)
+        try:
+            serializer = self.serializer_class(data=request.data)
+            serializer.is_valid(raise_exception=True)
 
-        user = serializer.validated_data["user"]
-        logger.info("User authenticated successfully: %s", user.email)
+            user = serializer.validated_data["user"]
+            logger.info(f"User authenticated successfully: {user.email}")
 
-        # Generate tokens
-        tokens = self.get_tokens_for_user(user)
+            # Generate tokens
+            tokens = self.get_tokens_for_user(user)
 
-        return Response(tokens)
+            return Response(tokens)
+
+        except Exception as e:
+            logger.error(f"Login error for {request.data.get('username')}: {str(e)}")
+            return Response(
+                {"error": "Invalid credentials or account issue"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
     @staticmethod
     def get_tokens_for_user(user):
@@ -4240,6 +4248,24 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             fail_silently=False,
                         )
 
+                        # Send push notification
+                        send_push_notification(
+                            user=user,
+                            title="AutoSave Successful! ✅",
+                            message=(
+                                f"Your scheduled AutoSave of ₦{Decimal(amount):,.2f} "
+                                f"({autosave.frequency.capitalize()}) has just been deposited into your savings."
+                            ),
+                            data={
+                                "amount": str(amount),
+                                "frequency": autosave.frequency,
+                                "transaction_id": reference,
+                                "type": "AutoSave",
+                                "status": "confirmed",
+                            },
+                            notif_type="CREDIT",
+                        )
+
                         print("AutoSave Successfully Credited your Account.")
 
                         return JsonResponse({"status": True}, status=status.HTTP_200_OK)
@@ -4257,13 +4283,11 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                                 paystack_auth_code=paystack_auth_code,
                             )
 
-                        # Atomically update user's savings
                         transaction.status = "confirmed"
                         transaction.paystack_auth_code = paystack_auth_code
                         transaction.save()
 
                         user.investment += int(amount)
-                        # user.confirm_referral_rewards(is_referrer=True)
                         user.update_total_savings_and_investment_this_month()
                         user.save()
 
@@ -4271,7 +4295,8 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         subject = f"AutoInvest ({autoinvest.frequency.capitalize()}) Successful!"
                         message = (
                             f"Well done {user.first_name},\n\n"
-                            f"Your AutoInvest was successful and ₦{Decimal(amount):,.2f} has been added to your INVESTMENT account."
+                            f"Your AutoInvest was successful and ₦{Decimal(amount):,.2f} "
+                            f"has been added to your INVESTMENT account."
                         )
                         from_email = "MyFund <info@myfundmobile.com>"
                         recipient_list = [user.email]
@@ -4281,6 +4306,24 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             from_email,
                             recipient_list,
                             fail_silently=False,
+                        )
+
+                        # Send push notification
+                        send_push_notification(
+                            user=user,
+                            title="AutoInvest Successful! 🎉",
+                            message=(
+                                f"Your scheduled AutoInvest of ₦{Decimal(amount):,.2f} "
+                                f"({autoinvest.frequency.capitalize()}) has just been deposited into your investments."
+                            ),
+                            data={
+                                "amount": str(amount),
+                                "frequency": autoinvest.frequency,
+                                "transaction_id": reference,
+                                "type": "AutoInvest",
+                                "status": "confirmed",
+                            },
+                            notif_type="CREDIT",
                         )
 
                         print("AutoInvest Successfully Credited your Account.")

@@ -894,7 +894,7 @@ class TransactionAdmin(admin.ModelAdmin):
     list_display = (
         "user",
         "transaction_type",
-        "status",  # Added status here
+        "status",
         "amount",
         "date",
         "time",
@@ -909,12 +909,12 @@ class TransactionAdmin(admin.ModelAdmin):
     )
     search_fields = (
         "user__email",
+        "user__first_name",
+        "user__last_name",
         "description",
         "transaction_id",
-        "transaction_type",
-        "status",  # Allow searching by status
+        "status",
         "amount",
-        "referral__user__email",
     )
 
     def is_referral_transaction(self, obj):

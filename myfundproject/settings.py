@@ -142,6 +142,13 @@ REST_FRAMEWORK = {
     "DEFAULT_TOKEN_EXPIRE_TIME": 60 * 60 * 24,  # Default is 1 day in seconds
 }
 
+# Increase the maximum number of fields allowed in a form submission
+DATA_UPLOAD_MAX_NUMBER_FIELDS = 2000  # Default is 1000
+
+# You might also want to increase these related settings
+DATA_UPLOAD_MAX_MEMORY_SIZE = 10485760  # 10MB (default is 2.5MB)
+FILE_UPLOAD_MAX_MEMORY_SIZE = 10485760  # 10MB (default is 2.5MB)
+
 # Celery settings
 from celery.schedules import crontab
 
