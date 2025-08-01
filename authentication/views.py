@@ -3350,9 +3350,14 @@ def get_top_savers(request):
                         user=OuterRef("pk"),
                         date__month=current_month,
                         date__year=current_year,
+                        status="confirmed",
+                        transaction_type="credit",
                     )
+                    .exclude(Q(account_type="wallet"))  # Exclude wallet transactions
                     .filter(
-                        Q(status="confirmed", transaction_type="credit")
+                        Q(
+                            account_type__in=["savings", "investment"]
+                        )  # Only savings and investment accounts
                         | Q(
                             description__in=[
                                 "AutoSave (Confirmed)",

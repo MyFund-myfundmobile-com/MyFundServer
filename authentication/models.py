@@ -558,14 +558,22 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
 
     def confirm_referral_rewards(self, is_referrer):
         if self.referral and not self.referral_reward_granted:
-            savings_threshold = 10000 if self.referral.is_ambassador else 20000
+            # Check if current month is August 2025
+            current_time = timezone.now()
+            is_august_2025 = current_time.month == 8 and current_time.year == 2025
+
+            # Set threshold based on month
+            savings_threshold = (
+                5000
+                if is_august_2025
+                else (10000 if self.referral.is_ambassador else 20000)
+            )
             investment_threshold = 100000
 
             qualifies_by_savings = self.savings >= savings_threshold
             qualifies_by_investment = self.investment >= investment_threshold
 
             if qualifies_by_savings or qualifies_by_investment:
-                current_time = timezone.now()
                 self.referral_reward_granted = True
                 self.referral_reward_confirmed_at = current_time
                 self.save(
@@ -648,26 +656,44 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                 )
 
     def send_confirmation_email(self, user, is_referrer):
+        current_time = timezone.now()
+        is_august_2025 = current_time.month == 8 and current_time.year == 2025
+
         if is_referrer:
             ambassador_note = (
                 "\n\nP.S. As our valued Ambassador, you qualified for early referral rewards. Keep up the great work!"
                 if user.is_ambassador
                 else ""
             )
+
+            august_note = (
+                "\n\nP.S. For August Referral contest, for early referral rewards. Keep up the great work!"
+                if is_august_2025
+                else ""
+            )
+
             subject = f"Congrats!🎊🥂 Referral Reward for {self.first_name} Confirmed!"
             message = (
                 f"Congratulations {user.first_name},\n\n"
                 f"You have received a referral reward of ₦500.00 in your wallet for referring {self.first_name}."
                 f"{ambassador_note}"
+                f"{august_note}"
                 f"\n\nThank you for using MyFund and referring others!"
                 f"\n\nKeep growing your funds.🥂"
                 f"\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
             )
         else:
+            august_note = (
+                "\n\nP.S. For August Referral contest, for early referral rewards. Keep up the great work!"
+                if is_august_2025
+                else ""
+            )
+
             subject = f"Congrats!🎊🥂 Referral Reward Confirmed!"
             message = (
                 f"Congratulations {self.first_name}, \n\n"
                 f"You have received a referral reward of ₦500.00 in your wallet thanks to your referral."
+                f"{august_note}"
                 f"\n\nThank you for using MyFund!"
                 f"\n\nKeep growing your funds.🥂"
                 f"\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
