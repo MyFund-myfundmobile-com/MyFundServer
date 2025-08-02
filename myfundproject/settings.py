@@ -15,35 +15,40 @@ from datetime import timedelta
 import os
 from dotenv import load_dotenv
 
-# Load environment variables first
-BASE_DIR = Path(__file__).resolve().parent.parent
-load_dotenv(BASE_DIR / ".env")
+load_dotenv()
+
+# from channels_redis.core import RedisChannelLayer
+# import redis
+
+# Set your OpenAI API key
+
+import os
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "myfundproject.settings")
 
 
-# Then get the environment variables
+SSL_PORT = 8443  # You can choose any available port number
+
+STATIC_ROOT = "/path/to/your/static/files/"
+
+
+# Build paths inside the project like this: BASE_DIR / 'subdir'.
+BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")  # <-- load your .env file
+
+
+# now pull them in
 IMAGEKIT_PRIVATE_KEY = os.getenv("IMAGEKIT_PRIVATE_KEY")
 IMAGEKIT_PUBLIC_KEY = os.getenv("IMAGEKIT_PUBLIC_KEY")
 IMAGEKIT_URL_ENDPOINT = os.getenv("IMAGEKIT_URL_ENDPOINT")
+
+
+# Quick-start development settings - unsuitable for production
+# See https://docs.djangoproject.com/en/4.2/howto/deployment/checklist/
+
+# SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.getenv("SECRET_KEY")
 
-# Now initialize ImageKit
-import imagekitio
-
-imagekit = imagekitio.ImageKit(
-    private_key=IMAGEKIT_PRIVATE_KEY,
-    public_key=IMAGEKIT_PUBLIC_KEY,
-    url_endpoint=IMAGEKIT_URL_ENDPOINT,
-)
-
-print("ImageKit Loaded:", IMAGEKIT_PRIVATE_KEY, IMAGEKIT_URL_ENDPOINT)
-
-# Other settings
-SSL_PORT = 8443
-STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
-
-# Set default Django settings module
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = False if os.environ.get("KOYEB_PUBLIC_DOMAIN") else True
 
@@ -112,6 +117,8 @@ ADMIN_URL = "admin/"
 
 
 # Celery settings]
+# CELERY_BROKER_URL = 'redis://localhost:6379/0'  # Use the appropri\n.ate broker URL for your environment.
+888  # CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'  # Use the appropriate result backend URL for your environment.
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
@@ -383,23 +390,3 @@ AUTHENTICATION_BACKENDS = [
 # SECURE_HSTS_INCLUDE_SUBDOMAINS = True
 
 PAYSTACK_SECRET_KEY = os.getenv("PAYSTACK_KEY_LIVE")
-
-if DEBUG:
-    SECURE_SSL_REDIRECT = False
-    SESSION_COOKIE_SECURE = False
-    CSRF_COOKIE_SECURE = False
-else:
-    SECURE_SSL_REDIRECT = True
-    SESSION_COOKIE_SECURE = True
-    CSRF_COOKIE_SECURE = True
-    SECURE_HSTS_SECONDS = 30 * 24 * 60 * 60  # 30 days
-    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
-
-# Generate a new secret key if still using the insecure default
-if SECRET_KEY.startswith("django-insecure-"):
-    import secrets
-
-    SECRET_KEY = secrets.token_urlsafe(50)
-
-# Then keep your existing DEBUG setting
-DEBUG = False if os.environ.get("KOYEB_PUBLIC_DOMAIN") else True
