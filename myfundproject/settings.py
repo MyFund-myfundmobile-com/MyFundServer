@@ -17,11 +17,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# from channels_redis.core import RedisChannelLayer
-# import redis
-
-# Set your OpenAI API key
-
 import os
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "myfundproject.settings")
@@ -41,10 +36,6 @@ load_dotenv(BASE_DIR / ".env")  # <-- load your .env file
 IMAGEKIT_PRIVATE_KEY = os.getenv("IMAGEKIT_PRIVATE_KEY")
 IMAGEKIT_PUBLIC_KEY = os.getenv("IMAGEKIT_PUBLIC_KEY")
 IMAGEKIT_URL_ENDPOINT = os.getenv("IMAGEKIT_URL_ENDPOINT")
-
-
-# Quick-start development settings - unsuitable for production
-# See https://docs.djangoproject.com/en/4.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.getenv("SECRET_KEY")
