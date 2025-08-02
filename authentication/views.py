@@ -756,91 +756,64 @@ imagekit = ImageKit(
     url_endpoint=settings.IMAGEKIT_URL_ENDPOINT,
 )
 
-# views.py
-
-import base64
-import time
-import logging
-from rest_framework import status
-from rest_framework.decorators import api_view, permission_classes, parser_classes
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.parsers import MultiPartParser, FormParser
-from rest_framework.response import Response
-from django.conf import settings
-import requests
-
-logger = logging.getLogger(__name__)
-
 
 @api_view(["PATCH"])
 @permission_classes([IsAuthenticated])
 @parser_classes([MultiPartParser, FormParser])
 def profile_picture_update(request):
     user = request.user
-
-    if "profile_picture" not in request.FILES:
+    pic = request.FILES.get("profile_picture")
+    if not pic:
         return Response(
-            {"error": "No file provided"}, status=status.HTTP_400_BAD_REQUEST
+            {"error": "No image file provided"}, status=status.HTTP_400_BAD_REQUEST
         )
 
-    pic = request.FILES["profile_picture"]
+    # optional: enforce size/type here…
 
-    # Validate file
-    valid_extensions = ["jpg", "jpeg", "png", "gif"]
-    ext = pic.name.split(".")[-1].lower()
-
-    if ext not in valid_extensions:
-        return Response(
-            {"error": f"Invalid file type. Allowed: {', '.join(valid_extensions)}"},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-
-    if pic.size > 5 * 1024 * 1024:  # 5MB
-        return Response(
-            {"error": "File too large (max 5MB)"}, status=status.HTTP_400_BAD_REQUEST
-        )
+    ext = pic.name.rsplit(".", 1)[-1]
+    filename = f"profile_{user.id}_{int(time.time())}.{ext}"
 
     try:
-        # Encode credentials manually (like in test script)
-        private_key = settings.IMAGEKIT_PRIVATE_KEY
-        auth_header = base64.b64encode(f"{private_key}:".encode()).decode()
-
-        headers = {"Authorization": f"Basic {auth_header}"}
-
-        response = requests.post(
-            "https://upload.imagekit.io/api/v1/files/upload",
-            headers=headers,
-            files={"file": (f"user_{user.id}_{int(time.time())}.{ext}", pic)},
-            data={
+        # upload to ImageKit
+        result = imagekit.upload_file(
+            file=pic,
+            file_name=filename,
+            options={
                 "folder": "/profile_pictures/",
-                "fileName": f"user_{user.id}_{int(time.time())}",
+                "tags": [f"user_{user.id}"],
             },
-            timeout=30,
         )
+        url = result["response"]["url"]
 
-        if response.status_code != 200:
-            logger.error(f"ImageKit upload failed: {response.text}")
-            return Response(
-                {"error": "Image upload service error"},
-                status=status.HTTP_502_BAD_GATEWAY,
-            )
-
-        image_url = response.json().get("url")
-        user.profile_picture = image_url
+        user.profile_picture = url
         user.save()
 
         return Response(
             {
-                "url": image_url,
                 "message": "Profile picture updated successfully",
-            }
+                "profile_picture": url,
+            },
+            status=status.HTTP_200_OK,
         )
 
     except Exception as e:
-        logger.error(f"Upload failed: {str(e)}")
+        logger.error("ImageKit upload failed: %s", e)
+        # fallback to local
+        from django.core.files.storage import FileSystemStorage
+
+        fs = FileSystemStorage()
+        local_name = fs.save(filename, pic)
+        local_url = request.build_absolute_uri(fs.url(local_name))
+        user.profile_picture = local_url
+        user.save()
+
         return Response(
-            {"error": "Image upload failed. Please try again."},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            {
+                "message": "Profile picture saved locally",
+                "profile_picture": local_url,
+                "warning": "Cloud upload failed, using local storage",
+            },
+            status=status.HTTP_200_OK,
         )
 
 
@@ -3348,14 +3321,14 @@ def get_all_property_details(request):
         )
 
 
-from django.db import transaction
-from django.db.models import Q, Sum, OuterRef, Subquery, DecimalField
-from django.db.models.functions import Coalesce
+from .serializers import CustomUserSerializer
+from django.db.models.functions import Coalesce  # Add this import
+from django.db.models import OuterRef, Subquery, DecimalField  # Add this line
+from django.db.models import Sum
 from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.response import Response
-from .models import CustomUser, Transaction, TopSaverHistory
+from django.db.models import Q  # Make sure to import Q
+from .models import TopSaverHistory
 
 
 @api_view(["GET"])
@@ -3377,9 +3350,14 @@ def get_top_savers(request):
                         user=OuterRef("pk"),
                         date__month=current_month,
                         date__year=current_year,
+                        status="confirmed",
+                        transaction_type="credit",
                     )
+                    .exclude(Q(account_type="wallet"))  # Exclude wallet transactions
                     .filter(
-                        Q(status="confirmed", transaction_type="credit")
+                        Q(
+                            account_type__in=["savings", "investment"]
+                        )  # Only savings and investment accounts
                         | Q(
                             description__in=[
                                 "AutoSave (Confirmed)",
