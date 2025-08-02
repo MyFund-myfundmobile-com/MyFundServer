@@ -403,3 +403,22 @@ if SECRET_KEY.startswith("django-insecure-"):
 
 # Then keep your existing DEBUG setting
 DEBUG = False if os.environ.get("KOYEB_PUBLIC_DOMAIN") else True
+
+
+# Add to settings.py
+LOGGING = {
+    "version": 1,
+    "handlers": {
+        "file": {
+            "level": "DEBUG",
+            "class": "logging.FileHandler",
+            "filename": "uploads.log",
+        },
+    },
+    "loggers": {
+        "django": {
+            "handlers": ["file"],
+            "level": "DEBUG",
+        },
+    },
+}
