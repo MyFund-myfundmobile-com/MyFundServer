@@ -6284,15 +6284,15 @@ class CurrentMonthFinancialView(generics.RetrieveAPIView):
             user=request.user,
             month=first_day_of_month,
             defaults={
-                "total_savings": request.user.savings,
-                "total_investments": request.user.investment,
+                "total_savings": request.user.account_balance.savings,
+                "total_investments": request.user.account_balance.investments,
             },
         )
 
         # Update if not created and values might have changed
         if not created:
-            record.total_savings = request.user.savings
-            record.total_investments = request.user.investment
+            record.total_savings = request.user.account_balance.savings
+            record.total_investments = request.user.account_balance.investments
             record.save()
 
         serializer = MonthlyFinancialRecordSerializer(record)
