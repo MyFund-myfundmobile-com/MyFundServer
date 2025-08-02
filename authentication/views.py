@@ -3350,14 +3350,9 @@ def get_top_savers(request):
                         user=OuterRef("pk"),
                         date__month=current_month,
                         date__year=current_year,
-                        status="confirmed",
-                        transaction_type="credit",
                     )
-                    .exclude(Q(account_type="wallet"))  # Exclude wallet transactions
                     .filter(
-                        Q(
-                            account_type__in=["savings", "investment"]
-                        )  # Only savings and investment accounts
+                        Q(status="confirmed", transaction_type="credit")
                         | Q(
                             description__in=[
                                 "AutoSave (Confirmed)",
@@ -6262,15 +6257,15 @@ class CurrentMonthFinancialView(generics.RetrieveAPIView):
             user=request.user,
             month=first_day_of_month,
             defaults={
-                "total_savings": request.user.account_balance.savings,
-                "total_investments": request.user.account_balance.investments,
+                "total_savings": request.user.savings,
+                "total_investments": request.user.investment,
             },
         )
 
         # Update if not created and values might have changed
         if not created:
-            record.total_savings = request.user.account_balance.savings
-            record.total_investments = request.user.account_balance.investments
+            record.total_savings = request.user.savings
+            record.total_investments = request.user.investment
             record.save()
 
         serializer = MonthlyFinancialRecordSerializer(record)
