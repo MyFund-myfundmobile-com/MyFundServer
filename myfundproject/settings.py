@@ -381,3 +381,23 @@ AUTHENTICATION_BACKENDS = [
 # SECURE_HSTS_INCLUDE_SUBDOMAINS = True
 
 PAYSTACK_SECRET_KEY = os.getenv("PAYSTACK_KEY_LIVE")
+
+# if DEBUG:
+#     SECURE_SSL_REDIRECT = False
+#     SESSION_COOKIE_SECURE = False
+#     CSRF_COOKIE_SECURE = False
+# else:
+#     SECURE_SSL_REDIRECT = True
+#     SESSION_COOKIE_SECURE = True
+#     CSRF_COOKIE_SECURE = True
+#     SECURE_HSTS_SECONDS = 30 * 24 * 60 * 60  # 30 days
+#     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
+# # Generate a new secret key if still using the insecure default
+# if SECRET_KEY.startswith("django-insecure-"):
+#     import secrets
+
+#     SECRET_KEY = secrets.token_urlsafe(50)
+
+# # Then keep your existing DEBUG setting
+# DEBUG = False if os.environ.get("KOYEB_PUBLIC_DOMAIN") else True
