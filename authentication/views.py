@@ -1436,6 +1436,7 @@ from django.conf import settings
 @permission_classes([IsAuthenticated])
 def quicksave(request):
     amount = request.data.get("amount")
+    payment_channels = request.data.get("channels", ["card"])
 
     if amount is None:
         return Response({"error": "amount required"}, status=400)
@@ -1449,6 +1450,7 @@ def quicksave(request):
     payload = {
         "email": request.user.email,
         "amount": amount_kobo,
+        "channels": payment_channels
     }
 
     # Make request to Paystack
@@ -1820,6 +1822,7 @@ def get_autosave_status(request):
 @permission_classes([IsAuthenticated])
 def quickinvest(request):
     amount = request.data.get("amount")
+    payment_channels = request.data.get("channels", ["card"])
 
     if amount is None:
         return Response({"error": "amount required"}, status=400)
@@ -1834,6 +1837,7 @@ def quickinvest(request):
     payload = {
         "email": request.user.email,
         "amount": amount_kobo,
+        "channels": payment_channels
     }
 
     resp = requests.post(
