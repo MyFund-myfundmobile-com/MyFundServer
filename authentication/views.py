@@ -51,6 +51,8 @@ import hmac
 from dotenv import load_dotenv
 import logging
 from django.db.models import Min
+from decimal import Decimal, ROUND_HALF_EVEN
+from .utils import send_push_notification
 
 
 load_dotenv()
@@ -427,18 +429,96 @@ def test_email(request):
     return HttpResponse("Test email sent. This shows the email system is working")
 
 
+from rest_framework.test import force_authenticate
+from rest_framework.request import Request
+from rest_framework.parsers import JSONParser
+from django.http import JsonResponse
+
+from rest_framework.test import APIRequestFactory, force_authenticate
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def delete_my_account(request):
+    user = request.user
+    print(f"⚠️ Deletion request for: {user.email}")
+
+    total_funds = user.savings + user.investment + user.wallet
+
+    # Case 1: No funds — delete immediately
+    if total_funds == 0:
+        user.delete()
+        print("✅ User deleted immediately. No funds.")
+        return Response({"message": "Account deleted successfully."})
+
+    # Case 2: Has funds — require a bank account
+    target_bank_account = user.bank_accounts.first()
+    if not target_bank_account:
+        print("❌ No bank account found. Cannot proceed with withdrawal.")
+        return Response(
+            {"error": "No bank account available for withdrawal."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        factory = APIRequestFactory()
+
+        for source, balance in [
+            ("savings", user.savings),
+            ("investment", user.investment),
+            ("wallet", user.wallet),
+        ]:
+            if balance > 0:
+                print(f"💸 Withdrawing ₦{balance} from {source}")
+                data = {
+                    "source_account": source,
+                    "amount": str(balance),
+                    "withdrawal_type": "immediate",
+                    "target_bank_account_id": target_bank_account.id,
+                }
+                mock_request = factory.post("/api/withdraw/", data, format="json")
+                force_authenticate(mock_request, user=user)
+
+                # ✅ Call the actual decorated view function
+                response = process_withdrawal_to_local_bank(mock_request)
+                if response.status_code not in (200, 201):
+                    raise Exception(f"Failed withdrawal from {source}: {response.data}")
+
+        user.delete()
+        print("✅ User account deleted after triggering withdrawals.")
+        return Response({"message": "Account deleted and withdrawals triggered."})
+
+    except Exception as e:
+        print("❌ Failed to process withdrawal before deletion.")
+        import traceback
+
+        traceback.print_exc()
+        return Response(
+            {"error": "Failed to process withdrawal before account deletion."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+
 class CustomObtainAuthToken(ObtainAuthToken):
     def post(self, request, *args, **kwargs):
-        serializer = self.serializer_class(data=request.data)
-        serializer.is_valid(raise_exception=True)
+        try:
+            serializer = self.serializer_class(data=request.data)
+            serializer.is_valid(raise_exception=True)
 
-        user = serializer.validated_data["user"]
-        logger.info("User authenticated successfully: %s", user.email)
+            user = serializer.validated_data["user"]
+            logger.info(f"User authenticated successfully: {user.email}")
 
-        # Generate tokens
-        tokens = self.get_tokens_for_user(user)
+            # Generate tokens
+            tokens = self.get_tokens_for_user(user)
 
-        return Response(tokens)
+            return Response(tokens)
+
+        except Exception as e:
+            logger.error(f"Login error for {request.data.get('username')}: {str(e)}")
+            return Response(
+                {"error": "Invalid credentials or account issue"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
     @staticmethod
     def get_tokens_for_user(user):
@@ -1163,6 +1243,7 @@ def add_bank_account(request):
             )
 
         # Save bank account
+        # Save bank account
         bank_account = BankAccount.objects.create(
             user=request.user,
             bank_name=bank_name,
@@ -1172,6 +1253,9 @@ def add_bank_account(request):
             is_default=False,
             paystack_recipient_code=paystack_recipient_code,
         )
+
+        # 🔥 Link the bank account to the user's ManyToMany field
+        request.user.bank_accounts.add(bank_account)
 
         logger.info("Bank account added successfully for user: %s", request.user.email)
 
@@ -1414,19 +1498,18 @@ def quicksave(request):
     if amount is None:
         return Response({"error": "amount required"}, status=400)
 
-    if int(float(amount)) < 100:
+    if int(amount) < 100:
         return Response({"error": "Amount cannot be less than #100"}, status=400)
 
-    try:
-        amount_kobo = int(float(amount) * 100)
-    except ValueError:
-        return Response({"error": "Invalid amount format"}, status=400)
+    # Convert amount to kobo and to int (Paystack requires integer amount in kobo)
+    amount_kobo = int(amount * 100)
 
     payload = {
         "email": request.user.email,
         "amount": amount_kobo,
     }
 
+    # Make request to Paystack
     resp = requests.post(
         "https://api.paystack.co/transaction/initialize",
         json=payload,
@@ -1434,12 +1517,23 @@ def quicksave(request):
             "Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}",
             "Content-Type": "application/json",
         },
+        timeout=30,  # 30 seconds timeout
     )
+
+    # Check if request to Paystack was successful
+    if resp.status_code != 200:
+        error_message = resp.json().get("message", "Payment initialization failed")
+        return Response({"error": error_message}, status=400)
 
     data = resp.json()
 
     if not data.get("status"):
-        return Response({"error": f"Charge Failed: {data}"}, status=400)
+        return Response(
+            {
+                "error": f"Payment initialization failed: {data.get('message', 'Unknown error')}"
+            },
+            status=400,
+        )
 
     reference = data["data"]["reference"]
     access_code = data["data"]["access_code"]
@@ -1448,7 +1542,7 @@ def quicksave(request):
         user=request.user,
         transaction_type="credit",
         status="pending",
-        amount=float(amount),
+        amount=Decimal(amount),
         description="QuickSave",
         transaction_id=reference,
         paystack_access_code=access_code,
@@ -1463,21 +1557,17 @@ def quicksave(request):
     Please complete the payment via Paystack to fund your savings.
 
     Grow your funds with MyFund. 🥂
+
+    — MyFund
+    Save, Buy Properties, Earn Rent
+    www.myfundmobile.com
+    13 Gbajabiamila Street, Ayobo, Lagos
     """
     from_email = "MyFund <info@myfundmobile.com>"
     recipient_list = [request.user.email]
 
-    context = {
-        "subject": subject,
-        "message": message
-    }
-
-    html_message = render_to_string("email/email.html", context=context)
-    plain_message = strip_tags(html_message)
-
     try:
-        # send_mail(subject, message, from_email, recipient_list, fail_silently=False)
-         send_mail(subject, plain_message, from_email, recipient_list, html_message=html_message)
+        send_mail(subject, message, from_email, recipient_list, fail_silently=False)
     except Exception as e:
         print("Email error:", e)
 
@@ -1548,18 +1638,21 @@ def autosave(request):
     except ObjectDoesNotExist:
         pass
 
-   # Check if user has a transaction with a paystack_auth_code
-    has_paystack_auth = Transaction.objects.filter(
-        user=user,
-        paystack_auth_code__isnull=False
-    ).exclude(paystack_auth_code='').exists()
-    
+    # Check if user has a transaction with a paystack_auth_code
+    has_paystack_auth = (
+        Transaction.objects.filter(user=user, paystack_auth_code__isnull=False)
+        .exclude(paystack_auth_code="")
+        .exists()
+    )
+
     # print(f"has_paystack_auth:  {has_paystack_auth}")
 
     if not has_paystack_auth:
         return Response(
-            {"error": "You need to do a QuickSave/QuickInvest before you can activate AutoSave"},
-            status=status.HTTP_400_BAD_REQUEST
+            {
+                "error": "You need to do a QuickSave/QuickInvest before you can activate AutoSave"
+            },
+            status=status.HTTP_400_BAD_REQUEST,
         )
 
     # Prepare Paystack plan creation request
@@ -1633,6 +1726,7 @@ def autosave(request):
         paystack_sub_id=subscription_id,
         paystack_sub_code=subscription_code,
         paystack_sub_token=subscription_token,
+        paystack_plan_code=plan_code,
         paystack_trans_ref=transaction_reference,
         active=True,
     )
@@ -1662,6 +1756,20 @@ def autosave(request):
     # Mark user as having autosave enabled
     user.autosave_enabled = True
     user.save()
+
+    # After user.autosave_enabled = True and user.save()
+    send_push_notification(
+        user=user,
+        title="AutoSave Activated! ✅",
+        message=f"Well done {user.first_name}! You're now saving ₦{amount} {frequency}. Keep growing your funds.",
+        data={
+            "amount": str(amount),
+            "frequency": frequency,
+            "type": "AutoSave",
+            "status": "activated",
+        },
+        notif_type="SYSTEM",
+    )
 
     return Response({"message": "AutoSave activated"}, status=status.HTTP_200_OK)
 
@@ -1733,7 +1841,7 @@ def deactivate_autosave(request):
 
         # Send a confirmation email
         subject = "AutoSave Deactivated!"
-        message = f"Hi {user.first_name}, Your AutoSave(s) for {frequency} have been deactivated. Keep growing your funds.🥂"
+        message = f"Hi {user.first_name},\n\nYour AutoSave(s) for {frequency} have been deactivated. \n\nKeep growing your funds.🥂\n\n\nMyFund  \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
         from_email = "MyFund <info@myfundmobile.com>"
         recipient_list = [user.email]
 
@@ -1815,13 +1923,10 @@ def quickinvest(request):
         return Response({"error": "amount required"}, status=400)
 
     if int(amount) < 100000:
-        return Response({"error": "QuickInvest cannot be less than #100000"})
+        return Response({"error": "Amount cannot be less than #100,000"}, status=400)
 
-    try:
-        # Convert amount to integer
-        amount_kobo = int(float(amount) * 100)
-    except ValueError:
-        return Response({"error": "Invalid amount format"}, status=400)
+    # Convert amount to kobo and to int (Paystack requires integer amount in kobo)
+    amount_kobo = int(amount * 100)
 
     # Paystack charge request
     payload = {
@@ -1853,7 +1958,7 @@ def quickinvest(request):
         user=request.user,
         transaction_type="credit",
         status="pending",
-        amount=float(amount),
+        amount=Decimal(amount),
         description="QuickInvest",
         transaction_id=reference,
         paystack_access_code=access_code,
@@ -1863,7 +1968,7 @@ def quickinvest(request):
         {
             "status": "transaction_initiated",
             "message": "Authorization of QickInvest transaction on Paystack required",
-            "authorization_url": f"{data["data"]["authorization_url"]}",
+            "authorization_url": f'{data["data"]["authorization_url"]}',
             "access_code": f"{access_code}",
         }
     )
@@ -1914,17 +2019,20 @@ def autoinvest(request):
             },
             status=status.HTTP_400_BAD_REQUEST,
         )
-        
-     # Check if user has a transaction with a paystack_auth_code
-    has_paystack_auth = Transaction.objects.filter(
-        user=user,
-        paystack_auth_code__isnull=False
-    ).exclude(paystack_auth_code='').exists()
+
+    # Check if user has a transaction with a paystack_auth_code
+    has_paystack_auth = (
+        Transaction.objects.filter(user=user, paystack_auth_code__isnull=False)
+        .exclude(paystack_auth_code="")
+        .exists()
+    )
 
     if not has_paystack_auth:
         return Response(
-            {"error": "You need to do a QuickSave/QuickInvest before you can activate AutoInvest"},
-            status=status.HTTP_400_BAD_REQUEST
+            {
+                "error": "You need to do a QuickSave/QuickInvest before you can activate AutoInvest"
+            },
+            status=status.HTTP_400_BAD_REQUEST,
         )
 
     # Prepare Paystack plan creation request
@@ -1985,6 +2093,7 @@ def autoinvest(request):
             paystack_sub_id=subscription_id,
             paystack_sub_code=subscription_code,
             paystack_sub_token=subscription_token,
+            paystack_plan_code=plan_code,
             paystack_trans_ref=transaction_reference,
             active=True,
         )
@@ -2373,26 +2482,30 @@ def wallet_to_investment(request):
         )
 
 
+from decimal import Decimal, ROUND_HALF_EVEN
+import uuid
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from django.db import IntegrityError
+from django.core.mail import send_mail
+from authentication.models import BankAccount, Transaction, WithdrawalsRequestToAdmin
+
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def withdraw_to_local_bank(request):
     user = request.user
-    source_account = request.data.get(
-        "source_account", ""
-    )  # 'savings', 'investment', 'wallet'
-
-    # when source_account is not provided
-    if not source_account:
-        return Response(
-            {"error": '"source_account" was NOT provided.'},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+    source_account = request.data.get("source_account", "").strip().lower()
     target_bank_account_id = request.data.get("target_bank_account_id", "")
-    # when target_bank_account_id is not provided
+    amount_raw = request.data.get("amount", 0)
+
+    # 1️⃣ Validate inputs
+    if not source_account:
+        return Response({"error": '"source_account" was NOT provided.'}, status=400)
     if not target_bank_account_id:
         return Response(
-            {"error": '"target_bank_account_id" was NOT provided.'},
-            status=status.HTTP_400_BAD_REQUEST,
+            {"error": '"target_bank_account_id" was NOT provided.'}, status=400
         )
     # when amount is not provided
     if not request.data.get("amount", 0):
@@ -2400,52 +2513,39 @@ def withdraw_to_local_bank(request):
             {"error": '"amount" was NOT provided.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
-    amount = Decimal(request.data.get("amount", 0))
 
-    # Validate that the user has enough balance in the source account
+    amount = Decimal(request.data.get("amount", 0)).quantize(
+        Decimal("0.00"), rounding=ROUND_HALF_EVEN
+    )
+
+    # 2️⃣ Check user balance (do NOT debit yet)
     if source_account == "savings" and user.savings < amount:
-        # print(f"user.savings({user.savings}) < withdrawal amount({amount})")
-        return Response(
-            {"error": "Insufficient savings balance."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+        return Response({"error": "Insufficient savings balance."}, status=400)
     if source_account == "investment" and user.investment < amount:
-        return Response(
-            {"error": "Insufficient investment balance."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-    elif source_account == "wallet" and user.wallet < amount:
-        return Response(
-            {"error": "Insufficient wallet balance."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+        return Response({"error": "Insufficient investment balance."}, status=400)
+    if source_account == "wallet" and user.wallet < amount:
+        return Response({"error": "Insufficient wallet balance."}, status=400)
 
-    # Validate that the target_bank_account_id belongs to the user
+    # 3️⃣ Verify bank account ownership
     try:
         target_bank_account = BankAccount.objects.get(
             id=target_bank_account_id, user=user
         )
     except BankAccount.DoesNotExist:
-        return Response(
-            {"error": "Target bank account not found."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+        return Response({"error": "Target bank account not found."}, status=400)
 
-    # Calculate the service charge based on the source account
-    service_charge_percentage = 0.0
-    if source_account == "savings":
-        service_charge_percentage = 10
-    elif source_account == "investment":
-        service_charge_percentage = 15
-
-    # Calculate the service charge and total withdrawal amount
-    service_charge = (service_charge_percentage / 100) * float(amount)
-    withdrawal_amount = float(amount) - service_charge
-
-    # Generate a unique transaction ID
+    # 4️⃣ Compute service charge & net amount
+    pct = (
+        10
+        if source_account == "savings"
+        else 15 if source_account == "investment" else 0
+    )
+    service_charge = (pct / Decimal(100)) * amount
+    withdrawal_amount = amount - service_charge
     transaction_id = str(uuid.uuid4())[:16]
 
     try:
+        # 5️⃣ Create pending transaction
         transaction = Transaction.objects.create(
             user=user,
             transaction_type="debit",
@@ -2453,54 +2553,65 @@ def withdraw_to_local_bank(request):
             amount=withdrawal_amount,
             service_charge=service_charge,
             total_amount=amount,
-            description=f"{source_account.capitalize()} > Bank",
+            description=f"{source_account.capitalize()} > Bank . . .",
             transaction_id=transaction_id,
         )
 
-        total_amount_decimal = Decimal(amount)
-        print(
-            f"Before deduction - {source_account.capitalize()} balance: {user.savings if source_account == 'savings' else user.investment if source_account == 'investment' else user.wallet}"
+        # 6️⃣ Hit Paystack first
+        paystack_response = make_withdrawal_through_paystack(
+            user, target_bank_account, withdrawal_amount
         )
+        print("Paystack API Response:", paystack_response)
 
+        if paystack_response.get("status"):
+            # 7️⃣ On success, debit user
+            if source_account == "savings":
+                user.savings -= amount
+            elif source_account == "investment":
+                user.investment -= amount
+            else:
+                user.wallet -= amount
+            user.save()
+
+            transaction.status = "confirmed"
+            transaction.save()
+
+            # 8️⃣ Email user
+            subj = f"Withdrawal Successful: ₦{amount}"
+            msg = (
+                f"Hi {user.first_name},\n\n"
+                f"Your withdrawal of ₦{amount} from your {source_account} account has been sent to {target_bank_account.bank_name}.\n\n"
+                "Thank you for using MyFund! 🥂\n\n"
+                "MyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n"
+                "13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+            )
+            try:
+                send_mail(subj, msg, "MyFund <info@myfundmobile.com>", [user.email])
+            except:
+                pass
+
+            return Response(
+                {
+                    "success": True,
+                    "message": paystack_response.get("message"),
+                    "transaction_id": transaction_id,
+                    "updated_balance": {
+                        "savings": user.savings,
+                        "investment": user.investment,
+                        "wallet": user.wallet,
+                    },
+                },
+                status=200,
+            )
+
+        # 9️⃣ On PAYSTACK FAILURE → **manual fallback**:
+        # — first, **debit** the user so their balance reflects the pending withdrawal
         if source_account == "savings":
-            if user.savings >= total_amount_decimal:
-                user.savings -= total_amount_decimal
-                user.save()
-            else:
-                # print(f"user.savings({user.savings}) < total_amount_decimal({total_amount_decimal})")
-                return Response(
-                    {"error": "Insufficient savings balance."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+            user.savings -= amount
         elif source_account == "investment":
-            if user.investment >= total_amount_decimal:
-                user.investment -= total_amount_decimal
-                user.save()
-            else:
-                return Response(
-                    {"error": "Insufficient investment balance."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-        elif source_account == "wallet":
-            if user.wallet >= total_amount_decimal:
-                user.wallet -= total_amount_decimal
-                user.save()
-            else:
-                return Response(
-                    {"error": "Insufficient wallet balance."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-        print(
-            f"After deduction - {source_account.capitalize()} balance: {user.savings if source_account == 'savings' else user.investment if source_account == 'investment' else user.wallet}"
-        )
-
-        updated_balance = {
-            "savings": user.savings,
-            "investment": user.investment,
-            "wallet": user.wallet,
-        }
-
+            user.investment -= amount
+        else:
+            user.wallet -= amount
         user.save()
 
         # print("Paystack processing the withdrawal...")
@@ -2524,20 +2635,11 @@ def withdraw_to_local_bank(request):
             bank_name = target_bank_account.bank_name
             # Send a confirmation email to the user
             subject = f"Withdrawal from {source_account.capitalize()} Successful!"
-            message = f"Hi {user.first_name}, Your withdrawal of ₦{amount} from your {source_account.capitalize()} account has been sent to your {bank_name} account successfully. Thank you for using MyFund. Keep growing your funds.🥂"
+            message = f"Hi {user.first_name},\n\nYour withdrawal of ₦{amount} from your {source_account.capitalize()} account has been sent to your {bank_name} account successfully.\n\nThank you for using MyFund.\n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
             from_email = "MyFund <info@myfundmobile.com>"
             recipient_list = [user.email]
 
-            context = {
-                "subject": subject,
-                "message": message
-            }
-
-            html_message = render_to_string("email/email.html", context=context)
-            plain_message = strip_tags(html_message)
-
-            # send_mail(subject, message, from_email, recipient_list, fail_silently=False)
-            send_mail(subject, plain_message, from_email, recipient_list, html_message=html_message)
+            send_mail(subject, message, from_email, recipient_list, fail_silently=False)
 
             return Response(
                 {
@@ -2560,17 +2662,11 @@ def withdraw_to_local_bank(request):
             )
 
     except IntegrityError:
-        # Handle the case where a unique constraint (transaction_id) is violated
-        return Response(
-            {"error": "Transaction ID conflict. Please try again."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+        return Response({"error": "Transaction conflict, please retry."}, status=400)
+
     except Exception as e:
-        print(f"Error: {str(e)}")
-        return Response(
-            {"error": "An internal error occurred. Please try again later."},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
+        print("Error in withdraw_to_local_bank:", e)
+        return Response({"error": "Server error, please try again later."}, status=500)
 
 
 import string
@@ -2775,6 +2871,24 @@ def process_withdrawal_to_local_bank(request):
                 print(f"❌ STEP 10 ERROR: Error sending email to user: {e}")
                 # Log this error but continue, as the core transaction is done
 
+            # ✅ STEP 10.1: Send push notification to user
+            send_push_notification(
+                user=user,
+                title="Withdrawal Request Pending ⏳",
+                message="Your withdrawal of ₦{:,} from your {} account is pending approval. We'll notify you once it’s processed.".format(
+                    int(amount), source_account.capitalize()
+                ),
+                data={
+                    "amount": str(amount),
+                    "transaction_id": transaction_id,
+                    "source_account": source_account,
+                    "type": "Withdrawal",
+                    "status": "pending",
+                },
+                notif_type="PENDING",
+            )
+            print("✅ STEP 10.2: Push notification sent to user.")
+
             # --- Send email to admin (with more details and correct recipients) ---
             admin_subject = (
                 f"[CHECK] {user.first_name} Wants to Withdraw ₦{amount:,.2f}"
@@ -2902,19 +3016,7 @@ def make_withdrawal_through_paystack(user, target_bank_account, amount):
         "recipient": target_bank_account.paystack_recipient_code,  # Paystack recipient code of the target bank account
     }
 
-    # Log the Paystack API request
-    print("Paystack API Request:")
-    print("URL:", url)
-    print("Headers:", headers)
-    print("Data:", data)
-
     response = requests.post(url, headers=headers, json=data)
-
-    # Log the Paystack API response for debugging
-    print("Paystack API Response Status Code:", response.status_code)
-    print(
-        "Paystack API Response Text:", response.text
-    )  # This will print the response body
 
     return response.json()
 
@@ -2979,111 +3081,124 @@ def make_withdrawal_through_admin(user, amount, transaction_id):
 
 from decimal import Decimal
 
+from decimal import Decimal, InvalidOperation
+from django.core.mail import send_mail
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework import status
+import uuid
+
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
-def initiate_wallet_transfer(request):
+def wallet_transfer_view(request):  # ✅ NEW NAME
     sender = request.user
     data = request.data
-    target_email = data.get(
-        "recipient_email"
-    )  # Update to match the key in the request data
-    amount = Decimal(data.get("amount"))
+    target_email = data.get("recipient_email")
 
-    # Verify that the sender has enough balance in their wallet
+    try:
+        amount = Decimal(str(data.get("amount")))
+    except (InvalidOperation, TypeError, ValueError):
+        return Response(
+            {"error": "Invalid amount format."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if amount <= 0:
+        return Response(
+            {"error": "Amount must be greater than 0."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Check sender balance
     if sender.wallet < amount:
         return Response(
             {"error": "Insufficient balance in the wallet."},
-            status=status.HTTP_BAD_REQUEST,
+            status=status.HTTP_400_BAD_REQUEST,
         )
 
-    # Find the target user by email
+    # Find recipient
     try:
         target_user = CustomUser.objects.get(email=target_email)
     except CustomUser.DoesNotExist:
         return Response(
-            {"error": "Target user not found."}, status=status.HTTP_404_NOT_FOUND
-        )  # Use the correct status code
+            {"error": "Target user not found."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
 
-    # Perform the wallet-to-wallet transfer
+    # Perform transfer
     sender.wallet -= amount
     target_user.wallet += amount
     sender.save()
     target_user.save()
 
-    # Generate unique transaction IDs
-    sender_transaction_id = str(uuid.uuid4().hex)[:10]
-    target_transaction_id = str(uuid.uuid4().hex)[:10]
+    # Push notification to recipient
+    send_push_notification(
+        user=target_user,
+        title="You've Received ₦{:,} from {}".format(amount, sender.first_name),
+        message=f"{sender.first_name} just sent you ₦{amount}. Check your Wallet.",
+        data={"amount": str(amount), "from": sender.email},
+        notif_type="CREDIT",
+    )
 
-    # Create transaction records for sender and target
-    sender_transaction = Transaction(
+    send_push_notification(
+        user=sender,
+        title="You sent ₦{:,} to {}".format(amount, target_user.first_name),
+        message=f"You successfully sent ₦{amount} to {target_user.first_name}.",
+        data={"amount": str(amount), "to": target_user.email},
+        notif_type="DEBIT",
+    )
+
+    # Create transactions
+    sender_transaction = Transaction.objects.create(
         user=sender,
         transaction_type="debit",
         status="confirmed",
         amount=amount,
-        description=f"Sent to {target_user.first_name}",
-        transaction_id=sender_transaction_id,
         total_amount=amount,
+        transaction_id=str(uuid.uuid4().hex)[:10],
+        description=f"Sent to {target_user.first_name}",
     )
-    sender_transaction.save()
 
-    target_transaction = Transaction(
+    target_transaction = Transaction.objects.create(
         user=target_user,
         transaction_type="credit",
         status="confirmed",
         amount=amount,
-        description=f"Received from {sender.first_name}",
-        transaction_id=target_transaction_id,
         total_amount=amount,
     )
     target_transaction.save()
 
     # Send confirmation emails to both users
     subject_sender = f"You Sent ₦{amount} to {target_user.first_name}"
-    message_sender = f"Hi {sender.first_name}, You have successfully transferred ₦{amount} to {target_user.first_name} ({target_user.email}). Thank you for using MyFund!"
+    message_sender = f"Hi {sender.first_name}, \n\nYou have successfully transferred ₦{amount} to {target_user.first_name} ({target_user.email}). \n\nThank you for using MyFund!\n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
     from_email_sender = (
         "MyFund <info@myfundmobile.com>"  # Replace with a valid sender email
     )
     recipient_list_sender = [sender.email]
 
-    context1 = {
-        "subject": subject_sender,
-        "message": message_sender
-    }
-
-    html_message1 = render_to_string("email/email.html", context=context1)
-    plain_message1 = strip_tags(html_message1)
-
-
     subject_target = f"You Received ₦{amount} from {sender.first_name}"
-    message_target = f"Hi {target_user.first_name}, You have received ₦{amount} from {sender.first_name} ({sender.email}). Thank you for using MyFund!"
+    message_target = f"Hi {target_user.first_name}, \n\nYou have received ₦{amount} from {sender.first_name} ({sender.email}). \n\nThank you for using MyFund!\n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
     from_email_target = (
         "MyFund <info@myfundmobile.com>"  # Replace with a valid target email
     )
     recipient_list_target = [target_user.email]
 
-    context2 = {
-        "subject": subject_target,
-        "message": message_target
-    }
-
-    html_message2 = render_to_string("email/email.html", context=context2)
-    plain_message2 = strip_tags(html_message2)
-
-    # send_mail(
-    #     subject_sender,
-    #     message_sender,
-    #     from_email_sender,
-    #     recipient_list_sender,
-    #     fail_silently=False,
-    # )
-    # send_mail(
-    #     subject_target,
-    #     message_target,
-    #     from_email_target,
-    #     recipient_list_target,
-    #     fail_silently=False,
-    # )
+    send_mail(
+        subject_sender,
+        message_sender,
+        from_email_sender,
+        recipient_list_sender,
+        fail_silently=False,
+    )
+    send_mail(
+        subject_target,
+        message_target,
+        from_email_target,
+        recipient_list_target,
+        fail_silently=False,
+    )
 
     send_mail(subject_sender, plain_message1, from_email_sender, recipient_list_sender, html_message=html_message1)
     send_mail(subject_target, plain_message2, from_email_target, recipient_list_target, html_message=html_message2)
@@ -3385,86 +3500,88 @@ def get_top_savers(request):
     current_month = now.month
     current_year = now.year
 
-    # Calculate and store top savers for the month
     with transaction.atomic():
-        # Delete old top savers for the current month and year
+        # Delete existing top savers for the current month/year
         TopSaverHistory.objects.filter(month=current_month, year=current_year).delete()
 
-    # 1. Update ALL users' current month totals
-    CustomUser.objects.all().update(
-        total_savings_and_investments_this_month=Coalesce(
-            Subquery(
-                Transaction.objects.filter(
-                    user=OuterRef("pk"),
-                    date__month=current_month,
-                    date__year=current_year,
-                )
-                .filter(
-                    Q(status="confirmed", transaction_type="credit")
-                    | Q(
-                        description__in=[
-                            "AutoSave (Confirmed)",
-                            "AutoInvest (Confirmed)",
-                        ]
+        # 1. Update user savings totals for current month
+        CustomUser.objects.all().update(
+            total_savings_and_investments_this_month=Coalesce(
+                Subquery(
+                    Transaction.objects.filter(
+                        user=OuterRef("pk"),
+                        date__month=current_month,
+                        date__year=current_year,
                     )
+                    .filter(
+                        Q(status="confirmed", transaction_type="credit")
+                        | Q(
+                            description__in=[
+                                "AutoSave (Confirmed)",
+                                "AutoInvest (Confirmed)",
+                            ]
+                        )
+                    )
+                    .values("user")
+                    .annotate(total=Sum("amount"))
+                    .values("total"),
+                    output_field=DecimalField(),
+                ),
+                0,
+            )
+        )
+
+        # 2. Get top savers
+        users = CustomUser.objects.filter(
+            total_savings_and_investments_this_month__gt=0
+        ).order_by("-total_savings_and_investments_this_month")
+
+        top_amount = (
+            users.first().total_savings_and_investments_this_month
+            if users.exists()
+            else 1
+        )
+
+        # 3. Build TopSaverHistory records
+        top_savers = []
+        top_history_entries = []
+        rank = 1
+
+        for user in users:
+            amount = user.total_savings_and_investments_this_month
+            percentage = round((amount / top_amount) * 100, 1) if top_amount > 0 else 0
+
+            top_history_entries.append(
+                TopSaverHistory(
+                    month=current_month,
+                    year=current_year,
+                    user=user,
+                    total_savings=amount,
+                    rank=rank,
                 )
-                .values("user")
-                .annotate(total=Sum("amount"))
-                .values("total"),
-                output_field=DecimalField(),
-            ),
-            0,
-        )
-    )
+            )
 
-    # 2. Get ordered list of users
-    users = CustomUser.objects.filter(
-        total_savings_and_investments_this_month__gt=0
-    ).order_by("-total_savings_and_investments_this_month")
+            top_savers.append(
+                {
+                    "id": user.id,
+                    "first_name": user.first_name,
+                    "profile_picture": user.profile_picture,
+                    "email": user.email,
+                    "amount": float(amount),
+                    "percentage": percentage,
+                }
+            )
 
-    # 3. Get top amount once for consistent percentage calculations
-    top_amount = (
-        users.first().total_savings_and_investments_this_month
-        if users.exists() and users.first().total_savings_and_investments_this_month > 0
-        else 1
-    )
+            rank += 1
 
-    # 4. Serialize data with calculated percentages and save them to TopSaverHistory
-    top_savers = []
-    rank = 1  # rank starts at 1 for top saver
-    for user in users:
-        percentage = (
-            (user.total_savings_and_investments_this_month / top_amount * 100)
-            if top_amount > 0
-            else 0
-        )
-        # Save to the TopSaverHistory model
-        TopSaverHistory.objects.create(
-            month=current_month,
-            year=current_year,
-            user=user,
-            total_savings=user.total_savings_and_investments_this_month,
-            rank=rank,
-        )
+        # 4. Bulk insert TopSaverHistory
+        TopSaverHistory.objects.bulk_create(top_history_entries)
 
-        top_savers.append(
-            {
-                "id": user.id,
-                "first_name": user.first_name,
-                "profile_picture": user.profile_picture,
-                "email": user.email,
-                "amount": float(user.total_savings_and_investments_this_month),
-                "percentage": round(percentage, 1),
-            }
-        )
-        rank += 1  # Increment rank for the next user
-
-    # 5. Get current user data
+    # 5. Prepare response for current user
     current_user = request.user
+    current_user_amount = current_user.total_savings_and_investments_this_month
     current_user_percentage = (
-        (current_user.total_savings_and_investments_this_month / top_amount * 100)
-        if top_amount > 0
-        else 0
+        round((current_user_amount / top_amount) * 100, 1) if top_amount > 0 else 0
     )
 
     return Response(
@@ -3472,8 +3589,8 @@ def get_top_savers(request):
             "top_savers": top_savers,
             "current_user": {
                 "email": current_user.email,
-                "percentage": round(current_user_percentage, 1),
-                "amount": float(current_user.total_savings_and_investments_this_month),
+                "percentage": current_user_percentage,
+                "amount": float(current_user_amount),
             },
         }
     )
@@ -3512,7 +3629,6 @@ class KYCUpdateView(generics.UpdateAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_object(self):
-        # Use the authenticated user as the object to update
         return self.request.user
 
     def update(self, request, *args, **kwargs):
@@ -3521,34 +3637,51 @@ class KYCUpdateView(generics.UpdateAPIView):
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)
 
+        # If not yet approved, mark as pending and notify user by email
         if user.kyc_status != "Updated!":
-            user.kyc_status = (
-                "Pending..."  # Only update to "Pending..." if not already "Updated!"
-            )
+            user.kyc_status = "Pending..."
             user.save()
 
-        # Notify admin that a KYC update is pending approval
+            # 1️⃣ Email to user
+            user_subject = "KYC Update Received... 🕒"
+            user_message = (
+                f"Hi {user.first_name},\n\n"
+                "We’ve received your updated KYC details. "
+                "Our team will review them shortly, and we’ll let you know once it’s approved.\n\n"
+                "Thank you for using MyFund.\n\n"
+                "MyFund\nSave, Buy Properties, Earn Rent\n"
+                "www.myfundmobile.com\n"
+                "13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+            )
+            send_mail(
+                user_subject,
+                user_message,
+                "MyFund <info@myfundmobile.com>",
+                [user.email],
+                fail_silently=False,
+            )
+
+        # 2️⃣ Push notification to user
+        send_push_notification(
+            user=user,
+            title="KYC Update Submitted... 🕒",
+            message="Thanks for updating your KYC details. We’ll notify you once it’s approved. Thank you for using MyFund.",
+            data={"kyc_status": user.kyc_status},
+            notif_type="SYSTEM",
+        )
+
+        # 3️⃣ Notify admin
         admin_email = ["info@myfundmobile.com", "company@myfundmobile.com"]
         subject = f"KYC Update for {user.first_name} Pending Approval"
-        message = f"Hello Admin, \n\n{user.first_name} {user.last_name} ({user.email}) has submitted a KYC update for approval. Please review it in the <a href='https://myfundapi-myfund-07ce351a.koyeb.app/admin/login/?next=/admin/'>admin panel</a>."
+        message = f"Hello Admin, \n\n{user.first_name} {user.last_name} ({user.email}) has submitted a KYC update for approval. Please review it in the <a href='https://myfundapi-myfund-07ce351a.koyeb.app/admin/login/?next=/admin/'>admin panel</a>.\n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
         from_email = "MyFund <info@myfundmobile.com>"
 
-        context = {
-            "subject": subject,
-            "message": message
-        }
-
-        html_message = render_to_string("email/email.html", context=context)
-        plain_message = strip_tags(html_message)
-
-        send_mail(subject, plain_message, from_email, admin_email, html_message=html_message)
-
-        # send_mail(subject, message, from_email, admin_email, fail_silently=False)
+        send_mail(subject, message, from_email, admin_email, fail_silently=False)
 
         return Response(serializer.data)
 
 
-kyc_update_view = KYCUpdateView.as_view()
+view = KYCUpdateView.as_view()
 
 
 class GetKYCStatusView(APIView):
@@ -3739,6 +3872,21 @@ def initiate_bank_transfer(request):
         )
         transaction.save()
 
+        send_push_notification(
+            user=user,
+            title="QuickSave Pending ⏳",
+            message="Your transfer of ₦{:,} is pending approval. We'll notify you once it’s confirmed. Thank you for using MyFund.".format(
+                int(amount)
+            ),
+            data={
+                "amount": str(amount),
+                "transaction_id": transaction_id,
+                "type": "QuickSave",
+                "status": "pending",
+            },
+            notif_type="PENDING",
+        )
+
         # ✅ Notify Admin
         subject = f"[CHECK] {user.first_name} Made A QuickSave Request"
         message = f"Hi Admin, A bank transfer request of ₦{amount} has been initiated by {user.first_name} {user.last_name} ({user.email}). Review here: https://myfundapi-myfund-07ce351a.koyeb.app/admin/ MyFund Team"
@@ -3819,22 +3967,12 @@ def initiate_invest_transfer(request):
 
         # Send a pending invest email to the user
         user_subject = "QuickInvest Pending..."
-        user_message = f"Hi {user.first_name}, Your investment transfer request of ₦{amount} is pending approval. We will notify you once it's processed. Thank you for using MyFund."
-        user_email = [user.email]
+        user_message = f"Hi {user.first_name},\n\nYour investment transfer request of ₦{amount} is pending approval. We will notify you once it's processed. \n\nThank you for using MyFund. \n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+        user_email = user.email
 
-        context = {
-            "subject": user_subject,
-            "message": user_message
-        }
-
-        html_message = render_to_string("email/email.html", context=context)
-        plain_message = strip_tags(html_message)
-
-        send_mail(user_subject, plain_message, from_email, user_email, html_message=html_message)
-
-        # send_mail(
-        #     user_subject, user_message, from_email, [user_email], fail_silently=False
-        # )
+        send_mail(
+            user_subject, user_message, from_email, [user_email], fail_silently=False
+        )
 
         # Create a pending transaction for the user with date and time
         current_datetime = timezone.now()
@@ -4197,31 +4335,201 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
 
         match event["event"]:
             case "charge.success":
-                # metadata = event["data"].get("metadata", {})
-                # if metadata.get("purpose") == "quicksave":
-                #     # Skip processing for OTP-based transactions
-                #     transaction = Transaction.objects.filter(
-                #         transaction_id=event["data"]["reference"]
-                #     ).first()
-
-                #     if transaction and transaction.status == "pending":
-                #         print("Skipping webhook processing for pending OTP transaction")
-                #         return
-
                 reference = event["data"]["reference"]
                 payment_channel = event["data"]["channel"]
                 email = event["data"]["customer"]["email"]
                 amount = Decimal(event["data"]["amount"]) / 100
-                paystack_auth_code = event["data"]["authorization"]["authorization_code"]
-                transaction = Transaction.objects.get(
-                    transaction_id=reference, amount=amount
+                paystack_auth_code = event["data"]["authorization"][
+                    "authorization_code"
+                ]
+                plan_code = (
+                    event["data"]["plan"]["plan_code"]
+                    if event["data"]["plan"]
+                    else None
                 )
-                user = CustomUser.objects.get(email=email)
-                # Check if this is an AutoSave transaction
-                autosave = AutoSave.objects.filter(paystack_trans_ref=reference).first()
-                autoinvest = AutoInvest.objects.filter(paystack_trans_ref=reference).first()
 
-                if transaction.description.lower().startswith("quicksave"):
+                try:
+                    user = CustomUser.objects.get(email=email)
+                except CustomUser.DoesNotExist:
+                    user = None
+
+                    # Send an email of the error that ocurred
+                    subject = "[Webhook Error] User NOT Found in DB"
+                    message = f"No user found with email {email}."
+
+                    from_email = "MyFund <info@myfundmobile.com>"
+                    recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
+
+                    send_mail(
+                        subject,
+                        message,
+                        from_email,
+                        recipient_list,
+                        fail_silently=False,
+                    )
+
+                    return JsonResponse({"status": True}, status=status.HTTP_200_OK)
+
+                try:
+                    transaction = Transaction.objects.get(
+                        transaction_id=reference, amount=amount
+                    )
+                except Transaction.DoesNotExist:
+                    transaction = None
+
+                    # Send an email of the error that ocurred
+                    subject = "[Webhook Error] Referrence ID NOT Found in DB"
+                    message = f"No Transaction found with reference {reference} and amount {amount}."
+
+                    from_email = "MyFund <info@myfundmobile.com>"
+                    recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
+
+                    pass
+
+                # Determine if this is an AutoSave/AutoInvest (has plan_code) or QuickSave/QuickInvest (no plan_code)
+                if plan_code:
+                    # AutoSave or AutoInvest flow
+                    autosave = AutoSave.objects.filter(
+                        user=user, paystack_plan_code=plan_code, active=True
+                    ).first()
+                    autoinvest = None
+                    if not autosave:
+                        autoinvest = AutoInvest.objects.filter(
+                            user=user, paystack_plan_code=plan_code, active=True
+                        ).first()
+
+                    target = autosave if autosave else autoinvest
+
+                    if not target:
+                        # Send an email of the error that ocurred
+                        subject = "[Webhook Error] Referrence ID NOT Found in DB"
+                        message = f"No Transaction found with reference {reference} and amount {amount}."
+
+                        from_email = "MyFund <info@myfundmobile.com>"
+                        recipient_list = [
+                            "info@myfundmobile.com",
+                            "sammy@myfundmobile.com",
+                        ]
+
+                        return
+
+                    # Create a new confirmed Transaction for this autosave/autoinvest payment
+                    if autosave:
+                        # Create transaction if it doesn't exist
+                        if not transaction:
+                            transaction = Transaction.objects.create(
+                                user=user,
+                                transaction_type="credit",
+                                status="confirmed",
+                                amount=Decimal(amount),
+                                description=f"AutoSave ({autosave.frequency.capitalize()})",
+                                transaction_id=reference,
+                                paystack_auth_code=paystack_auth_code,
+                            )
+
+                        # Atomically update user's savings
+                        transaction.status = "confirmed"
+                        transaction.paystack_auth_code = paystack_auth_code
+                        transaction.save()
+
+                        user.savings += int(amount)
+                        user.update_total_savings_and_investment_this_month()
+                        user.save()
+
+                        subject = "QuickSave Successful!"
+                        message = f"Well done {user.first_name},\n\nYour QuickSave was successful and ₦{amount} has been successfully added to your SAVINGS account. \n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+                        from_email = "MyFund <info@myfundmobile.com>"
+                        recipient_list = [user.email]
+
+                        send_mail(
+                            subject,
+                            message,
+                            from_email,
+                            recipient_list,
+                            fail_silently=False,
+                        )
+
+                        # Send push notification
+                        send_push_notification(
+                            user=user,
+                            title="AutoSave Successful! ✅",
+                            message=(
+                                f"Your scheduled AutoSave of ₦{Decimal(amount):,.2f} "
+                                f"({autosave.frequency.capitalize()}) has just been deposited into your savings."
+                            ),
+                            data={
+                                "amount": str(amount),
+                                "frequency": autosave.frequency,
+                                "transaction_id": reference,
+                                "type": "AutoSave",
+                                "status": "confirmed",
+                            },
+                            notif_type="CREDIT",
+                        )
+
+                        print("AutoSave Successfully Credited your Account.")
+
+                        return JsonResponse({"status": True}, status=status.HTTP_200_OK)
+
+                    elif autoinvest:
+                        # Create transaction if it doesn't exist
+                        if not transaction:
+                            transaction = Transaction.objects.create(
+                                user=user,
+                                transaction_type="credit",
+                                status="confirmed",
+                                amount=Decimal(amount),
+                                description=f"AutoInvest ({autoinvest.frequency.capitalize()})",
+                                transaction_id=reference,
+                                paystack_auth_code=paystack_auth_code,
+                            )
+
+                        transaction.status = "confirmed"
+                        transaction.paystack_auth_code = paystack_auth_code
+                        transaction.save()
+
+                        user.investment += int(amount)
+                        user.update_total_savings_and_investment_this_month()
+                        user.save()
+
+                        subject = "QuickInvest Successful!"
+                        message = f"Well done {user.first_name},\n\nYour QuickInvest was successful and ₦{amount} has been successfully added to your INVESTMENTS account. \n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+                        from_email = "MyFund <info@myfundmobile.com>"
+                        recipient_list = [user.email]
+
+                        send_mail(
+                            subject,
+                            message,
+                            from_email,
+                            recipient_list,
+                            fail_silently=False,
+                        )
+
+                        # Send push notification
+                        send_push_notification(
+                            user=user,
+                            title="AutoInvest Successful! 🎉",
+                            message=(
+                                f"Your scheduled AutoInvest of ₦{Decimal(amount):,.2f} "
+                                f"({autoinvest.frequency.capitalize()}) has just been deposited into your investments."
+                            ),
+                            data={
+                                "amount": str(amount),
+                                "frequency": autoinvest.frequency,
+                                "transaction_id": reference,
+                                "type": "AutoInvest",
+                                "status": "confirmed",
+                            },
+                            notif_type="CREDIT",
+                        )
+
+                        print("AutoInvest Successfully Credited your Account.")
+
+                        return JsonResponse({"status": True}, status=status.HTTP_200_OK)
+
+                elif transaction and transaction.description.lower().startswith(
+                    "quicksave"
+                ):
 
                     # print("\n====QuickSave Webhook Processing ====\n")
                     transaction.description = f"QuickSave ({payment_channel})"
@@ -4234,30 +4542,46 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     user.update_total_savings_and_investment_this_month()
                     user.save()
 
-                    subject = "QuickSave Successful!"
-                    message = f"Well done {user.first_name}, Your QuickSave was successful and ₦{amount} has been successfully added to your SAVINGS account. Keep growing your funds.🥂"
+                    # Send success email
+                    subject = (
+                        f"AutoSave ({autosave.frequency.capitalize()}) Successful!"
+                    )
+                    message = f"Well done {user.first_name},\n\nYour AutoSave was successful and ₦{amount:,.2f} has been added to your SAVINGS account."
                     from_email = "MyFund <info@myfundmobile.com>"
                     recipient_list = [user.email]
+                    send_mail(
+                        subject,
+                        message,
+                        from_email,
+                        recipient_list,
+                        fail_silently=False,
+                    )
 
-                    context = {
-                        "subject": subject,
-                        "message": message
-                    }
+                    # Update autosave record
+                    autosave.last_success = timezone.now()
+                    autosave.save()
 
-                    html_message = render_to_string("email/email.html", context=context)
-                    plain_message = strip_tags(html_message)
+                    send_push_notification(
+                        user=user,
+                        title="AutoSave Successful! ✅",
+                        message=f"Your scheduled AutoSave of ₦{amount:,.2f} has just been deposited into your savings. Thank you for using MyFund!",
+                        data={
+                            "amount": str(amount),
+                            "frequency": autosave.frequency,
+                            "transaction_id": reference,
+                            "type": "AutoSave",
+                            "status": "confirmed",
+                        },
+                        notif_type="CREDIT",
+                    )
 
-                    send_mail(subject, plain_message, from_email, recipient_list, html_message=html_message)
+                    return JsonResponse(
+                        {"status": True}, status=status.HTTP_200_OK
+                    )  # Prevent double processing
 
-                    # send_mail(
-                    #     subject,
-                    #     message,
-                    #     from_email,
-                    #     recipient_list,
-                    #     fail_silently=False,
-                    # )
-
-                elif transaction.description.lower().startswith("quickinvest"):
+                elif transaction and transaction.description.lower().startswith(
+                    "quickinvest"
+                ):
                     transaction.description = f"QuickInvest ({payment_channel})"
                     transaction.status = "confirmed"
                     transaction.paystack_auth_code = paystack_auth_code
@@ -4268,136 +4592,26 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     user.update_total_savings_and_investment_this_month()
                     user.save()
 
-                    subject = "QuickInvest Successful!"
-                    message = f"Well done {user.first_name}, Your QuickInvest was successful and ₦{amount} has been successfully added to your INVESTMENTS account. Keep growing your funds.🥂"
-                    from_email = "MyFund <info@myfundmobile.com>"
-                    recipient_list = [user.email]
-
-                    context = {
-                        "subject": subject,
-                        "message": message
-                    }
-
-                    html_message = render_to_string("email/email.html", context=context)
-                    plain_message = strip_tags(html_message)
-
-                    send_mail(subject, plain_message, from_email, recipient_list, html_message=html_message)
-
-                    # send_mail(
-                    #     subject,
-                    #     message,
-                    #     from_email,
-                    #     recipient_list,
-                    #     fail_silently=False,
-                    # )
-
-                elif autosave:
-                    # Use Decimal for precision
-                    if not transaction:
-                        transaction = Transaction.objects.create(
-                            user=user,
-                            transaction_type="credit",
-                            status="confirmed",
-                            amount=amount,
-                            description=f"AutoSave ({autosave.frequency.capitalize()})",
-                            transaction_id=reference,
-                        )
-
-                    # Atomic update for savings
-                    CustomUser.objects.filter(pk=user.pk).update(
-                        savings=F("savings") + amount
-                    )
-
-                    # Refresh user instance
-                    user.refresh_from_db()
-
-                    # Update totals and process referrals
-                    user.update_total_savings_and_investment_this_month()
-                    user.confirm_referral_rewards(is_referrer=True)
-
-                    # Send success email
-                    subject = (
-                        f"AutoSave ({autosave.frequency.capitalize()}) Successful!"
-                    )
-                    message = f"Well done {user.first_name}, Your AutoSave was successful and ₦{amount:,.2f} has been added to your SAVINGS account."
-                    from_email = "MyFund <info@myfundmobile.com>"
-                    recipient_list = [user.email]
-
-                    context = {
-                        "subject": subject,
-                        "message": message
-                    }
-
-                    html_message = render_to_string("email/email.html", context=context)
-                    plain_message = strip_tags(html_message)
-
-                    send_mail(subject, plain_message, from_email, recipient_list, html_message=html_message)
-                    # send_mail(
-                    #     subject,
-                    #     message,
-                    #     from_email,
-                    #     recipient_list,
-                    #     fail_silently=False,
-                    # )
-
-                    # Update autosave record
-                    autosave.last_success = timezone.now()
-                    autosave.save()
-                    return  # Prevent double processing
-                
-                elif autoinvest:
-                    # Use Decimal for precision
-                    if not transaction:
-                        transaction = Transaction.objects.create(
-                            user=user,
-                            transaction_type="credit",
-                            status="confirmed",
-                            amount=amount,
-                            description=f"AutoInvest ({autosave.frequency.capitalize()})",
-                            transaction_id=reference,
-                        )
-
-                    # Atomic update for savings
-                    CustomUser.objects.filter(pk=user.pk).update(
-                        savings=F("savings") + amount
-                    )
-
-                    # Refresh user instance
-                    user.refresh_from_db()
-
-                    # Update totals and process referrals
-                    user.update_total_savings_and_investment_this_month()
-                    user.confirm_referral_rewards(is_referrer=True)
-
                     # Send success email
                     subject = (
                         f"AutoInvest ({autosave.frequency.capitalize()}) Successful!"
                     )
-                    message = f"Well done {user.first_name}, Your AutoInvest was successful and ₦{amount:,.2f} has been added to your SAVINGS account."
+                    message = f"Well done {user.first_name},\n\nYour AutoInvest was successful and ₦{amount:,.2f} has been added to your SAVINGS account."
                     from_email = "MyFund <info@myfundmobile.com>"
                     recipient_list = [user.email]
+                    send_mail(
+                        subject,
+                        message,
+                        from_email,
+                        recipient_list,
+                        fail_silently=False,
+                    )
 
-                    context = {
-                        "subject": subject,
-                        "message": message
-                    }
+                    print("QuickInvest Successfully Credited your Account.")
 
-                    html_message = render_to_string("email/email.html", context=context)
-                    plain_message = strip_tags(html_message)
-
-                    send_mail(subject, plain_message, from_email, recipient_list, html_message=html_message)
-                    # send_mail(
-                    #     subject,
-                    #     message,
-                    #     from_email,
-                    #     recipient_list,
-                    #     fail_silently=False,
-                    # )
-
-                    # Update autosave record
-                    autoinvest.last_success = timezone.now()
-                    autoinvest.save()
-                    return  # Prevent double processing
+                    return JsonResponse(
+                        {"status": True}, status=status.HTTP_200_OK
+                    )  # Prevent double processing
 
                 else:
                     # Handle regular transactions
@@ -4441,10 +4655,17 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             transaction_id=event["data"]["reference"],
                         )
 
+                        user.investment += int(amount)
+                        # user.confirm_referral_rewards(is_referrer=True)
+                        user.update_total_savings_and_investment_this_month()
+                        user.save()
+
                 print(f"transaction before update: {transaction}")
 
                 # Only update AutoSave transactions if they are not already confirmed
-                if transaction.description.lower().startswith("autosave"):
+                if transaction and transaction.description.lower().startswith(
+                    "autosave"
+                ):
                     # If already confirmed, do nothing.
                     if transaction.status != "confirmed":
                         autosave_rec = AutoSave.objects.filter(
@@ -4462,6 +4683,11 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         transaction.save(
                             update_fields=["transaction_type", "status", "description"]
                         )
+
+                        user.savings += int(amount)
+                        # user.confirm_referral_rewards(is_referrer=True)
+                        user.update_total_savings_and_investment_this_month()
+                        user.save()
                     else:
                         # Already confirmed: ensure description includes the frequency.
                         autosave_rec = AutoSave.objects.filter(
@@ -4552,73 +4778,73 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
 
                 print(f"transaction after update: {transaction}")
 
-                return JsonResponse({"status": True}, status=status.HTTP_200_OK)
-
+                return
             case "invoice.create":
-                sub_code = event["data"]["subscription"]["subscription_code"]
-                sub_token = event["data"]["subscription"]["email_token"]
-                email = event["data"]["customer"]["email"]
-                trans_ref = event["data"]["transaction"]["reference"]
-                user = CustomUser.objects.get(email=email)
+                # sub_code = event["data"]["subscription"]["subscription_code"]
+                # sub_token = event["data"]["subscription"]["email_token"]
+                # email = event["data"]["customer"]["email"]
+                # trans_ref = event["data"]["transaction"]["reference"]
+                # user = CustomUser.objects.get(email=email)
 
-                print(f"sub_code: {sub_code}, sub_token: {sub_token}")
+                # print(f"sub_code: {sub_code}, sub_token: {sub_token}")
 
-                if AutoSave.objects.get(
-                    paystack_sub_code=sub_code,
-                    paystack_sub_token=sub_token,
-                ):
-                    # print(f"AutoSave has a record with the sub_code: {sub_code} and sub_token: {sub_token}")
+                # if AutoSave.objects.get(
+                #     paystack_sub_code=sub_code,
+                #     paystack_sub_token=sub_token,
+                # ):
+                #     # print(f"AutoSave has a record with the sub_code: {sub_code} and sub_token: {sub_token}")
 
-                    amount = event["data"]["amount"] / 100  # convert amount to naira
+                #     amount = event["data"]["amount"] / 100  # convert amount to naira
 
-                    # Check if a transaction with the same transaction_id already exists
-                    existing_transaction = Transaction.objects.filter(
-                        transaction_id=trans_ref
-                    ).first()
+                #     # Check if a transaction with the same transaction_id already exists
+                #     existing_transaction = Transaction.objects.filter(
+                #         transaction_id=trans_ref
+                #     ).first()
 
-                    if not existing_transaction:
-                        # Create a new transaction if not found
-                        Transaction.objects.create(
-                            user=user,
-                            transaction_type="credit",
-                            status="pending",
-                            amount=int(amount),
-                            description="AutoSave",
-                            transaction_id=trans_ref,
-                        )
+                #     if not existing_transaction:
+                #         # Create a new transaction if not found
+                #         Transaction.objects.create(
+                #             user=user,
+                #             transaction_type="credit",
+                #             status="pending",
+                #             amount=int(amount),
+                #             description="AutoSave",
+                #             transaction_id=trans_ref,
+                #         )
 
-                    return JsonResponse({"status": True}, status=status.HTTP_200_OK)
+                #     return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
-                elif AutoInvest.objects.get(
-                    paystack_sub_code=sub_code,
-                    paystack_sub_token=sub_token,
-                ):
-                    # print(f"AutoInvest has a record with the sub_code: {sub_code} and sub_token: {sub_token}")
+                # elif AutoInvest.objects.get(
+                #     paystack_sub_code=sub_code,
+                #     paystack_sub_token=sub_token,
+                # ):
+                #     # print(f"AutoInvest has a record with the sub_code: {sub_code} and sub_token: {sub_token}")
 
-                    amount = event["data"]["amount"] / 100  # convert amount to naira
+                #     amount = event["data"]["amount"] / 100  # convert amount to naira
 
-                    # Check if a transaction with the same transaction_id already exists
-                    existing_transaction = Transaction.objects.filter(
-                        transaction_id=trans_ref
-                    ).first()
+                #     # Check if a transaction with the same transaction_id already exists
+                #     existing_transaction = Transaction.objects.filter(
+                #         transaction_id=trans_ref
+                #     ).first()
 
-                    if not existing_transaction:
-                        # Create a new transaction if not found
-                        Transaction.objects.create(
-                            user=user,
-                            transaction_type="credit",
-                            status="pending",
-                            amount=int(amount),
-                            description="AutoInvest",
-                            transaction_id=trans_ref,
-                        )
+                #     if not existing_transaction:
+                #         # Create a new transaction if not found
+                #         Transaction.objects.create(
+                #             user=user,
+                #             transaction_type="credit",
+                #             status="pending",
+                #             amount=int(amount),
+                #             description="AutoInvest",
+                #             transaction_id=trans_ref,
+                #         )
 
-                    return JsonResponse({"status": True}, status=status.HTTP_200_OK)
+                #     return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
-                else:
-                    print(
-                        f'\n"invoice.create" details does not exist in MyFund database\n'
-                    )
+                # else:
+                #     print(
+                #         f'\n"invoice.create" details does not exist in MyFund database\n'
+                #     )
+                return
 
             case "invoice.payment_failed":
 
@@ -6318,15 +6544,15 @@ class CurrentMonthFinancialView(generics.RetrieveAPIView):
             user=request.user,
             month=first_day_of_month,
             defaults={
-                "total_savings": request.user.account_balance.savings,
-                "total_investments": request.user.account_balance.investments,
+                "total_savings": request.user.savings,
+                "total_investments": request.user.investment,
             },
         )
 
         # Update if not created and values might have changed
         if not created:
-            record.total_savings = request.user.account_balance.savings
-            record.total_investments = request.user.account_balance.investments
+            record.total_savings = request.user.savings
+            record.total_investments = request.user.investment
             record.save()
 
         serializer = MonthlyFinancialRecordSerializer(record)
@@ -6404,6 +6630,7 @@ def save_expo_push_token(request):
     user = request.user
     token = request.data.get("expo_push_token")
     device_type = request.data.get("device_type", "unknown")
+    app_version = request.data.get("app_version")
 
     if not token:
         return Response({"error": "No token provided"}, status=400)
@@ -6413,13 +6640,185 @@ def save_expo_push_token(request):
         entry for entry in user.expo_push_tokens if entry["token"] != token
     ]
 
-    user.expo_push_tokens.append(
-        {
-            "token": token,
-            "device_type": device_type.lower(),
-            "last_seen": timezone.now().isoformat(),
-        }
-    )
+    new_token = {
+        "token": token,
+        "device_type": device_type.lower(),
+        "last_seen": timezone.now().isoformat(),
+    }
 
+    if app_version:
+        new_token["app_version"] = app_version
+
+    user.expo_push_tokens.append(new_token)
     user.save()
     return Response({"message": "Token saved"})
+
+
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+from django.utils import timezone
+from django.db.models import Count, Q
+from django.core.mail import send_mail
+from authentication.utils import send_push_notification
+from authentication.models import CustomUser
+
+
+class TopReferralsAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get_profile_pic_url(self, user_obj):
+        pic = user_obj.profile_picture
+        if not pic:
+            return None
+        if hasattr(pic, "url"):
+            return pic.url
+        if isinstance(pic, str):
+            return pic
+        return None
+
+    def send_rank_notification(self, user, old_rank, new_rank):
+        """Sends consistent email + push notifications for rank changes."""
+        if new_rank < old_rank:
+            subject = f"🎉 Congrats! You're Now #{new_rank} on MyFund!"
+            message = (
+                f"Hi {user.first_name},\n\n"
+                f"Great news! Your referral rank improved from #{old_rank} to #{new_rank}. "
+                "Keep referring friends to climb higher!\n\n"
+                "Thank you for using MyFund.\n\n"
+                "MyFund\nSave, Buy Properties, Earn Rent\n"
+                "www.myfundmobile.com\n"
+                "13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+            )
+            push_title = f"🎉 Rank Improved! Now #{new_rank}"
+            push_message = (
+                f"Hi {user.first_name}, you moved up to #{new_rank} (from #{old_rank}). "
+                "Keep referring to earn more rewards!"
+            )
+        else:
+            subject = f"📉 Your MyFund Rank Changed to #{new_rank}"
+            message = (
+                f"Hi {user.first_name},\n\n"
+                f"Your referral rank changed from #{old_rank} to #{new_rank}. "
+                "Share your referral link to move back up!\n\n"
+                "Thank you for using MyFund.\n\n"
+                "MyFund\nSave, Buy Properties, Earn Rent\n"
+                "www.myfundmobile.com\n"
+                "13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+            )
+            push_title = f"📉 Rank Changed to #{new_rank}"
+            push_message = (
+                f"Hi {user.first_name}, your rank is now #{new_rank} (was #{old_rank}). "
+                "Refer more friends to climb higher!"
+            )
+
+        # Send email
+        send_mail(
+            subject,
+            message,
+            "MyFund <info@myfundmobile.com>",
+            [user.email],
+            fail_silently=False,
+        )
+
+        # Send push notification
+        send_push_notification(
+            user=user,
+            title=push_title,
+            message=push_message,
+            data={"old_rank": old_rank, "new_rank": new_rank, "type": "ReferralRank"},
+            notif_type="SYSTEM",
+        )
+
+    def get(self, request):
+        user = request.user
+        now = timezone.now()
+        start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+        # Get referral performance
+        ref_stats = (
+            CustomUser.objects.filter(
+                referral__isnull=False,
+                date_joined__gte=start_of_month,
+            )
+            .values("referral")
+            .annotate(
+                monthly_signups=Count("id"),
+                monthly_confirmed=Count(
+                    "id",
+                    filter=Q(
+                        referral_reward_confirmed_at__gte=start_of_month,
+                        referral_reward_granted=True,
+                    ),
+                ),
+            )
+            .order_by("-monthly_confirmed", "-monthly_signups")
+        )
+
+        ref_ids = [stat["referral"] for stat in ref_stats]
+        ref_users = CustomUser.objects.in_bulk(ref_ids)
+
+        top_users = []
+        for stat in ref_stats:
+            ref_user = ref_users.get(stat["referral"])
+            if not ref_user:
+                continue
+            top_users.append(
+                {
+                    "id": ref_user.id,
+                    "first_name": ref_user.first_name,
+                    "last_name": ref_user.last_name,
+                    "email": ref_user.email,
+                    "profile_picture": self.get_profile_pic_url(ref_user),
+                    "monthly_signups": stat["monthly_signups"],
+                    "monthly_confirmed": stat["monthly_confirmed"],
+                }
+            )
+
+        # Sort and rank
+        top_users.sort(key=lambda x: (-x["monthly_confirmed"], -x["monthly_signups"]))
+
+        rank_changes = {}
+        for index, user_data in enumerate(top_users):
+            u = CustomUser.objects.get(id=user_data["id"])
+            new_rank = index + 1
+            old_rank = u.last_referral_rank or 0
+
+            if old_rank != new_rank:
+                rank_changes[u] = (old_rank, new_rank)
+                u.last_referral_rank = new_rank
+                u.save(update_fields=["last_referral_rank"])
+
+        # Send notifications
+        for user_obj, (old_rank, new_rank) in rank_changes.items():
+            self.send_rank_notification(user_obj, old_rank, new_rank)
+
+        # Current user stats
+        my_signups = CustomUser.objects.filter(
+            referral=user, date_joined__gte=start_of_month
+        )
+        my_confirmed = my_signups.filter(
+            referral_reward_confirmed_at__gte=start_of_month,
+            referral_reward_granted=True,
+        )
+
+        current_user_stats = {
+            "id": user.id,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "email": user.email,
+            "profile_picture": self.get_profile_pic_url(user),
+            "monthly_signups": my_signups.count(),
+            "monthly_confirmed": my_confirmed.count(),
+            "rank": next(
+                (i + 1 for i, u in enumerate(top_users) if u["email"] == user.email),
+                None,
+            ),
+        }
+
+        return Response(
+            {
+                "top_referrers": top_users[:50],
+                "current_user": current_user_stats,
+            }
+        )

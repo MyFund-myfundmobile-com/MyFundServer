@@ -75,8 +75,10 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     reset_token_expires = models.DateTimeField(null=True, blank=True)
     profile_picture = models.CharField(max_length=200, null=True, blank=True)
     is_confirmed = models.BooleanField(default=False)
+    referral_reward_confirmed_at = models.DateTimeField(null=True, blank=True)
     is_subscribed = models.BooleanField(default=True)
     date_joined = models.DateTimeField(auto_now_add=True, db_index=True)
+    is_deleted = models.BooleanField(default=False)
 
     @property
     def full_name(self):
@@ -88,6 +90,8 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     pending_referral_reward = models.DecimalField(
         max_digits=10, decimal_places=2, default=0
     )
+    last_referral_rank = models.IntegerField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)  # 👈 Add this here
 
     how_did_you_hear = models.CharField(
         max_length=50,
@@ -521,6 +525,10 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     def myfund_pin_encrypted(self):
         return self.myfund_pin
 
+    def delete(self, *args, **kwargs):
+        self.is_deleted = True
+        self.save()
+
     def generate_reset_token(self):
         token = "".join(random.choices(string.ascii_letters + string.digits, k=64))
         self.reset_token = token
@@ -550,20 +558,32 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
 
     def confirm_referral_rewards(self, is_referrer):
         if self.referral and not self.referral_reward_granted:
-            # Determine the savings threshold based on whether referrer is an ambassador
-            savings_threshold = 10000 if self.referral.is_ambassador else 20000
-            investment_threshold = 100000  # Keep investment threshold the same
+            # Check if current month is August 2025
+            current_time = timezone.now()
+            is_august_2025 = current_time.month == 8 and current_time.year == 2025
 
-            # Check if savings or investment has crossed the threshold for the first time
-            first_time_savings_threshold = self.savings >= savings_threshold
-            first_time_investment_threshold = self.investment >= investment_threshold
+            # Set threshold based on month
+            savings_threshold = (
+                5000
+                if is_august_2025
+                else (10000 if self.referral.is_ambassador else 20000)
+            )
+            investment_threshold = 100000
 
-            if first_time_savings_threshold or first_time_investment_threshold:
-                # Mark referral reward as granted to prevent duplicate credits
+            qualifies_by_savings = self.savings >= savings_threshold
+            qualifies_by_investment = self.investment >= investment_threshold
+
+            if qualifies_by_savings or qualifies_by_investment:
                 self.referral_reward_granted = True
-                self.save(update_fields=["referral_reward_granted"])
+                self.referral_reward_confirmed_at = current_time
+                self.save(
+                    update_fields=[
+                        "referral_reward_granted",
+                        "referral_reward_confirmed_at",
+                    ]
+                )
 
-                # Update referred user's pending transaction to confirmed
+                # Confirm referred transaction
                 referred_transaction = Transaction.objects.filter(
                     user=self, transaction_type="credit", status="pending"
                 ).first()
@@ -573,12 +593,11 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                     referred_transaction.description = "Referral Reward"
                     referred_transaction.save()
 
-                    # Ensure wallet and transaction amounts match correctly
                     self.wallet += referred_transaction.amount
                     self.pending_referral_reward -= referred_transaction.amount
                     self.save(update_fields=["wallet", "pending_referral_reward"])
 
-                # Update referrer's pending transaction to confirmed
+                # Confirm referrer transaction
                 referrer_transaction = Transaction.objects.filter(
                     user=self.referral,
                     referral_email=self.email,
@@ -591,14 +610,44 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                     referrer_transaction.description = "Referral Reward"
                     referrer_transaction.save()
 
-                    # Ensure wallet and transaction amounts match correctly
                     self.referral.wallet += referrer_transaction.amount
                     self.referral.pending_referral_reward -= referrer_transaction.amount
                     self.referral.save(
                         update_fields=["wallet", "pending_referral_reward"]
                     )
 
-                # Send confirmation emails
+                from .utils import send_push_notification
+
+                if referred_transaction:
+                    send_push_notification(
+                        user=self,
+                        title="Referral Reward Received! 🎉",
+                        message=f"You've got ₦{referred_transaction.amount:,} for referring {self.referral.first_name}. Thank you for using MyFund!",
+                        data={
+                            "amount": str(referred_transaction.amount),
+                            "transaction_id": referred_transaction.transaction_id,
+                            "type": "Referral",
+                            "role": "referred",
+                            "status": "confirmed",
+                        },
+                        notif_type="CREDIT",
+                    )
+
+                if referrer_transaction:
+                    send_push_notification(
+                        user=self.referral,
+                        title="Referral Reward Confirmed! 🎊",
+                        message=f"You've earned ₦{referrer_transaction.amount:,} for referring {self.first_name} and improved your chances for more rewards. Check the Referral List for your ranking. Keep it up!",
+                        data={
+                            "amount": str(referrer_transaction.amount),
+                            "transaction_id": referrer_transaction.transaction_id,
+                            "type": "Referral",
+                            "role": "referrer",
+                            "status": "confirmed",
+                        },
+                        notif_type="CREDIT",
+                    )
+
                 self.send_confirmation_email(self, is_referrer=False)
                 self.send_confirmation_email(self.referral, is_referrer=True)
 
@@ -607,26 +656,44 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                 )
 
     def send_confirmation_email(self, user, is_referrer):
+        current_time = timezone.now()
+        is_august_2025 = current_time.month == 8 and current_time.year == 2025
+
         if is_referrer:
             ambassador_note = (
                 "\n\nP.S. As our valued Ambassador, you qualified for early referral rewards. Keep up the great work!"
                 if user.is_ambassador
                 else ""
             )
+
+            august_note = (
+                "\n\nP.S. For August Referral contest, for early referral rewards. Keep up the great work!"
+                if is_august_2025
+                else ""
+            )
+
             subject = f"Congrats!🎊🥂 Referral Reward for {self.first_name} Confirmed!"
             message = (
                 f"Congratulations {user.first_name},\n\n"
                 f"You have received a referral reward of ₦500.00 in your wallet for referring {self.first_name}."
                 f"{ambassador_note}"
+                f"{august_note}"
                 f"\n\nThank you for using MyFund and referring others!"
                 f"\n\nKeep growing your funds.🥂"
                 f"\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
             )
         else:
+            august_note = (
+                "\n\nP.S. For August Referral contest, for early referral rewards. Keep up the great work!"
+                if is_august_2025
+                else ""
+            )
+
             subject = f"Congrats!🎊🥂 Referral Reward Confirmed!"
             message = (
                 f"Congratulations {self.first_name}, \n\n"
                 f"You have received a referral reward of ₦500.00 in your wallet thanks to your referral."
+                f"{august_note}"
                 f"\n\nThank you for using MyFund!"
                 f"\n\nKeep growing your funds.🥂"
                 f"\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
@@ -733,7 +800,14 @@ from django.utils import timezone
 class TopSaverHistory(models.Model):
     month = models.PositiveIntegerField()
     year = models.PositiveIntegerField()
-    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE)
+    user = models.ForeignKey(
+        CustomUser,
+        on_delete=models.SET_NULL,  # previously models.CASCADE
+        related_name="top_saver_history",
+        null=True,  # important to allow nulls if we're setting null
+        blank=True,
+    )
+
     total_savings = models.DecimalField(max_digits=10, decimal_places=2)
     rank = models.PositiveIntegerField()
 
@@ -928,6 +1002,101 @@ class TargetSavings(models.Model):
     def __str__(self):
         return f"{self.user.email}'s {self.name} Target"
 
+    def process_deduction(self):
+        """Process the periodic deduction for this target savings"""
+        from django.db import transaction
+        from authentication.models import Transaction, CustomUser
+
+        try:
+            with transaction.atomic():
+                user = CustomUser.objects.get(id=self.user.id)
+                amount = self.monthly_payment
+
+                # Check funding source and balance
+                if self.funding_source == "SAVINGS" and user.savings >= amount:
+                    user.savings -= amount
+                    source = "savings"
+                elif self.funding_source == "INVESTMENT" and user.investment >= amount:
+                    user.investment -= amount
+                    source = "investment"
+                elif self.funding_source == "CARD":
+                    # Implement card payment processing here
+                    card_charge_success = True  # Replace with actual card processing
+                    if not card_charge_success:
+                        raise Exception("Card payment failed")
+                    source = "card"
+                else:
+                    # Insufficient funds - deactivate and notify
+                    self.is_active = False
+                    self.save()
+                    self.send_failed_deduction_email()
+                    return False
+
+                # Update balances
+                user.save()
+                self.current_amount += amount
+
+                # Schedule next deduction
+                if self.frequency == "DAILY":
+                    self.next_deduction = timezone.now() + timedelta(days=1)
+                elif self.frequency == "WEEKLY":
+                    self.next_deduction = timezone.now() + timedelta(weeks=1)
+                else:  # MONTHLY
+                    self.next_deduction = timezone.now() + relativedelta(months=1)
+                self.save()
+
+                # Create transaction record
+                Transaction.objects.create(
+                    user=user,
+                    transaction_type="credit",
+                    status="confirmed",
+                    amount=amount,
+                    description=f"Automatic {self.get_frequency_display().lower()} deduction for {self.name}",
+                    service_charge=0,
+                    total_amount=amount,
+                    target_savings=self,
+                    source=source,
+                    transaction_id=f"[{self.id}]-{uuid.uuid4().hex[:12]}_AUTO",
+                )
+
+                return True
+
+        except Exception as e:
+            logger.error(
+                f"Error processing deduction for target savings {self.id}: {str(e)}"
+            )
+            self.is_active = False
+            self.save()
+            return False
+
+    def send_failed_deduction_email(self):
+        """Send email notification about failed deduction"""
+        from django.core.mail import send_mail
+        from django.conf import settings
+
+        subject = f"Target Savings Deduction Failed - {self.name}"
+        message = (
+            f"Hi {self.user.first_name},\n\n"
+            f"The automatic deduction of ₦{self.monthly_payment} for your target savings "
+            f"'{self.name}' failed due to insufficient funds in your {self.get_funding_source_display()} account. "
+            "This may affect the achievement of your goal.\n\n"
+            "To ensure you meet your target, you can manually transfer the required amount "
+            "to your target savings. Please note that if the targets aren't completed by the "
+            "maturity date, you may not receive the expected interest.\n\n"
+            "MyFund Team"
+        )
+
+        send_mail(
+            subject,
+            message,
+            settings.DEFAULT_FROM_EMAIL,
+            [self.user.email],
+            fail_silently=False,
+        )
+
+
+from decimal import Decimal, InvalidOperation
+
 
 class Transaction(models.Model):
     TRANSACTION_TYPES = (
@@ -976,7 +1145,7 @@ class Transaction(models.Model):
     paystack_auth_code = models.CharField(
         max_length=255,
         editable=False,
-        default='',
+        default="",
         blank=True,
     )
     paystack_access_code = models.CharField(
@@ -999,7 +1168,12 @@ class Transaction(models.Model):
     )
 
     def save(self, *args, **kwargs):
-        self.total_amount = self.amount + self.service_charge
+        try:
+            if isinstance(self.service_charge, float):
+                self.service_charge = Decimal(str(self.service_charge))
+            self.total_amount = self.amount + self.service_charge
+        except (TypeError, InvalidOperation):
+            raise ValueError("Amount or service charge is not a valid Decimal.")
         super().save(*args, **kwargs)
 
     def __str__(self):
@@ -1052,6 +1226,7 @@ class AutoSave(models.Model):
     paystack_sub_id = models.CharField(max_length=255, null=True, blank=True)
     paystack_sub_code = models.CharField(max_length=255, null=True, blank=True)
     paystack_sub_token = models.CharField(max_length=255, null=True, blank=True)
+    paystack_plan_code = models.CharField(max_length=255, null=True, blank=True)
     paystack_trans_ref = models.CharField(max_length=255, null=True, blank=True)
 
     def __str__(self):
@@ -1070,11 +1245,13 @@ class AutoSave(models.Model):
                 "paystack_sub_id": self.paystack_sub_id,
                 "paystack_sub_code": self.paystack_sub_code,
                 "paystack_sub_token": self.paystack_sub_token,
+                "paystack_plan_code": self.paystack_plan_code,
                 "paystack_trans_ref": self.paystack_trans_ref,
             }
             if self.paystack_sub_id
             or self.paystack_sub_code
             or self.paystack_sub_token
+            or self.paystack_plan_code
             or self.paystack_trans_ref
             else {"message": "No Paystack details"}
         )
@@ -1099,6 +1276,7 @@ class AutoInvest(models.Model):
     paystack_sub_id = models.CharField(max_length=255, null=True, blank=True)
     paystack_sub_code = models.CharField(max_length=255, null=True, blank=True)
     paystack_sub_token = models.CharField(max_length=255, null=True, blank=True)
+    paystack_plan_code = models.CharField(max_length=255, null=True, blank=True)
     paystack_trans_ref = models.CharField(max_length=255, null=True, blank=True)
 
     def __str__(self):
@@ -1117,11 +1295,13 @@ class AutoInvest(models.Model):
                 "paystack_sub_id": self.paystack_sub_id,
                 "paystack_sub_code": self.paystack_sub_code,
                 "paystack_sub_token": self.paystack_sub_token,
+                "paystack_plan_code": self.paystack_plan_code,
                 "paystack_trans_ref": self.paystack_trans_ref,
             }
             if self.paystack_sub_id
             or self.paystack_sub_code
             or self.paystack_sub_token
+            or self.paystack_plan_code
             or self.paystack_trans_ref
             else {"message": "No Paystack details"}
         )

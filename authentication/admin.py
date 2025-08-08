@@ -39,6 +39,12 @@ import csv
 from django.http import HttpResponse
 from django.utils.html import format_html
 from django.urls import reverse
+from .utils import send_push_notification
+
+
+@admin.action(description="Say Hello")
+def say_hello(modeladmin, request, queryset):
+    messages.success(request, "👋 Hello from admin action!")
 
 
 class TransactionInline(admin.TabularInline):
@@ -66,6 +72,9 @@ class UserPasswordInline(admin.StackedInline):
     model = UserPassword
     can_delete = False
     verbose_name_plural = "Password"
+
+
+from .utils import send_push_notification  # assuming utils is in authentication
 
 
 class CustomUserAdmin(UserAdmin):
@@ -115,6 +124,8 @@ class CustomUserAdmin(UserAdmin):
         "revoke_ambassador",
         "delete_selected",
         "deactivate_user"
+        "notify_outdated_users",
+        "say_hello",
     ]
 
     fieldsets = (
@@ -275,14 +286,31 @@ class CustomUserAdmin(UserAdmin):
 
     export_to_csv.short_description = "Export selected users to CSV"
 
-    def make_hired_referrer(self, request, queryset):
-        updated_count = queryset.update(is_hired_referrer=True)
+    @admin.action(description="Notify users with outdated app versions")
+    def notify_outdated_users(self, request, queryset):
+        from packaging import version
+        from .utils import send_push_notification
 
-    def make_ambassador(self, request, queryset):
-        updated_count = queryset.update(is_ambassador=True)
+        MIN_REQUIRED_VERSION = "3.1.7"
+        count = 0
 
-    def revoke_ambassador(self, request, queryset):
-        updated_count = queryset.update(is_ambassador=False)
+        for user in queryset:
+            tokens = user.expo_push_tokens or []
+            for token in tokens:
+                app_version = token.get("app_version")
+                if app_version and version.parse(app_version) < version.parse(
+                    MIN_REQUIRED_VERSION
+                ):
+                    send_push_notification(
+                        user,
+                        "Update Required",
+                        "A new version of MyFund is available. Please update to enjoy full features.",
+                        notif_type="VERSION",
+                    )
+                    count += 1
+                    break  # Notify once per user
+
+        messages.success(request, f"✅ Sent update notice to {count} user(s).")
 
     def view_kyc_details(self, request, queryset):
         if queryset.count() == 1:
@@ -325,6 +353,17 @@ class CustomUserAdmin(UserAdmin):
                     subject, message, from_email, recipient_list, fail_silently=False
                 )
 
+                # Send push notification
+                send_push_notification(
+                    user=user,
+                    title="KYC Verified ✅",
+                    message="Hi {}, your KYC has been verified. You can now enjoy full access.".format(
+                        user.first_name
+                    ),
+                    data={"kyc_status": "verified"},
+                    notif_type="ACCOUNT",
+                )
+
             else:
                 rejected_users.append(user)
 
@@ -343,8 +382,6 @@ class CustomUserAdmin(UserAdmin):
             self.message_user(
                 request, f"{message_bit} already approved for KYC update."
             )
-
-        # Redirect to the changelist view after processing
 
     approve_kyc.short_description = "Approve KYC Details"
 
@@ -391,7 +428,7 @@ class CustomUserAdmin(UserAdmin):
 
     def user_percentage_to_top_saver(self, obj):
         top_saver = (
-            CustomUser.objects.all()
+            CustomUser.objects.filter(is_deleted=False)
             .order_by("-total_savings_and_investments_this_month")
             .first()
         )
@@ -551,9 +588,23 @@ class BankTransferRequestAdmin(admin.ModelAdmin):
             user.update_total_savings_and_investment_this_month()
 
             # ✅ Send Approval Email
-            subject = "QuickSave Updated! ✔"
+            subject = "QuickSave Updated! ✅"
             message = f"Hi {user.first_name},\n\nYour bank transfer of ₦{transfer_request.amount} has been approved and added to your savings!\n\nKeep growing your funds! \n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
             send_mail(subject, message, "MyFund <info@myfundmobile.com>", [user.email])
+
+            send_push_notification(
+                user=user,
+                title="QuickSave Approved ✅",
+                message="Hi {}, your transfer of ₦{:,} has been added to your Savings account. Check to confirm.".format(
+                    user.first_name, int(transfer_request.amount)
+                ),
+                data={
+                    "amount": str(transfer_request.amount),
+                    "transaction_id": transaction_id,
+                    "type": "QuickSave",
+                },
+                notif_type="CREDIT",
+            )
 
         self.message_user(
             request, "Selected bank transfers approved successfully!", level="success"
@@ -615,6 +666,20 @@ class InvestTransferRequestAdmin(admin.ModelAdmin):
             subject = "QuickInvest Updated! ✔"
             message = f"Hi {user.first_name},\n\nYour investment transfer of ₦{transfer_request.amount} has been approved and added to your investments!\n\nKeep growing your funds! \n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
             send_mail(subject, message, "MyFund <info@myfundmobile.com>", [user.email])
+
+            send_push_notification(
+                user=user,
+                title="QuickInvest Approved ✅",
+                message="Hi {}, your transfer of ₦{:,} has been added to your Investment account. Check to confirm.".format(
+                    user.first_name, int(transfer_request.amount)
+                ),
+                data={
+                    "amount": str(transfer_request.amount),
+                    "transaction_id": transaction_id,
+                    "type": "QuickInvest",
+                },
+                notif_type="CREDIT",
+            )
 
         self.message_user(
             request,
@@ -686,9 +751,26 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
                     transaction_record.status = (
                         "confirmed"  # Update status to confirmed
                     )
-                    transaction_record.description = f"Withdrawal from {withdrawal_request.source_account.capitalize()} to Bank (Confirmed)"  # Updated description
+                    transaction_record.description = f"{withdrawal_request.source_account.capitalize()} > Bank"  # Updated description
                     transaction_record.save()  # Save changes
                     approved_count += 1
+
+                    # ✅ Send push notification
+                    send_push_notification(
+                        user=user,
+                        title="Withdrawal Approved! ✅",
+                        message="Your withdrawal of ₦{:,} to your {} has been approved and processed. Thank you for using MyFund.".format(
+                            int(amount), withdrawal_request.target_bank
+                        ),
+                        data={
+                            "amount": str(amount),
+                            "transaction_id": transaction_id,
+                            "source_account": withdrawal_request.source_account,
+                            "type": "Withdrawal",
+                            "status": "confirmed",
+                        },
+                        notif_type="DEBIT",  # Can use DEBIT or SYSTEM depending on your preference
+                    )
 
                 except Transaction.DoesNotExist:
                     self.message_user(
@@ -820,7 +902,7 @@ class TransactionAdmin(admin.ModelAdmin):
     list_display = (
         "user",
         "transaction_type",
-        "status",  # Added status here
+        "status",
         "amount",
         "date",
         "time",
@@ -836,10 +918,11 @@ class TransactionAdmin(admin.ModelAdmin):
     # error comes
     search_fields = (
         "user__email",
+        "user__first_name",
+        "user__last_name",
         "description",
         "transaction_id",
-        "transaction_type",
-        "status",  # Allow searching by status
+        "status",
         "amount",
         # "referral__user__email",
         "referral_email",

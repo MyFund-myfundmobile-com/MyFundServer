@@ -12,9 +12,12 @@ logger = logging.getLogger(__name__)
 
 
 class SignupSerializer(serializers.ModelSerializer):
-    referral = serializers.CharField(
-        max_length=40, required=False
-    )  # Allow referral code to be optional
+    referral = serializers.EmailField(
+        required=False,
+        allow_blank=True,  # This allows empty string as valid input
+        allow_null=True,  # This allows null as valid input
+        label="Referral Email (optional)",
+    )
     how_did_you_hear = serializers.ChoiceField(
         choices=[
             ("SM", "Social Media - Facebook, Instagram, etc."),
@@ -353,6 +356,25 @@ class TargetSavingsSerializer(serializers.ModelSerializer):
 
     def get_progress_percentage(self, obj):
         return (obj.current_amount / obj.target_amount) * 100
+
+    def create(self, validated_data):
+        """Override create to set initial next_deduction"""
+        from django.utils import timezone
+        from datetime import timedelta
+
+        target = super().create(validated_data)
+
+        # Set initial next deduction time based on frequency
+        now = timezone.now()
+        if target.frequency == "DAILY":
+            target.next_deduction = now + timedelta(days=1)
+        elif target.frequency == "WEEKLY":
+            target.next_deduction = now + timedelta(weeks=1)
+        else:  # MONTHLY
+            target.next_deduction = now + timedelta(days=30)
+        target.save()
+
+        return target
 
 
 from django.utils import timezone

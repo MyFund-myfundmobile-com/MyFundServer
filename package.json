@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "react-native-paystack-webview": "^5.0.1",
+    "react-native-webview": "^13.15.0"
+  }
+}

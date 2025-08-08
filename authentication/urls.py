@@ -15,6 +15,8 @@ from .views import (
     UserTransactionListView,
     UserCardListView,
     AccountBalancesAPIView,
+    TopReferralsAPIView,
+    delete_my_account,
     send_email,
     save_template,
     delete_template,
@@ -157,10 +159,11 @@ urlpatterns = [
         name="process_withdrawal_to_local_bank",
     ),
     path(
-        "wallet-to-wallet/",
-        views.initiate_wallet_transfer,
-        name="initiate-wallet-transfer",
+        "wallet-transfer/",
+        views.wallet_transfer_view,  # ✅ updated view name
+        name="wallet_transfer",  # same name, no issue
     ),
+    path("delete-my-account/", delete_my_account, name="delete-my-account"),
     path("get-user-by-email/", get_user_by_email, name="get-user-by-email"),
     # Property-related APIs
     path("buy-property/", BuyPropertyView.as_view(), name="buy-property"),
@@ -257,22 +260,22 @@ urlpatterns = [
         name="get_user_contributions",
     ),
     # Target Savings Plan using ViewSet
-    path(
-        "target-savings/",
-        views.TargetSavingsListCreate.as_view(),
-        name="target-savings-list",
-    ),
-    path(
-        "target-savings/<int:pk>/",
-        views.TargetSavingsRetrieveUpdateDestroy.as_view(),
-        name="target-savings-detail",
-    ),
-    path(
-        "target-savings/<int:pk>/cancel/",
-        views.cancel_target_saving,
-        name="cancel-target-saving",
-    ),
-    path("target-savings/total/", target_savings_total, name="target-savings-total"),
+    # path(
+    #     "target-savings/",
+    #     views.TargetSavingsListCreate.as_view(),
+    #     name="target-savings-list",
+    # ),
+    # path(
+    #     "target-savings/<int:pk>/",
+    #     views.TargetSavingsRetrieveUpdateDestroy.as_view(),
+    #     name="target-savings-detail",
+    # ),
+    # path(
+    #     "target-savings/<int:pk>/cancel/",
+    #     views.cancel_target_saving,
+    #     name="cancel-target-saving",
+    # ),
+    # path("target-savings/total/", target_savings_total, name="target-savings-total"),
     # MonthlyFinancial APIs
     path(
         "current-month/",
@@ -308,4 +311,5 @@ urlpatterns = [
     ),
     path("admin/send-push/", send_admin_push_notification, name="send_admin_push"),
     path("push/save-token/", save_expo_push_token, name="save_push_token"),
+    path("top-referrals/", TopReferralsAPIView.as_view(), name="top-referrals"),
 ]
