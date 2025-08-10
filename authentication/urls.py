@@ -311,5 +311,6 @@ urlpatterns = [
     ),
     path("admin/send-push/", send_admin_push_notification, name="send_admin_push"),
     path("push/save-token/", save_expo_push_token, name="save_push_token"),
+    # TopReferrals URLs
     path("top-referrals/", TopReferralsAPIView.as_view(), name="top-referrals"),
 ]
