@@ -53,6 +53,7 @@ import logging
 from django.db.models import Min
 from decimal import Decimal, ROUND_HALF_EVEN
 from .utils import send_push_notification
+from .utils import send_generic_email
 
 
 load_dotenv()
@@ -159,26 +160,17 @@ def signup(request):
 
 def send_referrer_pending_reward_email(referrer, referred_email):
     subject = f"{referrer.first_name}, Your Referral Reward is Pending..."
-    message = f"Hi {referrer.first_name}, Your referral reward of ₦500.00 is pending. When your friend ({referred_email}) becomes active by making their first savings/investment, your reward will be confirmed in your wallet. Thank you for using MyFund! Keep growing your funds.🥂"
+    message = f"Hi {referrer.first_name},<br><br>Your referral reward of ₦500.00 is pending. When your friend ({referred_email}) becomes active by making their first savings/investment, your reward will be confirmed in your wallet.<br><br>Thank you for using MyFund!<br><br>Keep growing your funds.🥂<br><br>"
 
     from_email = "MyFund <info@myfundmobile.com>"
     recipient_list = [referrer.email]
 
-    # send_mail(subject, message, from_email, recipient_list, fail_silently=False)
-
-    context = {
-        "subject": subject,
-        "message": message
-    }
-
-    html_message = render_to_string("email/email.html", context=context)
-    plain_message = strip_tags(html_message)
-    send_mail(subject, plain_message, from_email, recipient_list, html_message=html_message)
+    send_generic_email(subject, message, from_email, recipient_list)
 
 
 def send_referred_pending_reward_email(user):
     subject = f"{user.first_name}, Your N500 Referral Reward is Pending"
-    message = f"Hi {user.first_name}, You have received a welcome referral reward bonus of ₦500.00 for signing up with a referral email. It will be confirmed in your Wallet when you make your first savings of up to ₦20,000. Thank you for using MyFund! Keep growing your funds.🥂"
+    message = f"Hi {user.first_name},<br><br>You have received a welcome referral reward bonus of ₦500.00 for signing up with a referral email. It will be confirmed in your Wallet when you make your first savings of up to ₦20,000.<br><br>Thank you for using MyFund!<br><br>Keep growing your funds.🥂<br><br>"
 
     from_email = "MyFund <info@myfundmobile.com>"
     recipient_list = [user.email]
@@ -187,18 +179,7 @@ def send_referred_pending_reward_email(user):
     # Combine recipient list and BCC list
     all_recipients = recipient_list + bcc_list
 
-    # Send the email without the bcc argument
-    # send_mail(subject, message, from_email, all_recipients, fail_silently=False)
-
-    context = {
-        "subject": subject,
-        "message": message
-    }
-
-    html_message = render_to_string("email/email.html", context=context)
-    plain_message = strip_tags(html_message)
-
-    send_mail(subject, plain_message, from_email, all_recipients, html_message=html_message)
+    send_generic_email(subject, message, from_email, all_recipients)
 
 @api_view(["POST"])
 @permission_classes([AllowAny])
@@ -248,33 +229,23 @@ def generate_otp():
 
 def send_otp_email(user, otp):
     subject = f"[OTP-{otp}] Did You Just Signup?"
-    current_year = datetime.now().year  # Get the current year
-    logo_url = (
-        "https://drive.google.com/uc?export=view&id=1MorbW_xLg4k2txNQdhUnBVxad8xeni-N"
-    )
+        
     message = f"""
-    Hi {user.first_name}, We heard you'd like a shiny new MyFund account. Use the One-Time-Password (OTP) below to complete your signup. This code is valid only for 20 minutes, so chop-chop!
+    <p>Hi {user.first_name}, </p>
 
-    <b>{otp}</b>
+    <p>We heard you'd like a shiny new MyFund account. Use the One-Time-Password (OTP) below to complete your signup. This code is valid only for 20 minutes, so chop-chop!</p>
 
-    If you did not request to create a MyFund account, kindly ignore this email. Otherwise, buckle up, you're in for a treat!
+    <h1 style="text-align: center; font-size: 24px;">{otp}</h1>
 
-    Cheers! 🥂<
+    <p>If you did not request to create a MyFund account, kindly ignore this email. Otherwise, buckle up, you're in for a treat!</p>
+
+    <p>Cheers! 🥂</p>
     """
 
     from_email = "MyFund <info@myfundmobile.com>"
     recipient_list = [user.email]
-
-    # send_mail(subject, message, from_email, recipient_list, html_message=message)
-    context = {
-        "subject": subject,
-        "message": message
-    }
-
-    html_message = render_to_string("email/email.html", context=context)
-    plain_message = strip_tags(html_message)
     
-    send_mail(subject, plain_message, from_email, recipient_list, html_message=html_message)
+    send_generic_email(subject, message, from_email, recipient_list)
 
 
 from django.core.mail import send_mail
@@ -291,87 +262,52 @@ image_url = (
 def send_welcome_email(user):
     subject = f"{user.first_name}, WELCOME TO MyFund! 🥂🎊🔥"
 
-    current_year = datetime.now().year
-    logo_url = (
-        "https://drive.google.com/uc?export=view&id=1MorbW_xLg4k2txNQdhUnBVxad8xeni-N"
-    )
     image_url = (
         "https://drive.google.com/uc?export=view&id=1K7sBCm3mgW5jQ1Cfh73LQDZuvGuNFTKw"
     )
     savings_image_url = "https://drive.google.com/uc?export=view&id=1bOVTTicGZJgUKX2aTm2SAqyX-8qfH41Q"  # Your new image link
 
-    # message = f"""
-    # <p><img src="{logo_url}" alt="MyFund Logo" style="display: block; margin: 0 auto; max-width: 100px; height: auto;"></p>
-
-    # <p>Hi {user.first_name},</p>
-
-    # <p>I'm personally welcoming you to the MyFund family.</p>
-
-    # <p>By signing up, you've entered the 4th step toward financial freedom, <strong>SAVINGS</strong> (click WealthMap on the app for details).</p>
-    
-    # <p><img src="{savings_image_url}" alt="Savings Step Image" style="display: block; margin: 10px auto; max-width: 100%; height: auto;"></p>
-
-    # <p>The app tracks your progress as you save towards buying properties for a lifetime rental (passive) income.</p>
-
-    # <p>In the last few years, thousands have saved to sort their rents, started a business, saved their first million, earned their first passive income, traveled abroad, got married... it's amazing.</p>
-
-    # <p>I can't wait to hear your financial success story in the shortest time possible here at MyFund.</p>
-
-    # <p>Once again, you're welcome!</p>
-
-    # <br>
-
-    # <p><img src="{image_url}" alt="Dr Tee" style="display: block; float: left; width: 100px; height: 100px; border-radius: 50%; margin-right: 10px;">
-    # <strong>Tolulope Ahmed (Dr Tee)</strong><br>
-    # CEO/Co-founder, MyFund</p>
-
-    # <p>MyFund ©{current_year}</p>
-    # """
-
     message = f"""
-    Hi {user.first_name}, I'm personally welcoming you to the MyFund family.
 
-    By signing up, you've entered the 4th step toward financial freedom, <strong>SAVINGS</strong> (click WealthMap on the app for details).
+    <p>Hi {user.first_name},</p>
+
+    <p>I'm personally welcoming you to the MyFund family.</p>
+
+    <p>By signing up, you've entered the 4th step toward financial freedom, <strong>SAVINGS</strong> (click WealthMap on the app for details).</p>
     
-    The app tracks your progress as you save towards buying properties for a lifetime rental (passive) income.
+    <p><img src="{savings_image_url}" alt="Savings Step Image" style="display: block; margin: 10px auto; max-width: 100%; height: auto;"></p>
 
-    In the last few years, thousands have saved to sort their rents, started a business, saved their first million, earned their first passive income, traveled abroad, got married... it's amazing.
+    <p>The app tracks your progress as you save towards buying properties for a lifetime rental (passive) income.</p>
 
-    I can't wait to hear your financial success story in the shortest time possible here at MyFund.
+    <p>In the last few years, thousands have saved to sort their rents, started a business, saved their first million, earned their first passive income, traveled abroad, got married... it's amazing.</p>
 
-    Once again, you're welcome!
+    <p>I can't wait to hear your financial success story in the shortest time possible here at MyFund.</p>
+
+    <p>Once again, you're welcome!</p>
+
+    <br>
+
+    <p><img src="{image_url}" alt="Dr Tee" style="display: block; float: left; width: 100px; height: 100px; border-radius: 50%; margin-right: 10px;">
+    <strong>Tolulope Ahmed (Dr Tee)</strong><br>
+    CEO/Co-founder, MyFund</p>
     """
 
     from_email = "MyFund <info@myfundmobile.com>"
     recipient_list = [user.email]
 
-    # send_mail(
-    #     subject,
-    #     message,
-    #     from_email,
-    #     recipient_list,
-    #     html_message=message,
-    #     fail_silently=False,
-    # )
-
-    context = {
-        "subject": subject,
-        "message": message
-    }
-
-    html_message = render_to_string("email/email.html", context=context)
-    plain_message = strip_tags(html_message)
-    send_mail(subject, plain_message, from_email, recipient_list, html_message=html_message)
+    send_generic_email(subject, message, from_email, recipient_list)
 
 
 def send_otp_reset_email(user, otp):
     subject = f"[OTP] Password Reset - {otp}"
     current_year = datetime.now().year
-    logo_url = (
-        "https://drive.google.com/uc?export=view&id=1MorbW_xLg4k2txNQdhUnBVxad8xeni-N"
-    )
+    
     message = f"""
-    Hi {user.first_name}, You have requested to reset your password. Use the One-Time-Password (OTP) below to complete the password reset. This code is valid only for a short time, so act quickly!
+    <p><img src="{logo_url}" alt="MyFund Logo" style="display: block; margin: 0 auto; max-width: 100px; height: auto;"></p>
+
+    <p>Hi {user.first_name}, </p>
+
+    <p>You have requested to reset your password. Use the One-Time-Password (OTP) below to complete the password reset. This code is valid only for a short time, so act quickly!</p>
 
     If you did not request a password reset, please ignore this email.
 
@@ -383,31 +319,13 @@ def send_otp_reset_email(user, otp):
     from_email = "MyFund <info@myfundmobile.com>"
     recipient_list = [user.email]
 
-    context = {
-        "subject": subject,
-        "message": message
-    }
-
-    html_message = render_to_string("email/email.html", context=context)
-    plain_message = strip_tags(html_message)
-    send_mail(subject, plain_message, from_email, recipient_list, html_message=html_message)
-
-    # send_mail(subject, message, from_email, recipient_list, html_message=message)
+    send_generic_email(subject, message, from_email, recipient_list)
 
 
 def test_email(request):
-    # send_mail(
-    #     "Test Email",
-    #     "This is a test email body.",
-    #     "myfundmobile@gmail.com",
-    #     ["valueplusrecords@gmail.com"],
-    #     fail_silently=False,
-    # )
-    subject = f"You have requested to reset your password"
+    subject = f"Test Email"
     message = f"""
-    Hi, You have requested to reset your password. Use the One-Time-Password (OTP) below to complete the password reset. This code is valid only for a short time, so act quickly!
-
-    If you did not request a password reset, please ignore this email.
+    This is a test email body.
 
     Thank you,
     
@@ -415,16 +333,9 @@ def test_email(request):
     """
 
     from_email = "MyFund <info@myfundmobile.com>"
-    recipient_list = ['sabirismail01@gmail.com']
+    recipient_list = ['sammy@myfundmobile.com', 'samuelojedele2003@gmail.com']
 
-    context = {
-        "subject": subject,
-        "message": message
-    }
-
-    html_message = render_to_string("email/email.html", context=context)
-    plain_message = strip_tags(html_message)
-    send_mail(subject, plain_message, from_email, recipient_list, html_message=html_message)
+    send_generic_email(subject, message, from_email, recipient_list)
 
     return HttpResponse("Test email sent. This shows the email system is working")
 
@@ -1550,29 +1461,6 @@ def quicksave(request):
         paystack_access_code=access_code,
     )
 
-    # ✅ Send QuickSave confirmation email
-    subject = "QuickSave Started!"
-    message = f"""Hi {request.user.first_name},
-
-    Your QuickSave of ₦{amount} has been initiated successfully.
-
-    Please complete the payment via Paystack to fund your savings.
-
-    Grow your funds with MyFund. 🥂
-
-    — MyFund
-    Save, Buy Properties, Earn Rent
-    www.myfundmobile.com
-    13 Gbajabiamila Street, Ayobo, Lagos
-    """
-    from_email = "MyFund <info@myfundmobile.com>"
-    recipient_list = [request.user.email]
-
-    try:
-        send_mail(subject, message, from_email, recipient_list, fail_silently=False)
-    except Exception as e:
-        print("Email error:", e)
-
     return Response(
         {
             "status": "transaction_initiated",
@@ -1735,25 +1623,11 @@ def autosave(request):
 
     # Send success notification email
     subject = "AutoSave Activated!"
-    message = f"Hi {user.first_name}, Your AutoSave have been activated. You are now saving ₦{amount} {frequency}. Keep growing your funds.🥂"
+    message = f"Hi {user.first_name},<br><br>Your AutoSave have been activated. You are now saving ₦{amount} {frequency}.<br><br>Keep growing your funds.🥂"
     from_email = "MyFund <info@myfundmobile.com>"
     recipient_list = [user.email]
 
-    context = {
-        "subject": subject,
-        "message": message
-    }
-
-    html_message = render_to_string("email/email.html", context=context)
-    plain_message = strip_tags(html_message)
-    try:
-        # send_mail(subject, message, from_email, recipient_list, fail_silently=False)
-        send_mail(subject, plain_message, from_email, recipient_list, html_message=html_message)
-    except Exception as e:
-        return Response(
-            {"error": f"Failed to send email: {str(e)}"},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
+    send_generic_email(subject, message, from_email, recipient_list)
 
     # Mark user as having autosave enabled
     user.autosave_enabled = True
@@ -1843,20 +1717,11 @@ def deactivate_autosave(request):
 
         # Send a confirmation email
         subject = "AutoSave Deactivated!"
-        message = f"Hi {user.first_name},\n\nYour AutoSave(s) for {frequency} have been deactivated. \n\nKeep growing your funds.🥂\n\n\nMyFund  \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+        message = f"Hi {user.first_name},<br><br>Your {frequency} AutoSave(s) have been deactivated. <br><br>Keep growing your funds.🥂"
         from_email = "MyFund <info@myfundmobile.com>"
         recipient_list = [user.email]
 
-        context = {
-            "subject": subject,
-            "message": message
-        }
-
-        html_message = render_to_string("email/email.html", context=context)
-        plain_message = strip_tags(html_message)
-
-        # send_mail(subject, message, from_email, recipient_list)
-        send_mail(subject, plain_message, from_email, recipient_list, html_message=html_message)
+        send_generic_email(subject, message, from_email, recipient_list)
 
         # Return a success response indicating that AutoSave has been deactivated
         return Response({"message": "AutoSave deactivated"}, status=status.HTTP_200_OK)
@@ -1949,7 +1814,7 @@ def quickinvest(request):
 
     data = resp.json()
 
-    # print(f"\n\npaystack response:\n {data}\n\n")
+    # print(f"<br><br>paystack response:\n {data}<br><br>")
 
     if not data.get("status"):
         return Response({"error": f"Charge Failed: {data}"}, status=400)
@@ -2104,27 +1969,11 @@ def autoinvest(request):
 
     # Send success notification email
     subject = "AutoInvest Activated!"
-    message = f"Hi {user.first_name}, Your AutoInvest have been activated. You are now saving ₦{amount} {frequency}. Keep growing your funds.🥂"
+    message = f"Hi {user.first_name},<br><br>Your AutoInvest have been activated. You are now saving ₦{amount} {frequency}.<br><br>Keep growing your funds.🥂"
     from_email = "MyFund <info@myfundmobile.com>"
     recipient_list = [user.email]
 
-    context = {
-        "subject": subject,
-        "message": message
-    }
-
-    html_message = render_to_string("email/email.html", context=context)
-    plain_message = strip_tags(html_message)
-
-    try:
-        #send_mail(subject, message, from_email, [user.email], fail_silently=False)
-        send_mail(subject, plain_message, from_email, recipient_list, html_message=html_message)
-    except Exception as e:
-        logger.error(f"Failed to send email: {e}")
-        return Response(
-            {"error": "Failed to send notification email."},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
+    send_generic_email(subject, message, from_email, recipient_list)
 
     return Response({"message": "AutoInvest activated"}, status=status.HTTP_200_OK)
 
@@ -2196,19 +2045,11 @@ def deactivate_autoinvest(request):
 
         # Send a confirmation email
         subject = "AutoInvest Deactivated!"
-        message = f"Hi {user.first_name}, Your {frequency} AutoInvest subscription have been deactivated. Keep growing your funds.🥂"
+        message = f"Hi {user.first_name},<br><br>Your {frequency} AutoInvest subscription have been deactivated. <br><br>Keep growing your funds.🥂"
         from_email = "MyFund <info@myfundmobile.com>"
         recipient_list = [user.email]
 
-        context = {
-            "subject": subject,
-            "message": message
-        }
-
-        html_message = render_to_string("email/email.html", context=context)
-        plain_message = strip_tags(html_message)
-
-        send_mail(subject, plain_message, from_email, recipient_list, html_message=html_message)
+        send_generic_email(subject, message, from_email, recipient_list)
 
         # Return a success response indicating that AutoInvest has been deactivated
         return Response(
@@ -2486,7 +2327,6 @@ def wallet_to_investment(request):
         )
 
 
-from decimal import Decimal, ROUND_HALF_EVEN
 import uuid
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
@@ -2581,19 +2421,15 @@ def withdraw_to_local_bank(request):
             transaction.save()
 
             # 8️⃣ Email user
-            subj = f"Withdrawal Successful: ₦{amount}"
-            msg = (
-                f"Hi {user.first_name},\n\n"
-                f"Your withdrawal of ₦{amount} from your {source_account} account has been sent to {target_bank_account.bank_name}.\n\n"
-                "Thank you for using MyFund! 🥂\n\n"
-                "MyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n"
-                "13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+            subject = f"Withdrawal Successful: ₦{amount}"
+            message = (
+                f"Hi {user.first_name},<br><br>"
+                f"Your withdrawal of ₦{amount} from your {source_account} account has been sent to {target_bank_account.bank_name}.<br><br>"
+                "Thank you for using MyFund! 🥂<br><br>"
             )
-            try:
-                send_mail(subj, msg, "MyFund <info@myfundmobile.com>", [user.email])
-            except:
-                pass
-
+            
+            send_generic_email(subject, message, "MyFund <info@myfundmobile.com>", [user.email])
+            
             return Response(
                 {
                     "success": True,
@@ -2618,52 +2454,64 @@ def withdraw_to_local_bank(request):
             user.wallet -= amount
         user.save()
 
-        # print("Paystack processing the withdrawal...")
-
-        # Perform the withdrawal to the local bank using Paystack API
-        paystack_response = make_withdrawal_through_paystack(
-            user, target_bank_account, withdrawal_amount
+        # — record the admin‐processed request
+        WithdrawalsRequestToAdmin.objects.create(
+            user=user,
+            amount=amount,
+            transaction_id=transaction_id,
+            source_account=source_account,
+            target_bank=target_bank_account.bank_name,
+            target_account_number=target_bank_account.account_number,
+            withdrawal_type="immediate",
+            is_approved=False,
         )
-        print("Paystack API Response:", paystack_response)
 
-        if paystack_response.get("status"):  # This checks if it's truthy
-            # Deduct the total amount (including service charge) from the source account
-            # Convert total_amount to Decimal
-            print("Paystack API Response:", paystack_response)
+        # 🔔 Send push notification on Paystack failure (manual processing fallback)
+        send_push_notification(
+            user=user,
+            title="Withdrawal Processing... ⏳",
+            message="Your withdrawal request has been received and will be processed shortly. You'll get a confirmation by mail once it's completed.",
+            data={
+                "amount": str(amount),
+                "transaction_id": transaction_id,
+                "source_account": source_account,
+                "type": "Withdrawal",
+                "status": "pending_manual",
+            },
+            notif_type="PENDING",  # Suitable here since it's in progress
+        )
 
-            # Update the transaction database table.
-            transaction.status = "confirmed"
-            transaction.description = f"{source_account.capitalize()} > Bank"
-            transaction.save()
+        # — notify the user
+        subject = f"Withdrawal of ₦{amount} Processing..."
+        message = (
+            f"Hi {user.first_name},<br><br>"
+            f"We've received your request to withdraw ₦{amount}. It'll be processed within the hour.<br><br>"
+            "Thank you for using MyFund!<br><br>"
+        )
+        
+        send_generic_email(subject, message, "MyFund <info@myfundmobile.com>", [user.email])
 
-            bank_name = target_bank_account.bank_name
-            # Send a confirmation email to the user
-            subject = f"Withdrawal from {source_account.capitalize()} Successful!"
-            message = f"Hi {user.first_name},\n\nYour withdrawal of ₦{amount} from your {source_account.capitalize()} account has been sent to your {bank_name} account successfully.\n\nThank you for using MyFund.\n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-            from_email = "MyFund <info@myfundmobile.com>"
-            recipient_list = [user.email]
+        # — notify admin
+        subj_admin = f"[CHECK] {user.first_name} Wants to Withdraw ₦{amount}"
+        msg_admin = (
+            f"User: {user.first_name} {user.last_name}<br>"
+            f"Amount: ₦{amount}<br>"
+            f"Bank: {target_bank_account.bank_name} ({target_bank_account.account_number})<br>"
+            f"Transaction ID: {transaction_id}<br>"
+            "Reason: automatic Paystack withdrawal failed; manual processing required."
+        )
+        
+        send_generic_email(subj_admin, msg_admin, "MyFund <info@myfundmobile.com>", ["admin@myfundmobile.com"])
 
-            send_mail(subject, message, from_email, recipient_list, fail_silently=False)
-
-            return Response(
-                {
-                    "success": True,
-                    "message": paystack_response.get("message"),
-                    "transaction_id": transaction_id,
-                    "updated_balance": updated_balance,
-                },
-                status=status.HTTP_200_OK,
-            )
-        else:
-            print("Paystack withdrawal failed:", paystack_response)
-
-            return Response(
-                {
-                    "error": "Withdrawal to local bank failed. Please try again later.",
-                    "transaction_id": transaction_id,
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        # 0️⃣ Return 200 with success:false so front end enters “processing” flow
+        return Response(
+            {
+                "success": False,
+                "message": "Automatic withdrawal failed. We’re processing it manually.",
+                "transaction_id": transaction_id,
+            },
+            status=200,
+        )
 
     except IntegrityError:
         return Response({"error": "Transaction conflict, please retry."}, status=400)
@@ -2846,34 +2694,14 @@ def process_withdrawal_to_local_bank(request):
                 )
 
             user_message = (
-                f"Hi {user.first_name}, {user_message_body} Thank you for using MyFund."
+                f"Hi {user.first_name},<br><br>"
+                f"{user_message_body}<br><br>"
+                "Thank you for using MyFund.<br><br>"
             )
             from_email = "MyFund <info@myfundmobile.com>"
             recipient_list = [user.email]
-
-            context = {
-            "subject": subject,
-            "message": user_message
-            }
-
-            html_message = render_to_string("email/email.html", context=context)
-            plain_message = strip_tags(html_message)
-
             
-
-            try:
-                # send_mail(
-                #     subject,
-                #     user_message,
-                #     from_email,
-                #     recipient_list,
-                #     fail_silently=False,
-                # )
-                send_mail(subject, plain_message, from_email, recipient_list, html_message=html_message)
-                print("✅ STEP 10: Email sent to user.")
-            except Exception as e:
-                print(f"❌ STEP 10 ERROR: Error sending email to user: {e}")
-                # Log this error but continue, as the core transaction is done
+            send_generic_email(subject, user_message, from_email, recipient_list)
 
             # ✅ STEP 10.1: Send push notification to user
             send_push_notification(
@@ -2915,41 +2743,19 @@ def process_withdrawal_to_local_bank(request):
             Request Date: {withdrawal.created_at.strftime('%Y-%m-%d %H:%M:%S')}
             """
             if withdrawal_type == "scheduled" and processing_date:
-                admin_message += f"Scheduled Processing Date: {processing_date.strftime('%A, %B %d, %Y')}\n"
+                admin_message += f"Scheduled Processing Date: {processing_date.strftime('%A, %B %d, %Y')}<br>"
 
             admin_message += f"""
             
             Please log in to the admin panel to mark this request as 'Approved' once payment has been made.
 
-            Best regards,
-            MyFund
+            Best regards!
             """
             admin_recipient_list = [
                 "company@myfundmobile.com"
             ]  # Changed to the specified admin email
-
-            context = {
-            "subject": admin_subject,
-            "message": admin_message
-            }
-
-            html_message = render_to_string("email/email.html", context=context)
-            plain_message = strip_tags(html_message)
-
             
-            try:
-                # send_mail(
-                #     admin_subject,
-                #     admin_message,
-                #     from_email,
-                #     admin_recipient_list,  # Only the main recipient list
-                #     fail_silently=False,
-                # )
-                send_mail(admin_subject, plain_message, from_email, admin_recipient_list, html_message=html_message)
-                print("✅ STEP 11: Admin notified.")
-            except Exception as e:
-                print(f"❌ STEP 11 ERROR: Error sending email to admin: {e}")
-                # Log this error but continue
+            send_generic_email(admin_subject, admin_message, from_email, admin_recipient_list)
 
         return Response(
             {
@@ -3037,44 +2843,22 @@ def make_withdrawal_through_admin(user, amount, transaction_id):
 
         # Send an email to admin
         subject = f"[CHECK] {user.first_name} Made A Withdrawal Request"
-        message = f"Hi Admin, A withdrawal request of ₦{amount} has just been initiated by {user.first_name} {user.last_name} ({user.email}). Please log in to the admin panel for review: https://myfundapi-myfund-07ce351a.koyeb.app/admin/login/?next=/admin/"
+        message = f"Hi Admin, <br><br>A withdrawal request of ₦{amount} has just been initiated by {user.first_name} {user.last_name} ({user.email}).<br><br>Please log in to the admin panel for review: https://myfundapi-myfund-07ce351a.koyeb.app/admin/login/?next=/admin/"
         from_email = "MyFund <info@myfundmobile.com>"
         recipient_list = [
             "company@myfundmobile.com",
             "info@myfundmobile.com",
-            "sammy@myfundmobile.com",
+            "cto@myfundmobile.com",
         ]
-
-        context = {
-            "subject": subject,
-            "message": message
-        }
-
-        html_message = render_to_string("email/email.html", context=context)
-        plain_message = strip_tags(html_message)
-
-        send_mail(subject, plain_message, from_email, recipient_list, html_message=html_message)
-
-        # send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+        
+        send_generic_email(subject, message, from_email, recipient_list)
 
         # Send a pending quicksave email to the user
         user_subject = "Withdrawal Pending..."
-        user_message = f"Hi {user.first_name}, Your withdrawal of ₦{amount} is pending approval. We will notify you once it's processed. Thank you for using MyFund."
+        user_message = f"Hi {user.first_name},<br><br>Your withdrawal of ₦{amount} is pending approval. We will notify you once it's processed. <br><br>Thank you for using MyFund."
         user_email = [user.email]
-
-        context = {
-            "subject": user_subject,
-            "message": user_message
-        }
-
-        html_message = render_to_string("email/email.html", context=context)
-        plain_message = strip_tags(html_message)
-
-        send_mail(user_subject, plain_message, from_email, user_email, html_message=html_message)
-
-        # send_mail(
-        #     user_subject, user_message, from_email, user_email, fail_silently=False
-        # )
+        
+        send_generic_email(user_subject, user_message, from_email, user_email)
 
         return {"message": "Withdrawal request created and pending admin approval"}
 
@@ -3171,41 +2955,28 @@ def wallet_transfer_view(request):  # ✅ NEW NAME
         status="confirmed",
         amount=amount,
         total_amount=amount,
-    )
-    target_transaction.save()
-
-    # Send confirmation emails to both users
-    subject_sender = f"You Sent ₦{amount} to {target_user.first_name}"
-    message_sender = f"Hi {sender.first_name}, \n\nYou have successfully transferred ₦{amount} to {target_user.first_name} ({target_user.email}). \n\nThank you for using MyFund!\n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-    from_email_sender = (
-        "MyFund <info@myfundmobile.com>"  # Replace with a valid sender email
-    )
-    recipient_list_sender = [sender.email]
-
-    subject_target = f"You Received ₦{amount} from {sender.first_name}"
-    message_target = f"Hi {target_user.first_name}, \n\nYou have received ₦{amount} from {sender.first_name} ({sender.email}). \n\nThank you for using MyFund!\n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-    from_email_target = (
-        "MyFund <info@myfundmobile.com>"  # Replace with a valid target email
-    )
-    recipient_list_target = [target_user.email]
-
-    send_mail(
-        subject_sender,
-        message_sender,
-        from_email_sender,
-        recipient_list_sender,
-        fail_silently=False,
-    )
-    send_mail(
-        subject_target,
-        message_target,
-        from_email_target,
-        recipient_list_target,
-        fail_silently=False,
+        transaction_id=str(uuid.uuid4().hex)[:10],
+        description=f"Received from {sender.first_name}",
     )
 
-    send_mail(subject_sender, plain_message1, from_email_sender, recipient_list_sender, html_message=html_message1)
-    send_mail(subject_target, plain_message2, from_email_target, recipient_list_target, html_message=html_message2)
+    # Send confirmation emails
+    
+    subject = f"You Sent ₦{amount} to {target_user.first_name}"
+    message = f"Hi {sender.first_name},<br><br>You have successfully transferred ₦{amount} to {target_user.first_name} ({target_user.email}).<br><br>Thank you for using MyFund!"
+    from_email = "MyFund <info@myfundmobile.com>"
+    recipient_list = [sender.email]
+    
+    send_generic_email(subject, message, from_email, recipient_list)  
+
+    
+    subject = f"You Received ₦{amount} from {sender.first_name}"
+    message = f"Hi {target_user.first_name},<br><br>You have received ₦{amount} from {sender.first_name} ({sender.email}).<br><br>Thank you for using MyFund!"
+    from_email = "MyFund <info@myfundmobile.com>"
+    recipient_list = [target_user.email]
+    
+    send_generic_email(subject, message, from_email, recipient_list)
+    
+
     return Response({"success": True})
 
 
@@ -3242,11 +3013,11 @@ def schedule_rent_reward(user_id, rent_reward, transaction_id, property_name):
 
     # # Send an email to the user for the rental income
     # subject = "You've Earned a Rental Income!"
-    # message = f"Hi {user.first_name},\n\nYou've received an annual rental income of ₦{rent_reward} from your {property_name} property. Keep growing your portfolio to enjoy more returns on your investment.🥂 \n\nThank you for using MyFund!\n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+    # message = f"Hi {user.first_name},<br><br>You've received an annual rental income of ₦{rent_reward} from your {property_name} property. Keep growing your portfolio to enjoy more returns on your investment.🥂 <br><br>Thank you for using MyFund!"
     # from_email = "MyFund <info@myfundmobile.com>"
     # recipient_list = [user.email]
-
-    # send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+    
+    # send_generic_email(subject, message, from_email, recipient_list)
 
 
 class BuyPropertyView(generics.CreateAPIView):
@@ -3325,21 +3096,11 @@ class BuyPropertyView(generics.CreateAPIView):
 
             subject = f"Congratulations {user.first_name} on Your Property Purchase!"
             num_units_text = "unit" if num_units == 1 else "units"
-            message = f"Hi {user.first_name}, You've successfully purchased {num_units} {num_units_text} of {property.name} property valued at {property.price}. You will earn an annual rental income of ₦{rent_reward} on this property. Congratulations on being a landlord!"
+            message = f"Hi {user.first_name},<br><br>You've successfully purchased {num_units} {num_units_text} of {property.name} property valued at {property.price}.<br><br>You will earn an annual rental income of ₦{rent_reward} on this property.<br><br>Congratulations on being a landlord!"
             from_email = "MyFund <info@myfundmobile.com>"
             recipient_list = [user.email]
-
-            context = {
-                "subject": subject,
-                "message": message
-            }
-
-            html_message = render_to_string("email/email.html", context=context)
-            plain_message = strip_tags(html_message)
-
-            send_mail(subject, plain_message, from_email, recipient_list, html_message=html_message)
-
-            # send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+            
+            send_generic_email(subject, message, from_email, recipient_list)
 
             schedule_rent_reward(user.id, rent_reward, uuid.uuid4(), property.name)
 
@@ -3416,26 +3177,11 @@ class BuyPropertyView(generics.CreateAPIView):
                         f"Congratulations {user.first_name} on Your Property Purchase!"
                     )
                     num_units_text = "unit" if num_units == 1 else "units"
-                    message = f"Hi {user.first_name}, You've successfully purchased {num_units} {num_units_text} of {property.name} property valued at {property.price}. You will earn an annual rental income of ₦{rent_reward} on this property.Congratulations on being a landlord!"
+                    message = f"Hi {user.first_name},<br><br>You've successfully purchased {num_units} {num_units_text} of {property.name} property valued at {property.price}.<br><br>You will earn an annual rental income of ₦{rent_reward} on this property.<br><br>Congratulations on being a landlord!"
                     from_email = "MyFund <info@myfundmobile.com>"
                     recipient_list = [user.email]
 
-                    context = {
-                        "subject": subject,
-                        "message": message
-                    }
-
-                    html_message = render_to_string("email/email.html", context=context)
-                    plain_message = strip_tags(html_message)
-
-                    send_mail(subject, plain_message, from_email, recipient_list, html_message=html_message)
-                    # send_mail(
-                    #     subject,
-                    #     message,
-                    #     from_email,
-                    #     recipient_list,
-                    #     fail_silently=False,
-                    # )
+                    send_generic_email(subject, message, from_email, recipient_list)
 
                     return Response(
                         {"detail": "Property purchased successfully."},
@@ -3649,21 +3395,15 @@ class KYCUpdateView(generics.UpdateAPIView):
             # 1️⃣ Email to user
             user_subject = "KYC Update Received... 🕒"
             user_message = (
-                f"Hi {user.first_name},\n\n"
+                f"Hi {user.first_name},<br><br>"
                 "We’ve received your updated KYC details. "
-                "Our team will review them shortly, and we’ll let you know once it’s approved.\n\n"
-                "Thank you for using MyFund.\n\n"
-                "MyFund\nSave, Buy Properties, Earn Rent\n"
-                "www.myfundmobile.com\n"
-                "13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+                "Our team will review them shortly, and we’ll let you know once it’s approved.<br><br>"
+                "Thank you for using MyFund.<br><br>"
             )
-            send_mail(
-                user_subject,
-                user_message,
-                "MyFund <info@myfundmobile.com>",
-                [user.email],
-                fail_silently=False,
-            )
+            from_email = "MyFund <info@myfundmobile.com>"
+            recipient_list = [user.email]
+            
+            send_generic_email(user_subject, user_message, from_email, recipient_list)
 
         # 2️⃣ Push notification to user
         send_push_notification(
@@ -3676,11 +3416,14 @@ class KYCUpdateView(generics.UpdateAPIView):
 
         # 3️⃣ Notify admin
         admin_email = ["info@myfundmobile.com", "company@myfundmobile.com"]
-        subject = f"KYC Update for {user.first_name} Pending Approval"
-        message = f"Hello Admin, \n\n{user.first_name} {user.last_name} ({user.email}) has submitted a KYC update for approval. Please review it in the <a href='https://myfundapi-myfund-07ce351a.koyeb.app/admin/login/?next=/admin/'>admin panel</a>.\n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-        from_email = "MyFund <info@myfundmobile.com>"
-
-        send_mail(subject, message, from_email, admin_email, fail_silently=False)
+        admin_subject = f"KYC Update for {user.first_name} Pending Approval"
+        admin_message = (
+            f"Hello Admin,<br><br>"
+            f"{user.first_name} {user.last_name} ({user.email}) has submitted a KYC update. "
+            "Please review it in the admin panel:<br>"
+            "https://myfundapi-myfund-07ce351a.koyeb.app/admin/login/?next=/admin/.<br><br>"
+        )
+        send_generic_email(admin_subject, admin_message, "MyFund <info@myfundmobile.com>", admin_email)
 
         return Response(serializer.data)
 
@@ -3893,44 +3636,21 @@ def initiate_bank_transfer(request):
 
         # ✅ Notify Admin
         subject = f"[CHECK] {user.first_name} Made A QuickSave Request"
-        message = f"Hi Admin, A bank transfer request of ₦{amount} has been initiated by {user.first_name} {user.last_name} ({user.email}). Review here: https://myfundapi-myfund-07ce351a.koyeb.app/admin/ MyFund Team"
-        from_email = "MyFund <info@myfundmobile.com>"
-        recipient_list = ["company@myfundmobile.com", "info@myfundmobile.com"]
-        # send_mail(
-        #     subject,
-        #     message,
-        #     "MyFund <info@myfundmobile.com>",
-        #     ["company@myfundmobile.com", "info@myfundmobile.com"],
-        # )
-
-        context = {
-            "subject": subject,
-            "message": message
-        }
-
-        html_message = render_to_string("email/email.html", context=context)
-        plain_message = strip_tags(html_message)
-
-        send_mail(subject, plain_message, from_email, recipient_list, html_message=html_message)
+        message = f"Hi Admin,<br><br>A bank transfer request of ₦{amount} has been initiated by {user.first_name} {user.last_name} ({user.email}).<br><br>Review here: https://myfundapi-myfund-07ce351a.koyeb.app/admin/<br><br>MyFund Team"
+        
+        send_generic_email(
+            subject, 
+            message, 
+            "MyFund <info@myfundmobile.com>", 
+            ["company@myfundmobile.com", "info@myfundmobile.com"]
+        )
 
         # ✅ Notify User
         user_subject = "QuickSave Pending..."
-        user_message = f"Hi {user.first_name}, Your bank transfer request of ₦{amount} is pending approval. We'll notify you once it's processed. Thank you for using MyFund."
-        from_email = "MyFund <info@myfundmobile.com>"
-        recipient_list = [user.email]
-
-        context = {
-            "subject": user_subject,
-            "message": user_message
-        }
-
-        html_message = render_to_string("email/email.html", context=context)
-        plain_message = strip_tags(html_message)
-
-        send_mail(user_subject, plain_message, from_email, recipient_list, html_message=html_message)
-        # send_mail(
-        #     user_subject, user_message, "MyFund <info@myfundmobile.com>", [user.email]
-        # )
+        user_message = f"Hi {user.first_name},<br><br>Your bank transfer request of ₦{amount} is pending approval. We'll notify you once it's processed.<br><br>Thank you for using MyFund. <br><br>"
+        send_generic_email(
+            user_subject, user_message, "MyFund <info@myfundmobile.com>", [user.email]
+        )
 
         return Response(
             {"message": "Bank transfer request created and pending admin approval"},
@@ -3950,32 +3670,37 @@ def initiate_invest_transfer(request):
 
         # Send an email to admin
         subject = f"[CHECK] {user.first_name} Made A QuickInvest Request"
-        message = f"Hi Admin, An investment transfer request of ₦{amount} has just been initiated by {user.first_name} ({user.email}).Please log in to the admin panel for review."
+        message = f"Hi Admin, <br><br>An investment transfer request of ₦{amount} has just been initiated by {user.first_name} ({user.email}).<br><br>Please log in to the admin panel for review.<br><br>"
         from_email = "MyFund <info@myfundmobile.com>"
         recipient_list = [
             "company@myfundmobile.com",
             "info@myfundmobile.com",
         ]  # Replace with the admin's email address
 
-        context = {
-            "subject": subject,
-            "message": message
-        }
-
-        html_message = render_to_string("email/email.html", context=context)
-        plain_message = strip_tags(html_message)
-
-        send_mail(subject, plain_message, from_email, recipient_list, html_message=html_message)
-
-        # send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+        send_generic_email(subject, message, from_email, recipient_list)
 
         # Send a pending invest email to the user
         user_subject = "QuickInvest Pending..."
-        user_message = f"Hi {user.first_name},\n\nYour investment transfer request of ₦{amount} is pending approval. We will notify you once it's processed. \n\nThank you for using MyFund. \n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+        user_message = f"Hi {user.first_name},<br><br>Your investment transfer request of ₦{amount} is pending approval. We will notify you once it's processed. <br><br>Thank you for using MyFund. <br><br>"
         user_email = user.email
 
-        send_mail(
-            user_subject, user_message, from_email, [user_email], fail_silently=False
+        send_generic_email(
+            user_subject, user_message, from_email, [user_email]
+        )
+
+        send_push_notification(
+            user=user,
+            title="QuickInvest Pending ⏳",
+            message="Your transfer of ₦{:,} is pending approval. We'll notify you once it’s confirmed.".format(
+                int(amount)
+            ),
+            data={
+                "amount": str(amount),
+                "transaction_id": transaction_id,
+                "type": "QuickInvest",
+                "status": "pending",
+            },
+            notif_type="PENDING",
         )
 
         # Create a pending transaction for the user with date and time
@@ -4053,14 +3778,13 @@ def message_admin(request):
             )
 
         subject = f"Message from {first_name} {last_name}"
-        message = f"From: {first_name} {last_name} ({email})\n\n{message}"
+        message = f"From: {first_name} {last_name} ({email})<br><br>{message}"
 
-        send_mail(
+        send_generic_email(
             subject=subject,
             message=message,
             from_email=from_email,
-            recipient_list=[recipient_email],
-            fail_silently=False,
+            recipient_list=[recipient_email]
         )
 
         return JsonResponse({"success": True}, status=status.HTTP_200_OK)
@@ -4174,51 +3898,32 @@ def paystack_submit_otp(request):
                 user.investment += int(amount)
 
                 subject = "QuickInvest Successful!"
-                message = f"Well done {user.first_name}, Your QuickInvest was successful and ₦{amount} has been successfully added to your INVESTMENTS account. Keep growing your funds.🥂"
+                message = f"Well done {user.first_name},<br><br>Your QuickInvest was successful and ₦{amount} has been successfully added to your INVESTMENTS account. <br><br>Keep growing your funds.🥂"
                 from_email = "MyFund <info@myfundmobile.com>"
                 recipient_list = [user.email]
 
-                context = {
-                    "subject": subject,
-                    "message": message
-                }
-
-                html_message = render_to_string("email/email.html", context=context)
-                plain_message = strip_tags(html_message)
-                send_mail(subject, plain_message, from_email, recipient_list, html_message=html_message)
-                # send_mail(
-                #     subject,
-                #     message,
-                #     from_email,
-                #     recipient_list,
-                #     fail_silently=False,
-                # )
+                send_generic_email(
+                    subject,
+                    message,
+                    from_email,
+                    recipient_list
+                )
 
             if description[0] == "QuickSave":
                 user.savings += int(amount)
 
                 # Send a confirmation email
                 subject = "QuickSave Successful!"
-                message = f"Well done {user.first_name}, Your QwickSave was successful and ₦{amount} has been successfully added to your SAVINGS account. Keep growing your funds.🥂"
+                message = f"Well done {user.first_name},<br><br>Your QwickSave was successful and ₦{amount} has been successfully added to your SAVINGS account. <br><br>Keep growing your funds.🥂"
                 from_email = "MyFund <info@myfundmobile.com>"
                 recipient_list = [user.email]
 
-                context = {
-                    "subject": subject,
-                    "message": message
-                }
-
-                html_message = render_to_string("email/email.html", context=context)
-                plain_message = strip_tags(html_message)
-                send_mail(subject, plain_message, from_email, recipient_list, html_message=html_message)
-
-                # send_mail(
-                #     subject,
-                #     message,
-                #     from_email,
-                #     recipient_list,
-                #     fail_silently=False,
-                # )
+                send_generic_email(
+                    subject,
+                    message,
+                    from_email,
+                    recipient_list,
+                )
 
             user.confirm_referral_rewards(is_referrer=True)
             user.update_total_savings_and_investment_this_month()
@@ -4237,7 +3942,7 @@ import time
 
 paystack_ips = ["52.31.139.75", "52.49.173.169", "52.214.14.220"]
 
-#start 
+
 @api_view(["POST"])
 def paystack_webhook(request):
     try:
@@ -4290,17 +3995,7 @@ def paystack_webhook(request):
         from_email = "MyFund <info@myfundmobile.com>"
         recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
 
-        context = {
-            "subject": subject,
-            "message": message
-        }
-
-        html_message = render_to_string("email/email.html", context=context)
-        plain_message = strip_tags(html_message)
-
-        send_mail(subject, plain_message, from_email, recipient_list, html_message=html_message)
-
-        # send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+        send_generic_email(subject, message, from_email, recipient_list)
 
         return JsonResponse({"error": str(e)}, status=status.HTTP_200_OK)
 
@@ -4325,17 +4020,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
         from_email = "MyFund <info@myfundmobile.com>"
         recipient_list = ["care@myfundmobile.com", "sammy@myfundmobile.com"]
 
-        context = {
-            "subject": subject,
-            "message": message
-        }
-
-        html_message = render_to_string("email/email.html", context=context)
-        plain_message = strip_tags(html_message)
-
-        send_mail(subject, plain_message, from_email, recipient_list, html_message=html_message)
-
-        # send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+        send_generic_email(subject, message, from_email, recipient_list)
 
         match event["event"]:
             case "charge.success":
@@ -4364,12 +4049,11 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     from_email = "MyFund <info@myfundmobile.com>"
                     recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
 
-                    send_mail(
+                    send_generic_email(
                         subject,
                         message,
                         from_email,
-                        recipient_list,
-                        fail_silently=False,
+                        recipient_list
                     )
 
                     return JsonResponse({"status": True}, status=status.HTTP_200_OK)
@@ -4440,17 +4124,21 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         user.update_total_savings_and_investment_this_month()
                         user.save()
 
-                        subject = "QuickSave Successful!"
-                        message = f"Well done {user.first_name},\n\nYour QuickSave was successful and ₦{amount} has been successfully added to your SAVINGS account. \n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+                        # Send success email
+                        subject = (
+                            f"AutoSave ({autosave.frequency.capitalize()}) Successful! ✅"
+                        )
+                        message = (
+                            f"Well done {user.first_name},<br><br>"
+                            f"Your AutoSave was successful and ₦{Decimal(amount):,.2f} has been added to your SAVINGS account."
+                        )
                         from_email = "MyFund <info@myfundmobile.com>"
                         recipient_list = [user.email]
-
-                        send_mail(
+                        send_generic_email(
                             subject,
                             message,
                             from_email,
                             recipient_list,
-                            fail_silently=False,
                         )
 
                         # Send push notification
@@ -4496,17 +4184,20 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         user.update_total_savings_and_investment_this_month()
                         user.save()
 
-                        subject = "QuickInvest Successful!"
-                        message = f"Well done {user.first_name},\n\nYour QuickInvest was successful and ₦{amount} has been successfully added to your INVESTMENTS account. \n\nKeep growing your funds.🥂\n\n\nMyFund \nSave, Buy Properties, Earn Rent \nwww.myfundmobile.com \n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+                        # Send success email
+                        subject = f"AutoInvest ({autoinvest.frequency.capitalize()}) Successful! 🎉"
+                        message = (
+                            f"Well done {user.first_name},<br><br>"
+                            f"Your AutoInvest was successful and ₦{Decimal(amount):,.2f} "
+                            f"has been added to your INVESTMENT account."
+                        )
                         from_email = "MyFund <info@myfundmobile.com>"
                         recipient_list = [user.email]
-
-                        send_mail(
+                        send_generic_email(
                             subject,
                             message,
                             from_email,
                             recipient_list,
-                            fail_silently=False,
                         )
 
                         # Send push notification
@@ -4542,41 +4233,20 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     transaction.save()
 
                     user.savings += int(amount)
-                    # user.confirm_referral_rewards(is_referrer=True)
+                    # user.confirm_referral_rewards(is_referrer=True)   
                     user.update_total_savings_and_investment_this_month()
                     user.save()
 
-                    # Send success email
-                    subject = (
-                        f"AutoSave ({autosave.frequency.capitalize()}) Successful!"
-                    )
-                    message = f"Well done {user.first_name},\n\nYour AutoSave was successful and ₦{amount:,.2f} has been added to your SAVINGS account."
+                    subject = "QuickSave Successful!"
+                    message = f"Well done {user.first_name},<br><br>Your <b>QuickSave</b> was successful and <b>₦{amount}</b> has been successfully added to your SAVINGS account. <br><br>Keep growing your funds.🥂<br><br>"
                     from_email = "MyFund <info@myfundmobile.com>"
                     recipient_list = [user.email]
-                    send_mail(
+
+                    send_generic_email(
                         subject,
                         message,
                         from_email,
                         recipient_list,
-                        fail_silently=False,
-                    )
-
-                    # Update autosave record
-                    autosave.last_success = timezone.now()
-                    autosave.save()
-
-                    send_push_notification(
-                        user=user,
-                        title="AutoSave Successful! ✅",
-                        message=f"Your scheduled AutoSave of ₦{amount:,.2f} has just been deposited into your savings. Thank you for using MyFund!",
-                        data={
-                            "amount": str(amount),
-                            "frequency": autosave.frequency,
-                            "transaction_id": reference,
-                            "type": "AutoSave",
-                            "status": "confirmed",
-                        },
-                        notif_type="CREDIT",
                     )
 
                     return JsonResponse(
@@ -4596,19 +4266,16 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     user.update_total_savings_and_investment_this_month()
                     user.save()
 
-                    # Send success email
-                    subject = (
-                        f"AutoInvest ({autosave.frequency.capitalize()}) Successful!"
-                    )
-                    message = f"Well done {user.first_name},\n\nYour AutoInvest was successful and ₦{amount:,.2f} has been added to your SAVINGS account."
+                    subject = "QuickInvest Successful!"
+                    message = f"Well done {user.first_name},<br><br>Your QuickInvest was successful and ₦{amount} has been successfully added to your INVESTMENTS account. <br><br>Keep growing your funds.🥂<br><br>"
                     from_email = "MyFund <info@myfundmobile.com>"
                     recipient_list = [user.email]
-                    send_mail(
+
+                    send_generic_email(
                         subject,
                         message,
                         from_email,
                         recipient_list,
-                        fail_silently=False,
                     )
 
                     print("QuickInvest Successfully Credited your Account.")
@@ -4728,53 +4395,31 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         user.savings += int(amount)
 
                         subject = f"{description[0]} Successful!"
-                        message = f"Well done {user.first_name}, Your {description[0]} was successful and ₦{amount} has been successfully added to your SAVINGS account. Keep growing your funds.🥂"
+                        message = f"Well done {user.first_name},<br><br>Your {description[0]} was successful and ₦{amount} has been successfully added to your SAVINGS account. <br><br>Keep growing your funds.🥂"
                         from_email = "MyFund <info@myfundmobile.com>"
                         recipient_list = [user.email]
 
-                        context = {
-                            "subject": subject,
-                            "message": message
-                        }
-
-                        html_message = render_to_string("email/email.html", context=context)
-                        plain_message = strip_tags(html_message)
-
-                        send_mail(subject, plain_message, from_email, recipient_list, html_message=html_message)
-
-                        # send_mail(
-                        #     subject,
-                        #     message,
-                        #     from_email,
-                        #     recipient_list,
-                        #     fail_silently=False,
-                        # )
+                        send_generic_email(
+                            subject,
+                            message,
+                            from_email,
+                            recipient_list,
+                        )
 
                     if description[0] == "AutoInvest":
                         user.investment += int(amount)
 
                         subject = f"{description[0]} Successful!"
-                        message = f"Well done {user.first_name}, Your {description[0]} was successful and ₦{amount} has been successfully added to your INVESTMENT account. Keep growing your funds.🥂"
+                        message = f"Well done {user.first_name},<br><br>Your {description[0]} was successful and ₦{amount} has been successfully added to your INVESTMENT account. <br><br>Keep growing your funds.🥂<br><br>"
                         from_email = "MyFund <info@myfundmobile.com>"
                         recipient_list = [user.email]
 
-                        context = {
-                            "subject": subject,
-                            "message": message
-                        }
-
-                        html_message = render_to_string("email/email.html", context=context)
-                        plain_message = strip_tags(html_message)
-
-                        send_mail(subject, plain_message, from_email, recipient_list, html_message=html_message)
-
-                        # send_mail(
-                        #     subject,
-                        #     message,
-                        #     from_email,
-                        #     recipient_list,
-                        #     fail_silently=False,
-                        # )
+                        send_generic_email(
+                            subject,
+                            message,
+                            from_email,
+                            recipient_list,
+                        )
 
                     user.confirm_referral_rewards(is_referrer=True)
                     user.update_total_savings_and_investment_this_month()
@@ -4856,7 +4501,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
 
                 # Send an email of the data of the failed payment
                 subject = "Paystack Webhook(Payment Failed)"
-                message = f"Invoice Data:  \n\n{event_data}"
+                message = f"Invoice Data:  <br><br>{event_data}"
 
                 from_email = "MyFund <info@myfundmobile.com>"
                 recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
@@ -4890,7 +4535,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
 
                 # Send a Withdrawal Request to Admin
                 subject = f"[CHECK] {user.first_name} Withdrawal Request FAILED!"
-                message = f"Hi Admin, A withdrawal request of ₦{amount} that was initiated by {user.first_name} {user.last_name} ({user.email}) has just FAILED! Reason for failure: {reason} Please log in to the admin panel for review: https://myfundapi-myfund-07ce351a.koyeb.app/admin/login/?next=/admin/"
+                message = f"Hi Admin, <br><br>A withdrawal request of ₦{amount} that was initiated by {user.first_name} {user.last_name} ({user.email}) has just FAILED!<br><br>Reason for failure: {reason}<br><br>Please log in to the admin panel for review: https://myfundapi-myfund-07ce351a.koyeb.app/admin/login/?next=/admin/<br><br>"
                 from_email = "MyFund <info@myfundmobile.com>"
                 recipient_list = [
                     "company@myfundmobile.com",
@@ -4898,19 +4543,9 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     "sammy@myfundmobile.com",
                 ]
 
-                context = {
-                    "subject": subject,
-                    "message": message
-                }
-
-                html_message = render_to_string("email/email.html", context=context)
-                plain_message = strip_tags(html_message)
-
-                send_mail(subject, plain_message, from_email, recipient_list, html_message=html_message)
-
-                # send_mail(
-                #     subject, message, from_email, recipient_list, fail_silently=False
-                # )
+                send_generic_email(
+                    subject, message, from_email, recipient_list
+                )
 
                 return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
@@ -4925,17 +4560,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
         from_email = "MyFund <info@myfundmobile.com>"
         recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
 
-        context = {
-            "subject": subject,
-            "message": message
-        }
-
-        html_message = render_to_string("email/email.html", context=context)
-        plain_message = strip_tags(html_message)
-
-        send_mail(subject, plain_message, from_email, recipient_list, html_message=html_message)
-
-        # send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+        send_generic_email(subject, message, from_email, recipient_list)
 
         return JsonResponse({"error": str(e)}, status=status.HTTP_200_OK)
 
@@ -5440,25 +5065,15 @@ def invite_to_group(request, group_id):
 
             # Step 6: Send an email to all invited users
             subject = "Invitation to Join Property Investment Group"
-            message = f"Hello, You have been invited by {user.email} to join a private property investment group. Please consider joining to participate in the joint property investment. Keep growing your funds.🥂"
+            message = f"Hello,<br><br>You have been invited by {user.email} to join a private property investment group. Please consider joining to participate in the joint property investment.<br><br>Keep growing your funds.🥂<br><br>"
             from_email = "MyFund <info@myfundmobile.com>"
 
             # Loop through the invited users and send emails
             recipient_list = [invited_user.email for invited_user in invited_users]
-            context = {
-                "subject": subject,
-                "message": message
-            }
-
-            html_message = render_to_string("email/email.html", context=context)
-            plain_message = strip_tags(html_message)
-
-            
             try:
-                send_mail(subject, plain_message, from_email, recipient_list, html_message=html_message)
-                # send_mail(
-                #     subject, message, from_email, recipient_list, fail_silently=False
-                # )
+                send_generic_email(
+                    subject, message, from_email, recipient_list
+                )
             except Exception as e:
                 return Response(
                     {"error": f"Failed to send email: {str(e)}"},
@@ -6046,20 +5661,11 @@ def add_funds(request, id):
 
         # Optional: Send a notification to the user (you can add actual email or push notification logic here)
         subject = f"Deposit to Your Target Savings ({goal.name}) Successful!"
-        message = f"Hi {user.first_name}, We’re excited to let you know that your deposit of ₦{amount} has been successfully added to your Target Savings ({goal.name}) account! Thank you for choosing MyFund to help you achieve your savings goals. Keep up the great work—your financial future is looking brighter every day! 🌟 Keep growing your funds.🥂"
+        message = f"Hi {user.first_name},<br><br>We’re excited to let you know that your deposit of ₦{amount} has been successfully added to your Target Savings ({goal.name}) account!<br><br>Thank you for choosing MyFund to help you achieve your savings goals. Keep up the great work—your financial future is looking brighter every day! 🌟<br><br>Keep growing your funds.🥂<br><br>"
         from_email = "MyFund <info@myfundmobile.com>"
         recipient_list = [user.email]
 
-        context = {
-            "subject": subject,
-            "message": message
-        }
-
-        html_message = render_to_string("email/email.html", context=context)
-        plain_message = strip_tags(html_message)
-
-        send_mail(subject, plain_message, from_email, recipient_list, html_message=html_message)
-        # send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+        send_generic_email(subject, message, from_email, recipient_list)
 
         # Return the success message
         return Response(
@@ -6208,23 +5814,13 @@ def withdraw_savings(request, id):
                 bank_name = target_bank_account.bank_name
                 # Send a confirmation email to the user
                 subject = f"Withdrawal from Target Savings({goal.name}) Successful!"
-                message = f"Hi {user.first_name}, Your withdrawal of ₦{amount} from your Target Savings({goal.name}) account has been sent to your {bank_name} account successfully. Thank you for using MyFund. Keep growing your funds.🥂"
+                message = f"Hi {user.first_name},<br><br>Your withdrawal of ₦{amount} from your Target Savings({goal.name}) account has been sent to your {bank_name} account successfully.<br><br>Thank you for using MyFund.<br><br>Keep growing your funds.🥂<br><br>"
                 from_email = "MyFund <info@myfundmobile.com>"
                 recipient_list = [user.email]
 
-                context = {
-                    "subject": subject,
-                    "message": message
-                }
-
-                html_message = render_to_string("email/email.html", context=context)
-                plain_message = strip_tags(html_message)
-
-                send_mail(subject, plain_message, from_email, recipient_list, html_message=html_message)
-
-                # send_mail(
-                #     subject, message, from_email, recipient_list, fail_silently=False
-                # )
+                send_generic_email(
+                    subject, message, from_email, recipient_list
+                )
 
                 return Response(
                     {
@@ -6394,24 +5990,14 @@ class TargetSavingsListCreate(ListCreateAPIView):
         # Send “New Target Created” email
         subject = f"Target Savings “{instance.name}” is Live!"
         message = (
-            f"Hi {user.first_name},"
-            f"Well done! Your new Target Savings plan “{instance.name}” has just been set up with a ₦{amount:,} initial deposit."
-            "Keep an eye on your progress and watch your savings grow! 🥂"
-            "Thanks for choosing MyFund!"
+            f"Hi {user.first_name},<br><br>"
+            f"Well done! Your new Target Savings plan “{instance.name}” has just been set up with a ₦{amount:,} initial deposit.<br><br>"
+            "Keep an eye on your progress and watch your savings grow! 🥂<br><br>"
+            "Thanks for choosing MyFund!<br>"
         )
         from_email = settings.DEFAULT_FROM_EMAIL  # e.g. "info@myfundmobile.com"
         recipient_list = [user.email]
-
-        context = {
-            "subject": subject,
-            "message": message
-        }
-
-        html_message = render_to_string("email/email.html", context=context)
-        plain_message = strip_tags(html_message)
-
-        send_mail(subject, plain_message, from_email, recipient_list, html_message=html_message)
-        # send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+        send_generic_email(subject, message, from_email, recipient_list)
         # ——————————————
 
         # Schedule next deduction
@@ -6486,26 +6072,15 @@ def cancel_target_saving(request, pk):
     # Send “Plan Cancelled” email
     subject = f"Target Savings “{target.name}” Cancelled"
     message = (
-        f"Hi {user.first_name},"
+        f"Hi {user.first_name},<br><br>"
         f"You’ve just cancelled your Target Savings plan “{target.name}” and we’ve refunded ₦{return_amount:,} "
-        "(minus our 1% processing fee)."
-        "You’ll forfeit any un‑accrued interest by cancelling early. If you change your mind, you can always set up a new plan."
-        "Thanks for using MyFund!"
-        "MyFund – Save, Buy Properties, Earn Rent"
-        "www.myfundmobile.com"
+        "(minus our 1% processing fee).<br><br>"
+        "You’ll forfeit any un‑accrued interest by cancelling early. If you change your mind, you can always set up a new plan.<br><br>"
+        "Thanks for using MyFund!<br>"
     )
     from_email = settings.DEFAULT_FROM_EMAIL
     recipient_list = [user.email]
-    context = {
-        "subject": subject,
-        "message": message
-    }
-
-    html_message = render_to_string("email/email.html", context=context)
-    plain_message = strip_tags(html_message)
-
-    send_mail(subject, plain_message, from_email, recipient_list, html_message=html_message)
-    # send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+    send_generic_email(subject, message, from_email, recipient_list)
     # ——————————————
 
     # Update target savings
@@ -6686,12 +6261,12 @@ class TopReferralsAPIView(APIView):
         if new_rank < old_rank:
             subject = f"🎉 Congrats! You're Now #{new_rank} on MyFund!"
             message = (
-                f"Hi {user.first_name},\n\n"
+                f"Hi {user.first_name},<br><br>"
                 f"Great news! Your referral rank improved from #{old_rank} to #{new_rank}. "
-                "Keep referring friends to climb higher!\n\n"
-                "Thank you for using MyFund.\n\n"
-                "MyFund\nSave, Buy Properties, Earn Rent\n"
-                "www.myfundmobile.com\n"
+                "Keep referring friends to climb higher!<br><br>"
+                "Thank you for using MyFund.<br><br>"
+                "MyFund\nSave, Buy Properties, Earn Rent<br>"
+                "www.myfundmobile.com<br>"
                 "13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
             )
             push_title = f"🎉 Rank Improved! Now #{new_rank}"
@@ -6702,13 +6277,10 @@ class TopReferralsAPIView(APIView):
         else:
             subject = f"📉 Your MyFund Rank Changed to #{new_rank}"
             message = (
-                f"Hi {user.first_name},\n\n"
+                f"Hi {user.first_name},<br><br>"
                 f"Your referral rank changed from #{old_rank} to #{new_rank}. "
-                "Share your referral link to move back up!\n\n"
-                "Thank you for using MyFund.\n\n"
-                "MyFund\nSave, Buy Properties, Earn Rent\n"
-                "www.myfundmobile.com\n"
-                "13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+                "Share your referral link to move back up!<br><br>"
+                "Thank you for using MyFund.<br><br>"
             )
             push_title = f"📉 Rank Changed to #{new_rank}"
             push_message = (
@@ -6717,12 +6289,11 @@ class TopReferralsAPIView(APIView):
             )
 
         # Send email
-        send_mail(
+        send_generic_email(
             subject,
             message,
             "MyFund <info@myfundmobile.com>",
             [user.email],
-            fail_silently=False,
         )
 
         # Send push notification
