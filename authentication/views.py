@@ -186,7 +186,23 @@ def send_referred_pending_reward_email(user):
 def confirm_otp(request):
     def activate_user_account(user):
         user.is_active = True
-        user.save()
+        user.otp = None
+        # set updated_at if you have one; also record referral confirmation timestamp if desired
+        try:
+            user.referral_reward_confirmed_at = (
+                user.referral_reward_confirmed_at or timezone.now()
+            )
+            user.save(
+                update_fields=[
+                    "is_active",
+                    "otp",
+                    "updated_at",
+                    "referral_reward_confirmed_at",
+                ]
+            )
+        except Exception:
+            # fallback if fields don't exist
+            user.save()
         logger.info("Account confirmed successfully for user %s", user.email)
         send_welcome_email(user)
 
@@ -441,6 +457,11 @@ def delete_my_account(request):
         )
 
 
+from rest_framework import status
+from rest_framework.response import Response
+from rest_framework_simplejwt.tokens import RefreshToken
+
+
 class CustomObtainAuthToken(ObtainAuthToken):
     def post(self, request, *args, **kwargs):
         try:
@@ -450,13 +471,42 @@ class CustomObtainAuthToken(ObtainAuthToken):
             user = serializer.validated_data["user"]
             logger.info(f"User authenticated successfully: {user.email}")
 
-            # Generate tokens
-            tokens = self.get_tokens_for_user(user)
+            # If user is inactive: resend OTP and instruct client to go to OTP screen
+            if not user.is_active:
+                try:
+                    # Generate new OTP and send it
+                    otp = generate_otp()
+                    user.otp = otp
+                    # update updated_at if present
+                    try:
+                        user.save(update_fields=["otp", "updated_at"])
+                    except Exception:
+                        user.save()
+                    send_otp_email(user, otp)
+                    logger.info("Resent OTP for inactive user %s", user.email)
+                except Exception as e:
+                    logger.exception(
+                        "Failed to resend OTP for %s: %s", user.email, str(e)
+                    )
 
-            return Response(tokens)
+                return Response(
+                    {
+                        "status": "inactive",
+                        "message": "Account not verified. A new OTP has been sent to your email.",
+                        "next_step": "enter_otp",
+                        "email": user.email,
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            # Active user: generate tokens
+            tokens = self.get_tokens_for_user(user)
+            return Response(tokens, status=status.HTTP_200_OK)
 
         except Exception as e:
-            logger.error(f"Login error for {request.data.get('username')}: {str(e)}")
+            logger.exception(
+                "Login error for %s: %s", request.data.get("username"), str(e)
+            )
             return Response(
                 {"error": "Invalid credentials or account issue"},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -1450,7 +1500,7 @@ def quicksave(request):
     payload = {
         "email": request.user.email,
         "amount": amount_kobo,
-        "channels": payment_channels
+        "channels": payment_channels,
     }
 
     # Make request to Paystack
@@ -1837,7 +1887,7 @@ def quickinvest(request):
     payload = {
         "email": request.user.email,
         "amount": amount_kobo,
-        "channels": payment_channels
+        "channels": payment_channels,
     }
 
     resp = requests.post(
@@ -6310,8 +6360,15 @@ class AllUsersMonthlyTotalsView(generics.ListAPIView):
         )
 
 
-from .models import PushNotifications
-from .serializers import PushNotificationsSerializer
+# app/views.py (update or add relevant functions)
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework import status
+from django.utils import timezone
+
+from .models import PushNotifications, DevicePushToken
+from .serializers import PushNotificationsSerializer, DevicePushTokenSerializer
 from .utils import send_push_notification
 
 
@@ -6330,13 +6387,15 @@ def send_admin_push_notification(request):
     user_ids = request.data.get("user_ids")
     title = request.data.get("title")
     message = request.data.get("message")
+    data = request.data.get("data", None)
 
     from .models import CustomUser
 
     users = CustomUser.objects.filter(id__in=user_ids)
 
     for user in users:
-        send_push_notification(user, title, message, notif_type="ADMIN")
+        # pass data through so client can filter by to_user_id
+        send_push_notification(user, title, message, data=data, notif_type="ADMIN")
 
     return Response({"message": "Notifications sent"}, status=status.HTTP_200_OK)
 
@@ -6344,31 +6403,75 @@ def send_admin_push_notification(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def save_expo_push_token(request):
+    """
+    Save or update a device's expo push token for the logged-in user.
+    Payload expected: { expo_push_token, device_id(optional), device_type(optional), app_version(optional) }
+    """
     user = request.user
     token = request.data.get("expo_push_token")
+    device_id = request.data.get("device_id")
     device_type = request.data.get("device_type", "unknown")
     app_version = request.data.get("app_version")
 
     if not token:
-        return Response({"error": "No token provided"}, status=400)
+        return Response(
+            {"error": "No token provided"}, status=status.HTTP_400_BAD_REQUEST
+        )
 
-    # Remove old duplicates
-    user.expo_push_tokens = [
-        entry for entry in user.expo_push_tokens if entry["token"] != token
-    ]
+    # Update or create DevicePushToken
+    obj, created = DevicePushToken.objects.update_or_create(
+        user=user,
+        token=token,
+        defaults={
+            "device_id": device_id,
+            "device_type": device_type.lower() if device_type else "unknown",
+            "app_version": app_version,
+            "last_seen": timezone.now(),
+        },
+    )
 
-    new_token = {
-        "token": token,
-        "device_type": device_type.lower(),
-        "last_seen": timezone.now().isoformat(),
-    }
+    return Response(
+        {"message": "Token saved", "created": created}, status=status.HTTP_200_OK
+    )
 
-    if app_version:
-        new_token["app_version"] = app_version
 
-    user.expo_push_tokens.append(new_token)
-    user.save()
-    return Response({"message": "Token saved"})
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def remove_expo_push_token(request):
+    """
+    Remove a device token for the current user.
+    Payload: { expo_push_token } or { device_id }
+    """
+    user = request.user
+    token = request.data.get("expo_push_token")
+    device_id = request.data.get("device_id")
+
+    if not token and not device_id:
+        return Response(
+            {"error": "Provide expo_push_token or device_id"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    qs = DevicePushToken.objects.filter(user=user)
+    if token:
+        qs = qs.filter(token=token)
+    if device_id:
+        qs = qs.filter(device_id=device_id)
+
+    deleted_count, _ = qs.delete()
+    return Response(
+        {"message": "Token(s) removed", "deleted": deleted_count},
+        status=status.HTTP_200_OK,
+    )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def list_my_push_tokens(request):
+    user = request.user
+    tokens = DevicePushToken.objects.filter(user=user)
+    serializer = DevicePushTokenSerializer(tokens, many=True)
+    return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 from rest_framework.views import APIView
