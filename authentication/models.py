@@ -1180,6 +1180,7 @@ class Transaction(models.Model):
         return f"{self.transaction_type} - {self.amount} - {self.status} - {self.paystack_auth_code} - {self.date}"
 
 
+# keep your existing PushNotifications and CustomUser models...
 class PushNotifications(models.Model):
     NOTIFICATION_TYPES = (
         ("CREDIT", "Credit Transaction"),
@@ -1191,7 +1192,7 @@ class PushNotifications(models.Model):
     )
 
     user = models.ForeignKey(
-        CustomUser, on_delete=models.CASCADE, related_name="push_notifications"
+        "CustomUser", on_delete=models.CASCADE, related_name="push_notifications"
     )
     title = models.CharField(max_length=255)
     message = models.TextField()
@@ -1205,6 +1206,30 @@ class PushNotifications(models.Model):
 
     def __str__(self):
         return f"{self.title} - {self.user.email}"
+
+
+class DevicePushToken(models.Model):
+    """
+    A record for each device token registered to a user.
+    Allows multiple devices per user and easy removal on logout.
+    """
+
+    user = models.ForeignKey(
+        "CustomUser", on_delete=models.CASCADE, related_name="device_push_tokens"
+    )
+    token = models.CharField(max_length=255, db_index=True)
+    device_id = models.CharField(max_length=255, null=True, blank=True, db_index=True)
+    device_type = models.CharField(max_length=32, default="unknown")
+    app_version = models.CharField(max_length=32, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_seen = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        unique_together = ("user", "token")
+        ordering = ["-last_seen"]
+
+    def __str__(self):
+        return f"{self.user.email} - {self.token} ({self.device_type})"
 
 
 class AutoSave(models.Model):
