@@ -333,7 +333,7 @@ def test_email(request):
     """
 
     from_email = "MyFund <info@myfundmobile.com>"
-    recipient_list = ['sammy@myfundmobile.com', 'samuelojedele2003@gmail.com']
+    recipient_list = ['sammy@myfundmobile.com']
 
     send_generic_email(subject, message, from_email, recipient_list)
 
