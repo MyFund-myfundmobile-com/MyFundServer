@@ -206,7 +206,16 @@ def confirm_otp(request):
             # fallback if fields don't exist
             user.save()
         logger.info("Account confirmed successfully for user %s", user.email)
-        send_welcome_email(user)
+
+        # Attempt to send welcome email, but don't break activation if mail fails.
+        try:
+            send_welcome_email(user)
+        except Exception as e:
+            logger.exception(
+                "Failed to send welcome email to %s after activation: %s",
+                user.email,
+                str(e),
+            )
 
     serializer = ConfirmOTPSerializer(data=request.data)
     if serializer.is_valid():
@@ -245,9 +254,13 @@ def generate_otp():
 
 
 def send_otp_email(user, otp):
+    """
+    Sends the OTP email using Django's send_mail with a proper recipient_list.
+    Raises on failure so callers can handle/log it.
+    """
     subject = f"[OTP-{otp}] Did You Just Signup?"
-
-    message = f"""
+    # HTML message
+    message_html = f"""
     <p>Hi {user.first_name}, </p>
 
     <p>We heard you'd like a shiny new MyFund account. Use the One-Time-Password (OTP) below to complete your signup. This code is valid only for 20 minutes, so chop-chop!</p>
@@ -259,10 +272,128 @@ def send_otp_email(user, otp):
     <p>Cheers! 🥂</p>
     """
 
-    from_email = "MyFund <info@myfundmobile.com>"
+    # Plain text fallback
+    message_text = strip_tags(message_html)
+
+    # Use default from settings if provided, else fallback string
+    from_email = getattr(
+        settings, "DEFAULT_FROM_EMAIL", "MyFund <info@myfundmobile.com>"
+    )
+
+    # recipient_list MUST be a list/tuple
     recipient_list = [user.email]
 
-    send_generic_email(subject, message, from_email, recipient_list)
+    try:
+        # fail_silently=False so exceptions bubble (we want to know failures)
+        send_mail(
+            subject,
+            message_text,
+            from_email,
+            recipient_list,
+            html_message=message_html,
+            fail_silently=False,
+        )
+        logger.info("OTP email sent to %s", user.email)
+    except Exception as exc:
+        logger.exception("Failed to send OTP email to %s: %s", user.email, str(exc))
+        # Clear the OTP to avoid leaving stale codes
+        try:
+            user.otp = None
+            user.save(update_fields=["otp"])
+        except Exception:
+            user.save()
+        # Re-raise so callers (resend / login) return 500 and client knows not to expect an email
+        raise
+
+
+def send_otp_for_user(user):
+    """
+    Helper: generate OTP, persist it (and last_otp_sent_at if available),
+    attempt to send the OTP email, and return True on success or raise on failure.
+    """
+    otp = generate_otp()
+    user.otp = otp
+
+    # update last_otp_sent_at if you added the field previously
+    if hasattr(user, "last_otp_sent_at"):
+        user.last_otp_sent_at = timezone.now()
+
+    # Save fields atomically when possible
+    try:
+        update_fields = ["otp", "updated_at"]
+        if hasattr(user, "last_otp_sent_at"):
+            update_fields.append("last_otp_sent_at")
+        user.save(update_fields=update_fields)
+    except Exception:
+        user.save()
+
+    # Try to send the email and raise if it fails so caller can handle it
+    try:
+        send_otp_email(user, otp)
+        logger.info("send_otp_for_user: OTP sent to %s", user.email)
+        return True
+    except Exception as e:
+        logger.exception(
+            "send_otp_for_user: Failed to send OTP to %s: %s", user.email, str(e)
+        )
+        # Clear the OTP (avoid leaving an unused OTP in DB)
+        try:
+            user.otp = None
+            user.save(update_fields=["otp"])
+        except Exception:
+            user.save()
+        # raise to inform the caller
+        raise
+
+
+@api_view(["POST"])
+@csrf_exempt
+@permission_classes([AllowAny])
+def resend_otp(request):
+    """
+    Resend OTP for an existing, inactive user.
+    Payload: { "email": "user@example.com" }
+    """
+    email = (request.data.get("email") or "").strip().lower()
+    if not email:
+        logger.warning("Resend OTP called without email.")
+        return Response(
+            {"detail": "Email is required."}, status=status.HTTP_400_BAD_REQUEST
+        )
+
+    try:
+        user = CustomUser.objects.get(email__iexact=email)
+    except CustomUser.DoesNotExist:
+        logger.warning("Resend OTP requested for non-existent user: %s", email)
+        return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    if user.is_active:
+        logger.info("Resend OTP requested for already active user: %s", user.email)
+        return Response(
+            {"detail": "Account already verified."}, status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # Optional server-side cooldown using last_otp_sent_at if available
+    COOLDOWN_SECONDS = 60
+    last_sent = getattr(user, "last_otp_sent_at", None)
+    if last_sent and timezone.now() - last_sent < timedelta(seconds=COOLDOWN_SECONDS):
+        logger.info("OTP resend cooldown in effect for %s", user.email)
+        return Response(
+            {"detail": "Please wait before requesting another code."}, status=429
+        )
+
+    try:
+        send_otp_for_user(user)
+        return Response(
+            {"detail": "OTP resent successfully.", "email": user.email},
+            status=status.HTTP_200_OK,
+        )
+    except Exception as e:
+        logger.exception("Error resending OTP to %s: %s", email, str(e))
+        return Response(
+            {"detail": "Failed to resend OTP. Try again later."},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
 
 from django.core.mail import send_mail
@@ -277,15 +408,21 @@ image_url = (
 
 
 def send_welcome_email(user):
+    """
+    Send a welcome email directly using Django's send_mail.
+    Uses a recipient_list (a Python list) to avoid TypeError.
+    Errors are raised to caller so callers can decide what to do.
+    """
     subject = f"{user.first_name}, WELCOME TO MyFund! 🥂🎊🔥"
 
     image_url = (
         "https://drive.google.com/uc?export=view&id=1K7sBCm3mgW5jQ1Cfh73LQDZuvGuNFTKw"
     )
-    savings_image_url = "https://drive.google.com/uc?export=view&id=1bOVTTicGZJgUKX2aTm2SAqyX-8qfH41Q"  # Your new image link
+    savings_image_url = (
+        "https://drive.google.com/uc?export=view&id=1bOVTTicGZJgUKX2aTm2SAqyX-8qfH41Q"
+    )
 
-    message = f"""
-
+    message_html = f"""
     <p>Hi {user.first_name},</p>
 
     <p>I'm personally welcoming you to the MyFund family.</p>
@@ -304,15 +441,26 @@ def send_welcome_email(user):
 
     <br>
 
-    <p><img src="{image_url}" alt="Dr Tee" style="display: block; float: left; width: 100px; height: 100px; border-radius: 50%; margin-right: 10px;">
+    <p><img src="{image_url}" alt="Dr Tee" style="display: block; float: left; width: 50; height: 50; border-radius: 50%; margin-right: 10px;">
     <strong>Tolulope Ahmed (Dr Tee)</strong><br>
     CEO/Co-founder, MyFund</p>
     """
 
-    from_email = "MyFund <info@myfundmobile.com>"
-    recipient_list = [user.email]
+    message_text = strip_tags(message_html)
+    from_email = getattr(
+        settings, "DEFAULT_FROM_EMAIL", "MyFund <info@myfundmobile.com>"
+    )
+    recipient_list = [user.email]  # MUST be a list
 
-    send_generic_email(subject, message, from_email, recipient_list)
+    # Do NOT swallow exceptions here; caller can choose to catch or log.
+    send_mail(
+        subject,
+        message_text,
+        from_email,
+        recipient_list,
+        html_message=message_html,
+        fail_silently=False,
+    )
 
 
 def send_otp_reset_email(user, otp):
@@ -441,22 +589,17 @@ class CustomObtainAuthToken(ObtainAuthToken):
             user = serializer.validated_data["user"]
             logger.info(f"User authenticated successfully: {user.email}")
 
-            # If user is inactive: resend OTP and instruct client to go to OTP screen
+            # If user is inactive: generate & send OTP (via helper) then instruct client to go to OTP screen
             if not user.is_active:
                 try:
-                    # Generate new OTP and send it
-                    otp = generate_otp()
-                    user.otp = otp
-                    # update updated_at if present
-                    try:
-                        user.save(update_fields=["otp", "updated_at"])
-                    except Exception:
-                        user.save()
-                    send_otp_email(user, otp)
-                    logger.info("Resent OTP for inactive user %s", user.email)
+                    send_otp_for_user(user)
                 except Exception as e:
                     logger.exception(
-                        "Failed to resend OTP for %s: %s", user.email, str(e)
+                        "Failed to send OTP during login for %s: %s", user.email, str(e)
+                    )
+                    return Response(
+                        {"detail": "Failed to send OTP. Try again later."},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     )
 
                 return Response(
@@ -484,9 +627,6 @@ class CustomObtainAuthToken(ObtainAuthToken):
 
     @staticmethod
     def get_tokens_for_user(user):
-        """
-        Generate and return JWT tokens for the given user.
-        """
         refresh = RefreshToken.for_user(user)
         return {
             "refresh": str(refresh),
