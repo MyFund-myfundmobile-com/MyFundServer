@@ -733,10 +733,24 @@ class NotificationSerializer(serializers.ModelSerializer):
         read_only_fields = ["id", "created_at"]
 
 
-from .models import PushNotifications
+from .models import PushNotifications, DevicePushToken
 
 
 class PushNotificationsSerializer(serializers.ModelSerializer):
     class Meta:
         model = PushNotifications
         fields = "__all__"
+
+
+class DevicePushTokenSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DevicePushToken
+        fields = [
+            "id",
+            "token",
+            "device_id",
+            "device_type",
+            "app_version",
+            "last_seen",
+            "created_at",
+        ]
