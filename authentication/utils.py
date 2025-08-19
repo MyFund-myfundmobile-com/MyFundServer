@@ -71,14 +71,33 @@ def send_push_notification(user, title, message, data=None, notif_type="SYSTEM")
 
 
 def send_generic_email(
-    subject, message, from_email="MyFund <info@myfundmobile.com>", recipient_list=[]
+    subject,
+    message,
+    from_email="MyFund <info@myfundmobile.com>",
+    recipient_list=None,
 ):
+    """
+    Smart email sender that works for both:
+    - Raw HTML messages (e.g. welcome/transaction emails)
+    - Plain text messages (auto-wrapped with email/email.html)
+    """
+
+    if recipient_list is None:
+        recipient_list = []
+    elif isinstance(recipient_list, str):
+        recipient_list = [recipient_list]
+
     def send_email_task():
         try:
-            context = {"subject": subject, "message": message}
-
-            html_message = render_to_string("email/email.html", context=context)
-            plain_message = strip_tags(html_message)
+            # Decide if message already contains HTML
+            if "<" in message and ">" in message:
+                html_message = message
+                plain_message = strip_tags(message)
+            else:
+                # Wrap in template
+                context = {"subject": subject, "message": message}
+                html_message = render_to_string("email/email.html", context=context)
+                plain_message = strip_tags(html_message)
 
             send_mail(
                 subject,
@@ -86,11 +105,11 @@ def send_generic_email(
                 from_email,
                 recipient_list,
                 html_message=html_message,
+                fail_silently=False,
             )
+            logger.info(f"📧 Sent email to {recipient_list} with subject: {subject}")
 
         except Exception as e:
-            logger.error(f"Failed to send email: {e}", exc_info=True)
+            logger.error(f"❌ Failed to send email: {e}", exc_info=True)
 
-    # Start the background thread
-    thread = threading.Thread(target=send_email_task)
-    thread.start()
+    threading.Thread(target=send_email_task, daemon=True).start()
