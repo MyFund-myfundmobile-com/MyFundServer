@@ -1,22 +1,16 @@
+# app/utils.py (updated)
 import requests
-from .models import PushNotifications
 from django.utils import timezone
 from django.core.mail import send_mail
-from django.template.loader import render_to_string
-from django.utils.html import strip_tags
-import threading
-import logging
-
-# Set up logging (make sure logging is configured in your settings or app)
-logger = logging.getLogger(__name__)
+from django.conf import settings
+from .models import PushNotifications, DevicePushToken
 
 EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
 
 
 def send_push_notification(user, title, message, data=None, notif_type="SYSTEM"):
     data = data or {}
-    tokens = user.expo_push_tokens or []
-
+    # create DB notification record
     notification = PushNotifications.objects.create(
         user=user,
         title=title,
@@ -26,30 +20,39 @@ def send_push_notification(user, title, message, data=None, notif_type="SYSTEM")
     )
     print(f"📝 Created notification ID {notification.id} for {user.email}")
 
+    tokens_qs = DevicePushToken.objects.filter(user=user)
+    tokens = list(tokens_qs)
+
     if not tokens:
         print(f"❌ No push tokens for {user.email}")
         return None
 
     success_count = 0
-    for token_entry in tokens:
-        token = token_entry.get("token")
-        if not token:
-            continue
+    total = len(tokens)
 
+    # ensure the client can filter notifications for the current user
+    payload_data = {
+        **data,
+        "notification_id": str(notification.id),
+        "to_user_id": str(user.id),
+    }
+
+    headers = {
+        "Accept": "application/json",
+        "Accept-encoding": "gzip, deflate",
+        "Content-Type": "application/json",
+    }
+
+    for token_obj in tokens:
+        token = token_obj.token
         payload = {
             "to": token,
             "sound": "default",
             "title": title,
             "body": message,
-            "data": {**data, "notification_id": str(notification.id)},
+            "data": payload_data,
             "channelId": "default",
             "priority": "high",
-        }
-
-        headers = {
-            "Accept": "application/json",
-            "Accept-encoding": "gzip, deflate",
-            "Content-Type": "application/json",
         }
 
         try:
@@ -59,40 +62,52 @@ def send_push_notification(user, title, message, data=None, notif_type="SYSTEM")
             res_data = response.json()
             print(f"📤 Sent to {token}: {res_data}")
 
-            if res_data.get("data", {}).get("status") != "ok":
-                print(f"❌ Failed for token: {token}")
+            ok = False
+            if isinstance(res_data, dict):
+                if res_data.get("data", {}).get("status") == "ok":
+                    ok = True
+                if res_data.get("errors"):
+                    ok = False
+                if (
+                    res_data.get("data", {}).get("details", {}).get("expoPushToken")
+                    == "DeviceNotRegistered"
+                ):
+                    ok = False
             else:
+                ok = response.status_code >= 200 and response.status_code < 300
+
+            if ok:
                 success_count += 1
+                token_obj.last_seen = timezone.now()
+                token_obj.save(update_fields=["last_seen"])
+            else:
+                errors = res_data.get("errors") if isinstance(res_data, dict) else None
+                if errors:
+                    should_delete = any(
+                        "DeviceNotRegistered" in str(err)
+                        or "not registered" in str(err).lower()
+                        for err in errors
+                    )
+                    if should_delete:
+                        print(
+                            f"🧹 Removing invalid token for user {user.email}: {token}"
+                        )
+                        try:
+                            token_obj.delete()
+                        except Exception:
+                            pass
 
         except Exception as e:
             print(f"🔥 Error sending to {token}: {str(e)}")
 
-    return {"sent": success_count, "total": len(tokens)}
+    return {"sent": success_count, "total": total}
 
 
-def send_generic_email(subject, message, from_email="MyFund <info@myfundmobile.com>", recipient_list=[]):
-    def send_email_task():
-        try:
-            context = {
-                "subject": subject,
-                "message": message
-            }
+def send_generic_email(subject, message, recipient_list, from_email=None):
+    """
+    Simple wrapper around Django's send_mail for generic notifications.
+    """
+    if from_email is None:
+        from_email = settings.DEFAULT_FROM_EMAIL
 
-            html_message = render_to_string("email/email.html", context=context)
-            plain_message = strip_tags(html_message)
-
-            send_mail(
-                subject,
-                plain_message,
-                from_email,
-                recipient_list,
-                html_message=html_message
-            )
-            
-        except Exception as e:
-            logger.error(f"Failed to send email: {e}", exc_info=True)
-
-
-    # Start the background thread
-    thread = threading.Thread(target=send_email_task)
-    thread.start()
+    send_mail(subject, message, from_email, recipient_list, fail_silently=False)
