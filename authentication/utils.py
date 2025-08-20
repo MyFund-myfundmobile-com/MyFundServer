@@ -1,7 +1,15 @@
 import requests
 from .models import PushNotifications
+from .models import PushNotifications
 from django.utils import timezone
 from django.core.mail import send_mail
+from django.template.loader import render_to_string
+from django.utils.html import strip_tags
+import threading
+import logging
+
+# Set up logging (make sure logging is configured in your settings or app)
+logger = logging.getLogger(__name__)
 from django.template.loader import render_to_string
 from django.utils.html import strip_tags
 import threading
@@ -15,6 +23,8 @@ EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
 
 def send_push_notification(user, title, message, data=None, notif_type="SYSTEM"):
     data = data or {}
+    tokens = user.expo_push_tokens or []
+
     tokens = user.expo_push_tokens or []
 
     notification = PushNotifications.objects.create(
@@ -36,14 +46,26 @@ def send_push_notification(user, title, message, data=None, notif_type="SYSTEM")
         if not token:
             continue
 
+    for token_entry in tokens:
+        token = token_entry.get("token")
+        if not token:
+            continue
+
         payload = {
             "to": token,
             "sound": "default",
             "title": title,
             "body": message,
             "data": {**data, "notification_id": str(notification.id)},
+            "data": {**data, "notification_id": str(notification.id)},
             "channelId": "default",
             "priority": "high",
+        }
+
+        headers = {
+            "Accept": "application/json",
+            "Accept-encoding": "gzip, deflate",
+            "Content-Type": "application/json",
         }
 
         headers = {
@@ -61,12 +83,15 @@ def send_push_notification(user, title, message, data=None, notif_type="SYSTEM")
 
             if res_data.get("data", {}).get("status") != "ok":
                 print(f"❌ Failed for token: {token}")
+            if res_data.get("data", {}).get("status") != "ok":
+                print(f"❌ Failed for token: {token}")
             else:
                 success_count += 1
 
         except Exception as e:
             print(f"🔥 Error sending to {token}: {str(e)}")
 
+    return {"sent": success_count, "total": len(tokens)}
     return {"sent": success_count, "total": len(tokens)}
 
 
