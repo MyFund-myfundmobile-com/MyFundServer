@@ -6,13 +6,13 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('authentication', '0011_devicepushtoken'),
+        ("authentication", "0009_customuser_updated_at"),
     ]
 
     operations = [
         migrations.AddField(
-            model_name='customuser',
-            name='last_otp_sent_at',
+            model_name="customuser",
+            name="last_otp_sent_at",
             field=models.DateTimeField(blank=True, null=True),
         ),
     ]
