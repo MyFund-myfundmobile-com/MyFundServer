@@ -36,8 +36,6 @@ from .views import (
     get_my_push_notifications,
     send_admin_push_notification,
     save_expo_push_token,
-    remove_expo_push_token,
-    list_my_push_tokens,
 )
 from django.views.decorators.csrf import csrf_exempt
 from authentication.views import CustomGraphQLView
@@ -313,8 +311,5 @@ urlpatterns = [
     ),
     path("admin/send-push/", send_admin_push_notification, name="send_admin_push"),
     path("push/save-token/", save_expo_push_token, name="save_push_token"),
-    path("push/remove-token/", remove_expo_push_token, name="remove_push_token"),
-    path("push/my-tokens/", list_my_push_tokens, name="list_my_tokens"),
-    # TopReferrals URLs
     path("top-referrals/", TopReferralsAPIView.as_view(), name="top-referrals"),
 ]
