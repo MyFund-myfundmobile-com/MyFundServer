@@ -181,6 +181,7 @@ def send_referred_pending_reward_email(user):
 
     send_generic_email(subject, message, from_email, all_recipients)
 
+
 @api_view(["POST"])
 @permission_classes([AllowAny])
 @csrf_exempt
@@ -189,7 +190,16 @@ def confirm_otp(request):
         user.is_active = True
         user.save()
         logger.info("Account confirmed successfully for user %s", user.email)
-        send_welcome_email(user)
+
+        # Attempt to send welcome email, but don't break activation if mail fails.
+        try:
+            send_welcome_email(user)
+        except Exception as e:
+            logger.exception(
+                "Failed to send welcome email to %s after activation: %s",
+                user.email,
+                str(e),
+            )
 
     serializer = ConfirmOTPSerializer(data=request.data)
     if serializer.is_valid():
@@ -228,24 +238,148 @@ def generate_otp():
 
 
 def send_otp_email(user, otp):
+    """
+    Sends the OTP email using Django's send_mail with a proper recipient_list.
+    Now always wrapped in MyFund's email/email.html template.
+    Raises on failure so callers can handle/log it.
+    """
     subject = f"[OTP-{otp}] Did You Just Signup?"
-        
-    message = f"""
+
+    # Inner content (can be plain text or HTML)
+    inner_html = f"""
     <p>Hi {user.first_name}, </p>
 
     <p>We heard you'd like a shiny new MyFund account. Use the One-Time-Password (OTP) below to complete your signup. This code is valid only for 20 minutes, so chop-chop!</p>
 
-    <h1 style="text-align: center; font-size: 24px;">{otp}</h1>
+    <h1 style="text-align: center; font-size: 36px;">{otp}</h1>
 
     <p>If you did not request to create a MyFund account, kindly ignore this email. Otherwise, buckle up, you're in for a treat!</p>
 
     <p>Cheers! 🥂</p>
     """
 
-    from_email = "MyFund <info@myfundmobile.com>"
+    # Wrap in MyFund template
+    context = {
+        "subject": subject,
+        "message": inner_html,  # template should render {{ message|safe }}
+        "user": user,  # optional if your template uses it
+    }
+    html_message = render_to_string("email/email.html", context=context)
+    message_text = strip_tags(html_message)
+
+    from_email = getattr(
+        settings, "DEFAULT_FROM_EMAIL", "MyFund <info@myfundmobile.com>"
+    )
     recipient_list = [user.email]
-    
-    send_generic_email(subject, message, from_email, recipient_list)
+
+    try:
+        send_mail(
+            subject,
+            message_text,
+            from_email,
+            recipient_list,
+            html_message=html_message,
+            fail_silently=False,
+        )
+        logger.info("OTP email sent to %s", user.email)
+    except Exception as exc:
+        logger.exception("Failed to send OTP email to %s: %s", user.email, str(exc))
+        try:
+            user.otp = None
+            user.save(update_fields=["otp"])
+        except Exception:
+            user.save()
+        raise
+
+
+def send_otp_for_user(user):
+    """
+    Helper: generate OTP, persist it (and last_otp_sent_at if available),
+    attempt to send the OTP email, and return True on success or raise on failure.
+    """
+    otp = generate_otp()
+    user.otp = otp
+
+    # update last_otp_sent_at if you added the field previously
+    if hasattr(user, "last_otp_sent_at"):
+        user.last_otp_sent_at = timezone.now()
+
+    # Save fields atomically when possible
+    try:
+        update_fields = ["otp", "updated_at"]
+        if hasattr(user, "last_otp_sent_at"):
+            update_fields.append("last_otp_sent_at")
+        user.save(update_fields=update_fields)
+    except Exception:
+        user.save()
+
+    # Try to send the email and raise if it fails so caller can handle it
+    try:
+        send_otp_email(user, otp)
+        logger.info("send_otp_for_user: OTP sent to %s", user.email)
+        return True
+    except Exception as e:
+        logger.exception(
+            "send_otp_for_user: Failed to send OTP to %s: %s", user.email, str(e)
+        )
+        # Clear the OTP (avoid leaving an unused OTP in DB)
+        try:
+            user.otp = None
+            user.save(update_fields=["otp"])
+        except Exception:
+            user.save()
+        # raise to inform the caller
+        raise
+
+
+@api_view(["POST"])
+@csrf_exempt
+@permission_classes([AllowAny])
+def resend_otp(request):
+    """
+    Resend OTP for an existing, inactive user.
+    Payload: { "email": "user@example.com" }
+    """
+    email = (request.data.get("email") or "").strip().lower()
+    if not email:
+        logger.warning("Resend OTP called without email.")
+        return Response(
+            {"detail": "Email is required."}, status=status.HTTP_400_BAD_REQUEST
+        )
+
+    try:
+        user = CustomUser.objects.get(email__iexact=email)
+    except CustomUser.DoesNotExist:
+        logger.warning("Resend OTP requested for non-existent user: %s", email)
+        return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    if user.is_active:
+        logger.info("Resend OTP requested for already active user: %s", user.email)
+        return Response(
+            {"detail": "Account already verified."}, status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # Optional server-side cooldown using last_otp_sent_at if available
+    COOLDOWN_SECONDS = 60
+    last_sent = getattr(user, "last_otp_sent_at", None)
+    if last_sent and timezone.now() - last_sent < timedelta(seconds=COOLDOWN_SECONDS):
+        logger.info("OTP resend cooldown in effect for %s", user.email)
+        return Response(
+            {"detail": "Please wait before requesting another code."}, status=429
+        )
+
+    try:
+        send_otp_for_user(user)
+        return Response(
+            {"detail": "OTP resent successfully.", "email": user.email},
+            status=status.HTTP_200_OK,
+        )
+    except Exception as e:
+        logger.exception("Error resending OTP to %s: %s", email, str(e))
+        return Response(
+            {"detail": "Failed to resend OTP. Try again later."},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
 
 from django.core.mail import send_mail
@@ -265,43 +399,45 @@ def send_welcome_email(user):
     image_url = (
         "https://drive.google.com/uc?export=view&id=1K7sBCm3mgW5jQ1Cfh73LQDZuvGuNFTKw"
     )
-    savings_image_url = "https://drive.google.com/uc?export=view&id=1bOVTTicGZJgUKX2aTm2SAqyX-8qfH41Q"  # Your new image link
+    savings_image_url = (
+        "https://drive.google.com/uc?export=view&id=1bOVTTicGZJgUKX2aTm2SAqyX-8qfH41Q"
+    )
 
-    message = f"""
-
+    message_html = f"""
     <p>Hi {user.first_name},</p>
-
     <p>I'm personally welcoming you to the MyFund family.</p>
-
-    <p>By signing up, you've entered the 4th step toward financial freedom, <strong>SAVINGS</strong> (click WealthMap on the app for details).</p>
-    
+    <p>By signing up, you've entered the 4th step toward financial freedom,
+       <strong>SAVINGS</strong> (click WealthMap on the app for details).</p>
     <p><img src="{savings_image_url}" alt="Savings Step Image" style="display: block; margin: 10px auto; max-width: 100%; height: auto;"></p>
-
     <p>The app tracks your progress as you save towards buying properties for a lifetime rental (passive) income.</p>
-
     <p>In the last few years, thousands have saved to sort their rents, started a business, saved their first million, earned their first passive income, traveled abroad, got married... it's amazing.</p>
-
     <p>I can't wait to hear your financial success story in the shortest time possible here at MyFund.</p>
-
     <p>Once again, you're welcome!</p>
-
     <br>
-
-    <p><img src="{image_url}" alt="Dr Tee" style="display: block; float: left; width: 100px; height: 100px; border-radius: 50%; margin-right: 10px;">
-    <strong>Tolulope Ahmed (Dr Tee)</strong><br>
-    CEO/Co-founder, MyFund</p>
+   <p style="display: inline-flex; align-items: center; margin: 0;">
+    <img src="{image_url}" alt="Dr Tee"
+        style="width: 50px; height: 50px; border-radius: 50%; margin-right: 10px;">
+    <span>
+        <strong style="font-size: 16px;">Tolulope Ahmed (Dr Tee)</strong><br>
+        <span style="font-size: 12px; font-style: italic; color: #555;">
+        CEO/Co-founder, MyFund
+        </span>
+    </span>
+    </p>
     """
 
-    from_email = "MyFund <info@myfundmobile.com>"
-    recipient_list = [user.email]
-
-    send_generic_email(subject, message, from_email, recipient_list)
+    # Just call the generic helper
+    send_generic_email(
+        subject=subject,
+        message=message_html,
+        recipient_list=[user.email],
+    )
 
 
 def send_otp_reset_email(user, otp):
     subject = f"[OTP] Password Reset - {otp}"
     current_year = datetime.now().year
-    
+
     message = f"""
     <p><img src="{logo_url}" alt="MyFund Logo" style="display: block; margin: 0 auto; max-width: 100px; height: auto;"></p>
 
@@ -333,7 +469,7 @@ def test_email(request):
     """
 
     from_email = "MyFund <info@myfundmobile.com>"
-    recipient_list = ['sammy@myfundmobile.com']
+    recipient_list = ["sammy@myfundmobile.com"]
 
     send_generic_email(subject, message, from_email, recipient_list)
 
@@ -419,7 +555,30 @@ class CustomObtainAuthToken(ObtainAuthToken):
             user = serializer.validated_data["user"]
             logger.info(f"User authenticated successfully: {user.email}")
 
-            # Generate tokens
+            # If user is inactive: generate & send OTP (via helper) then instruct client to go to OTP screen
+            if not user.is_active:
+                try:
+                    send_otp_for_user(user)
+                except Exception as e:
+                    logger.exception(
+                        "Failed to send OTP during login for %s: %s", user.email, str(e)
+                    )
+                    return Response(
+                        {"detail": "Failed to send OTP. Try again later."},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    )
+
+                return Response(
+                    {
+                        "status": "inactive",
+                        "message": "Account not verified. A new OTP has been sent to your email.",
+                        "next_step": "enter_otp",
+                        "email": user.email,
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            # Active user: generate tokens
             tokens = self.get_tokens_for_user(user)
 
             return Response(tokens)
@@ -433,9 +592,6 @@ class CustomObtainAuthToken(ObtainAuthToken):
 
     @staticmethod
     def get_tokens_for_user(user):
-        """
-        Generate and return JWT tokens for the given user.
-        """
         refresh = RefreshToken.for_user(user)
         return {
             "refresh": str(refresh),
@@ -1419,7 +1575,7 @@ def quicksave(request):
     payload = {
         "email": request.user.email,
         "amount": amount_kobo,
-        "channels": payment_channels
+        "channels": payment_channels,
     }
 
     # Make request to Paystack
@@ -1800,7 +1956,7 @@ def quickinvest(request):
     payload = {
         "email": request.user.email,
         "amount": amount_kobo,
-        "channels": payment_channels
+        "channels": payment_channels,
     }
 
     resp = requests.post(
@@ -2427,9 +2583,11 @@ def withdraw_to_local_bank(request):
                 f"Your withdrawal of ₦{amount} from your {source_account} account has been sent to {target_bank_account.bank_name}.<br><br>"
                 "Thank you for using MyFund! 🥂<br><br>"
             )
-            
-            send_generic_email(subject, message, "MyFund <info@myfundmobile.com>", [user.email])
-            
+
+            send_generic_email(
+                subject, message, "MyFund <info@myfundmobile.com>", [user.email]
+            )
+
             return Response(
                 {
                     "success": True,
@@ -2488,8 +2646,10 @@ def withdraw_to_local_bank(request):
             f"We've received your request to withdraw ₦{amount}. It'll be processed within the hour.<br><br>"
             "Thank you for using MyFund!<br><br>"
         )
-        
-        send_generic_email(subject, message, "MyFund <info@myfundmobile.com>", [user.email])
+
+        send_generic_email(
+            subject, message, "MyFund <info@myfundmobile.com>", [user.email]
+        )
 
         # — notify admin
         subj_admin = f"[CHECK] {user.first_name} Wants to Withdraw ₦{amount}"
@@ -2500,8 +2660,13 @@ def withdraw_to_local_bank(request):
             f"Transaction ID: {transaction_id}<br>"
             "Reason: automatic Paystack withdrawal failed; manual processing required."
         )
-        
-        send_generic_email(subj_admin, msg_admin, "MyFund <info@myfundmobile.com>", ["admin@myfundmobile.com"])
+
+        send_generic_email(
+            subj_admin,
+            msg_admin,
+            "MyFund <info@myfundmobile.com>",
+            ["admin@myfundmobile.com"],
+        )
 
         # 0️⃣ Return 200 with success:false so front end enters “processing” flow
         return Response(
@@ -2700,7 +2865,7 @@ def process_withdrawal_to_local_bank(request):
             )
             from_email = "MyFund <info@myfundmobile.com>"
             recipient_list = [user.email]
-            
+
             send_generic_email(subject, user_message, from_email, recipient_list)
 
             # ✅ STEP 10.1: Send push notification to user
@@ -2754,8 +2919,10 @@ def process_withdrawal_to_local_bank(request):
             admin_recipient_list = [
                 "company@myfundmobile.com"
             ]  # Changed to the specified admin email
-            
-            send_generic_email(admin_subject, admin_message, from_email, admin_recipient_list)
+
+            send_generic_email(
+                admin_subject, admin_message, from_email, admin_recipient_list
+            )
 
         return Response(
             {
@@ -2850,14 +3017,14 @@ def make_withdrawal_through_admin(user, amount, transaction_id):
             "info@myfundmobile.com",
             "cto@myfundmobile.com",
         ]
-        
+
         send_generic_email(subject, message, from_email, recipient_list)
 
         # Send a pending quicksave email to the user
         user_subject = "Withdrawal Pending..."
         user_message = f"Hi {user.first_name},<br><br>Your withdrawal of ₦{amount} is pending approval. We will notify you once it's processed. <br><br>Thank you for using MyFund."
         user_email = [user.email]
-        
+
         send_generic_email(user_subject, user_message, from_email, user_email)
 
         return {"message": "Withdrawal request created and pending admin approval"}
@@ -2960,22 +3127,20 @@ def wallet_transfer_view(request):  # ✅ NEW NAME
     )
 
     # Send confirmation emails
-    
+
     subject = f"You Sent ₦{amount} to {target_user.first_name}"
     message = f"Hi {sender.first_name},<br><br>You have successfully transferred ₦{amount} to {target_user.first_name} ({target_user.email}).<br><br>Thank you for using MyFund!"
     from_email = "MyFund <info@myfundmobile.com>"
     recipient_list = [sender.email]
-    
-    send_generic_email(subject, message, from_email, recipient_list)  
 
-    
+    send_generic_email(subject, message, from_email, recipient_list)
+
     subject = f"You Received ₦{amount} from {sender.first_name}"
     message = f"Hi {target_user.first_name},<br><br>You have received ₦{amount} from {sender.first_name} ({sender.email}).<br><br>Thank you for using MyFund!"
     from_email = "MyFund <info@myfundmobile.com>"
     recipient_list = [target_user.email]
-    
+
     send_generic_email(subject, message, from_email, recipient_list)
-    
 
     return Response({"success": True})
 
@@ -3016,7 +3181,7 @@ def schedule_rent_reward(user_id, rent_reward, transaction_id, property_name):
     # message = f"Hi {user.first_name},<br><br>You've received an annual rental income of ₦{rent_reward} from your {property_name} property. Keep growing your portfolio to enjoy more returns on your investment.🥂 <br><br>Thank you for using MyFund!"
     # from_email = "MyFund <info@myfundmobile.com>"
     # recipient_list = [user.email]
-    
+
     # send_generic_email(subject, message, from_email, recipient_list)
 
 
@@ -3099,7 +3264,7 @@ class BuyPropertyView(generics.CreateAPIView):
             message = f"Hi {user.first_name},<br><br>You've successfully purchased {num_units} {num_units_text} of {property.name} property valued at {property.price}.<br><br>You will earn an annual rental income of ₦{rent_reward} on this property.<br><br>Congratulations on being a landlord!"
             from_email = "MyFund <info@myfundmobile.com>"
             recipient_list = [user.email]
-            
+
             send_generic_email(subject, message, from_email, recipient_list)
 
             schedule_rent_reward(user.id, rent_reward, uuid.uuid4(), property.name)
@@ -3402,7 +3567,7 @@ class KYCUpdateView(generics.UpdateAPIView):
             )
             from_email = "MyFund <info@myfundmobile.com>"
             recipient_list = [user.email]
-            
+
             send_generic_email(user_subject, user_message, from_email, recipient_list)
 
         # 2️⃣ Push notification to user
@@ -3423,7 +3588,9 @@ class KYCUpdateView(generics.UpdateAPIView):
             "Please review it in the admin panel:<br>"
             "https://myfundapi-myfund-07ce351a.koyeb.app/admin/login/?next=/admin/.<br><br>"
         )
-        send_generic_email(admin_subject, admin_message, "MyFund <info@myfundmobile.com>", admin_email)
+        send_generic_email(
+            admin_subject, admin_message, "MyFund <info@myfundmobile.com>", admin_email
+        )
 
         return Response(serializer.data)
 
@@ -3637,12 +3804,12 @@ def initiate_bank_transfer(request):
         # ✅ Notify Admin
         subject = f"[CHECK] {user.first_name} Made A QuickSave Request"
         message = f"Hi Admin,<br><br>A bank transfer request of ₦{amount} has been initiated by {user.first_name} {user.last_name} ({user.email}).<br><br>Review here: https://myfundapi-myfund-07ce351a.koyeb.app/admin/<br><br>MyFund Team"
-        
+
         send_generic_email(
-            subject, 
-            message, 
-            "MyFund <info@myfundmobile.com>", 
-            ["company@myfundmobile.com", "info@myfundmobile.com"]
+            subject,
+            message,
+            "MyFund <info@myfundmobile.com>",
+            ["company@myfundmobile.com", "info@myfundmobile.com"],
         )
 
         # ✅ Notify User
@@ -3684,9 +3851,7 @@ def initiate_invest_transfer(request):
         user_message = f"Hi {user.first_name},<br><br>Your investment transfer request of ₦{amount} is pending approval. We will notify you once it's processed. <br><br>Thank you for using MyFund. <br><br>"
         user_email = user.email
 
-        send_generic_email(
-            user_subject, user_message, from_email, [user_email]
-        )
+        send_generic_email(user_subject, user_message, from_email, [user_email])
 
         send_push_notification(
             user=user,
@@ -3784,7 +3949,7 @@ def message_admin(request):
             subject=subject,
             message=message,
             from_email=from_email,
-            recipient_list=[recipient_email]
+            recipient_list=[recipient_email],
         )
 
         return JsonResponse({"success": True}, status=status.HTTP_200_OK)
@@ -3902,12 +4067,7 @@ def paystack_submit_otp(request):
                 from_email = "MyFund <info@myfundmobile.com>"
                 recipient_list = [user.email]
 
-                send_generic_email(
-                    subject,
-                    message,
-                    from_email,
-                    recipient_list
-                )
+                send_generic_email(subject, message, from_email, recipient_list)
 
             if description[0] == "QuickSave":
                 user.savings += int(amount)
@@ -4049,12 +4209,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     from_email = "MyFund <info@myfundmobile.com>"
                     recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
 
-                    send_generic_email(
-                        subject,
-                        message,
-                        from_email,
-                        recipient_list
-                    )
+                    send_generic_email(subject, message, from_email, recipient_list)
 
                     return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
@@ -4125,9 +4280,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         user.save()
 
                         # Send success email
-                        subject = (
-                            f"AutoSave ({autosave.frequency.capitalize()}) Successful! ✅"
-                        )
+                        subject = f"AutoSave ({autosave.frequency.capitalize()}) Successful! ✅"
                         message = (
                             f"Well done {user.first_name},<br><br>"
                             f"Your AutoSave was successful and ₦{Decimal(amount):,.2f} has been added to your SAVINGS account."
@@ -4233,7 +4386,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     transaction.save()
 
                     user.savings += int(amount)
-                    # user.confirm_referral_rewards(is_referrer=True)   
+                    # user.confirm_referral_rewards(is_referrer=True)
                     user.update_total_savings_and_investment_this_month()
                     user.save()
 
@@ -4543,9 +4696,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     "sammy@myfundmobile.com",
                 ]
 
-                send_generic_email(
-                    subject, message, from_email, recipient_list
-                )
+                send_generic_email(subject, message, from_email, recipient_list)
 
                 return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
@@ -5071,9 +5222,7 @@ def invite_to_group(request, group_id):
             # Loop through the invited users and send emails
             recipient_list = [invited_user.email for invited_user in invited_users]
             try:
-                send_generic_email(
-                    subject, message, from_email, recipient_list
-                )
+                send_generic_email(subject, message, from_email, recipient_list)
             except Exception as e:
                 return Response(
                     {"error": f"Failed to send email: {str(e)}"},
@@ -5818,9 +5967,7 @@ def withdraw_savings(request, id):
                 from_email = "MyFund <info@myfundmobile.com>"
                 recipient_list = [user.email]
 
-                send_generic_email(
-                    subject, message, from_email, recipient_list
-                )
+                send_generic_email(subject, message, from_email, recipient_list)
 
                 return Response(
                     {

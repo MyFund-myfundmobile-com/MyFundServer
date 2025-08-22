@@ -79,6 +79,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     is_subscribed = models.BooleanField(default=True)
     date_joined = models.DateTimeField(auto_now_add=True, db_index=True)
     is_deleted = models.BooleanField(default=False)
+    last_otp_sent_at = models.DateTimeField(null=True, blank=True)
 
     @property
     def full_name(self):
