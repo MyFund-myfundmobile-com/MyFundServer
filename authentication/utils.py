@@ -102,9 +102,9 @@ def send_generic_email(
     recipient_list=None,
 ):
     """
-    Smart email sender that works for both:
-    - Raw HTML messages (e.g. welcome/transaction emails)
-    - Plain text messages (auto-wrapped with email/email.html)
+    Smart email sender:
+    - Always wraps message in MyFund template (email/email.html)
+    - Supports both plain text and HTML content
     """
 
     if recipient_list is None:
@@ -114,15 +114,10 @@ def send_generic_email(
 
     def send_email_task():
         try:
-            # Decide if message already contains HTML
-            if "<" in message and ">" in message:
-                html_message = message
-                plain_message = strip_tags(message)
-            else:
-                # Wrap in template
-                context = {"subject": subject, "message": message}
-                html_message = render_to_string("email/email.html", context=context)
-                plain_message = strip_tags(html_message)
+            # Wrap everything inside the template
+            context = {"subject": subject, "message": message}
+            html_message = render_to_string("email/email.html", context=context)
+            plain_message = strip_tags(html_message)
 
             send_mail(
                 subject,

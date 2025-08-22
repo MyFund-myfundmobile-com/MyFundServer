@@ -240,53 +240,55 @@ def generate_otp():
 def send_otp_email(user, otp):
     """
     Sends the OTP email using Django's send_mail with a proper recipient_list.
+    Now always wrapped in MyFund's email/email.html template.
     Raises on failure so callers can handle/log it.
     """
     subject = f"[OTP-{otp}] Did You Just Signup?"
-    # HTML message
-    message_html = f"""
+
+    # Inner content (can be plain text or HTML)
+    inner_html = f"""
     <p>Hi {user.first_name}, </p>
 
     <p>We heard you'd like a shiny new MyFund account. Use the One-Time-Password (OTP) below to complete your signup. This code is valid only for 20 minutes, so chop-chop!</p>
 
-    <h1 style="text-align: center; font-size: 24px;">{otp}</h1>
+    <h1 style="text-align: center; font-size: 36px;">{otp}</h1>
 
     <p>If you did not request to create a MyFund account, kindly ignore this email. Otherwise, buckle up, you're in for a treat!</p>
 
     <p>Cheers! 🥂</p>
     """
 
-    # Plain text fallback
-    message_text = strip_tags(message_html)
+    # Wrap in MyFund template
+    context = {
+        "subject": subject,
+        "message": inner_html,  # template should render {{ message|safe }}
+        "user": user,  # optional if your template uses it
+    }
+    html_message = render_to_string("email/email.html", context=context)
+    message_text = strip_tags(html_message)
 
-    # Use default from settings if provided, else fallback string
     from_email = getattr(
         settings, "DEFAULT_FROM_EMAIL", "MyFund <info@myfundmobile.com>"
     )
-
-    # recipient_list MUST be a list/tuple
     recipient_list = [user.email]
 
     try:
-        # fail_silently=False so exceptions bubble (we want to know failures)
         send_mail(
             subject,
             message_text,
             from_email,
             recipient_list,
-            html_message=message_html,
+            html_message=html_message,
             fail_silently=False,
         )
         logger.info("OTP email sent to %s", user.email)
     except Exception as exc:
         logger.exception("Failed to send OTP email to %s: %s", user.email, str(exc))
-        # Clear the OTP to avoid leaving stale codes
         try:
             user.otp = None
             user.save(update_fields=["otp"])
         except Exception:
             user.save()
-        # Re-raise so callers (resend / login) return 500 and client knows not to expect an email
         raise
 
 
@@ -392,11 +394,6 @@ image_url = (
 
 
 def send_welcome_email(user):
-    """
-    Send a welcome email directly using Django's send_mail.
-    Uses a recipient_list (a Python list) to avoid TypeError.
-    Errors are raised to caller so callers can decide what to do.
-    """
     subject = f"{user.first_name}, WELCOME TO MyFund! 🥂🎊🔥"
 
     image_url = (
@@ -408,42 +405,32 @@ def send_welcome_email(user):
 
     message_html = f"""
     <p>Hi {user.first_name},</p>
-
     <p>I'm personally welcoming you to the MyFund family.</p>
-
-    <p>By signing up, you've entered the 4th step toward financial freedom, <strong>SAVINGS</strong> (click WealthMap on the app for details).</p>
-    
+    <p>By signing up, you've entered the 4th step toward financial freedom,
+       <strong>SAVINGS</strong> (click WealthMap on the app for details).</p>
     <p><img src="{savings_image_url}" alt="Savings Step Image" style="display: block; margin: 10px auto; max-width: 100%; height: auto;"></p>
-
     <p>The app tracks your progress as you save towards buying properties for a lifetime rental (passive) income.</p>
-
     <p>In the last few years, thousands have saved to sort their rents, started a business, saved their first million, earned their first passive income, traveled abroad, got married... it's amazing.</p>
-
     <p>I can't wait to hear your financial success story in the shortest time possible here at MyFund.</p>
-
     <p>Once again, you're welcome!</p>
-
     <br>
-
-    <p><img src="{image_url}" alt="Dr Tee" style="display: block; float: left; width: 50; height: 50; border-radius: 50%; margin-right: 10px;">
-    <strong>Tolulope Ahmed (Dr Tee)</strong><br>
-    CEO/Co-founder, MyFund</p>
+   <p style="display: inline-flex; align-items: center; margin: 0;">
+    <img src="{image_url}" alt="Dr Tee"
+        style="width: 50px; height: 50px; border-radius: 50%; margin-right: 10px;">
+    <span>
+        <strong style="font-size: 16px;">Tolulope Ahmed (Dr Tee)</strong><br>
+        <span style="font-size: 12px; font-style: italic; color: #555;">
+        CEO/Co-founder, MyFund
+        </span>
+    </span>
+    </p>
     """
 
-    message_text = strip_tags(message_html)
-    from_email = getattr(
-        settings, "DEFAULT_FROM_EMAIL", "MyFund <info@myfundmobile.com>"
-    )
-    recipient_list = [user.email]  # MUST be a list
-
-    # Do NOT swallow exceptions here; caller can choose to catch or log.
-    send_mail(
-        subject,
-        message_text,
-        from_email,
-        recipient_list,
-        html_message=message_html,
-        fail_silently=False,
+    # Just call the generic helper
+    send_generic_email(
+        subject=subject,
+        message=message_html,
+        recipient_list=[user.email],
     )
 
 
