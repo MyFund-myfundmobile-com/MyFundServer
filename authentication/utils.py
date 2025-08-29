@@ -98,23 +98,21 @@ def send_push_notification(user, title, message, data=None, notif_type="SYSTEM")
 def send_generic_email(
     subject,
     message,
-    from_email="MyFund <info@myfundmobile.com>",
+    from_email=None,
     recipient_list=None,
 ):
-    """
-    Smart email sender:
-    - Always wraps message in MyFund template (email/email.html)
-    - Supports both plain text and HTML content
-    """
-
     if recipient_list is None:
         recipient_list = []
     elif isinstance(recipient_list, str):
         recipient_list = [recipient_list]
 
+    if from_email is None:
+        from django.conf import settings
+
+        from_email = settings.DEFAULT_FROM_EMAIL
+
     def send_email_task():
         try:
-            # Wrap everything inside the template
             context = {"subject": subject, "message": message}
             html_message = render_to_string("email/email.html", context=context)
             plain_message = strip_tags(html_message)
