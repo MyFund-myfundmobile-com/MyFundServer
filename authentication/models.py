@@ -80,6 +80,8 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     date_joined = models.DateTimeField(auto_now_add=True, db_index=True)
     is_deleted = models.BooleanField(default=False)
     last_otp_sent_at = models.DateTimeField(null=True, blank=True)
+    pin_reset_otp = models.CharField(max_length=6, blank=True, null=True)
+    pin_reset_otp_expiry = models.DateTimeField(null=True, blank=True)
 
     @property
     def full_name(self):
@@ -925,6 +927,30 @@ class AccountBalance(models.Model):
 from django.core.validators import RegexValidator
 
 
+from django.db import models
+from django.conf import settings
+from django.core.validators import RegexValidator
+from decimal import Decimal, InvalidOperation
+import uuid
+import logging
+from dateutil.relativedelta import relativedelta
+from django.utils import timezone
+
+logger = logging.getLogger(__name__)
+
+
+from django.db import models
+from django.conf import settings
+from django.core.validators import RegexValidator
+from django.utils import timezone
+from dateutil.relativedelta import relativedelta
+from datetime import timedelta
+import uuid
+import logging
+
+logger = logging.getLogger(__name__)
+
+
 class TargetSavings(models.Model):
     CATEGORY_CHOICES = [
         ("RENT_ACCOMMODATION", "Rent & Accommodation"),
@@ -944,6 +970,7 @@ class TargetSavings(models.Model):
     ]
 
     FREQUENCY_CHOICES = [
+        ("HOURLY", "Hourly"),
         ("DAILY", "Daily"),
         ("WEEKLY", "Weekly"),
         ("MONTHLY", "Monthly"),
@@ -972,7 +999,6 @@ class TargetSavings(models.Model):
     monthly_payment = models.DecimalField(
         max_digits=12, decimal_places=2, blank=True, null=True
     )
-
     funding_source = models.CharField(
         max_length=20,
         choices=[
@@ -982,17 +1008,26 @@ class TargetSavings(models.Model):
         ],
         default="SAVINGS",
     )
-    payment_method = models.CharField(
-        max_length=50, blank=True, null=True
-    )  # Store card ID if used
+    payment_method = models.CharField(max_length=50, blank=True, null=True)
     frequency = models.CharField(
         max_length=10, choices=FREQUENCY_CHOICES, default="MONTHLY"
     )
     next_deduction = models.DateTimeField(null=True, blank=True)
+    next_retry = models.DateTimeField(null=True, blank=True)
     cancellation_charge = models.DecimalField(
         max_digits=12, decimal_places=2, default=0
     )
     is_cancelled = models.BooleanField(default=False)
+    last_processed = models.DateTimeField(null=True, blank=True)
+    deduction_attempts = models.IntegerField(default=0)
+    max_attempts = models.IntegerField(default=3)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["is_active", "next_deduction"]),
+            models.Index(fields=["user", "is_active"]),
+            models.Index(fields=["is_active", "next_retry"]),
+        ]
 
     @property
     def progress_percentage(self):
@@ -1000,51 +1035,163 @@ class TargetSavings(models.Model):
             return 0
         return (self.current_amount / self.target_amount) * 100
 
+    @property
+    def is_completed(self):
+        return self.current_amount >= self.target_amount
+
     def __str__(self):
         return f"{self.user.email}'s {self.name} Target"
+
+    def calculate_next_deduction_time(self):
+        """Calculate next deduction time based on frequency"""
+        now = timezone.now()
+        if self.frequency == "HOURLY":
+            return now + relativedelta(hours=1)
+        elif self.frequency == "DAILY":
+            return now + relativedelta(days=1)
+        elif self.frequency == "WEEKLY":
+            return now + relativedelta(weeks=1)
+        else:  # MONTHLY
+            return now + relativedelta(months=1)
+
+    def update_next_deduction_date(self):
+        """Update next deduction date based on frequency and last processing time"""
+        base_time = self.last_processed if self.last_processed else timezone.now()
+
+        if self.frequency == "HOURLY":
+            self.next_deduction = base_time + timedelta(hours=1)
+        elif self.frequency == "DAILY":
+            self.next_deduction = base_time + timedelta(days=1)
+        elif self.frequency == "WEEKLY":
+            self.next_deduction = base_time + timedelta(weeks=1)
+        elif self.frequency == "MONTHLY":
+            # For monthly, use relativedelta for proper month handling
+            self.next_deduction = base_time + relativedelta(months=1)
+
+    def schedule_retry(self):
+        """Schedule retry based on frequency"""
+        now = timezone.now()
+
+        if self.frequency == "HOURLY":
+            self.next_retry = now + timedelta(minutes=30)  # Retry in 30 minutes
+        elif self.frequency == "DAILY":
+            self.next_retry = now + timedelta(hours=6)  # Retry in 6 hours
+        elif self.frequency == "WEEKLY":
+            self.next_retry = now + timedelta(days=1)  # Retry in 1 day
+        elif self.frequency == "MONTHLY":
+            self.next_retry = now + timedelta(days=2)  # Retry in 2 days
+
+    def get_retry_interval_display(self):
+        """Get human-readable retry interval"""
+        if self.frequency == "HOURLY":
+            return "30 minutes"
+        elif self.frequency == "DAILY":
+            return "6 hours"
+        elif self.frequency == "WEEKLY":
+            return "1 day"
+        elif self.frequency == "MONTHLY":
+            return "2 days"
+        return "soon"
 
     def process_deduction(self):
         """Process the periodic deduction for this target savings"""
         from django.db import transaction
-        from authentication.models import Transaction, CustomUser
+        from .models import Transaction
+        from .utils import send_generic_email, send_push_notification
+        from django.conf import settings
 
         try:
             with transaction.atomic():
-                user = CustomUser.objects.get(id=self.user.id)
-                amount = self.monthly_payment
+                target = TargetSavings.objects.select_for_update().get(id=self.id)
+                user = target.user.__class__.objects.select_for_update().get(
+                    id=target.user.id
+                )
 
-                # Check funding source and balance
-                if self.funding_source == "SAVINGS" and user.savings >= amount:
-                    user.savings -= amount
-                    source = "savings"
-                elif self.funding_source == "INVESTMENT" and user.investment >= amount:
-                    user.investment -= amount
-                    source = "investment"
-                elif self.funding_source == "CARD":
-                    # Implement card payment processing here
-                    card_charge_success = True  # Replace with actual card processing
-                    if not card_charge_success:
-                        raise Exception("Card payment failed")
-                    source = "card"
-                else:
-                    # Insufficient funds - deactivate and notify
-                    self.is_active = False
-                    self.save()
-                    self.send_failed_deduction_email()
+                if target.is_completed or target.is_cancelled or not target.is_active:
+                    logger.info(
+                        f"Target {target.id} is completed/cancelled/inactive, skipping deduction"
+                    )
                     return False
 
-                # Update balances
-                user.save()
-                self.current_amount += amount
+                amount = target.monthly_payment
 
-                # Schedule next deduction
-                if self.frequency == "DAILY":
-                    self.next_deduction = timezone.now() + timedelta(days=1)
-                elif self.frequency == "WEEKLY":
-                    self.next_deduction = timezone.now() + timedelta(weeks=1)
-                else:  # MONTHLY
-                    self.next_deduction = timezone.now() + relativedelta(months=1)
-                self.save()
+                # Check if this deduction will complete the target
+                if target.current_amount + amount > target.target_amount:
+                    amount = target.target_amount - target.current_amount
+                    if amount <= 0:
+                        target.is_active = False
+                        target.save()
+                        return True
+
+                deduction_success = False
+                source = None
+
+                # Check funding source and balance
+                if target.funding_source == "SAVINGS" and user.savings >= amount:
+                    user.savings -= amount
+                    source = "savings"
+                    deduction_success = True
+                elif (
+                    target.funding_source == "INVESTMENT" and user.investment >= amount
+                ):
+                    user.investment -= amount
+                    source = "investment"
+                    deduction_success = True
+                elif target.funding_source == "CARD":
+                    try:
+                        card_charge_success = self.process_card_payment(amount)
+                        if card_charge_success:
+                            source = "card"
+                            deduction_success = True
+                    except Exception as e:
+                        logger.error(
+                            f"Card payment failed for target {target.id}: {str(e)}"
+                        )
+                        deduction_success = False
+
+                if not deduction_success:
+                    target.deduction_attempts += 1
+                    target.last_processed = timezone.now()
+
+                    if target.deduction_attempts >= target.max_attempts:
+                        target.is_active = False
+                        target.save()
+                        # Send final failure email
+                        self.send_failed_deduction_email(max_attempts=True)
+                        send_push_notification(
+                            user,
+                            title="Plan Paused 🛑",
+                            message=f"'{target.name}' has been paused after multiple failed deductions.",
+                            data={
+                                "target_id": target.id,
+                                "type": "DEDUCTION_FAILED_FINAL",
+                            },
+                        )
+                    else:
+                        self.schedule_retry()
+                        target.save()
+                        # Send temporary failure email
+                        self.send_failed_deduction_email(max_attempts=False)
+                        send_push_notification(
+                            user,
+                            title="Deduction Failed ❌",
+                            message=f"We couldn't deduct ₦{target.monthly_payment:,} for '{target.name}'. "
+                            "We'll try again soon.",
+                            data={
+                                "target_id": target.id,
+                                "type": "DEDUCTION_FAILED_RETRY",
+                            },
+                        )
+                    return False
+
+                # Deduction successful
+                user.save()
+                target.current_amount += amount
+                target.deduction_attempts = 0  # Reset attempts
+                target.last_processed = timezone.now()
+                target.next_retry = None  # Clear any pending retry
+                target.update_next_deduction_date()  # Update next_deduction
+                target.save()
 
                 # Create transaction record
                 Transaction.objects.create(
@@ -1052,12 +1199,31 @@ class TargetSavings(models.Model):
                     transaction_type="credit",
                     status="confirmed",
                     amount=amount,
-                    description=f"Automatic {self.get_frequency_display().lower()} deduction for {self.name}",
+                    description=f"{target.name}",
                     service_charge=0,
                     total_amount=amount,
-                    target_savings=self,
+                    target_savings=target,
                     source=source,
-                    transaction_id=f"[{self.id}]-{uuid.uuid4().hex[:12]}_AUTO",
+                    transaction_id=f"[{target.id}]-{uuid.uuid4().hex[:12]}_AUTO",
+                )
+
+                # Send success notification
+                subject = f"Auto Deduction for '{target.name}' Successful"
+                message = (
+                    f"Hi {user.first_name},<br><br>"
+                    f"We've successfully deducted ₦{target.monthly_payment:,} "
+                    f"for your Target Savings plan '{target.name}'.<br><br>"
+                    f"Your new balance in this plan is ₦{target.current_amount:,}.<br><br>"
+                    f"Next deduction: {target.next_deduction.strftime('%Y-%m-%d %H:%M')}<br><br>"
+                    "Keep going, you're closer to your goal! 🚀"
+                )
+                send_generic_email(subject, message, recipient_list=[user.email])
+                send_push_notification(
+                    user,
+                    title="Target Savings Deduction Successful 🎉",
+                    message=f"₦{target.monthly_payment:,} deducted for '{target.name}'. "
+                    f"New balance: ₦{target.current_amount:,}",
+                    data={"target_id": target.id, "type": "DEDUCTION_SUCCESS"},
                 )
 
                 return True
@@ -1066,24 +1232,77 @@ class TargetSavings(models.Model):
             logger.error(
                 f"Error processing deduction for target savings {self.id}: {str(e)}"
             )
-            self.is_active = False
+            self.schedule_retry()
             self.save()
             return False
 
-    def send_failed_deduction_email(self):
+    def save(self, *args, **kwargs):
+        """Override save to set initial next_deduction if not set"""
+        # Ensure next_deduction is only set once upon creation
+        if not self.id and not self.next_deduction:
+            self.next_deduction = self.calculate_next_deduction_time()
+        super().save(*args, **kwargs)
+
+    def process_card_payment(self, amount):
+        """Process card payment (placeholder for actual implementation)"""
+        # Implement your actual card payment processing here
+        # This should integrate with your payment gateway
+        # For now, return True to simulate successful payment
+        return True
+
+    def send_failed_deduction_email(self, max_attempts=False):
         """Send email notification about failed deduction"""
         from django.core.mail import send_mail
         from django.conf import settings
 
         subject = f"Target Savings Deduction Failed - {self.name}"
+
+        if max_attempts:
+            message = (
+                f"Hi {self.user.first_name},\n\n"
+                f"We've attempted to deduct ₦{self.monthly_payment} for your target savings "
+                f"'{self.name}' multiple times but failed due to insufficient funds. "
+                "Your target savings plan has been temporarily paused.\n\n"
+                "Please ensure you have sufficient funds and reactivate your plan "
+                "to continue working towards your goal.\n\n"
+                "MyFund Team"
+            )
+        else:
+            retry_time = (
+                self.next_retry.strftime("%Y-%m-%d %H:%M")
+                if self.next_retry
+                else "soon"
+            )
+            message = (
+                f"Hi {self.user.first_name},\n\n"
+                f"The automatic deduction of ₦{self.monthly_payment} for your target savings "
+                f"'{self.name}' failed due to insufficient funds. We'll retry at {retry_time}.\n\n"
+                "To ensure you meet your target, you can manually transfer the required amount "
+                "to your target savings account.\n\n"
+                "MyFund Team"
+            )
+
+        send_mail(
+            subject,
+            message,
+            settings.DEFAULT_FROM_EMAIL,
+            [self.user.email],
+            fail_silently=False,
+        )
+
+    def send_completion_email(self):
+        """Send email notification about target completion"""
+        from django.core.mail import send_mail
+        from django.conf import settings
+
+        subject = f"Congratulations! Target Savings Completed - {self.name}"
         message = (
             f"Hi {self.user.first_name},\n\n"
-            f"The automatic deduction of ₦{self.monthly_payment} for your target savings "
-            f"'{self.name}' failed due to insufficient funds in your {self.get_funding_source_display()} account. "
-            "This may affect the achievement of your goal.\n\n"
-            "To ensure you meet your target, you can manually transfer the required amount "
-            "to your target savings. Please note that if the targets aren't completed by the "
-            "maturity date, you may not receive the expected interest.\n\n"
+            f"Great news! You've successfully completed your target savings '{self.name}' "
+            f"with a total of ₦{self.current_amount:,} saved!\n\n"
+            "Your dedication has paid off. You can now use these funds for your intended goal "
+            "or set up a new target savings plan.\n\n"
+            "Well done and keep up the great savings habit!\n\n"
             "MyFund Team"
         )
 
@@ -1094,6 +1313,12 @@ class TargetSavings(models.Model):
             [self.user.email],
             fail_silently=False,
         )
+
+    def save(self, *args, **kwargs):
+        """Override save to set initial next_deduction if not set"""
+        if not self.next_deduction and self.is_active and not self.is_cancelled:
+            self.next_deduction = self.calculate_next_deduction_time()
+        super().save(*args, **kwargs)
 
 
 from decimal import Decimal, InvalidOperation
@@ -1124,6 +1349,19 @@ class Transaction(models.Model):
         null=True,
         blank=True,
         related_name="referral_transactions",
+    )
+
+    source = models.CharField(
+        max_length=20,
+        choices=[
+            ("SAVINGS", "Savings"),
+            ("INVESTMENT", "Investment"),
+            ("CARD", "Card"),
+            ("WALLET", "Wallet"),
+        ],
+        blank=True,
+        null=True,
+        help_text="Where the transaction funds came from",
     )
 
     transaction_type = models.CharField(max_length=20, choices=TRANSACTION_TYPES)
@@ -1442,7 +1680,7 @@ class Notification(models.Model):
 
 class DeviceToken(models.Model):
     user = models.ForeignKey(
-        User, on_delete=models.CASCADE, related_name="device_tokens"
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="device_tokens"
     )
     token = models.CharField(max_length=255, unique=True)
     device_type = models.CharField(

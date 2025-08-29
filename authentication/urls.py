@@ -211,11 +211,18 @@ urlpatterns = [
         name="initiate_invest_transfer",
     ),
     path("message-admin/", views.message_admin, name="message-admin"),
+    # PIN Management APIs
     path("update-myfundpin/", views.update_myfund_pin, name="update-myfundpin"),
     path("has-myfundpin/", views.has_myfund_pin, name="has-myfundpin"),
     path("validate-myfundpin/", views.validate_myfund_pin, name="validate_myfundpin"),
     path("submit_otp/", views.paystack_submit_otp, name="submit_otp"),
     path("paystack-webhook/", views.paystack_webhook, name="paystack-webhook"),
+    path("send-pin-reset-otp/", views.send_pin_reset_otp, name="send_pin_reset_otp"),
+    path(
+        "verify-otp-reset-pin/",
+        views.verify_otp_and_reset_pin,
+        name="verify_otp_reset_pin",
+    ),
     # Admin Related APIs
     path("get-all-users/", views.get_all_users, name="get_all_users"),
     path("send-email/", send_email, name="send_email"),
@@ -260,23 +267,25 @@ urlpatterns = [
         views.get_user_contributions,
         name="get_user_contributions",
     ),
-    # Target Savings Plan using ViewSet
-    # path(
-    #     "target-savings/",
-    #     views.TargetSavingsListCreate.as_view(),
-    #     name="target-savings-list",
-    # ),
-    # path(
-    #     "target-savings/<int:pk>/",
-    #     views.TargetSavingsRetrieveUpdateDestroy.as_view(),
-    #     name="target-savings-detail",
-    # ),
-    # path(
-    #     "target-savings/<int:pk>/cancel/",
-    #     views.cancel_target_saving,
-    #     name="cancel-target-saving",
-    # ),
-    # path("target-savings/total/", target_savings_total, name="target-savings-total"),
+    # Target Savings URLs
+    path(
+        "target-savings/",
+        views.TargetSavingsListCreate.as_view(),
+        name="target-savings-list",
+    ),
+    path(
+        "target-savings/<int:pk>/",
+        views.TargetSavingsRetrieveUpdateDestroy.as_view(),
+        name="target-savings-detail",
+    ),
+    path(
+        "target-savings/<int:pk>/cancel/",
+        views.cancel_target_saving,
+        name="cancel-target-saving",
+    ),
+    path(
+        "target-savings/total/", views.target_savings_total, name="target-savings-total"
+    ),
     # MonthlyFinancial APIs
     path(
         "current-month/",
