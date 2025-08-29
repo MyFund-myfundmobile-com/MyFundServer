@@ -123,8 +123,7 @@ class CustomUserAdmin(UserAdmin):
         "make_ambassador",
         "revoke_ambassador",
         "delete_selected",
-        "deactivate_user"
-        "notify_outdated_users",
+        "deactivate_user" "notify_outdated_users",
         "say_hello",
     ]
 
@@ -329,7 +328,6 @@ class CustomUserAdmin(UserAdmin):
         queryset.update(is_active=False)
 
     deactivate_user.short_description = "Deactivate user"
-
 
     def approve_kyc(self, request, queryset):
         updated_users = []
@@ -1031,32 +1029,56 @@ class TopSaverHistoryAdmin(admin.ModelAdmin):
     is_current_month.short_description = "Current Month"
 
 
+from django.contrib import admin
+from .models import TargetSavings
+
+
 @admin.register(TargetSavings)
 class TargetSavingsAdmin(admin.ModelAdmin):
-    list_display = (
+    list_display = [
         "user",
         "name",
         "target_amount",
         "current_amount",
         "progress_percentage",
+        "frequency",
         "is_active",
+        "is_cancelled",
         "next_deduction",
-        "funding_source",
-    )
-    list_filter = ("is_active", "frequency", "category")
-    search_fields = ("user__email", "name")
-    readonly_fields = ("progress_percentage",)
-    fieldsets = (
-        (None, {"fields": ("user", "name", "target_amount", "current_amount")}),
-        ("Settings", {"fields": ("frequency", "funding_source", "payment_method")}),
-        ("Dates", {"fields": ("start_date", "end_date", "next_deduction")}),
-        ("Status", {"fields": ("is_active", "is_cancelled", "cancellation_charge")}),
-    )
+        "last_processed",
+    ]
+    list_filter = ["is_active", "is_cancelled", "frequency", "category"]
+    search_fields = ["user__email", "name"]
+    readonly_fields = ["current_amount", "progress_percentage", "last_processed"]
+    actions = ["force_process_deduction", "mark_as_completed"]
 
     def progress_percentage(self, obj):
-        return f"{obj.progress_percentage:.2f}%"
+        return f"{obj.progress_percentage:.1f}%"
 
     progress_percentage.short_description = "Progress"
+
+    def force_process_deduction(self, request, queryset):
+        for target in queryset:
+            if target.is_active and not target.is_cancelled:
+                target.process_deduction()
+        self.message_user(
+            request, f"Processed deductions for {queryset.count()} targets"
+        )
+
+    force_process_deduction.short_description = (
+        "Force process deduction for selected targets"
+    )
+
+    def mark_as_completed(self, request, queryset):
+        for target in queryset:
+            if not target.is_completed:
+                target.current_amount = target.target_amount
+                target.is_active = False
+                target.save()
+                target.send_completion_email()
+        self.message_user(request, f"Marked {queryset.count()} targets as completed")
+
+    mark_as_completed.short_description = "Mark selected targets as completed"
 
 
 from django.contrib import admin
