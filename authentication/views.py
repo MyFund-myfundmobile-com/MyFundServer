@@ -4020,6 +4020,101 @@ def validate_myfund_pin(request):
             {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
+        # Add to your views.py
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def send_pin_reset_otp(request):
+    """Send OTP via email + push"""
+    try:
+        user = request.user
+        if not user.myfund_pin:
+            return JsonResponse({"error": "No PIN set for this account"}, status=400)
+
+        otp = "".join(random.choices(string.digits, k=6))
+        user.pin_reset_otp = otp
+        user.pin_reset_otp_expiry = timezone.now() + timezone.timedelta(minutes=10)
+        user.save()
+
+        subject = f"[{otp}] PIN Reset OTP - MyFund"
+        message = f"""
+        Hi {user.first_name},<br><br>
+        Your PIN reset OTP is:<br><br>
+        <div style="font-size: 28px; font-weight: bold; text-align: center; color: #2c3e50;">
+            {otp}
+        </div><br>
+        This OTP expires in 10 minutes.<br><br>
+        If you didn't request this PIN reset, please contact support immediately.<br><br>
+        Best regards,<br>
+        MyFund Team
+        """
+        send_generic_email(
+            subject, message, "MyFund <info@myfundmobile.com>", [user.email]
+        )
+
+        send_push_notification(
+            user,
+            title="PIN Reset OTP",
+            message="Your MyFund PIN reset OTP has been sent to your registered email. Kindly use it to complete your PIN reset.",
+            data={"type": "PIN_RESET"},
+            notif_type="SECURITY",
+        )
+        return JsonResponse({"success": "OTP sent successfully"}, status=200)
+
+    except Exception as e:
+        return JsonResponse({"error": "Failed to send OTP"}, status=500)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def verify_otp_and_reset_pin(request):
+    """Verify OTP and reset PIN in one go"""
+    try:
+        user = request.user
+        otp = request.data.get("otp")
+        new_pin = request.data.get("new_pin")
+
+        if (
+            not user.pin_reset_otp
+            or user.pin_reset_otp != otp
+            or not user.pin_reset_otp_expiry
+            or user.pin_reset_otp_expiry < timezone.now()
+        ):
+            return JsonResponse({"error": "Invalid or expired OTP"}, status=400)
+
+        if not new_pin or len(new_pin) != 4 or not new_pin.isdigit():
+            return JsonResponse({"error": "PIN must be exactly 4 digits"}, status=400)
+
+        user.myfund_pin = encrypt_data(new_pin)
+        user.pin_reset_otp = None
+        user.pin_reset_otp_expiry = None
+        user.save()
+
+        subject = "PIN Reset Successful - MyFund"
+        message = f"""
+        Hi {user.first_name},<br><br>
+        ✅ Your transaction PIN has been successfully reset.<br><br>
+        If this wasn't you, please contact support immediately.<br><br>
+        Best regards,<br>
+        MyFund Team
+        """
+        send_generic_email(
+            subject, message, "MyFund <info@myfundmobile.com>", [user.email]
+        )
+
+        send_push_notification(
+            user,
+            title="PIN Reset Successful",
+            message="Your MyFund transaction PIN has been successfully reset.",
+            data={"type": "PIN_RESET_SUCCESS"},
+            notif_type="SECURITY",
+        )
+        return JsonResponse({"success": "PIN reset successful"}, status=200)
+
+    except Exception as e:
+        return JsonResponse({"error": "Failed to reset PIN"}, status=500)
+
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
@@ -6072,8 +6167,6 @@ def delete_savings_goal(request, id):
         )
 
 
-# views.py
-# Add these imports at the top of views.py
 from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIView
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
@@ -6082,10 +6175,12 @@ from django.shortcuts import get_object_or_404
 from .serializers import TargetSavingsSerializer
 from .models import TargetSavings, Transaction
 from django.utils import timezone
-from dateutil.relativedelta import relativedelta
-
-# from django.core.exceptions import ValidationError
+from decimal import Decimal
+import uuid
+from django.conf import settings
 from rest_framework.exceptions import ValidationError
+from django.db.models import Sum
+from .utils import send_generic_email, send_push_notification
 
 
 class TargetSavingsListCreate(ListCreateAPIView):
@@ -6095,32 +6190,38 @@ class TargetSavingsListCreate(ListCreateAPIView):
     def perform_create(self, serializer):
         user = self.request.user
         data = serializer.validated_data
-        # In perform_create() method
-        frequency = data["frequency"].upper()  # Force uppercase
+
+        frequency = data["frequency"].upper()
         if frequency not in dict(TargetSavings.FREQUENCY_CHOICES):
             raise ValidationError({"detail": "Invalid frequency"})
-        # Get required values
+
         amount = Decimal(str(serializer.validated_data["monthly_payment"]))
         funding_source = data["funding_source"]
 
-        # Validate balances
         if funding_source == "SAVINGS" and user.savings < amount:
             raise ValidationError({"detail": "Insufficient savings balance"})
         if funding_source == "INVESTMENT" and user.investment < amount:
-            raise ValidationError({"detail": "Insufficient savings balance"})
+            raise ValidationError({"detail": "Insufficient investment balance"})
 
-        # Deduct from source
+        # Deduct from source and update user balance
         setattr(
             user, funding_source.lower(), getattr(user, funding_source.lower()) - amount
         )
         user.save()
 
-        # Create instance with initial amount
+        # Create the TargetSavings instance
         instance = serializer.save(
-            user=user, current_amount=amount, start_date=timezone.now().date()
+            user=user,
+            current_amount=amount,
+            start_date=timezone.now().date(),
+            # No need to set next_deduction here, model's save() handles it.
         )
 
-        # Create transaction
+        # Manually set the first next_deduction time *after* the initial one
+        instance.next_deduction = instance.calculate_next_deduction_time()
+        instance.save()
+
+        # Create transaction for the initial deposit
         Transaction.objects.create(
             user=user,
             transaction_type="credit",
@@ -6130,32 +6231,40 @@ class TargetSavingsListCreate(ListCreateAPIView):
             service_charge=0,
             total_amount=amount,
             target_savings=instance,
-            transaction_id=f"[{instance.id}]-{uuid.uuid4().hex[:12]}_ACTIVE",  # Add this
+            source=funding_source,
+            transaction_id=f"[{instance.id}]-{uuid.uuid4().hex[:12]}_INITIAL",
         )
 
-        # ——————————————
-        # Send “New Target Created” email
-        subject = f"Target Savings “{instance.name}” is Live!"
+        # Send notifications
+        subject = f"Target Savings '{instance.name}' is Live!"
         message = (
             f"Hi {user.first_name},<br><br>"
-            f"Well done! Your new Target Savings plan “{instance.name}” has just been set up with a ₦{amount:,} initial deposit.<br><br>"
+            f"Well done! Your new Target Savings plan '{instance.name}' has been set up "
+            f"with a ₦{amount:,} initial deposit. Automatic {frequency.lower()} deductions "
+            f"will begin according to your schedule.<br><br>"
             "Keep an eye on your progress and watch your savings grow! 🥂<br><br>"
             "Thanks for choosing MyFund!<br>"
         )
-        from_email = settings.DEFAULT_FROM_EMAIL  # e.g. "info@myfundmobile.com"
+        from_email = settings.DEFAULT_FROM_EMAIL
         recipient_list = [user.email]
         send_generic_email(subject, message, from_email, recipient_list)
-        # ——————————————
-
-        # Schedule next deduction
-        instance.next_deduction = timezone.now() + relativedelta(months=1)
-        instance.save()
+        send_push_notification(
+            user,
+            title="🎉 New Target Savings Plan Created",
+            message=f"Your plan '{instance.name}' has been activated with ₦{amount:,}!",
+            data={"target_savings_id": instance.id},
+            notif_type="TARGET_SAVINGS",
+        )
 
     def get_queryset(self):
-        return TargetSavings.objects.filter(
-            user=self.request.user,
-            is_cancelled=False,  # Only include non-cancelled plans
-        ).prefetch_related("transaction_set")
+        return (
+            TargetSavings.objects.filter(
+                user=self.request.user,
+                is_cancelled=False,
+            )
+            .prefetch_related("transaction_set")
+            .order_by("-start_date")
+        )
 
 
 @api_view(["GET"])
@@ -6164,12 +6273,53 @@ def target_savings_total(request):
     total = (
         TargetSavings.objects.filter(
             user=request.user,
-            is_active=True,
-            is_cancelled=False,  # Only include non-cancelled plans
-        ).aggregate(total=Sum("current_amount"))["total"]
+            is_cancelled=False,
+        ).aggregate(
+            total=Sum("current_amount")
+        )["total"]
         or 0
     )
     return Response({"total_target_savings": float(total)})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def test_target_savings_processing(request):
+    """Manually trigger target savings processing for testing"""
+    from authentication.tasks import process_target_savings_deductions
+
+    # Call the task
+    result = process_target_savings_deductions.delay()
+
+    return Response(
+        {
+            "status": "Processing started",
+            "task_id": result.id,
+            "message": "Check your celery worker logs for results",
+        }
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def force_target_deduction(request, target_id):
+    """Force deduction for a specific target savings (for testing)"""
+    target = get_object_or_404(TargetSavings, id=target_id, user=request.user)
+
+    # Set next_deduction to now to force processing
+    target.next_deduction = timezone.now()
+    target.save()
+
+    # Process immediately
+    success = target.process_deduction()
+
+    return Response(
+        {
+            "success": success,
+            "message": f"Deduction {'succeeded' if success else 'failed'} for target {target.name}",
+            "new_balance": float(target.current_amount),
+        }
+    )
 
 
 class TargetSavingsRetrieveUpdateDestroy(RetrieveUpdateDestroyAPIView):
@@ -6180,14 +6330,13 @@ class TargetSavingsRetrieveUpdateDestroy(RetrieveUpdateDestroyAPIView):
     def get_queryset(self):
         return TargetSavings.objects.filter(
             user=self.request.user,
-            is_cancelled=False,  # Only include non-cancelled plans
+            is_cancelled=False,
         )
 
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def cancel_target_saving(request, pk):
-    # Get target savings instance
     target = get_object_or_404(TargetSavings, pk=pk, user=request.user)
 
     if target.is_cancelled:
@@ -6212,23 +6361,33 @@ def cancel_target_saving(request, pk):
         service_charge=charge,
         total_amount=return_amount,
         target_savings=target,
-        transaction_id=f"[{target.id}]-{uuid.uuid4().hex[:12]}_CANCELLED",  # Add this
+        transaction_id=f"[{target.id}]-{uuid.uuid4().hex[:12]}_CANCELLED",
     )
 
-    # ——————————————
-    # Send “Plan Cancelled” email
-    subject = f"Target Savings “{target.name}” Cancelled"
+    # Notifications
+    subject = f"Target Savings '{target.name}' Cancelled"
     message = (
         f"Hi {user.first_name},<br><br>"
-        f"You’ve just cancelled your Target Savings plan “{target.name}” and we’ve refunded ₦{return_amount:,} "
-        "(minus our 1% processing fee).<br><br>"
-        "You’ll forfeit any un‑accrued interest by cancelling early. If you change your mind, you can always set up a new plan.<br><br>"
+        f"You've cancelled your Target Savings plan '{target.name}' and we've refunded "
+        f"₦{return_amount:,.2f} (minus our 1% processing fee).<br><br>"
+        "If you change your mind, you can always set up a new plan.<br><br>"
         "Thanks for using MyFund!<br>"
     )
+
     from_email = settings.DEFAULT_FROM_EMAIL
     recipient_list = [user.email]
+
+    # Send email
     send_generic_email(subject, message, from_email, recipient_list)
-    # ——————————————
+
+    # Push notification
+    send_push_notification(
+        user,
+        title="⚠️ Target Savings Cancelled",
+        message=f"Your plan '{target.name}' has been cancelled. ₦{return_amount:,.2f} has been refunded to the source account.",
+        data={"target_savings_id": target.id, "refund_amount": float(return_amount)},
+        notif_type="TARGET_SAVINGS",
+    )
 
     # Update target savings
     target.is_active = False
@@ -6236,13 +6395,11 @@ def cancel_target_saving(request, pk):
     target.cancellation_charge = charge
     target.save()
 
-    # Refresh user balances
-    user.refresh_from_db()
-
     return Response(
         {
             "status": "cancelled",
             "returned_amount": float(return_amount),
+            "charge": float(charge),
             "new_balance": float(user.savings),
         }
     )
