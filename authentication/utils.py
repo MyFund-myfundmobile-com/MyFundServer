@@ -131,3 +131,22 @@ def send_generic_email(
             logger.error(f"❌ Failed to send email: {e}", exc_info=True)
 
     threading.Thread(target=send_email_task, daemon=True).start()
+
+
+def get_user_balance(user, source):
+    if source == "Savings":
+        return user.savings
+    elif source == "Investment":
+        return user.investment
+    elif source == "Wallet":
+        return user.wallet
+    else:
+        return 0
+
+def set_user_balance(user, source, amount):
+    if source == "Savings":
+        user.savings = amount
+    elif source == "Investment":
+        user.investment = amount
+    elif source == "Wallet":
+        user.wallet = amount

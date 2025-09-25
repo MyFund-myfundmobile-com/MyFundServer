@@ -246,7 +246,7 @@ urlpatterns = [
         views.get_group_by_property,
         name="get_group_by_property",
     ),
-    path("groups/join/<str:group_id>/", views.join_group, name="join_group"),
+    # path("groups/join/<str:group_id>/", views.join_group, name="join_group"),
     path(
         "groups/invite/<str:group_id>/", views.invite_to_group, name="invite_to_group"
     ),
@@ -263,7 +263,7 @@ urlpatterns = [
     path("groups/leave/<str:group_id>/", views.leave_group, name="leave_group"),
     path("users/groups/", views.get_user_groups, name="get_user_groups"),
     path(
-        "users/contributions/",
+        "user/contributions/",
         views.get_user_contributions,
         name="get_user_contributions",
     ),

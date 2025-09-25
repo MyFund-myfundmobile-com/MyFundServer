@@ -1735,6 +1735,12 @@ class Group(models.Model):
             f"Group {self.id} for Property {self.property.name} (Status: {self.status})"
         )
 
+class GroupOwnership(models.Model):
+    group = models.ForeignKey(Group, on_delete=models.CASCADE)
+    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    total_contributed = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    ownership_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+
 
 class Contribution(models.Model):
     PAYMENT_STATUS = [

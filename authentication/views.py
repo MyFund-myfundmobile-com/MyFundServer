@@ -3,6 +3,7 @@ from rest_framework import status, viewsets
 from rest_framework.authtoken.models import Token
 from rest_framework.authtoken.views import ObtainAuthToken
 from django.core.mail import send_mail, EmailMultiAlternatives
+from django.core.validators import validate_email
 from django.template.loader import render_to_string
 from django.utils.html import strip_tags
 from rest_framework.response import Response
@@ -52,8 +53,9 @@ from dotenv import load_dotenv
 import logging
 from django.db.models import Min
 from decimal import Decimal, ROUND_HALF_EVEN
-from .utils import send_push_notification
+from .utils import get_user_balance, send_push_notification, set_user_balance
 from .utils import send_generic_email
+
 
 
 load_dotenv()
@@ -662,7 +664,7 @@ class OTPVerificationView(APIView):
             )
 
 
-from .models import CustomUser, PasswordReset, UserPassword
+from .models import CustomUser, GroupOwnership, PasswordReset, UserPassword
 
 
 @api_view(["POST"])
@@ -3374,6 +3376,7 @@ class BuyPropertyView(generics.CreateAPIView):
 
 
 @api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def get_all_property_details(request):
     try:
         # Get all properties
@@ -5180,65 +5183,88 @@ from django.core.exceptions import ValidationError
 
 # POST /groups/create - Create a new group buy for a property
 @api_view(["POST"])
+@permission_classes([IsAuthenticated])
 def create_group(request):
     if request.method == "POST":
         data = request.data
 
-    # Step 1: Check if the required fields are in the request data
-    required_fields = ["propertyId", "minimumContribution", "groupType", "deadline"]
-    missing_fields = [field for field in required_fields if field not in data]
+        # Step 1: Check for required fields (excluding deadline, now optional)
+        required_fields = ["propertyId", "minimumContribution", "groupType"]
+        missing_fields = [field for field in required_fields if field not in data]
 
-    if missing_fields:
-        return JsonResponse(
-            {"error": f'Missing required fields: {", ".join(missing_fields)}'},
-            status=400,
+        if missing_fields:
+            return JsonResponse(
+                {"error": f'Missing required fields: {", ".join(missing_fields)}'},
+                status=400,
+            )
+
+        # Step 2: Validate groupType
+        allowed_group_types = ["public", "private"]
+        group_type = data["groupType"].lower()
+        if group_type not in allowed_group_types:
+            return JsonResponse(
+                {"error": f'Invalid groupType. Must be one of: {", ".join(allowed_group_types)}'},
+                status=400
+            )
+
+        # Step 3: Ensure the property exists
+        try:
+            property_obj = Property.objects.get(id=data["propertyId"])
+        except Property.DoesNotExist:
+            return JsonResponse({"error": "Invalid Property ID"}, status=400)
+
+        # Step 4: Check property availability
+        if property_obj.units_available < 1:
+            return JsonResponse(
+                {"error": "The group limit for this property has already been reached"},
+                status=400,
+            )
+
+        # Step 5: Handle deadline logic
+        now = timezone.now()
+        max_deadline = now + timedelta(days=90)
+
+        if "deadline" in data and data["deadline"]:
+            try:
+                deadline = datetime.strptime(data["deadline"], "%Y-%m-%d")
+                deadline = timezone.make_aware(deadline)
+            except ValueError:
+                return JsonResponse(
+                    {"error": "Invalid deadline format. Use YYYY-MM-DD."}, status=400
+                )
+
+            if deadline > max_deadline:
+                return JsonResponse(
+                    {"error": "Deadline cannot be more than 3 months from today."},
+                    status=400
+                )
+        else:
+            deadline = max_deadline  # Default deadline to 3 months from now
+
+        # Step 6: Create the group
+        group = Group.objects.create(
+            property_id=data["propertyId"],
+            created_by=request.user,
+            goal_amount=property_obj.price,
+            minimum_contribution=data["minimumContribution"],
+            total_raised=0,
+            status="Active",
+            group_type=group_type,
+            deadline=deadline,
         )
+        
+        # Reserve a unit
+        property_obj.units_available -= 1
+        property_obj.save()
 
-    # Ensure the property exists
-    try:
-        property_obj = Property.objects.get(id=data["propertyId"])
-    except Property.DoesNotExist:
-        return JsonResponse({"error": "Invalid Property ID"}, status=400)
-
-    # Step 2: Check if the available units are less than 1
-    if property_obj.units_available < 1:
-        return JsonResponse(
-            {"error": "The group limit for this property has already been reached"},
-            status=400,
-        )
-
-    # Decrease the available units of the property by 1 since a new group is being created
-    property_obj.units_available -= 1
-    property_obj.save()
-
-    # Make sure the deadline is aware of timezones
-    try:
-        deadline = datetime.strptime(data["deadline"], "%Y-%m-%d")
-        deadline = timezone.make_aware(deadline)
-    except ValueError:
-        return JsonResponse(
-            {"error": "Invalid deadline format. Use YYYY-MM-DD."}, status=400
-        )
-
-    # Step 4: Create the new group with the selected type (Public or Private)
-    group = Group.objects.create(
-        property_id=data["propertyId"],
-        created_by=request.user,
-        goal_amount=property_obj.price,
-        minimum_contribution=data["minimumContribution"],
-        total_raised=0,  # Initially set total raised to 0
-        status="Active",  # Group starts as active
-        group_type=data["groupType"],
-        deadline=deadline,
-    )
-
-    # Serialize and return the created group data
-    serializer = GroupSerializer(group)
-    return Response(serializer.data, status=status.HTTP_201_CREATED)
-
+        # Step 7: Return the serialized group
+        serializer = GroupSerializer(group)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+    
 
 # GET /groups/:propertyId - Retrieve group buy details for a specific property
 @api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def get_group_by_property(request, property_id):
     try:
         group = Group.objects.filter(property_id=property_id)
@@ -5255,34 +5281,74 @@ def get_group_by_property(request, property_id):
         )
 
 
-# POST /groups/:groupId/join - Allow a user to join a group
-@api_view(["POST"])
-@permission_classes([IsAuthenticated])
-def join_group(request, group_id):
-    try:
-        group = Group.objects.get(id=group_id)
-        print(f"user: {request.user}")
-        print(f"group: {group}")
-        group.contributors.add(request.user)  # Add current user as contributor
-        return Response(
-            {"message": "You successfully joined the group."}, status=status.HTTP_200_OK
-        )
-    except Group.DoesNotExist:
-        return Response(
-            {"message": "Group not found."}, status=status.HTTP_404_NOT_FOUND
-        )
+# # POST /groups/:groupId/join - Allow a user to join a group
+# @api_view(["POST"])
+# @permission_classes([IsAuthenticated])
+# def join_group(request, group_id):
+#     try:    
+#         user = request.user
+        
+#         # Validate group_id is a valid UUID
+#         try:
+#             group_uuid = uuid.UUID(str(group_id))
+#         except ValueError:
+#             return Response(
+#                 {"message": "Invalid group ID. It must be a valid UUID."},
+#                 status=status.HTTP_400_BAD_REQUEST
+#             )
+
+#         # Attempt to retrieve the group
+#         try:
+#             group = Group.objects.get(id=group_uuid)
+#         except Group.DoesNotExist:
+#             return Response(
+#                 {"message": "Group not found."},
+#                 status=status.HTTP_404_NOT_FOUND
+#             )
+            
+#         # Check access for private groups
+#         if group.group_type.lower() == "private":
+#             if not group.invited_users.filter(id=user.id).exists():
+#                 return Response(
+#                     {"message": "You are not invited to join this private group."},
+#                     status=status.HTTP_403_FORBIDDEN
+#                 )
+
+
+#         # Add user to contributors
+#         group.contributors.add(request.user)
+#         return Response(
+#             {"message": "You successfully joined the group."},
+#             status=status.HTTP_200_OK
+#         )
+        
+#     except Exception as e:
+#         # Log the exception if needed (e.g., using logging)
+#         # logger.error(f"Unexpected error in join_group: {e}")
+
+#         return Response(
+#             {"message": "An unexpected error occurred. Please try again later."},
+#             status=status.HTTP_500_INTERNAL_SERVER_ERROR
+#         )
 
 
 # POST /groups/:groupId/invite - Send invitations to users for private groups
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def invite_to_group(request, group_id):
+    # Step 0: Validate group_id format
+    if not str(group_id):
+        return Response(
+            {"message": "Invalid group ID provided."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
     try:
         group = Group.objects.get(id=group_id)
         user = request.user
 
         # Step 1: Check if the group is private
-        if group.group_type == "Private":
+        if group.group_type.lower() == "private":
             # Step 2: Check if the requesting user is the group creator
             if group.created_by != user:
                 return Response(
@@ -5290,31 +5356,68 @@ def invite_to_group(request, group_id):
                     status=status.HTTP_403_FORBIDDEN,
                 )
 
-            # Step 3: Get the list of user IDs to invite
-            invited_user_ids = request.data.get("userIds", [])
-            if not invited_user_ids:
+            # Step 3: Get the list of email addresses to invite
+            invited_emails = request.data.get("emails", [])
+            if not invited_emails:
                 return Response(
-                    {"message": "No user IDs provided for invitation."},
+                    {"message": "No email addresses provided for invitation."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            # Step 4: Validate the user IDs
-            invited_users = get_user_model().objects.filter(id__in=invited_user_ids)
-            if not invited_users:
+            # Step 4: Validate all emails
+            cleaned_emails = set()
+            invalid_emails = []
+
+            for email in invited_emails:
+                email = email.strip().lower()
+                try:
+                    validate_email(email)
+                    cleaned_emails.add(email)
+                except ValidationError:
+                    invalid_emails.append(email)
+
+            if not cleaned_emails:
                 return Response(
-                    {"message": "Some or all users are not found."},
+                    {"message": "All provided emails are invalid.", "invalidEmails": invalid_emails},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            if invalid_emails:
+                # Continue but warn about invalids
+                warning_message = f"Some emails were invalid and skipped: {', '.join(invalid_emails)}"
+            else:
+                warning_message = None
+            
+            # Step 5: Fetch users with those emails
+            invited_users = get_user_model().objects.filter(email__in=cleaned_emails)
+            if not invited_users.exists():
+                return Response(
+                    {"message": "No registered users found for the provided email addresses."},
                     status=status.HTTP_404_NOT_FOUND,
                 )
 
-            # Step 5: Add the invited users to the group
+            # Step 6: Add the invited users to the group
             group.invited_users.add(*invited_users)
 
-            # Step 6: Send an email to all invited users
-            subject = "Invitation to Join Property Investment Group"
-            message = f"Hello,<br><br>You have been invited by {user.email} to join a private property investment group. Please consider joining to participate in the joint property investment.<br><br>Keep growing your funds.🥂<br><br>"
+            # Step 7: Send an email to all invited users
+            subject = "You're Invited to Join a GroupBuy Investment Opportunity"
+            join_link = f"https://myfundmobile.com/groupbuy-invite/{group_id}"
+
+            message = (
+                f"Hello,<br><br>"
+                f"You've been invited by <strong>{user.first_name} {user.last_name}</strong> to join a private property GroupBuy on MyFund.<br><br>"
+                f"GroupBuys allow members to pool funds together and invest in real estate opportunities collaboratively. "
+                f"This is a great way to build wealth with like-minded investors.<br><br>"
+                f"<a href='{join_link}' style='display:inline-block; padding:10px 20px; background-color:#2c7be5; color:#ffffff; "
+                f"text-decoration:none; border-radius:5px;'>Click here to Join the GroupBuy</a><br><br>"
+                f"If the button doesn't work, copy and paste this link into your browser:<br>"
+                f"{join_link}<br><br>"
+                f"Keep growing your funds 🥂<br><br>"
+                f"— The MyFund Team"
+            )
+
             from_email = "MyFund <info@myfundmobile.com>"
 
-            # Loop through the invited users and send emails
             recipient_list = [invited_user.email for invited_user in invited_users]
             try:
                 send_generic_email(subject, message, from_email, recipient_list)
@@ -5324,8 +5427,11 @@ def invite_to_group(request, group_id):
                     status=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 )
 
-            return Response({"message": "Invitations sent."}, status=status.HTTP_200_OK)
+            response_data = {"message": "Invitations sent."}
+            if warning_message:
+                response_data["warning"] = warning_message
 
+            return Response(response_data, status=status.HTTP_200_OK)
         # If the group is not private
         return Response(
             {"message": "This group is not private."},
@@ -5344,56 +5450,71 @@ def invite_to_group(request, group_id):
 def leave_group(request, group_id):
     try:
         group = Group.objects.get(id=group_id)
+        user = request.user
 
-        # Check if the group has completed funding
+        # 1. Disallow leaving if group is completed
         if group.status == "completed":
             return Response(
                 {"message": "You cannot leave the group once funding is complete."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Check if the user is a contributor to the group
-        if request.user not in group.contributors.all():
+        # 2. Ensure user is a contributor
+        if not group.contributors.filter(id=user.id).exists():
             return Response(
                 {"message": "You are not a member of this group."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Retrieve the contributor's contribution
-        contribution = Contribution.objects.filter(
-            group=group, user=request.user
-        ).first()
-        if contribution:
-            # Refund the contribution to the appropriate source (wallet, savings, or investments)
-            amount_to_refund = contribution.amount
+        # 3. Get all confirmed contributions
+        contributions = Contribution.objects.filter(
+            group=group, user=user, payment_status="Confirmed"
+        )
+
+        total_refund = Decimal(0)
+
+        for contribution in contributions:
+            amount = contribution.amount
             source = contribution.source
 
-            # Refund the contribution amount to the user based on their source
+            # Refund to correct account
             if source == "Savings":
-                request.user.savings += amount_to_refund
+                user.savings += amount
             elif source == "Investment":
-                request.user.investment += amount_to_refund
+                user.investment += amount
             elif source == "Wallet":
-                request.user.wallet += amount_to_refund
+                user.wallet += amount
 
-            # Save the user after updating their balance
-            request.user.save()
-
-            # Refund the contribution status to 'Refunded'
+            # Mark contribution as refunded
             contribution.payment_status = "Refunded"
             contribution.save()
 
-        # Remove the user from the group contributors
-        group.contributors.remove(request.user)
+            total_refund += amount
+
+        user.save()
+
+        # 4. Update group total_raised
+        group.total_raised -= total_refund
+        group.save()
+
+        # 5. Remove user from contributors list
+        group.contributors.remove(user)
+
+        # 6. Remove or update GroupOwnership
+        GroupOwnership.objects.filter(group=group, user=user).delete()
 
         return Response(
-            {"message": "Successfully left the group and contribution refunded."},
+            {
+                "message": "Successfully left the group. Contributions refunded.",
+                "refunded_amount": float(total_refund),
+            },
             status=status.HTTP_200_OK,
         )
 
     except Group.DoesNotExist:
         return Response(
-            {"message": "Group not found."}, status=status.HTTP_404_NOT_FOUND
+            {"message": "Group not found."},
+            status=status.HTTP_404_NOT_FOUND,
         )
 
 
@@ -5431,201 +5552,130 @@ def get_user_groups(request):
 @permission_classes([IsAuthenticated])
 def contribute_to_group(request, group_id):
     try:
-        # Get the group by ID
+        # 1. Fetch group
         group = Group.objects.get(id=group_id)
 
-        # Check if the current time is after the group's deadline
+        # 2. Check deadline
         if timezone.now() > group.deadline:
             return Response(
                 {"message": "Contributions are no longer allowed after the deadline."},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        # Check if the group is private and if the user is not an invited user
-        if (
-            group.group_type == "private"
-            and request.user not in group.invited_users.all()
-        ):
+        # 3. Check private group invitation
+        if group.group_type == "private" and not group.invited_users.filter(id=request.user.id).exists():
             return Response(
                 {"message": "You are not an invited contributor to this group."},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        # Get user object
         user = request.user
 
-        # Retrieve 'amount' and 'source' from the request data
-        amount = int(request.data.get("amount"))
-        source = request.data.get("source").capitalize()
+        # 4. Retrieve and validate input
+        try:
+            amount = int(request.data.get("amount"))
+        except (TypeError, ValueError):
+            return Response({"message": "Invalid or missing amount."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Validate that 'amount' and 'source' are provided
-        if not amount:
-            return Response(
-                {"message": "Amount is required."}, status=status.HTTP_400_BAD_REQUEST
-            )
-
+        source = request.data.get("source")
         if not source:
-            return Response(
-                {"message": "Source is required."}, status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({"message": "Source is required."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Validate 'source' value
+        source = source.capitalize()
         accepted_sources = ["Savings", "Investment", "Wallet"]
         if source not in accepted_sources:
             return Response(
-                {
-                    "message": "Invalid source. Accepted values are: Savings, Investment, Wallet."
-                },
+                {"message": f"Invalid source. Accepted values are: {', '.join(accepted_sources)}."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Validate that the amount is not less than the minimum contribution in the group
+        if amount <= 0:
+            return Response({"message": "Amount must be greater than zero."}, status=status.HTTP_400_BAD_REQUEST)
+
         if amount < group.minimum_contribution:
             return Response(
-                {
-                    "message": f"The minimum contribution for this group is {group.minimum_contribution}."
-                },
+                {"message": f"The minimum contribution for this group is {group.minimum_contribution}."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Validate that the user has enough balance in the source account
-        if source == "Savings" and user.savings < amount:
+        # 5. Check and update user balance
+        user_balance = get_user_balance(user, source)
+        if user_balance < amount:
             return Response(
-                {"error": "Insufficient savings balance."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        if source == "Investment" and user.investment < amount:
-            return Response(
-                {"error": "Insufficient investment balance."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        elif source == "Wallet" and user.wallet < amount:
-            return Response(
-                {"error": "Insufficient wallet balance."},
+                {"message": f"Insufficient {source.lower()} balance."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Debit the source
-        if source == "Savings":
-            if user.savings >= amount:
-                user.savings -= amount
-                user.save()
-            else:
-                return Response(
-                    {"error": "Insufficient savings balance."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-        elif source == "Investment":
-            if user.investment >= amount:
-                user.investment -= amount
-                user.save()
-            else:
-                return Response(
-                    {"error": "Insufficient investment balance."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-        elif source == "Wallet":
-            if user.wallet >= amount:
-                user.wallet -= amount
-                user.save()
-            else:
-                return Response(
-                    {"error": "Insufficient wallet balance."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+        # Temporarily deduct amount
+        set_user_balance(user, source, user_balance - amount)
+        user.save()
 
-        # Create the contribution record
-        contribution = Contribution.objects.create(
-            group=group,
-            user=request.user,
-            amount=amount,
-            payment_status="Pending",  # You can change this based on actual payment status
-            source=source,  # Store the source of the contribution
-        )
+        # 6. Check and handle overfunding
+        total_after = group.total_raised + amount
+        excess_amount = max(total_after - group.goal_amount, 0)
 
-        # Check if the contribution would exceed the goal amount
-        total_raised_after_contribution = group.total_raised + amount
-        excess_amount = 0
-
-        if total_raised_after_contribution > group.goal_amount:
-            # Calculate excess
-            excess_amount = total_raised_after_contribution - group.goal_amount
-            # Adjust contribution amount to fit the goal
+        if excess_amount > 0:
             amount -= excess_amount
-            # Refund the excess amount
-            if source == "Savings":
-                user.savings += excess_amount
-            elif source == "Investment":
-                user.investment += excess_amount
-            elif source == "Wallet":
-                user.wallet += excess_amount
+            refund_balance = get_user_balance(user, source)
+            set_user_balance(user, source, refund_balance + excess_amount)
             user.save()
 
-        # Add the valid contribution amount to the group's total_raised
+        # 7. Create contribution
+        contribution = Contribution.objects.create(
+            group=group,
+            user=user,
+            amount=amount,
+            payment_status="Confirmed",
+            source=source,
+        )
+
+        # 8. Update group total raised
         group.total_raised += amount
         group.save()
 
-        # Calculate the ownership percentage for the contributor
-        ownership_percentage = (amount / group.goal_amount) * 100
+        # 9. Ownership calculation
+        ownership_obj, _ = GroupOwnership.objects.get_or_create(group=group, user=user)
+        ownership_obj.total_contributed += amount
+        ownership_obj.ownership_percentage = (ownership_obj.total_contributed / group.goal_amount) * 100
+        ownership_obj.save()
 
-        # Update the contribution's ownership percentage
-        contribution.ownership_percentage = ownership_percentage
-        contribution.save()
-
-        # Change the contribution payment_status to Confirmed
-        contribution.payment_status = "Confirmed"
-        contribution.save()
-
-        # Add user to the contributors if not already a contributor
-        if user not in group.contributors.all():
+        # 10. Add user to contributors
+        if not group.contributors.filter(id=user.id).exists():
             group.contributors.add(user)
 
-        return Response(
-            {"message": "Contribution successful."}, status=status.HTTP_201_CREATED
-        )
+        return Response({"message": "Contribution successful."}, status=status.HTTP_201_CREATED)
 
     except Group.DoesNotExist:
-        return Response(
-            {"message": "Group not found."}, status=status.HTTP_404_NOT_FOUND
-        )
+        return Response({"message": "Group not found."}, status=status.HTTP_404_NOT_FOUND)
 
 
 # GET /groups/:groupId/contributions - Fetch all contributions for a group
 @api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def get_contributions(request, group_id):
     try:
         group = Group.objects.get(id=group_id)
 
-        # Get all users who contributed to the group
-        contributors = group.contributors.all()
+        # Get all ownership records for this group
+        ownerships = GroupOwnership.objects.filter(group=group).select_related('user')
 
-        # Prepare a dictionary to hold the total contributions for each user
-        user_contributions = {}
+        contributions_list = []
 
-        # Loop through each contributor
-        for contributor in contributors:
-            # Get all contributions made by the current contributor in the group
-            contributions = Contribution.objects.filter(group=group, user=contributor)
+        for ownership in ownerships:
+            user = ownership.user
+            contributions_list.append({
+                "user_id": user.id,
+                "email": user.email,
+                "total_contributed": float(ownership.total_contributed),
+                "ownership_percentage": round(float(ownership.ownership_percentage), 2),
+            })
 
-            # Sum the total contribution amount for this user
-            total_amount = sum(contribution.amount for contribution in contributions)
-
-            # Calculate the total ownership percentage
-            ownership_percentage = (
-                (total_amount / group.goal_amount) * 100 if group.goal_amount > 0 else 0
-            )
-
-            # Store the data in the user_contributions dictionary
-            user_contributions[contributor.email] = {
-                "total_amount": total_amount,
-                "ownership_percentage": ownership_percentage,
-            }
-
-        return Response(user_contributions)
+        return Response(contributions_list, status=status.HTTP_200_OK)
 
     except Group.DoesNotExist:
         return Response(
-            {"message": "Group not found."}, status=status.HTTP_404_NOT_FOUND
+            {"message": "Group not found."},
+            status=status.HTTP_404_NOT_FOUND
         )
 
 
