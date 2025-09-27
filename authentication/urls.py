@@ -240,32 +240,32 @@ urlpatterns = [
         name="first_time_savers",
     ),
     # Group Contribution Related APIs
-    path("groups/create/", views.create_group, name="create_group"),
+    path("groupbuy/create/", views.create_groupbuy, name="create_groupbuy"),
     path(
-        "groups/<int:property_id>/",
-        views.get_group_by_property,
-        name="get_group_by_property",
+        "groupbuy/<int:property_id>/",
+        views.get_groupbuy_by_property,
+        name="get_groupbuy_by_property",
     ),
-    # path("groups/join/<str:group_id>/", views.join_group, name="join_group"),
+    path("groupbuy/join/<str:group_id>/", views.join_groupbuy, name="join_groupbuy"),
     path(
-        "groups/invite/<str:group_id>/", views.invite_to_group, name="invite_to_group"
-    ),
-    path(
-        "groups/contribute/<str:group_id>/",
-        views.contribute_to_group,
-        name="contribute_to_group",
+        "groupbuy/invite/<str:group_id>/", views.invite_to_groupbuy, name="invite_to_groupbuy"
     ),
     path(
-        "groups/contributions/<str:group_id>/",
-        views.get_contributions,
-        name="get_contributions",
+        "groupbuy/contribute/<str:group_id>/",
+        views.contribute_to_groupbuy,
+        name="contribute_to_groupbuy",
     ),
-    path("groups/leave/<str:group_id>/", views.leave_group, name="leave_group"),
-    path("users/groups/", views.get_user_groups, name="get_user_groups"),
     path(
-        "user/contributions/",
-        views.get_user_contributions,
-        name="get_user_contributions",
+        "groupbuy/contributions/<str:group_id>/",
+        views.get_groupbuy_contributions,
+        name="get_groupbuy_contributions",
+    ),
+    path("groupbuy/leave/<str:group_id>/", views.leave_groupbuy, name="leave_group"),
+    path("user/groupbuy/", views.get_user_groupbuys, name="get_user_groupbuys"),
+    path(
+        "user/groupbuy/contributions/",
+        views.get_user_groupbuy_contributions,
+        name="get_user_groupbuy_contributions",
     ),
     # Target Savings URLs
     path(
