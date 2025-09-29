@@ -142,6 +142,7 @@ DATA_UPLOAD_MAX_MEMORY_SIZE = 10485760  # 10MB (default is 2.5MB)
 FILE_UPLOAD_MAX_MEMORY_SIZE = 10485760  # 10MB (default is 2.5MB)
 
 # Celery settings
+# Celery settings
 from celery.schedules import crontab
 
 CELERY_BROKER_URL = "redis://localhost:6379/0"
@@ -149,14 +150,15 @@ CELERY_RESULT_BACKEND = "redis://localhost:6379/0"
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
-CELERY_TIMEZONE = "Africa/Lagos"
+CELERY_TIMEZONE = "Africa/Lagos"  # Keep your preferred timezone
 
-CELERY_BEAT_SCHEDULE = {
-    "daily_target_savings_deductions": {
-        "task": "authentication.tasks.run_daily_target_savings_deductions",
-        "schedule": crontab(minute=0, hour=2),  # every day at 2AM
-    },
-}
+# Additional Celery settings for better performance
+CELERY_TASK_ALWAYS_EAGER = False
+CELERY_TASK_EAGER_PROPAGATES = True
+CELERY_WORKER_CONCURRENCY = 4
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+CELERY_TASK_ACKS_LATE = True
+CELERY_TASK_TRACK_STARTED = True
 
 
 MEDIA_URL = "/media/"
@@ -314,7 +316,8 @@ LOGGING = {
 
 LANGUAGE_CODE = "en-us"
 
-TIME_ZONE = "UTC"
+TIME_ZONE = "Africa/Lagos"
+USE_TZ = True
 
 USE_I18N = True
 
@@ -350,6 +353,7 @@ EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
 EMAIL_HOST = "myfundmobile.com"
 EMAIL_PORT = 465
 EMAIL_USE_SSL = True  # Use SSL for secure connection
+
 
 # SMTP Authentication
 EMAIL_HOST_USER = "message@myfundmobile.com"

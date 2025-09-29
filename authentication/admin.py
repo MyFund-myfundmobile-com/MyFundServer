@@ -123,8 +123,7 @@ class CustomUserAdmin(UserAdmin):
         "make_ambassador",
         "revoke_ambassador",
         "delete_selected",
-        "deactivate_user"
-        "notify_outdated_users",
+        "deactivate_user" "notify_outdated_users",
         "say_hello",
     ]
 
@@ -329,7 +328,6 @@ class CustomUserAdmin(UserAdmin):
         queryset.update(is_active=False)
 
     deactivate_user.short_description = "Deactivate user"
-
 
     def approve_kyc(self, request, queryset):
         updated_users = []
@@ -1031,32 +1029,264 @@ class TopSaverHistoryAdmin(admin.ModelAdmin):
     is_current_month.short_description = "Current Month"
 
 
+from django.contrib import admin
+from django.utils import timezone
+from django.utils.timezone import localtime
+from .models import TargetSavings, TargetSavingsCompletion, Notification
+import logging
+
+logger = logging.getLogger(__name__)
+
+
 @admin.register(TargetSavings)
 class TargetSavingsAdmin(admin.ModelAdmin):
-    list_display = (
+    list_display = [
         "user",
         "name",
         "target_amount",
         "current_amount",
         "progress_percentage",
+        "frequency",
         "is_active",
-        "next_deduction",
-        "funding_source",
-    )
-    list_filter = ("is_active", "frequency", "category")
-    search_fields = ("user__email", "name")
-    readonly_fields = ("progress_percentage",)
-    fieldsets = (
-        (None, {"fields": ("user", "name", "target_amount", "current_amount")}),
-        ("Settings", {"fields": ("frequency", "funding_source", "payment_method")}),
-        ("Dates", {"fields": ("start_date", "end_date", "next_deduction")}),
-        ("Status", {"fields": ("is_active", "is_cancelled", "cancellation_charge")}),
-    )
+        "is_cancelled",
+        "formatted_next_deduction",
+        "formatted_last_processed",
+    ]
+    list_filter = ["is_active", "is_cancelled", "frequency", "category"]
+    search_fields = ["user__email", "name"]
+    readonly_fields = ["current_amount", "progress_percentage", "last_processed"]
+    actions = ["force_process_deduction", "mark_as_completed"]
 
     def progress_percentage(self, obj):
-        return f"{obj.progress_percentage:.2f}%"
+        return f"{obj.progress_percentage:.1f}%"
 
     progress_percentage.short_description = "Progress"
+
+    def formatted_next_deduction(self, obj):
+        if obj.next_deduction:
+            return localtime(obj.next_deduction).strftime("%b %d, %Y, %I:%M %p")
+        return "-"
+
+    formatted_next_deduction.admin_order_field = "next_deduction"
+    formatted_next_deduction.short_description = "Next deduction"
+
+    def formatted_last_processed(self, obj):
+        if obj.last_processed:
+            return localtime(obj.last_processed).strftime("%b %d, %Y, %I:%M %p")
+        return "-"
+
+    formatted_last_processed.admin_order_field = "last_processed"
+    formatted_last_processed.short_description = "Last processed"
+
+    def force_process_deduction(self, request, queryset):
+        results = {"processed": 0, "paused": 0, "failed": 0, "errors": []}
+
+        for target in queryset:
+            if target.is_active and not target.is_cancelled:
+                try:
+                    # DEBUG: Log current state before processing
+                    logger.info(
+                        f"🔄 Admin forcing deduction for target {target.id}: {target.name}"
+                    )
+                    logger.info(
+                        f"   Attempts: {target.deduction_attempts}/{target.max_attempts}"
+                    )
+                    logger.info(f"   Current amount: {target.current_amount}")
+                    logger.info(f"   Monthly payment: {target.monthly_payment}")
+                    logger.info(f"   User savings: {target.user.savings}")
+                    logger.info(f"   User investment: {target.user.investment}")
+                    logger.info(f"   Funding source: {target.funding_source}")
+
+                    # Check if deduction would actually fail
+                    amount = target.monthly_payment or Decimal("0")
+                    if target.funding_source == "SAVINGS":
+                        will_fail = target.user.savings < amount
+                    else:
+                        will_fail = target.user.investment < amount
+
+                    logger.info(f"   Will fail due to insufficient funds: {will_fail}")
+
+                    success = target.process_deduction()
+
+                    # Refresh the target to get updated data
+                    target.refresh_from_db()
+
+                    logger.info(f"   ✅ After processing:")
+                    logger.info(
+                        f"   Attempts: {target.deduction_attempts}/{target.max_attempts}"
+                    )
+                    logger.info(f"   Is active: {target.is_active}")
+                    logger.info(f"   Success result: {success}")
+
+                    if success:
+                        results["processed"] += 1
+                    elif not target.is_active:
+                        results["paused"] += 1
+                        logger.info(
+                            f"🛑 Target {target.id} was PAUSED due to max attempts"
+                        )
+                    else:
+                        results["failed"] += 1
+
+                except Exception as e:
+                    error_msg = f"Error processing target {target.name}: {str(e)}"
+                    logger.error(error_msg)
+                    results["errors"].append(error_msg)
+                    results["failed"] += 1
+
+        # Build result message
+        message_parts = []
+        if results["processed"] > 0:
+            message_parts.append(
+                f"Successfully processed {results['processed']} targets"
+            )
+        if results["paused"] > 0:
+            message_parts.append(
+                f"Paused {results['paused']} targets due to max attempts"
+            )
+        if results["failed"] > 0:
+            message_parts.append(f"Failed to process {results['failed']} targets")
+        if results["errors"]:
+            message_parts.append(f"Encountered {len(results['errors'])} errors")
+
+        final_message = ". ".join(message_parts)
+        self.message_user(request, final_message)
+
+        # Log detailed results
+        logger.info(f"Admin force deduction results: {final_message}")
+
+    force_process_deduction.short_description = (
+        "Force process deduction for selected targets"
+    )
+
+    def mark_as_completed(self, request, queryset):
+        completed_count = 0
+        for target in queryset:
+            if target.is_active and not target.is_cancelled:
+                try:
+                    # Check if completion record already exists
+                    if hasattr(target, "completion_record"):
+                        self.message_user(
+                            request,
+                            f"Target '{target.name}' already has a completion record",
+                            level="WARNING",
+                        )
+                        continue
+
+                    # Create a TargetSavingsCompletion record
+                    completed_target = TargetSavingsCompletion.objects.create(
+                        user=target.user,
+                        target_savings=target,
+                        completed_amount=target.current_amount,
+                        bonus_amount=(
+                            target.calculate_bonus()
+                            if hasattr(target, "calculate_bonus")
+                            else 0
+                        ),
+                        total_amount=target.current_amount
+                        + (
+                            target.calculate_bonus()
+                            if hasattr(target, "calculate_bonus")
+                            else 0
+                        ),
+                        completed_date=timezone.now().date(),
+                        was_on_time=timezone.now().date() <= target.end_date,
+                    )
+
+                    # Deactivate the original target
+                    target.is_active = False
+                    target.save()
+                    completed_count += 1
+
+                    # Send completion notification/email
+                    if hasattr(target, "send_completion_email"):
+                        target.send_completion_email()
+
+                except Exception as e:
+                    self.message_user(
+                        request,
+                        f"Error completing target {target.name}: {str(e)}",
+                        level="ERROR",
+                    )
+
+        self.message_user(request, f"Marked {completed_count} targets as completed")
+
+    mark_as_completed.short_description = "Mark selected targets as completed"
+
+
+@admin.register(TargetSavingsCompletion)
+class TargetSavingsCompletionAdmin(admin.ModelAdmin):
+    list_display = [
+        "user",
+        "target_name",
+        "target_amount",
+        "completed_amount",
+        "bonus_amount",
+        "total_amount",
+        "was_on_time",
+        "formatted_completed_date",
+    ]
+    list_filter = ["was_on_time"]
+    search_fields = ["user__email", "target_savings__name"]
+    readonly_fields = [
+        "user",
+        "target_savings",
+        "completed_amount",
+        "bonus_amount",
+        "total_amount",
+        "completed_date",
+        "was_on_time",
+        "created_at",
+    ]
+    list_select_related = ["user", "target_savings"]
+
+    def target_name(self, obj):
+        return obj.target_savings.name
+
+    target_name.short_description = "Target Name"
+
+    def target_amount(self, obj):
+        return obj.target_savings.target_amount
+
+    target_amount.short_description = "Target Amount"
+
+    def formatted_completed_date(self, obj):
+        if obj.completed_date:
+            return obj.completed_date.strftime("%b %d, %Y")
+        return "-"
+
+    formatted_completed_date.admin_order_field = "completed_date"
+    formatted_completed_date.short_description = "Completed Date"
+
+    # Add action to revert completed targets back to active (optional)
+    actions = ["revert_to_active"]
+
+    def revert_to_active(self, request, queryset):
+        reverted_count = 0
+        for completion in queryset:
+            try:
+                target = completion.target_savings
+
+                # Reactivate the target
+                target.is_active = True
+                target.save()
+
+                # Delete the completion record
+                completion.delete()
+                reverted_count += 1
+
+            except Exception as e:
+                self.message_user(
+                    request,
+                    f"Error reverting target {completion.target_savings.name}: {str(e)}",
+                    level="ERROR",
+                )
+
+        self.message_user(
+            request, f"Reverted {reverted_count} targets to active status"
+        )
+
+    revert_to_active.short_description = "Revert selected targets to active status"
 
 
 from django.contrib import admin
