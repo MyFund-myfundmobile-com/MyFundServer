@@ -79,6 +79,9 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     is_subscribed = models.BooleanField(default=True)
     date_joined = models.DateTimeField(auto_now_add=True, db_index=True)
     is_deleted = models.BooleanField(default=False)
+    last_otp_sent_at = models.DateTimeField(null=True, blank=True)
+    pin_reset_otp = models.CharField(max_length=6, blank=True, null=True)
+    pin_reset_otp_expiry = models.DateTimeField(null=True, blank=True)
 
     @property
     def full_name(self):
@@ -622,7 +625,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                     send_push_notification(
                         user=self,
                         title="Referral Reward Received! 🎉",
-                        message=f"You've got ₦{referred_transaction.amount:,} for referring {self.referral.first_name}. Thank you for using MyFund!",
+                        message=f"You've got ₦{referred_transaction.amount:,.2f} for referring {self.referral.first_name}. Thank you for using MyFund!",
                         data={
                             "amount": str(referred_transaction.amount),
                             "transaction_id": referred_transaction.transaction_id,
@@ -637,7 +640,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                     send_push_notification(
                         user=self.referral,
                         title="Referral Reward Confirmed! 🎊",
-                        message=f"You've earned ₦{referrer_transaction.amount:,} for referring {self.first_name} and improved your chances for more rewards. Check the Referral List for your ranking. Keep it up!",
+                        message=f"You've earned ₦{referrer_transaction.amount:,.2f} for referring {self.first_name} and improved your chances for more rewards. Check the Referral List for your ranking. Keep it up!",
                         data={
                             "amount": str(referrer_transaction.amount),
                             "transaction_id": referrer_transaction.transaction_id,
@@ -921,7 +924,19 @@ class AccountBalance(models.Model):
     wallet = models.DecimalField(max_digits=10, decimal_places=2, default=0)
 
 
+from django.db import models
+from django.conf import settings
 from django.core.validators import RegexValidator
+from decimal import Decimal, InvalidOperation
+import uuid
+import logging
+from dateutil.relativedelta import relativedelta
+from django.utils import timezone
+from datetime import timedelta
+from decimal import Decimal
+
+
+logger = logging.getLogger(__name__)
 
 
 class TargetSavings(models.Model):
@@ -943,6 +958,7 @@ class TargetSavings(models.Model):
     ]
 
     FREQUENCY_CHOICES = [
+        ("HOURLY", "Hourly"),
         ("DAILY", "Daily"),
         ("WEEKLY", "Weekly"),
         ("MONTHLY", "Monthly"),
@@ -971,27 +987,37 @@ class TargetSavings(models.Model):
     monthly_payment = models.DecimalField(
         max_digits=12, decimal_places=2, blank=True, null=True
     )
+    FUNDING_SOURCE_CHOICES = [
+        ("SAVINGS", "Savings"),
+        ("INVESTMENT", "Investment"),
+    ]
 
     funding_source = models.CharField(
         max_length=20,
-        choices=[
-            ("SAVINGS", "Savings"),
-            ("INVESTMENT", "Investment"),
-            ("CARD", "Card"),
-        ],
+        choices=FUNDING_SOURCE_CHOICES,
         default="SAVINGS",
     )
-    payment_method = models.CharField(
-        max_length=50, blank=True, null=True
-    )  # Store card ID if used
+
+    payment_method = models.CharField(max_length=50, blank=True, null=True)
     frequency = models.CharField(
         max_length=10, choices=FREQUENCY_CHOICES, default="MONTHLY"
     )
     next_deduction = models.DateTimeField(null=True, blank=True)
+    next_retry = models.DateTimeField(null=True, blank=True)
     cancellation_charge = models.DecimalField(
         max_digits=12, decimal_places=2, default=0
     )
     is_cancelled = models.BooleanField(default=False)
+    last_processed = models.DateTimeField(null=True, blank=True)
+    deduction_attempts = models.IntegerField(default=0)
+    max_attempts = models.IntegerField(default=4)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["is_active", "next_deduction"]),
+            models.Index(fields=["user", "is_active"]),
+            models.Index(fields=["is_active", "next_retry"]),
+        ]
 
     @property
     def progress_percentage(self):
@@ -999,90 +1025,455 @@ class TargetSavings(models.Model):
             return 0
         return (self.current_amount / self.target_amount) * 100
 
+    @property
+    def is_completed(self):
+        return self.current_amount >= self.target_amount
+
     def __str__(self):
         return f"{self.user.email}'s {self.name} Target"
 
+    def calculate_next_deduction_time(self):
+        """Calculate next deduction time based on frequency"""
+        now = timezone.now()
+        if self.frequency == "HOURLY":
+            return now + relativedelta(hours=1)
+        elif self.frequency == "DAILY":
+            return now + relativedelta(days=1)
+        elif self.frequency == "WEEKLY":
+            return now + relativedelta(weeks=1)
+        else:  # MONTHLY
+            return now + relativedelta(months=1)
+
+    def update_next_deduction_date(self):
+        """Update next deduction date based on frequency and last processing time"""
+        base_time = self.last_processed if self.last_processed else timezone.now()
+
+        if self.frequency == "HOURLY":
+            self.next_deduction = base_time + timedelta(hours=1)
+        elif self.frequency == "DAILY":
+            self.next_deduction = base_time + timedelta(days=1)
+        elif self.frequency == "WEEKLY":
+            self.next_deduction = base_time + timedelta(weeks=1)
+        elif self.frequency == "MONTHLY":
+            # For monthly, use relativedelta for proper month handling
+            self.next_deduction = base_time + relativedelta(months=1)
+
+    def schedule_retry(self):
+        """Schedule retry based on frequency"""
+        now = timezone.now()
+
+        if self.frequency == "HOURLY":
+            self.next_retry = now + timedelta(minutes=30)  # Retry in 30 minutes
+        elif self.frequency == "DAILY":
+            self.next_retry = now + timedelta(hours=6)  # Retry in 6 hours
+        elif self.frequency == "WEEKLY":
+            self.next_retry = now + timedelta(days=1)  # Retry in 1 day
+        elif self.frequency == "MONTHLY":
+            self.next_retry = now + timedelta(days=2)  # Retry in 2 days
+
+    def get_retry_interval_display(self):
+        """Get human-readable retry interval"""
+        if self.frequency == "HOURLY":
+            return "30 minutes"
+        elif self.frequency == "DAILY":
+            return "6 hours"
+        elif self.frequency == "WEEKLY":
+            return "1 day"
+        elif self.frequency == "MONTHLY":
+            return "2 days"
+        return "soon"
+
     def process_deduction(self):
-        """Process the periodic deduction for this target savings"""
+        """Process the periodic deduction for this target savings with robust handling for max attempts.
+
+        Important changes:
+        1. Persist deduction_attempts and other DB changes before sending external notifications.
+        2. Use transaction.on_commit to run email/push after DB commit so failures in notification code do not rollback DB state.
+        3. Use update_fields on saves to minimize accidental overwrites.
+        """
         from django.db import transaction
-        from authentication.models import Transaction, CustomUser
+        from .utils import send_generic_email, send_push_notification
 
         try:
             with transaction.atomic():
-                user = CustomUser.objects.get(id=self.user.id)
-                amount = self.monthly_payment
+                # Re-fetch inside the transaction to avoid stale data/race conditions
+                target = TargetSavings.objects.select_for_update().get(id=self.id)
+                user = target.user.__class__.objects.select_for_update().get(
+                    id=target.user.id
+                )
 
-                # Check funding source and balance
-                if self.funding_source == "SAVINGS" and user.savings >= amount:
-                    user.savings -= amount
-                    source = "savings"
-                elif self.funding_source == "INVESTMENT" and user.investment >= amount:
-                    user.investment -= amount
-                    source = "investment"
-                elif self.funding_source == "CARD":
-                    # Implement card payment processing here
-                    card_charge_success = True  # Replace with actual card processing
-                    if not card_charge_success:
-                        raise Exception("Card payment failed")
-                    source = "card"
-                else:
-                    # Insufficient funds - deactivate and notify
-                    self.is_active = False
-                    self.save()
-                    self.send_failed_deduction_email()
+                # Skip if no longer actionable
+                if target.is_completed or target.is_cancelled or not target.is_active:
+                    logger.info(
+                        f"Target {target.id} is completed/cancelled/inactive, skipping deduction"
+                    )
                     return False
 
-                # Update balances
-                user.save()
-                self.current_amount += amount
+                # Base amount (guard against None)
+                amount = target.monthly_payment or Decimal("0")
 
-                # Schedule next deduction
-                if self.frequency == "DAILY":
-                    self.next_deduction = timezone.now() + timedelta(days=1)
-                elif self.frequency == "WEEKLY":
-                    self.next_deduction = timezone.now() + timedelta(weeks=1)
-                else:  # MONTHLY
-                    self.next_deduction = timezone.now() + relativedelta(months=1)
-                self.save()
+                # Adjust amount if it would overshoot the target
+                if target.current_amount + amount > target.target_amount:
+                    amount = target.target_amount - target.current_amount
 
-                # Create transaction record
+                deduction_success = False
+                source = None
+
+                # Check and debit funding source
+                if (
+                    target.funding_source == "SAVINGS"
+                    and user.savings >= amount
+                    and amount > 0
+                ):
+                    user.savings -= amount
+                    source = "SAVINGS"
+                    deduction_success = True
+                elif (
+                    target.funding_source == "INVESTMENT"
+                    and user.investment >= amount
+                    and amount > 0
+                ):
+                    user.investment -= amount
+                    source = "INVESTMENT"
+                    deduction_success = True
+
+                # always update last_processed timestamp
+                target.last_processed = timezone.now()
+
+                # FAILURE PATH (insufficient funds or invalid amount)
+                if not deduction_success or amount <= 0:
+                    target.deduction_attempts += 1
+                    target.save(update_fields=["deduction_attempts", "last_processed"])
+
+                    # Final failure: pause + refund + completion record
+                    if target.deduction_attempts >= target.max_attempts:
+                        # Pause target
+                        target.is_active = False
+                        target.is_cancelled = True  # mark clearly as cancelled/paused
+                        target.next_retry = None
+                        target.last_processed = timezone.now()
+                        target.save(
+                            update_fields=[
+                                "is_active",
+                                "is_cancelled",
+                                "next_retry",
+                                "last_processed",
+                                "deduction_attempts",
+                            ]
+                        )
+
+                        # Refund 99%
+                        refund_amount = target.current_amount * Decimal("0.99")
+                        charge = target.current_amount - refund_amount
+
+                        if refund_amount > 0:
+                            if target.funding_source == "SAVINGS":
+                                user.savings += refund_amount
+                                user.save(update_fields=["savings"])
+                            else:
+                                user.investment += refund_amount
+                                user.save(update_fields=["investment"])
+
+                            Transaction.objects.create(
+                                user=user,
+                                transaction_type="debit",
+                                status="confirmed",
+                                amount=refund_amount,
+                                description=f"{target.name} - Failed",
+                                service_charge=charge,
+                                total_amount=refund_amount,
+                                target_savings=target,
+                                source="TARGET_REFUND",
+                                transaction_id=f"[{target.id}]-{uuid.uuid4().hex[:12]}_MAX_ATTEMPTS_REFUND",
+                            )
+
+                        # Create FAILED completion record
+                        TargetSavingsCompletion.objects.update_or_create(
+                            user=user,
+                            target_savings=target,
+                            defaults={
+                                "completed_amount": target.current_amount,
+                                "bonus_amount": 0,
+                                "total_amount": refund_amount,
+                                "completed_date": timezone.now().date(),
+                                "was_on_time": False,
+                                "status": "FAILED",
+                            },
+                        )
+
+                        # Reset current_amount so plan is visibly closed out
+                        target.current_amount = 0
+                        target.save(update_fields=["current_amount"])
+
+                        # Notify after commit
+                        def _notify_final():
+                            try:
+                                target.send_failed_deduction_email(max_attempts=True)
+                            except Exception as e:
+                                logger.exception(
+                                    f"Error sending final failed-deduction email: {e}"
+                                )
+                            try:
+                                send_push_notification(
+                                    user,
+                                    title=f"{target.name} Plan Paused 🛑",
+                                    message=(
+                                        f"Your {target.name} plan was paused after {target.max_attempts} failed attempts. "
+                                        f"₦{refund_amount:,.2f} has been refunded to your {target.funding_source.lower()} account."
+                                    ),
+                                    data={
+                                        "target_id": target.id,
+                                        "type": "DEDUCTION_FAILED_FINAL",
+                                        "refund_amount": float(refund_amount or 0),
+                                    },
+                                )
+                            except Exception as e:
+                                logger.exception(
+                                    f"Error sending final failed-deduction push: {e}"
+                                )
+
+                        transaction.on_commit(_notify_final)
+                        return False
+
+                    # Non-final failure: schedule a retry and notify (after commit)
+                    else:
+                        target.schedule_retry()
+                        target.save(update_fields=["next_retry"])
+
+                        def _notify_retry():
+                            try:
+                                target.send_failed_deduction_email(max_attempts=False)
+                            except Exception as e:
+                                logger.exception(
+                                    f"Error sending retry failed-deduction email for target {target.id}: {e}"
+                                )
+                            try:
+                                send_push_notification(
+                                    user,
+                                    title=f"{target.name} AutoSave Failed ❌",
+                                    message=(
+                                        f"Failed to autosave ₦{amount:,.2f} for your {target.name}. "
+                                        f"We'll retry in {target.get_retry_interval_display()}. Attempt {target.deduction_attempts} of {target.max_attempts}."
+                                    ),
+                                    data={
+                                        "target_id": target.id,
+                                        "type": "DEDUCTION_FAILED_RETRY",
+                                        "attempt": target.deduction_attempts,
+                                        "max_attempts": target.max_attempts,
+                                    },
+                                )
+                            except Exception as e:
+                                logger.exception(
+                                    f"Error sending retry failed-deduction push for target {target.id}: {e}"
+                                )
+
+                        transaction.on_commit(_notify_retry)
+                        return False
+
+                # SUCCESS PATH
+                # persist the user balance change
+                if source:
+                    user.save(update_fields=[source.lower()])
+
+                # Update the target balance and reset attempts
+                target.current_amount += amount
+                target.deduction_attempts = 0
+                target.last_processed = timezone.now()
+                target.next_retry = None
+
+                # If target completed, handle completion flow
+                if target.current_amount >= target.target_amount:
+
+                    today = timezone.now().date()
+                    bonus = Decimal("0")
+                    completed_amount = target.current_amount
+
+                    if today <= target.end_date:
+                        bonus = completed_amount * Decimal("0.13")
+
+                    user.wallet += completed_amount + bonus
+                    user.save(update_fields=["wallet"])
+
+                    # zero out and deactivate target
+                    target.current_amount = Decimal("0")
+                    target.is_active = False
+                    target.save()
+
+                    TargetSavingsCompletion.objects.create(
+                        user=user,
+                        target_savings=target,
+                        completed_amount=completed_amount,
+                        bonus_amount=bonus,
+                        total_amount=completed_amount + bonus,
+                        completed_date=today,
+                        was_on_time=today <= target.end_date,
+                    )
+
+                    Transaction.objects.create(
+                        user=user,
+                        transaction_type="credit",
+                        status="confirmed",
+                        amount=completed_amount + bonus,
+                        description=f"{target.name} Completed! ✅",
+                        service_charge=0,
+                        total_amount=completed_amount + bonus,
+                        target_savings=target,
+                        source="TARGET_COMPLETION",
+                        transaction_id=f"[{target.id}]-{uuid.uuid4().hex[:12]}_COMPLETION",
+                    )
+
+                    def _notify_completion():
+                        try:
+                            target.send_completion_email()
+                        except Exception as e:
+                            logger.exception(
+                                f"Error sending completion email for target {target.id}: {e}"
+                            )
+                        try:
+                            send_push_notification(
+                                user,
+                                title=f"🎉 {target.name} Target Completed!✅",
+                                message=(
+                                    f"Congratulations, your {target.name} Target Savings is completed! "
+                                    f"₦{completed_amount + bonus:,.2f} credited to your wallet."
+                                ),
+                                data={
+                                    "target_id": target.id,
+                                    "type": "TARGET_COMPLETED",
+                                    "amount": float(completed_amount + bonus),
+                                },
+                            )
+                        except Exception as e:
+                            logger.exception(
+                                f"Error sending completion push for target {target.id}: {e}"
+                            )
+
+                    transaction.on_commit(_notify_completion)
+                    return True
+
+                # Otherwise persist next deduction and create auto transaction, then notify
+                target.update_next_deduction_date()
+                target.save()
+
                 Transaction.objects.create(
                     user=user,
                     transaction_type="credit",
                     status="confirmed",
                     amount=amount,
-                    description=f"Automatic {self.get_frequency_display().lower()} deduction for {self.name}",
+                    description=f"{target.name}",
                     service_charge=0,
                     total_amount=amount,
-                    target_savings=self,
+                    target_savings=target,
                     source=source,
-                    transaction_id=f"[{self.id}]-{uuid.uuid4().hex[:12]}_AUTO",
+                    transaction_id=f"[{target.id}]-{uuid.uuid4().hex[:12]}_AUTO",
                 )
 
+                progress = round(
+                    (target.current_amount / target.target_amount) * 100, 2
+                )
+
+                def _notify_success():
+                    try:
+                        subject = f"AutoSave for {target.name} Successful! 🎉"
+                        message = (
+                            f"Hi {user.first_name},\n\n"
+                            f"₦{amount:,.2f} has been successfully autosaved for your {target.name} Target Savings plan.\n\n"
+                            f"Your new balance in this plan is ₦{target.current_amount:,.2f}.\n\n"
+                            f"You're now {progress}% closer to your goal! 🚀\n\n"
+                            f"Next autosave: {target.next_deduction.strftime('%Y-%m-%d %H:%M') if target.next_deduction else 'scheduled soon'}"
+                        )
+                        send_generic_email(
+                            subject, message, settings.DEFAULT_FROM_EMAIL, [user.email]
+                        )
+                    except Exception as e:
+                        logger.exception(
+                            f"Error sending success email for target {target.id}: {e}"
+                        )
+                    try:
+                        send_push_notification(
+                            user,
+                            title=f"AutoSave for {target.name} Successful! 🎉",
+                            message=(
+                                f"₦{amount:,.2f} has just been autosaved for your {target.name} goal. "
+                                f"New balance: ₦{target.current_amount:,.2f}. You're now {progress}% closer to your goal! Well done! 🚀"
+                            ),
+                            data={"target_id": target.id, "type": "DEDUCTION_SUCCESS"},
+                        )
+                    except Exception as e:
+                        logger.exception(
+                            f"Error sending success push for target {target.id}: {e}"
+                        )
+
+                transaction.on_commit(_notify_success)
                 return True
 
         except Exception as e:
             logger.error(
-                f"Error processing deduction for target savings {self.id}: {str(e)}"
+                f"Error processing autosave for target savings {self.id}: {str(e)}"
             )
-            self.is_active = False
-            self.save()
+            # If something unexpected fails, schedule a retry and persist state
+            try:
+                self.schedule_retry()
+                self.save(update_fields=["next_retry"])
+            except Exception:
+                logger.exception("Failed to schedule retry after unexpected error")
             return False
 
-    def send_failed_deduction_email(self):
+    def send_failed_deduction_email(self, max_attempts=False):
         """Send email notification about failed deduction"""
         from django.core.mail import send_mail
         from django.conf import settings
 
-        subject = f"Target Savings Deduction Failed - {self.name}"
+        subject = f"{self.name} AutoSave Failed ❌"
+
+        if max_attempts:
+            message = (
+                f"Hi {self.user.first_name},\n\n"
+                f"We've attempted to autosave ₦{self.monthly_payment} for your {self.name} target savings "
+                f"multiple times but failed due to insufficient funds. "
+                "Your target savings plan has been temporarily paused and your funds have been returned to the funding source.\n\n"
+                "Please ensure you have sufficient funds and reactivate your plan "
+                "to continue working towards your goal.\n\n"
+                "MyFund Team"
+            )
+        else:
+            retry_time = (
+                self.next_retry.strftime("%Y-%m-%d %H:%M")
+                if self.next_retry
+                else "soon"
+            )
+            message = (
+                f"Hi {self.user.first_name},\n\n"
+                f"The autosave of ₦{self.monthly_payment} for your {self.name} target savings "
+                f" failed due to insufficient funds.\n\n"
+                "Kindly note that you'll forfeit the extra interest if you do not meet your target date.\n\n"
+                "To ensure you meet your target, add the required amount to your source account.\n\n"
+                f"We'll retry again at {retry_time}.\n\n"
+                f"(PS: Your Target Savings plan will pause after 3 unsuccessful retries and the funds will be returned to your {self.funding_source}. Kindly fund your {self.funding_source} to stay on track.)\n\n"
+                "MyFund Team"
+            )
+
+        send_mail(
+            subject,
+            message,
+            settings.DEFAULT_FROM_EMAIL,
+            [self.user.email],
+            fail_silently=False,
+        )
+
+    def send_completion_email(self):
+        """Send email notification about target completion"""
+        from django.core.mail import send_mail
+        from django.conf import settings
+
+        subject = f"🎉 Congrats! {self.name} Target Plan Completed! ✅"
         message = (
             f"Hi {self.user.first_name},\n\n"
-            f"The automatic deduction of ₦{self.monthly_payment} for your target savings "
-            f"'{self.name}' failed due to insufficient funds in your {self.get_funding_source_display()} account. "
-            "This may affect the achievement of your goal.\n\n"
-            "To ensure you meet your target, you can manually transfer the required amount "
-            "to your target savings. Please note that if the targets aren't completed by the "
-            "maturity date, you may not receive the expected interest.\n\n"
+            f"Great news! You've successfully completed your {self.name} plan "
+            f"with a total of ₦{self.current_amount:,.2f} saved!\n\n"
+            "You can now use these funds for your intended goal "
+            "or set up a new target savings plan.\n\n"
+            "Well done and keep up the great savings habit!\n\n"
             "MyFund Team"
         )
 
@@ -1092,6 +1483,44 @@ class TargetSavings(models.Model):
             settings.DEFAULT_FROM_EMAIL,
             [self.user.email],
             fail_silently=False,
+        )
+
+    def save(self, *args, **kwargs):
+        """Ensure initial next_deduction is set when creating an active plan."""
+        if not self.next_deduction and self.is_active and not self.is_cancelled:
+            self.next_deduction = self.calculate_next_deduction_time()
+        super().save(*args, **kwargs)
+
+
+class TargetSavingsCompletion(models.Model):
+    STATUS_CHOICES = [
+        ("SUCCESS", "Success"),
+        ("FAILED", "Failed"),
+        ("CANCELLED", "Cancelled"),  # 🔴 Added new status option
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="completed_target_savings",
+    )
+    target_savings = models.OneToOneField(
+        TargetSavings, on_delete=models.CASCADE, related_name="completion_record"
+    )
+    completed_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    bonus_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    total_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    completed_date = models.DateField()
+    was_on_time = models.BooleanField(default=False)
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default="SUCCESS")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-completed_date"]
+
+    def __str__(self):
+        return (
+            f"{self.user.email}'s {self.target_savings.name} Completion ({self.status})"
         )
 
 
@@ -1123,6 +1552,19 @@ class Transaction(models.Model):
         null=True,
         blank=True,
         related_name="referral_transactions",
+    )
+
+    source = models.CharField(
+        max_length=20,
+        choices=[
+            ("SAVINGS", "Savings"),
+            ("INVESTMENT", "Investment"),
+            ("CARD", "Card"),
+            ("WALLET", "Wallet"),
+        ],
+        blank=True,
+        null=True,
+        help_text="Where the transaction funds came from",
     )
 
     transaction_type = models.CharField(max_length=20, choices=TRANSACTION_TYPES)
@@ -1180,7 +1622,6 @@ class Transaction(models.Model):
         return f"{self.transaction_type} - {self.amount} - {self.status} - {self.paystack_auth_code} - {self.date}"
 
 
-# keep your existing PushNotifications and CustomUser models...
 class PushNotifications(models.Model):
     NOTIFICATION_TYPES = (
         ("CREDIT", "Credit Transaction"),
@@ -1192,7 +1633,7 @@ class PushNotifications(models.Model):
     )
 
     user = models.ForeignKey(
-        "CustomUser", on_delete=models.CASCADE, related_name="push_notifications"
+        CustomUser, on_delete=models.CASCADE, related_name="push_notifications"
     )
     title = models.CharField(max_length=255)
     message = models.TextField()
@@ -1206,30 +1647,6 @@ class PushNotifications(models.Model):
 
     def __str__(self):
         return f"{self.title} - {self.user.email}"
-
-
-class DevicePushToken(models.Model):
-    """
-    A record for each device token registered to a user.
-    Allows multiple devices per user and easy removal on logout.
-    """
-
-    user = models.ForeignKey(
-        "CustomUser", on_delete=models.CASCADE, related_name="device_push_tokens"
-    )
-    token = models.CharField(max_length=255, db_index=True)
-    device_id = models.CharField(max_length=255, null=True, blank=True, db_index=True)
-    device_type = models.CharField(max_length=32, default="unknown")
-    app_version = models.CharField(max_length=32, null=True, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    last_seen = models.DateTimeField(default=timezone.now)
-
-    class Meta:
-        unique_together = ("user", "token")
-        ordering = ["-last_seen"]
-
-    def __str__(self):
-        return f"{self.user.email} - {self.token} ({self.device_type})"
 
 
 class AutoSave(models.Model):
@@ -1466,7 +1883,7 @@ class Notification(models.Model):
 
 class DeviceToken(models.Model):
     user = models.ForeignKey(
-        User, on_delete=models.CASCADE, related_name="device_tokens"
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="device_tokens"
     )
     token = models.CharField(max_length=255, unique=True)
     device_type = models.CharField(

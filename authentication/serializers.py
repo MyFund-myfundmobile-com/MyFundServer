@@ -297,11 +297,12 @@ class AccountBalancesSerializer(serializers.ModelSerializer):
         fields = ["savings", "investment", "properties", "wallet"]
 
 
-from decimal import Decimal
-
-from decimal import Decimal
+# serializers.py
 from rest_framework import serializers
 from .models import TargetSavings
+from decimal import Decimal
+from django.utils import timezone
+from dateutil.relativedelta import relativedelta
 
 
 class TargetSavingsSerializer(serializers.ModelSerializer):
@@ -316,6 +317,10 @@ class TargetSavingsSerializer(serializers.ModelSerializer):
     )
     start_date = serializers.DateField(format="%Y-%m-%d", required=False)
     end_date = serializers.DateField(format="%Y-%m-%d", input_formats=["%Y-%m-%d"])
+    is_completed = serializers.BooleanField(read_only=True)
+    funding_source = serializers.ChoiceField(
+        choices=[("SAVINGS", "Savings"), ("INVESTMENT", "Investment")]
+    )
 
     def validate(self, data):
         # Ensure end_date is in the future
@@ -323,6 +328,17 @@ class TargetSavingsSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"end_date": "End date must be in the future"}
             )
+
+        # Validate that monthly payment is reasonable compared to target
+        target_amount = data.get("target_amount")
+        monthly_payment = data.get("monthly_payment")
+
+        if target_amount and monthly_payment:
+            if monthly_payment > target_amount:
+                raise serializers.ValidationError(
+                    {"monthly_payment": "Monthly payment cannot exceed target amount"}
+                )
+
         return data
 
     class Meta:
@@ -341,6 +357,9 @@ class TargetSavingsSerializer(serializers.ModelSerializer):
             "frequency",
             "funding_source",
             "progress_percentage",
+            "is_completed",
+            "next_deduction",
+            "last_processed",
         ]
         read_only_fields = [
             "user",
@@ -348,33 +367,14 @@ class TargetSavingsSerializer(serializers.ModelSerializer):
             "start_date",
             "progress_percentage",
             "is_active",
+            "is_completed",
+            "next_deduction",
+            "last_processed",
         ]
         extra_kwargs = {
             "end_date": {"required": True},
-            "start_date": {"required": False},  # Let backend set this
+            "start_date": {"required": False},
         }
-
-    def get_progress_percentage(self, obj):
-        return (obj.current_amount / obj.target_amount) * 100
-
-    def create(self, validated_data):
-        """Override create to set initial next_deduction"""
-        from django.utils import timezone
-        from datetime import timedelta
-
-        target = super().create(validated_data)
-
-        # Set initial next deduction time based on frequency
-        now = timezone.now()
-        if target.frequency == "DAILY":
-            target.next_deduction = now + timedelta(days=1)
-        elif target.frequency == "WEEKLY":
-            target.next_deduction = now + timedelta(weeks=1)
-        else:  # MONTHLY
-            target.next_deduction = now + timedelta(days=30)
-        target.save()
-
-        return target
 
 
 from django.utils import timezone
@@ -733,24 +733,10 @@ class NotificationSerializer(serializers.ModelSerializer):
         read_only_fields = ["id", "created_at"]
 
 
-from .models import PushNotifications, DevicePushToken
+from .models import PushNotifications
 
 
 class PushNotificationsSerializer(serializers.ModelSerializer):
     class Meta:
         model = PushNotifications
         fields = "__all__"
-
-
-class DevicePushTokenSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = DevicePushToken
-        fields = [
-            "id",
-            "token",
-            "device_id",
-            "device_type",
-            "app_version",
-            "last_seen",
-            "created_at",
-        ]

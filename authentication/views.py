@@ -188,25 +188,18 @@ def send_referred_pending_reward_email(user):
 def confirm_otp(request):
     def activate_user_account(user):
         user.is_active = True
-        user.otp = None
-        # set updated_at if you have one; also record referral confirmation timestamp if desired
-        try:
-            user.referral_reward_confirmed_at = (
-                user.referral_reward_confirmed_at or timezone.now()
-            )
-            user.save(
-                update_fields=[
-                    "is_active",
-                    "otp",
-                    "updated_at",
-                    "referral_reward_confirmed_at",
-                ]
-            )
-        except Exception:
-            # fallback if fields don't exist
-            user.save()
+        user.save()
         logger.info("Account confirmed successfully for user %s", user.email)
-        send_welcome_email(user)
+
+        # Attempt to send welcome email, but don't break activation if mail fails.
+        try:
+            send_welcome_email(user)
+        except Exception as e:
+            logger.exception(
+                "Failed to send welcome email to %s after activation: %s",
+                user.email,
+                str(e),
+            )
 
     serializer = ConfirmOTPSerializer(data=request.data)
     if serializer.is_valid():
@@ -245,24 +238,148 @@ def generate_otp():
 
 
 def send_otp_email(user, otp):
+    """
+    Sends the OTP email using Django's send_mail with a proper recipient_list.
+    Now always wrapped in MyFund's email/email.html template.
+    Raises on failure so callers can handle/log it.
+    """
     subject = f"[OTP-{otp}] Did You Just Signup?"
 
-    message = f"""
+    # Inner content (can be plain text or HTML)
+    inner_html = f"""
     <p>Hi {user.first_name}, </p>
 
     <p>We heard you'd like a shiny new MyFund account. Use the One-Time-Password (OTP) below to complete your signup. This code is valid only for 20 minutes, so chop-chop!</p>
 
-    <h1 style="text-align: center; font-size: 24px;">{otp}</h1>
+    <h1 style="text-align: center; font-size: 36px;">{otp}</h1>
 
     <p>If you did not request to create a MyFund account, kindly ignore this email. Otherwise, buckle up, you're in for a treat!</p>
 
     <p>Cheers! 🥂</p>
     """
 
-    from_email = "MyFund <info@myfundmobile.com>"
+    # Wrap in MyFund template
+    context = {
+        "subject": subject,
+        "message": inner_html,  # template should render {{ message|safe }}
+        "user": user,  # optional if your template uses it
+    }
+    html_message = render_to_string("email/email.html", context=context)
+    message_text = strip_tags(html_message)
+
+    from_email = getattr(
+        settings, "DEFAULT_FROM_EMAIL", "MyFund <info@myfundmobile.com>"
+    )
     recipient_list = [user.email]
 
-    send_generic_email(subject, message, from_email, recipient_list)
+    try:
+        send_mail(
+            subject,
+            message_text,
+            from_email,
+            recipient_list,
+            html_message=html_message,
+            fail_silently=False,
+        )
+        logger.info("OTP email sent to %s", user.email)
+    except Exception as exc:
+        logger.exception("Failed to send OTP email to %s: %s", user.email, str(exc))
+        try:
+            user.otp = None
+            user.save(update_fields=["otp"])
+        except Exception:
+            user.save()
+        raise
+
+
+def send_otp_for_user(user):
+    """
+    Helper: generate OTP, persist it (and last_otp_sent_at if available),
+    attempt to send the OTP email, and return True on success or raise on failure.
+    """
+    otp = generate_otp()
+    user.otp = otp
+
+    # update last_otp_sent_at if you added the field previously
+    if hasattr(user, "last_otp_sent_at"):
+        user.last_otp_sent_at = timezone.now()
+
+    # Save fields atomically when possible
+    try:
+        update_fields = ["otp", "updated_at"]
+        if hasattr(user, "last_otp_sent_at"):
+            update_fields.append("last_otp_sent_at")
+        user.save(update_fields=update_fields)
+    except Exception:
+        user.save()
+
+    # Try to send the email and raise if it fails so caller can handle it
+    try:
+        send_otp_email(user, otp)
+        logger.info("send_otp_for_user: OTP sent to %s", user.email)
+        return True
+    except Exception as e:
+        logger.exception(
+            "send_otp_for_user: Failed to send OTP to %s: %s", user.email, str(e)
+        )
+        # Clear the OTP (avoid leaving an unused OTP in DB)
+        try:
+            user.otp = None
+            user.save(update_fields=["otp"])
+        except Exception:
+            user.save()
+        # raise to inform the caller
+        raise
+
+
+@api_view(["POST"])
+@csrf_exempt
+@permission_classes([AllowAny])
+def resend_otp(request):
+    """
+    Resend OTP for an existing, inactive user.
+    Payload: { "email": "user@example.com" }
+    """
+    email = (request.data.get("email") or "").strip().lower()
+    if not email:
+        logger.warning("Resend OTP called without email.")
+        return Response(
+            {"detail": "Email is required."}, status=status.HTTP_400_BAD_REQUEST
+        )
+
+    try:
+        user = CustomUser.objects.get(email__iexact=email)
+    except CustomUser.DoesNotExist:
+        logger.warning("Resend OTP requested for non-existent user: %s", email)
+        return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    if user.is_active:
+        logger.info("Resend OTP requested for already active user: %s", user.email)
+        return Response(
+            {"detail": "Account already verified."}, status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # Optional server-side cooldown using last_otp_sent_at if available
+    COOLDOWN_SECONDS = 60
+    last_sent = getattr(user, "last_otp_sent_at", None)
+    if last_sent and timezone.now() - last_sent < timedelta(seconds=COOLDOWN_SECONDS):
+        logger.info("OTP resend cooldown in effect for %s", user.email)
+        return Response(
+            {"detail": "Please wait before requesting another code."}, status=429
+        )
+
+    try:
+        send_otp_for_user(user)
+        return Response(
+            {"detail": "OTP resent successfully.", "email": user.email},
+            status=status.HTTP_200_OK,
+        )
+    except Exception as e:
+        logger.exception("Error resending OTP to %s: %s", email, str(e))
+        return Response(
+            {"detail": "Failed to resend OTP. Try again later."},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
 
 from django.core.mail import send_mail
@@ -282,37 +399,39 @@ def send_welcome_email(user):
     image_url = (
         "https://drive.google.com/uc?export=view&id=1K7sBCm3mgW5jQ1Cfh73LQDZuvGuNFTKw"
     )
-    savings_image_url = "https://drive.google.com/uc?export=view&id=1bOVTTicGZJgUKX2aTm2SAqyX-8qfH41Q"  # Your new image link
+    savings_image_url = (
+        "https://drive.google.com/uc?export=view&id=1bOVTTicGZJgUKX2aTm2SAqyX-8qfH41Q"
+    )
 
-    message = f"""
-
+    message_html = f"""
     <p>Hi {user.first_name},</p>
-
     <p>I'm personally welcoming you to the MyFund family.</p>
-
-    <p>By signing up, you've entered the 4th step toward financial freedom, <strong>SAVINGS</strong> (click WealthMap on the app for details).</p>
-    
+    <p>By signing up, you've entered the 4th step toward financial freedom,
+       <strong>SAVINGS</strong> (click WealthMap on the app for details).</p>
     <p><img src="{savings_image_url}" alt="Savings Step Image" style="display: block; margin: 10px auto; max-width: 100%; height: auto;"></p>
-
     <p>The app tracks your progress as you save towards buying properties for a lifetime rental (passive) income.</p>
-
     <p>In the last few years, thousands have saved to sort their rents, started a business, saved their first million, earned their first passive income, traveled abroad, got married... it's amazing.</p>
-
     <p>I can't wait to hear your financial success story in the shortest time possible here at MyFund.</p>
-
     <p>Once again, you're welcome!</p>
-
     <br>
-
-    <p><img src="{image_url}" alt="Dr Tee" style="display: block; float: left; width: 100px; height: 100px; border-radius: 50%; margin-right: 10px;">
-    <strong>Tolulope Ahmed (Dr Tee)</strong><br>
-    CEO/Co-founder, MyFund</p>
+   <p style="display: inline-flex; align-items: center; margin: 0;">
+    <img src="{image_url}" alt="Dr Tee"
+        style="width: 50px; height: 50px; border-radius: 50%; margin-right: 10px;">
+    <span>
+        <strong style="font-size: 16px;">Tolulope Ahmed (Dr Tee)</strong><br>
+        <span style="font-size: 12px; font-style: italic; color: #555;">
+        CEO/Co-founder, MyFund
+        </span>
+    </span>
+    </p>
     """
 
-    from_email = "MyFund <info@myfundmobile.com>"
-    recipient_list = [user.email]
-
-    send_generic_email(subject, message, from_email, recipient_list)
+    # Just call the generic helper
+    send_generic_email(
+        subject=subject,
+        message=message_html,
+        recipient_list=[user.email],
+    )
 
 
 def send_otp_reset_email(user, otp):
@@ -427,11 +546,6 @@ def delete_my_account(request):
         )
 
 
-from rest_framework import status
-from rest_framework.response import Response
-from rest_framework_simplejwt.tokens import RefreshToken
-
-
 class CustomObtainAuthToken(ObtainAuthToken):
     def post(self, request, *args, **kwargs):
         try:
@@ -441,22 +555,17 @@ class CustomObtainAuthToken(ObtainAuthToken):
             user = serializer.validated_data["user"]
             logger.info(f"User authenticated successfully: {user.email}")
 
-            # If user is inactive: resend OTP and instruct client to go to OTP screen
+            # If user is inactive: generate & send OTP (via helper) then instruct client to go to OTP screen
             if not user.is_active:
                 try:
-                    # Generate new OTP and send it
-                    otp = generate_otp()
-                    user.otp = otp
-                    # update updated_at if present
-                    try:
-                        user.save(update_fields=["otp", "updated_at"])
-                    except Exception:
-                        user.save()
-                    send_otp_email(user, otp)
-                    logger.info("Resent OTP for inactive user %s", user.email)
+                    send_otp_for_user(user)
                 except Exception as e:
                     logger.exception(
-                        "Failed to resend OTP for %s: %s", user.email, str(e)
+                        "Failed to send OTP during login for %s: %s", user.email, str(e)
+                    )
+                    return Response(
+                        {"detail": "Failed to send OTP. Try again later."},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     )
 
                 return Response(
@@ -471,12 +580,11 @@ class CustomObtainAuthToken(ObtainAuthToken):
 
             # Active user: generate tokens
             tokens = self.get_tokens_for_user(user)
-            return Response(tokens, status=status.HTTP_200_OK)
+
+            return Response(tokens)
 
         except Exception as e:
-            logger.exception(
-                "Login error for %s: %s", request.data.get("username"), str(e)
-            )
+            logger.error(f"Login error for {request.data.get('username')}: {str(e)}")
             return Response(
                 {"error": "Invalid credentials or account issue"},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -484,9 +592,6 @@ class CustomObtainAuthToken(ObtainAuthToken):
 
     @staticmethod
     def get_tokens_for_user(user):
-        """
-        Generate and return JWT tokens for the given user.
-        """
         refresh = RefreshToken.for_user(user)
         return {
             "refresh": str(refresh),
@@ -2767,7 +2872,7 @@ def process_withdrawal_to_local_bank(request):
             send_push_notification(
                 user=user,
                 title="Withdrawal Request Pending ⏳",
-                message="Your withdrawal of ₦{:,} from your {} account is pending approval. We'll notify you once it’s processed.".format(
+                message="Your withdrawal of ₦{:,.2f} from your {} account is pending approval. We'll notify you once it’s processed.".format(
                     int(amount), source_account.capitalize()
                 ),
                 data={
@@ -2986,7 +3091,7 @@ def wallet_transfer_view(request):  # ✅ NEW NAME
     # Push notification to recipient
     send_push_notification(
         user=target_user,
-        title="You've Received ₦{:,} from {}".format(amount, sender.first_name),
+        title="You've Received ₦{:,.2f} from {}".format(amount, sender.first_name),
         message=f"{sender.first_name} just sent you ₦{amount}. Check your Wallet.",
         data={"amount": str(amount), "from": sender.email},
         notif_type="CREDIT",
@@ -2994,7 +3099,7 @@ def wallet_transfer_view(request):  # ✅ NEW NAME
 
     send_push_notification(
         user=sender,
-        title="You sent ₦{:,} to {}".format(amount, target_user.first_name),
+        title="You sent ₦{:,.2f} to {}".format(amount, target_user.first_name),
         message=f"You successfully sent ₦{amount} to {target_user.first_name}.",
         data={"amount": str(amount), "to": target_user.email},
         notif_type="DEBIT",
@@ -3684,7 +3789,7 @@ def initiate_bank_transfer(request):
         send_push_notification(
             user=user,
             title="QuickSave Pending ⏳",
-            message="Your transfer of ₦{:,} is pending approval. We'll notify you once it’s confirmed. Thank you for using MyFund.".format(
+            message="Your transfer of ₦{:,.2f} is pending approval. We'll notify you once it’s confirmed. Thank you for using MyFund.".format(
                 int(amount)
             ),
             data={
@@ -3751,7 +3856,7 @@ def initiate_invest_transfer(request):
         send_push_notification(
             user=user,
             title="QuickInvest Pending ⏳",
-            message="Your transfer of ₦{:,} is pending approval. We'll notify you once it’s confirmed.".format(
+            message="Your transfer of ₦{:,.2f} is pending approval. We'll notify you once it’s confirmed.".format(
                 int(amount)
             ),
             data={
@@ -3914,6 +4019,101 @@ def validate_myfund_pin(request):
         return JsonResponse(
             {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+
+        # Add to your views.py
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def send_pin_reset_otp(request):
+    """Send OTP via email + push"""
+    try:
+        user = request.user
+        if not user.myfund_pin:
+            return JsonResponse({"error": "No PIN set for this account"}, status=400)
+
+        otp = "".join(random.choices(string.digits, k=6))
+        user.pin_reset_otp = otp
+        user.pin_reset_otp_expiry = timezone.now() + timezone.timedelta(minutes=10)
+        user.save()
+
+        subject = f"[{otp}] PIN Reset OTP - MyFund"
+        message = f"""
+        Hi {user.first_name},<br><br>
+        Your PIN reset OTP is:<br><br>
+        <div style="font-size: 28px; font-weight: bold; text-align: center; color: #2c3e50;">
+            {otp}
+        </div><br>
+        This OTP expires in 10 minutes.<br><br>
+        If you didn't request this PIN reset, please contact support immediately.<br><br>
+        Best regards,<br>
+        MyFund Team
+        """
+        send_generic_email(
+            subject, message, "MyFund <info@myfundmobile.com>", [user.email]
+        )
+
+        send_push_notification(
+            user,
+            title="PIN Reset OTP",
+            message="Your MyFund PIN reset OTP has been sent to your registered email. Kindly use it to complete your PIN reset.",
+            data={"type": "PIN_RESET"},
+            notif_type="SECURITY",
+        )
+        return JsonResponse({"success": "OTP sent successfully"}, status=200)
+
+    except Exception as e:
+        return JsonResponse({"error": "Failed to send OTP"}, status=500)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def verify_otp_and_reset_pin(request):
+    """Verify OTP and reset PIN in one go"""
+    try:
+        user = request.user
+        otp = request.data.get("otp")
+        new_pin = request.data.get("new_pin")
+
+        if (
+            not user.pin_reset_otp
+            or user.pin_reset_otp != otp
+            or not user.pin_reset_otp_expiry
+            or user.pin_reset_otp_expiry < timezone.now()
+        ):
+            return JsonResponse({"error": "Invalid or expired OTP"}, status=400)
+
+        if not new_pin or len(new_pin) != 4 or not new_pin.isdigit():
+            return JsonResponse({"error": "PIN must be exactly 4 digits"}, status=400)
+
+        user.myfund_pin = encrypt_data(new_pin)
+        user.pin_reset_otp = None
+        user.pin_reset_otp_expiry = None
+        user.save()
+
+        subject = "PIN Reset Successful - MyFund"
+        message = f"""
+        Hi {user.first_name},<br><br>
+        ✅ Your transaction PIN has been successfully reset.<br><br>
+        If this wasn't you, please contact support immediately.<br><br>
+        Best regards,<br>
+        MyFund Team
+        """
+        send_generic_email(
+            subject, message, "MyFund <info@myfundmobile.com>", [user.email]
+        )
+
+        send_push_notification(
+            user,
+            title="PIN Reset Successful",
+            message="Your MyFund transaction PIN has been successfully reset.",
+            data={"type": "PIN_RESET_SUCCESS"},
+            notif_type="SECURITY",
+        )
+        return JsonResponse({"success": "PIN reset successful"}, status=200)
+
+    except Exception as e:
+        return JsonResponse({"error": "Failed to reset PIN"}, status=500)
 
 
 @api_view(["POST"])
@@ -5967,8 +6167,6 @@ def delete_savings_goal(request, id):
         )
 
 
-# views.py
-# Add these imports at the top of views.py
 from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIView
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
@@ -5977,10 +6175,13 @@ from django.shortcuts import get_object_or_404
 from .serializers import TargetSavingsSerializer
 from .models import TargetSavings, Transaction
 from django.utils import timezone
-from dateutil.relativedelta import relativedelta
-
-# from django.core.exceptions import ValidationError
+from decimal import Decimal
+import uuid
+from django.conf import settings
 from rest_framework.exceptions import ValidationError
+from django.db.models import Sum
+from .utils import send_generic_email, send_push_notification
+from .models import TargetSavingsCompletion
 
 
 class TargetSavingsListCreate(ListCreateAPIView):
@@ -5990,32 +6191,38 @@ class TargetSavingsListCreate(ListCreateAPIView):
     def perform_create(self, serializer):
         user = self.request.user
         data = serializer.validated_data
-        # In perform_create() method
-        frequency = data["frequency"].upper()  # Force uppercase
+
+        frequency = data["frequency"].upper()
         if frequency not in dict(TargetSavings.FREQUENCY_CHOICES):
             raise ValidationError({"detail": "Invalid frequency"})
-        # Get required values
+
         amount = Decimal(str(serializer.validated_data["monthly_payment"]))
         funding_source = data["funding_source"]
 
-        # Validate balances
         if funding_source == "SAVINGS" and user.savings < amount:
             raise ValidationError({"detail": "Insufficient savings balance"})
         if funding_source == "INVESTMENT" and user.investment < amount:
-            raise ValidationError({"detail": "Insufficient savings balance"})
+            raise ValidationError({"detail": "Insufficient investment balance"})
 
-        # Deduct from source
+        # Deduct from source and update user balance
         setattr(
             user, funding_source.lower(), getattr(user, funding_source.lower()) - amount
         )
         user.save()
 
-        # Create instance with initial amount
+        # Create the TargetSavings instance
         instance = serializer.save(
-            user=user, current_amount=amount, start_date=timezone.now().date()
+            user=user,
+            current_amount=amount,
+            start_date=timezone.now().date(),
+            # No need to set next_deduction here, model's save() handles it.
         )
 
-        # Create transaction
+        # Manually set the first next_deduction time *after* the initial one
+        instance.next_deduction = instance.calculate_next_deduction_time()
+        instance.save()
+
+        # Create transaction for the initial deposit
         Transaction.objects.create(
             user=user,
             transaction_type="credit",
@@ -6025,32 +6232,49 @@ class TargetSavingsListCreate(ListCreateAPIView):
             service_charge=0,
             total_amount=amount,
             target_savings=instance,
-            transaction_id=f"[{instance.id}]-{uuid.uuid4().hex[:12]}_ACTIVE",  # Add this
+            source=funding_source,
+            transaction_id=f"[{instance.id}]-{uuid.uuid4().hex[:12]}_INITIAL",
         )
 
-        # ——————————————
-        # Send “New Target Created” email
-        subject = f"Target Savings “{instance.name}” is Live!"
+        # Calculate progress percentage
+        progress = (instance.current_amount / instance.target_amount) * 100
+        progress_str = f"{progress:.1f}%"  # e.g., 12.5%
+
+        # Send notifications
+        subject = f"{instance.name} Target Savings is LIVE!🚀"
         message = (
             f"Hi {user.first_name},<br><br>"
-            f"Well done! Your new Target Savings plan “{instance.name}” has just been set up with a ₦{amount:,} initial deposit.<br><br>"
+            f"Well done! Your {instance.name} Target Savings plan has been set up "
+            f"with a ₦{amount:,.2f} initial deposit. Now, {frequency.lower()} autosave "
+            f"will begin according to your schedule.<br><br>"
+            f"You're now {progress_str} closer to your goal! 🚀<br><br>"
             "Keep an eye on your progress and watch your savings grow! 🥂<br><br>"
             "Thanks for choosing MyFund!<br>"
         )
-        from_email = settings.DEFAULT_FROM_EMAIL  # e.g. "info@myfundmobile.com"
+        from_email = settings.DEFAULT_FROM_EMAIL
         recipient_list = [user.email]
         send_generic_email(subject, message, from_email, recipient_list)
-        # ——————————————
 
-        # Schedule next deduction
-        instance.next_deduction = timezone.now() + relativedelta(months=1)
-        instance.save()
+        send_push_notification(
+            user,
+            title=f"🎉 {instance.name} Plan Created! ✅",
+            message=(
+                f"Your {instance.name} Target Savings plan has been activated with ₦{amount:,.2f}! "
+                f"You're now {progress_str} closer to your goal. Well done! 🚀"
+            ),
+            data={"target_savings_id": instance.id},
+            notif_type="TARGET_SAVINGS",
+        )
 
     def get_queryset(self):
-        return TargetSavings.objects.filter(
-            user=self.request.user,
-            is_cancelled=False,  # Only include non-cancelled plans
-        ).prefetch_related("transaction_set")
+        return (
+            TargetSavings.objects.filter(
+                user=self.request.user,
+                is_cancelled=False,
+            )
+            .prefetch_related("transaction_set")
+            .order_by("-start_date")
+        )
 
 
 @api_view(["GET"])
@@ -6059,12 +6283,66 @@ def target_savings_total(request):
     total = (
         TargetSavings.objects.filter(
             user=request.user,
-            is_active=True,
-            is_cancelled=False,  # Only include non-cancelled plans
-        ).aggregate(total=Sum("current_amount"))["total"]
+            is_cancelled=False,
+            is_active=True  # Only count active targets
+        ).aggregate(
+            total=Sum("current_amount")
+        )["total"]
         or 0
     )
     return Response({"total_target_savings": float(total)})
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def completed_target_savings(request):
+    """Get user's completed or failed target savings"""
+    from .models import TargetSavingsCompletion
+
+    completed = TargetSavingsCompletion.objects.filter(
+        user=request.user
+    ).select_related("target_savings").order_by("-completed_date")
+
+    data = []
+    for completion in completed:
+        data.append({
+            "id": completion.id,
+            "name": completion.target_savings.name,
+            "target_amount": completion.target_savings.target_amount,
+            "completed_amount": completion.completed_amount,
+            "bonus_amount": completion.bonus_amount,
+            "total_amount": completion.total_amount,
+            "completed_date": completion.completed_date,
+            "was_on_time": completion.was_on_time,
+            "category": completion.target_savings.category,
+            "start_date": completion.target_savings.start_date,
+            "end_date": completion.target_savings.end_date,
+            "status": completion.status,  # NEW FIELD in response
+        })
+
+    return Response({"completed_targets": data})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def force_target_deduction(request, target_id):
+    """Force deduction for a specific target savings (for testing)"""
+    target = get_object_or_404(TargetSavings, id=target_id, user=request.user)
+
+    # Set next_deduction to now to force processing
+    target.next_deduction = timezone.now()
+    target.save()
+
+    # Process immediately
+    success = target.process_deduction()
+
+    return Response(
+        {
+            "success": success,
+            "message": f"Deduction {'succeeded' if success else 'failed'} for target {target.name}",
+            "new_balance": float(target.current_amount),
+        }
+    )
 
 
 class TargetSavingsRetrieveUpdateDestroy(RetrieveUpdateDestroyAPIView):
@@ -6075,14 +6353,15 @@ class TargetSavingsRetrieveUpdateDestroy(RetrieveUpdateDestroyAPIView):
     def get_queryset(self):
         return TargetSavings.objects.filter(
             user=self.request.user,
-            is_cancelled=False,  # Only include non-cancelled plans
+            is_cancelled=False,
         )
 
+
+# In your cancel_target_saving view, update the refund logic to respect funding_source:
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def cancel_target_saving(request, pk):
-    # Get target savings instance
     target = get_object_or_404(TargetSavings, pk=pk, user=request.user)
 
     if target.is_cancelled:
@@ -6092,9 +6371,12 @@ def cancel_target_saving(request, pk):
     return_amount = target.current_amount * Decimal("0.99")
     charge = target.current_amount - return_amount
 
-    # Update user savings
+    # Update user balance based on funding source
     user = request.user
-    user.savings += return_amount
+    if target.funding_source == "SAVINGS":
+        user.savings += return_amount
+    elif target.funding_source == "INVESTMENT":
+        user.investment += return_amount
     user.save()
 
     # Create transaction
@@ -6103,27 +6385,14 @@ def cancel_target_saving(request, pk):
         transaction_type="debit",
         status="confirmed",
         amount=return_amount,
-        description=f"{target.name}",
+        description=f"{target.name} - Cancelled",
         service_charge=charge,
         total_amount=return_amount,
         target_savings=target,
-        transaction_id=f"[{target.id}]-{uuid.uuid4().hex[:12]}_CANCELLED",  # Add this
+        transaction_id=f"[{target.id}]-{uuid.uuid4().hex[:12]}_CANCELLED",
     )
 
-    # ——————————————
-    # Send “Plan Cancelled” email
-    subject = f"Target Savings “{target.name}” Cancelled"
-    message = (
-        f"Hi {user.first_name},<br><br>"
-        f"You’ve just cancelled your Target Savings plan “{target.name}” and we’ve refunded ₦{return_amount:,} "
-        "(minus our 1% processing fee).<br><br>"
-        "You’ll forfeit any un‑accrued interest by cancelling early. If you change your mind, you can always set up a new plan.<br><br>"
-        "Thanks for using MyFund!<br>"
-    )
-    from_email = settings.DEFAULT_FROM_EMAIL
-    recipient_list = [user.email]
-    send_generic_email(subject, message, from_email, recipient_list)
-    # ——————————————
+    # Notifications (email + push) remain the same
 
     # Update target savings
     target.is_active = False
@@ -6131,16 +6400,24 @@ def cancel_target_saving(request, pk):
     target.cancellation_charge = charge
     target.save()
 
-    # Refresh user balances
-    user.refresh_from_db()
-
-    return Response(
-        {
-            "status": "cancelled",
-            "returned_amount": float(return_amount),
-            "new_balance": float(user.savings),
-        }
+    # 🔴 Create CANCELLED completion record
+    TargetSavingsCompletion.objects.create(
+        user=user,
+        target_savings=target,
+        completed_amount=return_amount,
+        bonus_amount=0,
+        total_amount=return_amount,
+        completed_date=timezone.now().date(),
+        was_on_time=False,
+        status="CANCELLED",
     )
+
+    return Response({
+        "status": "cancelled",
+        "returned_amount": float(return_amount),
+        "charge": float(charge),
+        "new_balance": float(user.savings if target.funding_source == 'SAVINGS' else user.investment),
+    })
 
 
 from rest_framework import generics
@@ -6214,15 +6491,8 @@ class AllUsersMonthlyTotalsView(generics.ListAPIView):
         )
 
 
-# app/views.py (update or add relevant functions)
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.response import Response
-from rest_framework import status
-from django.utils import timezone
-
-from .models import PushNotifications, DevicePushToken
-from .serializers import PushNotificationsSerializer, DevicePushTokenSerializer
+from .models import PushNotifications
+from .serializers import PushNotificationsSerializer
 from .utils import send_push_notification
 
 
@@ -6241,15 +6511,13 @@ def send_admin_push_notification(request):
     user_ids = request.data.get("user_ids")
     title = request.data.get("title")
     message = request.data.get("message")
-    data = request.data.get("data", None)
 
     from .models import CustomUser
 
     users = CustomUser.objects.filter(id__in=user_ids)
 
     for user in users:
-        # pass data through so client can filter by to_user_id
-        send_push_notification(user, title, message, data=data, notif_type="ADMIN")
+        send_push_notification(user, title, message, notif_type="ADMIN")
 
     return Response({"message": "Notifications sent"}, status=status.HTTP_200_OK)
 
@@ -6257,75 +6525,31 @@ def send_admin_push_notification(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def save_expo_push_token(request):
-    """
-    Save or update a device's expo push token for the logged-in user.
-    Payload expected: { expo_push_token, device_id(optional), device_type(optional), app_version(optional) }
-    """
     user = request.user
     token = request.data.get("expo_push_token")
-    device_id = request.data.get("device_id")
     device_type = request.data.get("device_type", "unknown")
     app_version = request.data.get("app_version")
 
     if not token:
-        return Response(
-            {"error": "No token provided"}, status=status.HTTP_400_BAD_REQUEST
-        )
+        return Response({"error": "No token provided"}, status=400)
 
-    # Update or create DevicePushToken
-    obj, created = DevicePushToken.objects.update_or_create(
-        user=user,
-        token=token,
-        defaults={
-            "device_id": device_id,
-            "device_type": device_type.lower() if device_type else "unknown",
-            "app_version": app_version,
-            "last_seen": timezone.now(),
-        },
-    )
+    # Remove old duplicates
+    user.expo_push_tokens = [
+        entry for entry in user.expo_push_tokens if entry["token"] != token
+    ]
 
-    return Response(
-        {"message": "Token saved", "created": created}, status=status.HTTP_200_OK
-    )
+    new_token = {
+        "token": token,
+        "device_type": device_type.lower(),
+        "last_seen": timezone.now().isoformat(),
+    }
 
+    if app_version:
+        new_token["app_version"] = app_version
 
-@api_view(["POST"])
-@permission_classes([IsAuthenticated])
-def remove_expo_push_token(request):
-    """
-    Remove a device token for the current user.
-    Payload: { expo_push_token } or { device_id }
-    """
-    user = request.user
-    token = request.data.get("expo_push_token")
-    device_id = request.data.get("device_id")
-
-    if not token and not device_id:
-        return Response(
-            {"error": "Provide expo_push_token or device_id"},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-
-    qs = DevicePushToken.objects.filter(user=user)
-    if token:
-        qs = qs.filter(token=token)
-    if device_id:
-        qs = qs.filter(device_id=device_id)
-
-    deleted_count, _ = qs.delete()
-    return Response(
-        {"message": "Token(s) removed", "deleted": deleted_count},
-        status=status.HTTP_200_OK,
-    )
-
-
-@api_view(["GET"])
-@permission_classes([IsAuthenticated])
-def list_my_push_tokens(request):
-    user = request.user
-    tokens = DevicePushToken.objects.filter(user=user)
-    serializer = DevicePushTokenSerializer(tokens, many=True)
-    return Response(serializer.data, status=status.HTTP_200_OK)
+    user.expo_push_tokens.append(new_token)
+    user.save()
+    return Response({"message": "Token saved"})
 
 
 from rest_framework.views import APIView
