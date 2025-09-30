@@ -17,11 +17,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# from channels_redis.core import RedisChannelLayer
-# import redis
-
-# Set your OpenAI API key
-
 import os
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "myfundproject.settings")
@@ -41,10 +36,6 @@ load_dotenv(BASE_DIR / ".env")  # <-- load your .env file
 IMAGEKIT_PRIVATE_KEY = os.getenv("IMAGEKIT_PRIVATE_KEY")
 IMAGEKIT_PUBLIC_KEY = os.getenv("IMAGEKIT_PUBLIC_KEY")
 IMAGEKIT_URL_ENDPOINT = os.getenv("IMAGEKIT_URL_ENDPOINT")
-
-
-# Quick-start development settings - unsuitable for production
-# See https://docs.djangoproject.com/en/4.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.getenv("SECRET_KEY")
@@ -325,7 +316,8 @@ LOGGING = {
 
 LANGUAGE_CODE = "en-us"
 
-TIME_ZONE = "UTC"
+TIME_ZONE = "Africa/Lagos"
+USE_TZ = True
 
 USE_I18N = True
 
@@ -394,3 +386,23 @@ AUTHENTICATION_BACKENDS = [
 # SECURE_HSTS_INCLUDE_SUBDOMAINS = True
 
 PAYSTACK_SECRET_KEY = os.getenv("PAYSTACK_KEY_LIVE")
+
+# if DEBUG:
+#     SECURE_SSL_REDIRECT = False
+#     SESSION_COOKIE_SECURE = False
+#     CSRF_COOKIE_SECURE = False
+# else:
+#     SECURE_SSL_REDIRECT = True
+#     SESSION_COOKIE_SECURE = True
+#     CSRF_COOKIE_SECURE = True
+#     SECURE_HSTS_SECONDS = 30 * 24 * 60 * 60  # 30 days
+#     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
+# # Generate a new secret key if still using the insecure default
+# if SECRET_KEY.startswith("django-insecure-"):
+#     import secrets
+
+#     SECRET_KEY = secrets.token_urlsafe(50)
+
+# # Then keep your existing DEBUG setting
+# DEBUG = False if os.environ.get("KOYEB_PUBLIC_DOMAIN") else True

@@ -6,6 +6,7 @@ import logging
 from django.db import models
 from .utils import send_generic_email, send_push_notification
 from datetime import timedelta
+from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
@@ -14,8 +15,11 @@ logger = logging.getLogger(__name__)
 def process_target_savings_deductions():
     """Celery task to process all due target savings deductions"""
     now = timezone.now()
+    logger.info(f"🕒 Processing target savings at {now}")
 
-    # Get targets that are due for processing based on next_deduction
+    # Add debug logging to see what's happening
+    logger.info(f"🔍 Checking for due targets with next_deduction <= {now}")
+
     due_targets = TargetSavings.objects.filter(
         is_active=True,
         is_cancelled=False,
@@ -23,7 +27,13 @@ def process_target_savings_deductions():
         current_amount__lt=models.F("target_amount"),
     ).select_related("user")
 
-    logger.info(f"Found {due_targets.count()} target savings due for processing")
+    logger.info(f"📊 Found {due_targets.count()} target savings due for processing")
+
+    # Log details about each due target
+    for target in due_targets:
+        logger.info(
+            f"   - Target: {target.name}, Next deduction: {target.next_deduction}, Current: {target.current_amount}/{target.target_amount}"
+        )
 
     success_count = 0
     failure_count = 0
@@ -79,16 +89,16 @@ def check_completed_targets():
         message = (
             f"Hi {user.first_name},<br><br>"
             f"Congratulations! You’ve successfully completed your Target Savings plan "
-            f"'{target.name}' with ₦{target.current_amount:,}.<br><br>"
+            f"'{target.name}' with ₦{target.current_amount:,.2f}.<br><br>"
             "You can now withdraw or reinvest these funds. 🥂"
         )
-        send_generic_email(subject, message, recipient_list=user.email)
+        send_generic_email(subject, message, settings.DEFAULT_FROM_EMAIL, [user.email])
 
         # Push notification
         send_push_notification(
             user,
             title="🎉 Target Savings Completed!",
-            message=f"Congrats! '{target.name}' reached ₦{target.current_amount:,}.",
+            message=f"Congrats! '{target.name}' reached ₦{target.current_amount:,.2f}.",
             data={"target_id": target.id, "type": "TARGET_COMPLETED"},
         )
 
@@ -113,19 +123,22 @@ def retry_failed_deductions():
         user = target.user
         success = target.process_deduction()
         if success:
-            subject = f"Retry Deduction for '{target.name}' Successful ✅"
+            subject = f"Autosave Retry for {target.name} Target Successful ✅"
             message = (
                 f"Hi {user.first_name},<br><br>"
-                f"We retried your Target Savings deduction for '{target.name}' "
-                f"and successfully deducted ₦{target.monthly_payment:,}.<br><br>"
-                f"New balance: ₦{target.current_amount:,}."
+                f"We retried your Target Savings for '{target.name}' "
+                f"and successfully autosaved ₦{target.monthly_payment:,.2f} for it.<br><br>"
+                f"New balance: ₦{target.current_amount:,.2f}.\n\n "
+                "Keep going! You're doing great. 🚀"
             )
-            send_generic_email(subject, message, recipient_list=user.email)
+            send_generic_email(
+                subject, message, settings.DEFAULT_FROM_EMAIL, [user.email]
+            )
 
             send_push_notification(
                 user,
                 title="Retry Successful ✅",
-                message=f"₦{target.monthly_payment:,} was successfully deducted for '{target.name}'.",
+                message=f"₦{target.monthly_payment:,.2f} was successfully deducted for '{target.name}'.",
                 data={"target_id": target.id, "type": "RETRY_SUCCESS"},
             )
 

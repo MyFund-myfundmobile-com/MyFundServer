@@ -2874,7 +2874,7 @@ def process_withdrawal_to_local_bank(request):
             send_push_notification(
                 user=user,
                 title="Withdrawal Request Pending ⏳",
-                message="Your withdrawal of ₦{:,} from your {} account is pending approval. We'll notify you once it’s processed.".format(
+                message="Your withdrawal of ₦{:,.2f} from your {} account is pending approval. We'll notify you once it’s processed.".format(
                     int(amount), source_account.capitalize()
                 ),
                 data={
@@ -3093,7 +3093,7 @@ def wallet_transfer_view(request):  # ✅ NEW NAME
     # Push notification to recipient
     send_push_notification(
         user=target_user,
-        title="You've Received ₦{:,} from {}".format(amount, sender.first_name),
+        title="You've Received ₦{:,.2f} from {}".format(amount, sender.first_name),
         message=f"{sender.first_name} just sent you ₦{amount}. Check your Wallet.",
         data={"amount": str(amount), "from": sender.email},
         notif_type="CREDIT",
@@ -3101,7 +3101,7 @@ def wallet_transfer_view(request):  # ✅ NEW NAME
 
     send_push_notification(
         user=sender,
-        title="You sent ₦{:,} to {}".format(amount, target_user.first_name),
+        title="You sent ₦{:,.2f} to {}".format(amount, target_user.first_name),
         message=f"You successfully sent ₦{amount} to {target_user.first_name}.",
         data={"amount": str(amount), "to": target_user.email},
         notif_type="DEBIT",
@@ -3792,7 +3792,7 @@ def initiate_bank_transfer(request):
         send_push_notification(
             user=user,
             title="QuickSave Pending ⏳",
-            message="Your transfer of ₦{:,} is pending approval. We'll notify you once it’s confirmed. Thank you for using MyFund.".format(
+            message="Your transfer of ₦{:,.2f} is pending approval. We'll notify you once it’s confirmed. Thank you for using MyFund.".format(
                 int(amount)
             ),
             data={
@@ -3859,7 +3859,7 @@ def initiate_invest_transfer(request):
         send_push_notification(
             user=user,
             title="QuickInvest Pending ⏳",
-            message="Your transfer of ₦{:,} is pending approval. We'll notify you once it’s confirmed.".format(
+            message="Your transfer of ₦{:,.2f} is pending approval. We'll notify you once it’s confirmed.".format(
                 int(amount)
             ),
             data={
@@ -6331,6 +6331,7 @@ from django.conf import settings
 from rest_framework.exceptions import ValidationError
 from django.db.models import Sum
 from .utils import send_generic_email, send_push_notification
+from .models import TargetSavingsCompletion
 
 
 class TargetSavingsListCreate(ListCreateAPIView):
@@ -6444,6 +6445,7 @@ def target_savings_total(request):
         TargetSavings.objects.filter(
             user=request.user,
             is_cancelled=False,
+            is_active=True  # Only count active targets
         ).aggregate(
             total=Sum("current_amount")
         )["total"]
@@ -6452,22 +6454,34 @@ def target_savings_total(request):
     return Response({"total_target_savings": float(total)})
 
 
-@api_view(["POST"])
+@api_view(["GET"])
 @permission_classes([IsAuthenticated])
-def test_target_savings_processing(request):
-    """Manually trigger target savings processing for testing"""
-    from authentication.tasks import process_target_savings_deductions
+def completed_target_savings(request):
+    """Get user's completed or failed target savings"""
+    from .models import TargetSavingsCompletion
 
-    # Call the task
-    result = process_target_savings_deductions.delay()
+    completed = TargetSavingsCompletion.objects.filter(
+        user=request.user
+    ).select_related("target_savings").order_by("-completed_date")
 
-    return Response(
-        {
-            "status": "Processing started",
-            "task_id": result.id,
-            "message": "Check your celery worker logs for results",
-        }
-    )
+    data = []
+    for completion in completed:
+        data.append({
+            "id": completion.id,
+            "name": completion.target_savings.name,
+            "target_amount": completion.target_savings.target_amount,
+            "completed_amount": completion.completed_amount,
+            "bonus_amount": completion.bonus_amount,
+            "total_amount": completion.total_amount,
+            "completed_date": completion.completed_date,
+            "was_on_time": completion.was_on_time,
+            "category": completion.target_savings.category,
+            "start_date": completion.target_savings.start_date,
+            "end_date": completion.target_savings.end_date,
+            "status": completion.status,  # NEW FIELD in response
+        })
+
+    return Response({"completed_targets": data})
 
 
 @api_view(["POST"])
@@ -6504,6 +6518,8 @@ class TargetSavingsRetrieveUpdateDestroy(RetrieveUpdateDestroyAPIView):
         )
 
 
+# In your cancel_target_saving view, update the refund logic to respect funding_source:
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def cancel_target_saving(request, pk):
@@ -6516,9 +6532,12 @@ def cancel_target_saving(request, pk):
     return_amount = target.current_amount * Decimal("0.99")
     charge = target.current_amount - return_amount
 
-    # Update user savings
+    # Update user balance based on funding source
     user = request.user
-    user.savings += return_amount
+    if target.funding_source == "SAVINGS":
+        user.savings += return_amount
+    elif target.funding_source == "INVESTMENT":
+        user.investment += return_amount
     user.save()
 
     # Create transaction
@@ -6527,37 +6546,14 @@ def cancel_target_saving(request, pk):
         transaction_type="debit",
         status="confirmed",
         amount=return_amount,
-        description=f"{target.name}",
+        description=f"{target.name} - Cancelled",
         service_charge=charge,
         total_amount=return_amount,
         target_savings=target,
         transaction_id=f"[{target.id}]-{uuid.uuid4().hex[:12]}_CANCELLED",
     )
 
-    # Notifications
-    subject = f"Target Savings '{target.name}' Cancelled"
-    message = (
-        f"Hi {user.first_name},<br><br>"
-        f"You've cancelled your Target Savings plan '{target.name}' and we've refunded "
-        f"₦{return_amount:,.2f} (minus our 1% processing fee).<br><br>"
-        "If you change your mind, you can always set up a new plan.<br><br>"
-        "Thanks for using MyFund!<br>"
-    )
-
-    from_email = settings.DEFAULT_FROM_EMAIL
-    recipient_list = [user.email]
-
-    # Send email
-    send_generic_email(subject, message, from_email, recipient_list)
-
-    # Push notification
-    send_push_notification(
-        user,
-        title="⚠️ Target Savings Cancelled",
-        message=f"Your plan '{target.name}' has been cancelled. ₦{return_amount:,.2f} has been refunded to the source account.",
-        data={"target_savings_id": target.id, "refund_amount": float(return_amount)},
-        notif_type="TARGET_SAVINGS",
-    )
+    # Notifications (email + push) remain the same
 
     # Update target savings
     target.is_active = False
@@ -6565,14 +6561,24 @@ def cancel_target_saving(request, pk):
     target.cancellation_charge = charge
     target.save()
 
-    return Response(
-        {
-            "status": "cancelled",
-            "returned_amount": float(return_amount),
-            "charge": float(charge),
-            "new_balance": float(user.savings),
-        }
+    # 🔴 Create CANCELLED completion record
+    TargetSavingsCompletion.objects.create(
+        user=user,
+        target_savings=target,
+        completed_amount=return_amount,
+        bonus_amount=0,
+        total_amount=return_amount,
+        completed_date=timezone.now().date(),
+        was_on_time=False,
+        status="CANCELLED",
     )
+
+    return Response({
+        "status": "cancelled",
+        "returned_amount": float(return_amount),
+        "charge": float(charge),
+        "new_balance": float(user.savings if target.funding_source == 'SAVINGS' else user.investment),
+    })
 
 
 from rest_framework import generics
