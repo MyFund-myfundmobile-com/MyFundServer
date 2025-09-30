@@ -6341,70 +6341,90 @@ class TargetSavingsListCreate(ListCreateAPIView):
         user = self.request.user
         data = serializer.validated_data
 
-        frequency = data["frequency"].upper()
+        frequency = data.get("frequency", "").upper()
         if frequency not in dict(TargetSavings.FREQUENCY_CHOICES):
             raise ValidationError({"detail": "Invalid frequency"})
 
-        amount = Decimal(str(serializer.validated_data["monthly_payment"]))
-        funding_source = data["funding_source"]
+        amount = Decimal(str(data.get("monthly_payment", 0)))
+        if amount <= 0:
+            raise ValidationError({"monthly_payment": "Monthly payment must be positive"})
+
+        # ✅ Safely get funding_source
+        funding_source = data.get("funding_source")
+        if not funding_source:
+            raise ValidationError({"funding_source": "This field is required."})
+
+        if funding_source not in ("SAVINGS", "INVESTMENT"):
+            raise ValidationError({"funding_source": "Invalid funding source"})
 
         if funding_source == "SAVINGS" and user.savings < amount:
             raise ValidationError({"detail": "Insufficient savings balance"})
         if funding_source == "INVESTMENT" and user.investment < amount:
             raise ValidationError({"detail": "Insufficient investment balance"})
 
-        # Deduct from source and update user balance
-        setattr(
-            user, funding_source.lower(), getattr(user, funding_source.lower()) - amount
-        )
-        user.save()
+        try:
+            with transaction.atomic():
+                locked_user = get_object_or_404(
+                    get_user_model().objects.select_for_update(), pk=user.pk
+                )
 
-        # Create the TargetSavings instance
-        instance = serializer.save(
-            user=user,
-            current_amount=amount,
-            start_date=timezone.now().date(),
-            # No need to set next_deduction here, model's save() handles it.
-        )
+                source_field = funding_source.lower()
+                current_balance = getattr(locked_user, source_field)
 
-        # Manually set the first next_deduction time *after* the initial one
-        instance.next_deduction = instance.calculate_next_deduction_time()
-        instance.save()
+                if current_balance < amount:
+                    raise ValidationError({"detail": f"Insufficient {source_field} balance"})
 
-        # Create transaction for the initial deposit
-        Transaction.objects.create(
-            user=user,
-            transaction_type="credit",
-            status="confirmed",
-            amount=amount,
-            description=f"{instance.name}",
-            service_charge=0,
-            total_amount=amount,
-            target_savings=instance,
-            source=funding_source,
-            transaction_id=f"[{instance.id}]-{uuid.uuid4().hex[:12]}_INITIAL",
-        )
+                get_user_model().objects.filter(pk=locked_user.pk).update(
+                    **{source_field: F(source_field) - amount}
+                )
 
-        # Send notifications
-        subject = f"Target Savings '{instance.name}' is Live!"
-        message = (
-            f"Hi {user.first_name},<br><br>"
-            f"Well done! Your new Target Savings plan '{instance.name}' has been set up "
-            f"with a ₦{amount:,} initial deposit. Automatic {frequency.lower()} deductions "
-            f"will begin according to your schedule.<br><br>"
-            "Keep an eye on your progress and watch your savings grow! 🥂<br><br>"
-            "Thanks for choosing MyFund!<br>"
-        )
-        from_email = settings.DEFAULT_FROM_EMAIL
-        recipient_list = [user.email]
-        send_generic_email(subject, message, from_email, recipient_list)
-        send_push_notification(
-            user,
-            title="🎉 New Target Savings Plan Created",
-            message=f"Your plan '{instance.name}' has been activated with ₦{amount:,}!",
-            data={"target_savings_id": instance.id},
-            notif_type="TARGET_SAVINGS",
-        )
+                locked_user.refresh_from_db()
+
+                instance = serializer.save(
+                    user=locked_user,
+                    current_amount=amount,
+                    start_date=timezone.now().date(),
+                )
+                instance.next_deduction = instance.calculate_next_deduction_time()
+                instance.save()
+
+                Transaction.objects.create(
+                    user=user,
+                    transaction_type="credit",
+                    status="confirmed",
+                    amount=amount,
+                    description=f"{instance.name}",
+                    service_charge=0,
+                    total_amount=amount,
+                    target_savings=instance,
+                    source=funding_source,
+                    transaction_id=f"[{instance.id}]-{uuid.uuid4().hex[:12]}_INITIAL",
+                )
+
+                subject = f"Target Savings '{instance.name}' is Live!"
+                message = (
+                    f"Hi {user.first_name},<br><br>"
+                    f"Well done! Your new Target Savings plan '{instance.name}' has been set up "
+                    f"with a ₦{amount:,} initial deposit. Automatic {frequency.lower()} deductions "
+                    f"will begin according to your schedule.<br><br>"
+                    "Keep an eye on your progress and watch your savings grow! 🥂<br><br>"
+                    "Thanks for choosing MyFund!<br>"
+                )
+                from_email = settings.DEFAULT_FROM_EMAIL
+                recipient_list = [user.email]
+                send_generic_email(subject, message, from_email, recipient_list)
+
+                send_push_notification(
+                    user,
+                    title="🎉 New Target Savings Plan Created",
+                    message=f"Your plan '{instance.name}' has been activated with ₦{amount:,}!",
+                    data={"target_savings_id": instance.id},
+                    notif_type="TARGET_SAVINGS",
+                )
+        except ValidationError:
+            raise
+        except Exception as e:
+            logger.exception("Error creating target savings plan")
 
     def get_queryset(self):
         return (

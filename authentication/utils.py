@@ -7,6 +7,7 @@ from django.template.loader import render_to_string
 from django.utils.html import strip_tags
 import threading
 import logging
+import smtplib
 
 # Set up logging (make sure logging is configured in your settings or app)
 logger = logging.getLogger(__name__)
@@ -108,7 +109,6 @@ def send_generic_email(
 
     if from_email is None:
         from django.conf import settings
-
         from_email = settings.DEFAULT_FROM_EMAIL
 
     def send_email_task():
@@ -125,10 +125,15 @@ def send_generic_email(
                 html_message=html_message,
                 fail_silently=False,
             )
+
             logger.info(f"📧 Sent email to {recipient_list} with subject: {subject}")
 
+        except smtplib.SMTPRecipientsRefused as e:
+            # Log detailed info about rejected recipients
+            logger.error(f"❌ Email rejected by recipient's server: {e.recipients}")
         except Exception as e:
-            logger.error(f"❌ Failed to send email: {e}", exc_info=True)
+            # Log any other error that may occur
+            logger.exception("❌ Failed to send email due to an unexpected error.")
 
     threading.Thread(target=send_email_task, daemon=True).start()
 

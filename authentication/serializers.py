@@ -319,6 +319,16 @@ class TargetSavingsSerializer(serializers.ModelSerializer):
     end_date = serializers.DateField(format="%Y-%m-%d", input_formats=["%Y-%m-%d"])
     is_completed = serializers.BooleanField(read_only=True)
 
+    funding_source = serializers.ChoiceField(
+        choices=[("SAVINGS", "SAVINGS"), ("INVESTMENT", "INVESTMENT")],
+        required=True,
+    )
+    
+    frequency = serializers.ChoiceField(
+        choices=[("DAILY", "Daily"), ("WEEKLY", "Weekly"), ("MONTHLY", "Monthly")],
+        required=True,
+    )
+
     def validate(self, data):
         # Ensure end_date is in the future
         if data["end_date"] < timezone.now().date():
