@@ -286,6 +286,16 @@ urlpatterns = [
     path(
         "target-savings/total/", views.target_savings_total, name="target-savings-total"
     ),
+    path(
+        "target-savings/<int:target_id>/force/",
+        views.force_target_deduction,
+        name="force-target-deduction",
+    ),
+    path(
+        "target-savings/completed/",
+        views.completed_target_savings,
+        name="completed-target-savings",
+    ),
     # MonthlyFinancial APIs
     path(
         "current-month/",
