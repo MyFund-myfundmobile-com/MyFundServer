@@ -6259,7 +6259,7 @@ class TargetSavingsListCreate(ListCreateAPIView):
             user,
             title=f"🎉 {instance.name} Plan Created! ✅",
             message=(
-                f"Your {instance.name} Target Savings plan has been activated with ₦{amount:,.2f}! "
+                f"{user.first_name}, your {instance.name} Target Savings plan has been activated with ₦{amount:,.2f}! "
                 f"You're now {progress_str} closer to your goal. Well done! 🚀"
             ),
             data={"target_savings_id": instance.id},

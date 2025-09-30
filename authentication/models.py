@@ -1218,7 +1218,7 @@ class TargetSavings(models.Model):
                                     user,
                                     title=f"{target.name} Plan Paused 🛑",
                                     message=(
-                                        f"Your {target.name} plan was paused after {target.max_attempts} failed attempts. "
+                                        f"{self.user.first_name}, your {target.name} plan was paused after {target.max_attempts} failed attempts. "
                                         f"₦{refund_amount:,.2f} has been refunded to your {target.funding_source.lower()} account."
                                     ),
                                     data={
@@ -1252,7 +1252,7 @@ class TargetSavings(models.Model):
                                     user,
                                     title=f"{target.name} AutoSave Failed ❌",
                                     message=(
-                                        f"Failed to autosave ₦{amount:,.2f} for your {target.name}. "
+                                        f"{self.user.first_name}, autosave of ₦{amount:,.2f} failed for your {target.name} goal due to insufficient funds. "
                                         f"We'll retry in {target.get_retry_interval_display()}. Attempt {target.deduction_attempts} of {target.max_attempts}."
                                     ),
                                     data={
@@ -1289,7 +1289,18 @@ class TargetSavings(models.Model):
                     completed_amount = target.current_amount
 
                     if today <= target.end_date:
-                        bonus = completed_amount * Decimal("0.13")
+                        # 🔹 Use prorated 13% p.a. bonus
+                        months = max(
+                            1,
+                            (target.end_date.year - target.start_date.year) * 12
+                            + (target.end_date.month - target.start_date.month),
+                        )
+                        bonus = (
+                            completed_amount
+                            * Decimal("0.13")
+                            * Decimal(months)
+                            / Decimal(12)
+                        ).quantize(Decimal("0.01"))
 
                     user.wallet += completed_amount + bonus
                     user.save(update_fields=["wallet"])
@@ -1394,7 +1405,7 @@ class TargetSavings(models.Model):
                             user,
                             title=f"AutoSave for {target.name} Successful! 🎉",
                             message=(
-                                f"₦{amount:,.2f} has just been autosaved for your {target.name} goal. "
+                                f"{self.user.first_name}, ₦{amount:,.2f} has just been autosaved for your {target.name} goal. "
                                 f"New balance: ₦{target.current_amount:,.2f}. You're now {progress}% closer to your goal! Well done! 🚀"
                             ),
                             data={"target_id": target.id, "type": "DEDUCTION_SUCCESS"},
@@ -1420,70 +1431,86 @@ class TargetSavings(models.Model):
             return False
 
     def send_failed_deduction_email(self, max_attempts=False):
-        """Send email notification about failed deduction"""
-        from django.core.mail import send_mail
+        """Send formatted email notification about failed deduction using generic email helper"""
+        from .utils import send_generic_email
         from django.conf import settings
 
-        subject = f"{self.name} AutoSave Failed ❌"
+        try:
+            subject = f"{self.name} AutoSave Failed ❌"
 
-        if max_attempts:
-            message = (
-                f"Hi {self.user.first_name},\n\n"
-                f"We've attempted to autosave ₦{self.monthly_payment} for your {self.name} target savings "
-                f"multiple times but failed due to insufficient funds. "
-                "Your target savings plan has been temporarily paused and your funds have been returned to the funding source.\n\n"
-                "Please ensure you have sufficient funds and reactivate your plan "
-                "to continue working towards your goal.\n\n"
-                "MyFund Team"
-            )
-        else:
-            retry_time = (
-                self.next_retry.strftime("%Y-%m-%d %H:%M")
-                if self.next_retry
-                else "soon"
-            )
-            message = (
-                f"Hi {self.user.first_name},\n\n"
-                f"The autosave of ₦{self.monthly_payment} for your {self.name} target savings "
-                f" failed due to insufficient funds.\n\n"
-                "Kindly note that you'll forfeit the extra interest if you do not meet your target date.\n\n"
-                "To ensure you meet your target, add the required amount to your source account.\n\n"
-                f"We'll retry again at {retry_time}.\n\n"
-                f"(PS: Your Target Savings plan will pause after 3 unsuccessful retries and the funds will be returned to your {self.funding_source}. Kindly fund your {self.funding_source} to stay on track.)\n\n"
-                "MyFund Team"
+            if max_attempts:
+                message = (
+                    f"Hi {self.user.first_name},<br><br>"
+                    f"We've attempted to autosave ₦{self.monthly_payment:,.2f} for your {self.name} target savings multiple times but failed due to insufficient funds.<br><br>"
+                    "Your target savings plan has been <strong>temporarily paused</strong> and your funds have been returned to the funding source.<br><br>"
+                    "Please ensure you have sufficient funds and reactivate your plan to continue working towards your goal.<br><br>"
+                    "<em>MyFund Team</em>"
+                )
+            else:
+                retry_time = (
+                    self.next_retry.strftime("%Y-%m-%d %H:%M")
+                    if self.next_retry
+                    else "soon"
+                )
+
+                message = (
+                    f"Hi {self.user.first_name},<br><br>"
+                    f"The autosave of ₦{self.monthly_payment:,.2f} for your {self.name} target savings failed due to insufficient funds.<br><br>"
+                    "Kindly note that you'll forfeit the extra interest if you do not meet your target date.<br><br>"
+                    f"To ensure you meet your target, add the required amount to your {self.funding_source} account.<br><br>"
+                    f"We'll retry again at <strong>{retry_time}</strong>.<br><br>"
+                    f"(PS: Your Target Savings plan will pause after 3 unsuccessful retries and the funds will be returned to your {self.funding_source} (1% charge). Kindly fund your {self.funding_source} to stay on track.)<br><br>"
+                    "<em>MyFund Team</em>"
+                )
+
+            send_generic_email(
+                subject, message, settings.DEFAULT_FROM_EMAIL, [self.user.email]
             )
 
-        send_mail(
-            subject,
-            message,
-            settings.DEFAULT_FROM_EMAIL,
-            [self.user.email],
-            fail_silently=False,
-        )
+        except Exception as e:
+            import logging
+
+            logger = logging.getLogger(__name__)
+            logger.exception(
+                f"Error sending failed deduction email for target {self.id}: {e}"
+            )
 
     def send_completion_email(self):
-        """Send email notification about target completion"""
-        from django.core.mail import send_mail
-        from django.conf import settings
+        """Send formatted email notification about target completion using generic email helper"""
+        from .utils import send_generic_email
+        from .models import TargetSavingsCompletion
 
-        subject = f"🎉 Congrats! {self.name} Target Plan Completed! ✅"
-        message = (
-            f"Hi {self.user.first_name},\n\n"
-            f"Great news! You've successfully completed your {self.name} plan "
-            f"with a total of ₦{self.current_amount:,.2f} saved!\n\n"
-            "You can now use these funds for your intended goal "
-            "or set up a new target savings plan.\n\n"
-            "Well done and keep up the great savings habit!\n\n"
-            "MyFund Team"
-        )
+        try:
+            completion = TargetSavingsCompletion.objects.filter(
+                target_savings=self, user=self.user
+            ).last()
 
-        send_mail(
-            subject,
-            message,
-            settings.DEFAULT_FROM_EMAIL,
-            [self.user.email],
-            fail_silently=False,
-        )
+            if not completion:
+                logger.warning(
+                    f"No completion record found for target {self.id} when sending email"
+                )
+                return
+
+            subject = f"🎉 Congrats! {self.name} Target Plan Completed! ✅"
+            message = (
+                f"Hi {self.user.first_name},<br><br>"
+                f"Congratulations! You've successfully completed your {self.name} Target Savings plan.<br><br>"
+                f"<strong>Completed Amount:</strong> ₦{completion.completed_amount:,.2f}<br>"
+                f"<strong>Bonus:</strong> ₦{completion.bonus_amount:,.2f}<br>"
+                f"<strong>Total Credited:</strong> ₦{completion.total_amount:,.2f}<br><br>"
+                "You can now use these funds for your intended goal or set up a new target savings plan.<br><br>"
+                "Well done and keep up the great savings habit! 🚀<br><br>"
+                "<em>MyFund Team</em>"
+            )
+
+            send_generic_email(
+                subject, message, settings.DEFAULT_FROM_EMAIL, [self.user.email]
+            )
+
+        except Exception as e:
+            logger.exception(
+                f"Error sending completion email for target {self.id}: {e}"
+            )
 
     def save(self, *args, **kwargs):
         """Ensure initial next_deduction is set when creating an active plan."""
