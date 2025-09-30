@@ -318,6 +318,9 @@ class TargetSavingsSerializer(serializers.ModelSerializer):
     start_date = serializers.DateField(format="%Y-%m-%d", required=False)
     end_date = serializers.DateField(format="%Y-%m-%d", input_formats=["%Y-%m-%d"])
     is_completed = serializers.BooleanField(read_only=True)
+    funding_source = serializers.ChoiceField(
+        choices=[("SAVINGS", "Savings"), ("INVESTMENT", "Investment")]
+    )
 
     funding_source = serializers.ChoiceField(
         choices=[("SAVINGS", "SAVINGS"), ("INVESTMENT", "INVESTMENT")],
