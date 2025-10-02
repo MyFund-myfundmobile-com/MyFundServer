@@ -240,6 +240,11 @@ urlpatterns = [
         name="first_time_savers",
     ),
     # Group Contribution Related APIs
+    path(
+        "groupbuy/",
+        views.get_active_public_groupbuys,
+        name="get_active_public_groupbuys",
+    ),
     path("groupbuy/create/", views.create_groupbuy, name="create_groupbuy"),
     path(
         "groupbuy/<int:property_id>/",
