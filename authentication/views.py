@@ -5254,7 +5254,7 @@ def create_groupbuy(request):
             goal_amount=property_obj.price,
             minimum_contribution=data["minimum_contribution"],
             total_raised=0,
-            status="Active",
+            status="active",
             group_type=group_type,
             deadline=deadline,
         )
@@ -5347,6 +5347,28 @@ def get_groupbuy_by_property(request, property_id):
     except Group.DoesNotExist:
         return Response(
             {"message": "Group not found."}, status=status.HTTP_404_NOT_FOUND
+        )
+        
+# GET /groupbuys/ - Retrieve group buy details for a specific property
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def get_active_public_groupbuys(request):
+    try:
+        groups = Group.objects.filter(
+            status__in=["Active", "active"],
+            group_type="public"
+        )
+        if groups.exists():
+            serializer = GroupSerializer(groups, many=True)
+            return Response(serializer.data)
+        return Response(
+            {"message": "No active public GroupBuy available"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+    except Exception as e:
+        return Response(
+            {"message": f"An error occurred: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
 
