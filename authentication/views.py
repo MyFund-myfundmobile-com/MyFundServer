@@ -6424,7 +6424,7 @@ class TargetSavingsListCreate(ListCreateAPIView):
                     transaction_id=f"[{instance.id}]-{uuid.uuid4().hex[:12]}_INITIAL",
                 )
 
-                subject = f"Target Savings '{instance.name}' is Live!"
+                subject = f"Your {instance.name} Plan is LIVE!"
                 message = (
                     f"Hi {user.first_name},<br><br>"
                     f"Well done! Your new Target Savings plan '{instance.name}' has been set up "
@@ -6439,8 +6439,8 @@ class TargetSavingsListCreate(ListCreateAPIView):
 
                 send_push_notification(
                     user,
-                    title="🎉 New Target Savings Plan Created",
-                    message=f"Your plan '{instance.name}' has been activated with ₦{amount:,}!",
+                    title=f"🎉 {instance.name} Plan Created",
+                    message=f"{user.first_name}, Your {instance.name} plan has been activated with ₦{amount:,}!",
                     data={"target_savings_id": instance.id},
                     notif_type="TARGET_SAVINGS",
                 )
