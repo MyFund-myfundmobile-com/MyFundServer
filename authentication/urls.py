@@ -240,32 +240,37 @@ urlpatterns = [
         name="first_time_savers",
     ),
     # Group Contribution Related APIs
-    path("groups/create/", views.create_group, name="create_group"),
     path(
-        "groups/<int:property_id>/",
-        views.get_group_by_property,
-        name="get_group_by_property",
+        "groupbuy/",
+        views.get_active_public_groupbuys,
+        name="get_active_public_groupbuys",
     ),
-    path("groups/join/<str:group_id>/", views.join_group, name="join_group"),
+    path("groupbuy/create/", views.create_groupbuy, name="create_groupbuy"),
     path(
-        "groups/invite/<str:group_id>/", views.invite_to_group, name="invite_to_group"
+        "groupbuy/<int:property_id>/",
+        views.get_groupbuy_by_property,
+        name="get_groupbuy_by_property",
+    ),
+    path("groupbuy/join/<str:group_id>/", views.join_groupbuy, name="join_groupbuy"),
+    path(
+        "groupbuy/invite/<str:group_id>/", views.invite_to_groupbuy, name="invite_to_groupbuy"
     ),
     path(
-        "groups/contribute/<str:group_id>/",
-        views.contribute_to_group,
-        name="contribute_to_group",
+        "groupbuy/contribute/<str:group_id>/",
+        views.contribute_to_groupbuy,
+        name="contribute_to_groupbuy",
     ),
     path(
-        "groups/contributions/<str:group_id>/",
-        views.get_contributions,
-        name="get_contributions",
+        "groupbuy/contributions/<str:group_id>/",
+        views.get_groupbuy_contributions,
+        name="get_groupbuy_contributions",
     ),
-    path("groups/leave/<str:group_id>/", views.leave_group, name="leave_group"),
-    path("users/groups/", views.get_user_groups, name="get_user_groups"),
+    path("groupbuy/leave/<str:group_id>/", views.leave_groupbuy, name="leave_group"),
+    path("user/groupbuy/", views.get_user_groupbuys, name="get_user_groupbuys"),
     path(
-        "users/contributions/",
-        views.get_user_contributions,
-        name="get_user_contributions",
+        "user/groupbuy/contributions/",
+        views.get_user_groupbuy_contributions,
+        name="get_user_groupbuy_contributions",
     ),
     # Target Savings URLs
     path(
