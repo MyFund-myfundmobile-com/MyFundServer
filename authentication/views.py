@@ -53,7 +53,7 @@ from dotenv import load_dotenv
 import logging
 from django.db.models import Min
 from decimal import Decimal, ROUND_HALF_EVEN
-from .utils import get_user_balance, send_push_notification, set_user_balance
+from .utils import generate_reference, get_user_balance, send_push_notification, set_user_balance
 from .utils import send_generic_email
 
 
@@ -2544,7 +2544,8 @@ def withdraw_to_local_bank(request):
     )
     service_charge = (pct / Decimal(100)) * amount
     withdrawal_amount = amount - service_charge
-    transaction_id = str(uuid.uuid4())[:16]
+    reference_code = generate_reference()
+    transaction_id = f"withdrawal-{reference_code}"
 
     try:
         # 5️⃣ Create pending transaction
@@ -2561,7 +2562,7 @@ def withdraw_to_local_bank(request):
 
         # 6️⃣ Hit Paystack first
         paystack_response = make_withdrawal_through_paystack(
-            user, target_bank_account, withdrawal_amount
+            user, target_bank_account, withdrawal_amount, transaction_id
         )
         print("Paystack API Response:", paystack_response)
 
@@ -2981,9 +2982,17 @@ def create_paystack_recipient(bank_name, account_number, bank_code):
         logger.error(error_message)
         return None
 
+def make_withdrawal_through_paystack(user, target_bank_account, amount, reference):
+    """
+    Makes a withdrawal request to Paystack API.
+    Generates a valid reference string automatically with prefix.
 
-def make_withdrawal_through_paystack(user, target_bank_account, amount):
-    # Make a withdrawal request to Paystack API
+    Reference string format:
+    - Prefix: 'withdrawal-'
+    - Suffix: 16-50 characters of lowercase letters, digits, dash, underscore (default 20 chars)
+    - Total length will be prefix length + suffix length.
+    """
+
     url = "https://api.paystack.co/transfer"
     headers = {
         "Authorization": f"Bearer {paystack_secret_key}",
@@ -2992,7 +3001,8 @@ def make_withdrawal_through_paystack(user, target_bank_account, amount):
     data = {
         "source": "balance",
         "amount": int(amount * 100),  # Amount in kobo (100 kobo = 1 Naira)
-        "recipient": target_bank_account.paystack_recipient_code,  # Paystack recipient code of the target bank account
+        "recipient": target_bank_account.paystack_recipient_code,
+        "reference": reference,
     }
 
     response = requests.post(url, headers=headers, json=data)
@@ -6190,7 +6200,8 @@ def withdraw_savings(request, id):
                 goal.save()
 
         # Generate a unique transaction ID (You can also use UUID or another method if needed)
-        transaction_id = str(uuid.uuid4())[:16]
+        reference_code = generate_reference()
+        transaction_id = f"withdrawal-{reference_code}"
 
         # Log the transaction (this could be a simple database record)
         transaction = Transaction.objects.create(
@@ -6207,7 +6218,7 @@ def withdraw_savings(request, id):
             print("Paystack in progresss...")
             # Perform the withdrawal to the local bank using Paystack API
             paystack_response = make_withdrawal_through_paystack(
-                user, target_bank_account, amount
+                user, target_bank_account, amount, transaction_id
             )
 
             if paystack_response.get("status"):  # This checks if it's truthy

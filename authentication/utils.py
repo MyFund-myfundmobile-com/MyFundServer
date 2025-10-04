@@ -8,6 +8,9 @@ from django.utils.html import strip_tags
 import threading
 import logging
 import smtplib
+import random
+import string
+import requests
 
 # Set up logging (make sure logging is configured in your settings or app)
 logger = logging.getLogger(__name__)
@@ -155,3 +158,8 @@ def set_user_balance(user, source, amount):
         user.investment = amount
     elif source == "Wallet":
         user.wallet = amount
+
+def generate_reference(length=20):
+    """Generate a unique reference string with allowed characters."""
+    allowed_chars = string.ascii_lowercase + string.digits + '-_'
+    return ''.join(random.choice(allowed_chars) for _ in range(length))
