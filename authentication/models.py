@@ -1219,7 +1219,7 @@ class TargetSavings(models.Model):
                                     title=f"{target.name} Plan Paused 🛑",
                                     message=(
                                         f"{self.user.first_name}, your {target.name} plan was paused after {target.max_attempts} failed attempts. "
-                                        f"₦{refund_amount:,.2f} has been refunded to your {target.funding_source.lower()} account."
+                                        f"₦{refund_amount:,.2f} has been refunded to your {target.funding_source.lower()} account. Kindly reactivate to get back on track."
                                     ),
                                     data={
                                         "target_id": target.id,
@@ -1297,7 +1297,7 @@ class TargetSavings(models.Model):
                         )
                         bonus = (
                             completed_amount
-                            * Decimal("0.13")
+                            * Decimal("0.15")
                             * Decimal(months)
                             / Decimal(12)
                         ).quantize(Decimal("0.01"))
@@ -1331,6 +1331,19 @@ class TargetSavings(models.Model):
                         target_savings=target,
                         source="TARGET_COMPLETION",
                         transaction_id=f"[{target.id}]-{uuid.uuid4().hex[:12]}_COMPLETION",
+                    )
+
+                    # ✅ Record wallet credit transaction (separate, so user sees wallet inflow)
+                    Transaction.objects.create(
+                        user=user,
+                        transaction_type="credit",
+                        status="confirmed",
+                        amount=completed_amount + bonus,
+                        description=f"{target.name} Completed! ✅",
+                        service_charge=0,
+                        total_amount=completed_amount + bonus,
+                        source="WALLET",
+                        transaction_id=f"[{target.id}]-{uuid.uuid4().hex[:12]}_WALLET",
                     )
 
                     def _notify_completion():
