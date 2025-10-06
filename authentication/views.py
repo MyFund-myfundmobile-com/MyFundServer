@@ -55,6 +55,7 @@ from django.db.models import Min
 from decimal import Decimal, ROUND_HALF_EVEN
 from .utils import generate_reference, get_user_balance, send_push_notification, set_user_balance
 from .utils import send_generic_email
+from django.db import transaction
 
 
 
@@ -2297,192 +2298,290 @@ random_uuid = uuid.uuid4()
 @permission_classes([IsAuthenticated])
 def savings_to_investment(request):
     user = request.user
-    amount = Decimal(request.data.get("amount", 0))
 
-    # Validate that the user has enough savings
-    if user.savings < amount:
+    # Ensure user is authenticated
+    if not user or not user.is_authenticated:
         return Response(
-            {"error": "Insufficient savings balance."},
+            {"error": "Authentication credentials were not provided."},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    # Validate and parse amount
+    amount_raw = request.data.get("amount", None)
+    if amount_raw is None:
+        return Response(
+            {"error": "Amount is required."},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    # Generate unique transaction IDs for debit and credit transactions
-    debit_transaction_id = str(uuid.uuid4())[:16]
-    credit_transaction_id = str(uuid.uuid4())[:16]
+    try:
+        amount = Decimal(amount_raw)
+    except (InvalidOperation, TypeError):
+        return Response(
+            {"error": "Invalid amount format."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if amount <= 0:
+        return Response(
+            {"error": "Amount must be greater than zero."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     try:
-        # Create a debit transaction record
-        debit_transaction = Transaction(
-            user=user,
-            transaction_type="debit",
-            status="confirmed",
-            amount=amount,
-            description="Savings > Investment",
-            transaction_id=debit_transaction_id,
-            service_charge=0.0,  # Default
-            total_amount=amount,  # No extra charges
-        )
+        with transaction.atomic():
+            # Refresh user to get latest balance and lock row for update
+            user = user.__class__.objects.select_for_update().get(pk=user.pk)
 
-        debit_transaction.save()
+            if user.savings < amount:
+                return Response(
+                    {"error": "Insufficient savings balance."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
-        # Create a credit transaction record
-        credit_transaction = Transaction(
-            user=user,
-            transaction_type="credit",
-            status="confirmed",
-            amount=amount,
-            description="QuickInvest",
-            transaction_id=credit_transaction_id,
-            service_charge=0.0,  # Default
-            total_amount=amount,  # No extra charges
-        )
+            # Use full UUID for transaction IDs (no truncation)
+            debit_transaction_id = str(uuid.uuid4())[:16]
+            credit_transaction_id = str(uuid.uuid4())[:16]
 
-        credit_transaction.save()
+            # Create debit transaction
+            debit_transaction = Transaction(
+                user=user,
+                transaction_type="debit",
+                status="confirmed",
+                amount=amount,
+                description="Savings > Investment",
+                transaction_id=debit_transaction_id,
+                service_charge=0.0,
+                total_amount=amount,
+            )
+            debit_transaction.save()
 
-        # Perform the savings to investment transfer
-        user.savings -= amount
-        user.investment += amount
-        user.save()
+            # Create credit transaction
+            credit_transaction = Transaction(
+                user=user,
+                transaction_type="credit",
+                status="confirmed",
+                amount=amount,
+                description="QuickInvest",
+                transaction_id=credit_transaction_id,
+                service_charge=0.0,
+                total_amount=amount,
+            )
+            credit_transaction.save()
 
+            # Update user balances
+            user.savings -= amount
+            user.investment += amount
+            user.save()
+
+    except Transaction.DoesNotExist:
         return Response(
-            {
-                "message": "Savings to investment transfer successful.",
-                "debit_transaction_id": debit_transaction_id,
-                "credit_transaction_id": credit_transaction_id,
-            },
-            status=status.HTTP_200_OK,
+            {"error": "User account not found."},
+            status=status.HTTP_404_NOT_FOUND,
         )
-
     except IntegrityError:
-        # Handle the case where a unique constraint (transaction_id) is violated
         return Response(
             {"error": "Transaction ID conflict. Please try again."},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+    return Response(
+        {
+            "message": "Savings to investment transfer successful.",
+            "debit_transaction_id": debit_transaction_id,
+            "credit_transaction_id": credit_transaction_id,
+        },
+        status=status.HTTP_200_OK,
+    )
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def wallet_to_savings(request):
     user = request.user
-    amount = Decimal(request.data.get("amount", 0))
 
-    # Validate that the user has enough wallet balance
-    if user.wallet < amount:
+    # Ensure user is authenticated
+    if not user or not user.is_authenticated:
         return Response(
-            {"error": "Insufficient wallet balance."},
+            {"error": "Authentication credentials were not provided."},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    # Validate and parse amount
+    amount_raw = request.data.get("amount", None)
+    if amount_raw is None:
+        return Response(
+            {"error": "Amount is required."},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    # Generate a unique transaction ID
-    transaction_id = str(uuid.uuid4())[:16]
+    try:
+        amount = Decimal(amount_raw)
+    except (InvalidOperation, TypeError):
+        return Response(
+            {"error": "Invalid amount format."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if amount <= 0:
+        return Response(
+            {"error": "Amount must be greater than zero."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     try:
-        # Create a debit transaction for the wallet deduction
-        debit_transaction = Transaction(
-            user=user,
-            transaction_type="debit",
-            status="confirmed",
-            amount=amount,
-            total_amount=amount,
-            description="Wallet > Savings",
-            transaction_id=transaction_id + "-D",  # Append '-D' for clarity
-        )
-        debit_transaction.save()
+        with transaction.atomic():
+            # Lock user record to prevent race conditions
+            user = user.__class__.objects.select_for_update().get(pk=user.pk)
 
-        # Create a credit transaction for the savings addition
-        credit_transaction = Transaction(
-            user=user,
-            transaction_type="credit",
-            status="confirmed",
-            amount=amount,
-            total_amount=amount,
-            description="QuickSave (Transfer)",
-            transaction_id=transaction_id + "-C",  # Append '-C' for clarity
-        )
-        credit_transaction.save()
+            if user.wallet < amount:
+                return Response(
+                    {"error": "Insufficient wallet balance."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
-        # Perform the wallet to savings transfer
-        user.wallet -= amount
-        user.savings += amount
-        user.save()
+            # Use full UUID for transaction IDs with clear suffixes
+            base_transaction_id = str(uuid.uuid4())[:16]
 
+            debit_transaction = Transaction(
+                user=user,
+                transaction_type="debit",
+                status="confirmed",
+                amount=amount,
+                total_amount=amount,
+                description="Wallet > Savings",
+                transaction_id=base_transaction_id + "-D",
+            )
+            debit_transaction.save()
+
+            credit_transaction = Transaction(
+                user=user,
+                transaction_type="credit",
+                status="confirmed",
+                amount=amount,
+                total_amount=amount,
+                description="QuickSave (Transfer)",
+                transaction_id=base_transaction_id + "-C",
+            )
+            credit_transaction.save()
+
+            # Update balances
+            user.wallet -= amount
+            user.savings += amount
+            user.save()
+
+    except user.DoesNotExist:
         return Response(
-            {
-                "message": "Wallet to savings transfer successful.",
-                "transaction_id": transaction_id,
-            },
-            status=status.HTTP_200_OK,
+            {"error": "User account not found."},
+            status=status.HTTP_404_NOT_FOUND,
         )
-
     except IntegrityError:
-        # Handle the case where a unique constraint (transaction_id) is violated
         return Response(
             {"error": "Transaction ID conflict. Please try again."},
             status=status.HTTP_400_BAD_REQUEST,
         )
+
+    return Response(
+        {
+            "message": "Wallet to savings transfer successful.",
+            "transaction_id": base_transaction_id,
+        },
+        status=status.HTTP_200_OK,
+    )
 
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def wallet_to_investment(request):
     user = request.user
-    amount = Decimal(request.data.get("amount", 0))
 
-    # Validate that the user has enough wallet balance
-    if user.wallet < amount:
+    # Ensure user is authenticated
+    if not user or not user.is_authenticated:
         return Response(
-            {"error": "Insufficient wallet balance."},
+            {"error": "Authentication credentials were not provided."},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    # Validate and parse amount
+    amount_raw = request.data.get("amount", None)
+    if amount_raw is None:
+        return Response(
+            {"error": "Amount is required."},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    # Generate a unique transaction ID
-    transaction_id = str(uuid.uuid4())[:16]
+    try:
+        amount = Decimal(amount_raw)
+    except (InvalidOperation, TypeError):
+        return Response(
+            {"error": "Invalid amount format."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if amount <= 0:
+        return Response(
+            {"error": "Amount must be greater than zero."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     try:
-        # Create a debit transaction for the wallet deduction
-        debit_transaction = Transaction(
-            user=user,
-            transaction_type="debit",
-            status="confirmed",
-            amount=amount,
-            total_amount=amount,
-            description="Wallet > Investment",
-            transaction_id=transaction_id + "-D",  # Append '-D' for clarity
-        )
-        debit_transaction.save()
+        with transaction.atomic():
+            # Lock user record to prevent race conditions
+            user = user.__class__.objects.select_for_update().get(pk=user.pk)
 
-        # Create a credit transaction for the investment addition
-        credit_transaction = Transaction(
-            user=user,
-            transaction_type="credit",
-            status="confirmed",
-            amount=amount,
-            total_amount=amount,
-            description="QuickInvest (Transfer)",
-            transaction_id=transaction_id + "-C",  # Append '-C' for clarity
-        )
-        credit_transaction.save()
+            if user.wallet < amount:
+                return Response(
+                    {"error": "Insufficient wallet balance."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
-        # Perform the wallet to investment transfer
-        user.wallet -= amount
-        user.investment += amount
-        user.save()
+            # Use full UUID as base transaction ID
+            base_transaction_id = str(uuid.uuid4())[:16]
 
+            debit_transaction = Transaction(
+                user=user,
+                transaction_type="debit",
+                status="confirmed",
+                amount=amount,
+                total_amount=amount,
+                description="Wallet > Investment",
+                transaction_id=base_transaction_id + "-D",
+            )
+            debit_transaction.save()
+
+            credit_transaction = Transaction(
+                user=user,
+                transaction_type="credit",
+                status="confirmed",
+                amount=amount,
+                total_amount=amount,
+                description="QuickInvest (Transfer)",
+                transaction_id=base_transaction_id + "-C",
+            )
+            credit_transaction.save()
+
+            # Update user balances
+            user.wallet -= amount
+            user.investment += amount
+            user.save()
+
+    except user.DoesNotExist:
         return Response(
-            {
-                "message": "Wallet to investment transfer successful.",
-                "transaction_id": transaction_id,
-            },
-            status=status.HTTP_200_OK,
+            {"error": "User account not found."},
+            status=status.HTTP_404_NOT_FOUND,
         )
-
     except IntegrityError:
-        # Handle the case where a unique constraint (transaction_id) is violated
         return Response(
             {"error": "Transaction ID conflict. Please try again."},
             status=status.HTTP_400_BAD_REQUEST,
         )
+
+    return Response(
+        {
+            "message": "Wallet to investment transfer successful.",
+            "transaction_id": base_transaction_id,
+        },
+        status=status.HTTP_200_OK,
+    )
 
 
 import uuid
@@ -2497,6 +2596,7 @@ from authentication.models import BankAccount, Transaction, WithdrawalsRequestTo
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def withdraw_to_local_bank(request):
+    User = get_user_model()
     user = request.user
     source_account = request.data.get("source_account", "").strip().lower()
     target_bank_account_id = request.data.get("target_bank_account_id", "")
@@ -2519,55 +2619,107 @@ def withdraw_to_local_bank(request):
     amount = Decimal(request.data.get("amount", 0)).quantize(
         Decimal("0.00"), rounding=ROUND_HALF_EVEN
     )
+    
+    VALID_SOURCES = ["savings", "investment", "wallet"]
+
+    if source_account not in VALID_SOURCES:
+        return Response({"error": "Invalid source account."}, status=400)
+
+    try:
+        if amount <= 0:
+            return Response({"error": "Amount must be greater than zero."}, status=400)
+    except:
+        return Response({"error": "Invalid amount format."}, status=400)
 
     # 2️⃣ Check user balance (do NOT debit yet)
-    if source_account == "savings" and user.savings < amount:
-        return Response({"error": "Insufficient savings balance."}, status=400)
-    if source_account == "investment" and user.investment < amount:
-        return Response({"error": "Insufficient investment balance."}, status=400)
-    if source_account == "wallet" and user.wallet < amount:
-        return Response({"error": "Insufficient wallet balance."}, status=400)
+    with transaction.atomic():
+        user = User.objects.select_for_update().get(pk=request.user.pk)
+        if source_account == "savings" and user.savings < amount:
+            return Response({"error": "Insufficient savings balance."}, status=400)
+        if source_account == "investment" and user.investment < amount:
+            return Response({"error": "Insufficient investment balance."}, status=400)
+        if source_account == "wallet" and user.wallet < amount:
+            return Response({"error": "Insufficient wallet balance."}, status=400)
 
-    # 3️⃣ Verify bank account ownership
-    try:
-        target_bank_account = BankAccount.objects.get(
-            id=target_bank_account_id, user=user
+        # 3️⃣ Verify bank account ownership
+        try:
+            target_bank_account = BankAccount.objects.get(
+                id=target_bank_account_id, user=user
+            )
+        except BankAccount.DoesNotExist:
+            return Response({"error": "Target bank account not found."}, status=400)
+
+        # 4️⃣ Compute service charge & net amount
+        pct = (
+            10
+            if source_account == "savings"
+            else 15 if source_account == "investment" else 0
         )
-    except BankAccount.DoesNotExist:
-        return Response({"error": "Target bank account not found."}, status=400)
+        service_charge = (pct / Decimal(100)) * amount
+        withdrawal_amount = amount - service_charge
+        reference_code = generate_reference()
+        transaction_id = f"withdrawal-{reference_code}"
 
-    # 4️⃣ Compute service charge & net amount
-    pct = (
-        10
-        if source_account == "savings"
-        else 15 if source_account == "investment" else 0
-    )
-    service_charge = (pct / Decimal(100)) * amount
-    withdrawal_amount = amount - service_charge
-    reference_code = generate_reference()
-    transaction_id = f"withdrawal-{reference_code}"
+        try:
+            # 5️⃣ Create pending transaction
+            transaction_details = Transaction.objects.create(
+                user=user,
+                transaction_type="debit",
+                status="pending",
+                amount=withdrawal_amount,
+                service_charge=service_charge,
+                total_amount=amount,
+                description=f"{source_account.capitalize()} > Bank . . .",
+                transaction_id=transaction_id,
+            )
 
-    try:
-        # 5️⃣ Create pending transaction
-        transaction = Transaction.objects.create(
-            user=user,
-            transaction_type="debit",
-            status="pending",
-            amount=withdrawal_amount,
-            service_charge=service_charge,
-            total_amount=amount,
-            description=f"{source_account.capitalize()} > Bank . . .",
-            transaction_id=transaction_id,
-        )
+            # 6️⃣ Hit Paystack first
+            paystack_response = make_withdrawal_through_paystack(
+                user, target_bank_account, withdrawal_amount, transaction_id
+            )
+            print("Paystack API Response:", paystack_response)
 
-        # 6️⃣ Hit Paystack first
-        paystack_response = make_withdrawal_through_paystack(
-            user, target_bank_account, withdrawal_amount, transaction_id
-        )
-        print("Paystack API Response:", paystack_response)
+            if paystack_response.get("status"):
+                # 7️⃣ On success, debit user
+                if source_account == "savings":
+                    user.savings -= amount
+                elif source_account == "investment":
+                    user.investment -= amount
+                else:
+                    user.wallet -= amount
+                user.save()
 
-        if paystack_response.get("status"):
-            # 7️⃣ On success, debit user
+                transaction_details.status = "confirmed"
+                transaction_details.save()
+
+                # 8️⃣ Email user
+                subject = f"Withdrawal Successful: ₦{amount}"
+                message = (
+                    f"Hi {user.first_name},<br><br>"
+                    f"Your withdrawal of ₦{amount} from your {source_account} account has been sent to {target_bank_account.bank_name}.<br><br>"
+                    "Thank you for using MyFund! 🥂<br><br>"
+                )
+
+                send_generic_email(
+                    subject, message, "MyFund <info@myfundmobile.com>", [user.email]
+                )
+
+                return Response(
+                    {
+                        "success": True,
+                        "message": paystack_response.get("message"),
+                        "transaction_id": transaction_id,
+                        "updated_balance": {
+                            "savings": user.savings,
+                            "investment": user.investment,
+                            "wallet": user.wallet,
+                        },
+                    },
+                    status=200,
+                )
+
+            # 9️⃣ On PAYSTACK FAILURE → **manual fallback**:
+            # — first, **debit** the user so their balance reflects the pending withdrawal
             if source_account == "savings":
                 user.savings -= amount
             elif source_account == "investment":
@@ -2576,117 +2728,78 @@ def withdraw_to_local_bank(request):
                 user.wallet -= amount
             user.save()
 
-            transaction.status = "confirmed"
-            transaction.save()
+            # — record the admin‐processed request
+            WithdrawalsRequestToAdmin.objects.create(
+                user=user,
+                amount=amount,
+                transaction_id=transaction_id,
+                source_account=source_account,
+                target_bank=target_bank_account.bank_name,
+                target_account_number=target_bank_account.account_number,
+                withdrawal_type="immediate",
+                is_approved=False,
+            )
 
-            # 8️⃣ Email user
-            subject = f"Withdrawal Successful: ₦{amount}"
+            # 🔔 Send push notification on Paystack failure (manual processing fallback)
+            send_push_notification(
+                user=user,
+                title="Withdrawal Processing... ⏳",
+                message="Your withdrawal request has been received and will be processed shortly. You'll get a confirmation by mail once it's completed.",
+                data={
+                    "amount": str(amount),
+                    "transaction_id": transaction_id,
+                    "source_account": source_account,
+                    "type": "Withdrawal",
+                    "status": "pending_manual",
+                },
+                notif_type="PENDING",  # Suitable here since it's in progress
+            )
+
+            # — notify the user
+            subject = f"Withdrawal of ₦{amount} Processing..."
             message = (
                 f"Hi {user.first_name},<br><br>"
-                f"Your withdrawal of ₦{amount} from your {source_account} account has been sent to {target_bank_account.bank_name}.<br><br>"
-                "Thank you for using MyFund! 🥂<br><br>"
+                f"We've received your request to withdraw ₦{amount}. It'll be processed within the hour.<br><br>"
+                "Thank you for using MyFund!<br><br>"
             )
 
             send_generic_email(
                 subject, message, "MyFund <info@myfundmobile.com>", [user.email]
             )
 
+            # — notify admin
+            subj_admin = f"[CHECK] {user.first_name} Wants to Withdraw ₦{amount}"
+            msg_admin = (
+                f"User: {user.first_name} {user.last_name}<br>"
+                f"Amount: ₦{amount}<br>"
+                f"Bank: {target_bank_account.bank_name} ({target_bank_account.account_number})<br>"
+                f"Transaction ID: {transaction_id}<br>"
+                "Reason: automatic Paystack withdrawal failed; manual processing required."
+            )
+
+            send_generic_email(
+                subj_admin,
+                msg_admin,
+                "MyFund <info@myfundmobile.com>",
+                ["admin@myfundmobile.com"],
+            )
+
+            # 0️⃣ Return 200 with success:false so front end enters “processing” flow
             return Response(
                 {
-                    "success": True,
-                    "message": paystack_response.get("message"),
+                    "success": False,
+                    "message": "Automatic withdrawal failed. We’re processing it manually.",
                     "transaction_id": transaction_id,
-                    "updated_balance": {
-                        "savings": user.savings,
-                        "investment": user.investment,
-                        "wallet": user.wallet,
-                    },
                 },
                 status=200,
             )
 
-        # 9️⃣ On PAYSTACK FAILURE → **manual fallback**:
-        # — first, **debit** the user so their balance reflects the pending withdrawal
-        if source_account == "savings":
-            user.savings -= amount
-        elif source_account == "investment":
-            user.investment -= amount
-        else:
-            user.wallet -= amount
-        user.save()
+        except IntegrityError:
+            return Response({"error": "Transaction conflict, please retry."}, status=400)
 
-        # — record the admin‐processed request
-        WithdrawalsRequestToAdmin.objects.create(
-            user=user,
-            amount=amount,
-            transaction_id=transaction_id,
-            source_account=source_account,
-            target_bank=target_bank_account.bank_name,
-            target_account_number=target_bank_account.account_number,
-            withdrawal_type="immediate",
-            is_approved=False,
-        )
-
-        # 🔔 Send push notification on Paystack failure (manual processing fallback)
-        send_push_notification(
-            user=user,
-            title="Withdrawal Processing... ⏳",
-            message="Your withdrawal request has been received and will be processed shortly. You'll get a confirmation by mail once it's completed.",
-            data={
-                "amount": str(amount),
-                "transaction_id": transaction_id,
-                "source_account": source_account,
-                "type": "Withdrawal",
-                "status": "pending_manual",
-            },
-            notif_type="PENDING",  # Suitable here since it's in progress
-        )
-
-        # — notify the user
-        subject = f"Withdrawal of ₦{amount} Processing..."
-        message = (
-            f"Hi {user.first_name},<br><br>"
-            f"We've received your request to withdraw ₦{amount}. It'll be processed within the hour.<br><br>"
-            "Thank you for using MyFund!<br><br>"
-        )
-
-        send_generic_email(
-            subject, message, "MyFund <info@myfundmobile.com>", [user.email]
-        )
-
-        # — notify admin
-        subj_admin = f"[CHECK] {user.first_name} Wants to Withdraw ₦{amount}"
-        msg_admin = (
-            f"User: {user.first_name} {user.last_name}<br>"
-            f"Amount: ₦{amount}<br>"
-            f"Bank: {target_bank_account.bank_name} ({target_bank_account.account_number})<br>"
-            f"Transaction ID: {transaction_id}<br>"
-            "Reason: automatic Paystack withdrawal failed; manual processing required."
-        )
-
-        send_generic_email(
-            subj_admin,
-            msg_admin,
-            "MyFund <info@myfundmobile.com>",
-            ["admin@myfundmobile.com"],
-        )
-
-        # 0️⃣ Return 200 with success:false so front end enters “processing” flow
-        return Response(
-            {
-                "success": False,
-                "message": "Automatic withdrawal failed. We’re processing it manually.",
-                "transaction_id": transaction_id,
-            },
-            status=200,
-        )
-
-    except IntegrityError:
-        return Response({"error": "Transaction conflict, please retry."}, status=400)
-
-    except Exception as e:
-        print("Error in withdraw_to_local_bank:", e)
-        return Response({"error": "Server error, please try again later."}, status=500)
+        except Exception as e:
+            print("Error in withdraw_to_local_bank:", e)
+            return Response({"error": "Server error, please try again later."}, status=500)
 
 
 import string
@@ -2717,6 +2830,11 @@ def process_withdrawal_to_local_bank(request):
             {"error": '"source_account" was NOT provided.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
+        
+    VALID_SOURCES = ["savings", "investment", "wallet"]
+
+    if source_account not in VALID_SOURCES:
+        return Response({"error": "Invalid source account."}, status=400)
 
     if not target_bank_account_id:
         print("❌ target_bank_account_id not provided.")
@@ -2785,9 +2903,9 @@ def process_withdrawal_to_local_bank(request):
         )
 
     transaction_id = "".join(
-        random.choices(string.ascii_uppercase + string.digits, k=8)
+        random.choices(string.ascii_uppercase + string.digits, k=20)
     )
-    print(f"✅ STEP 6: Generated transaction_id {transaction_id}")
+    print(f"✅ STEP 6: Generated transaction_id")
     current_datetime = datetime.now()
     processing_date = None
     if withdrawal_type == "scheduled":
@@ -2799,21 +2917,40 @@ def process_withdrawal_to_local_bank(request):
 
     try:
         with transaction.atomic():
-            # --- DEDUCT AMOUNT FROM USER'S BALANCE HERE ---
+            User = get_user_model()
+            
+            # Lock user row for update to prevent concurrent modifications
+            user_locked = User.objects.select_for_update().get(id=user.id)
+
+            # Re-check balance inside transaction after locking
             if source_account == "savings":
-                user.savings -= amount
+                if not hasattr(user_locked, "savings") or user_locked.savings < amount:
+                    return Response({"error": "Insufficient savings balance."}, status=400)
+                user_locked.savings -= amount
+
             elif source_account == "investment":
-                user.investment -= amount
+                if not hasattr(user_locked, "investment") or user_locked.investment < amount:
+                    return Response({"error": "Insufficient investment balance."}, status=400)
+                user_locked.investment -= amount
+
             elif source_account == "wallet":
-                user.wallet -= amount
-            user.save()  # Save the updated balance
+                if not hasattr(user_locked, "wallet") or user_locked.wallet < amount:
+                    return Response({"error": "Insufficient wallet balance."}, status=400)
+                user_locked.wallet -= amount
+
+            else:
+                return Response({"error": "Invalid source account."}, status=400)
+
+            # Save updated balances
+            user_locked.save()
+            
             print(
                 f"✅ STEP 7: Amount {amount} deducted from user's {source_account} balance."
             )
 
             # Withdrawal record
             withdrawal = WithdrawalsRequestToAdmin.objects.create(
-                user=user,
+                user=user_locked,
                 amount=amount,
                 transaction_id=transaction_id,
                 source_account=source_account,
@@ -2830,7 +2967,7 @@ def process_withdrawal_to_local_bank(request):
             # Transaction record - Status is "pending" because it's waiting for admin approval,
             # but the amount is already "debited" from the user's perspective.
             Transaction.objects.create(
-                user=user,
+                user=user_locked,
                 transaction_id=transaction_id,
                 transaction_type="debit",
                 status="pending",  # Status is pending approval by admin
@@ -2862,18 +2999,18 @@ def process_withdrawal_to_local_bank(request):
                 )
 
             user_message = (
-                f"Hi {user.first_name},<br><br>"
+                f"Hi {user_locked.first_name},<br><br>"
                 f"{user_message_body}<br><br>"
                 "Thank you for using MyFund.<br><br>"
             )
             from_email = "MyFund <info@myfundmobile.com>"
-            recipient_list = [user.email]
+            recipient_list = [user_locked.email]
 
             send_generic_email(subject, user_message, from_email, recipient_list)
 
             # ✅ STEP 10.1: Send push notification to user
             send_push_notification(
-                user=user,
+                user=user_locked,
                 title="Withdrawal Request Pending ⏳",
                 message="Your withdrawal of ₦{:,.2f} from your {} account is pending approval. We'll notify you once it’s processed.".format(
                     int(amount), source_account.capitalize()
@@ -2891,7 +3028,7 @@ def process_withdrawal_to_local_bank(request):
 
             # --- Send email to admin (with more details and correct recipients) ---
             admin_subject = (
-                f"[CHECK] {user.first_name} Wants to Withdraw ₦{amount:,.2f}"
+                f"[CHECK] {user_locked.first_name} Wants to Withdraw ₦{amount:,.2f}"
             )
             admin_message = f"""
             Hi Admin,
@@ -2899,8 +3036,8 @@ def process_withdrawal_to_local_bank(request):
             A new withdrawal request has been submitted. The user's account has already been debited.
             Please review this request and process the payment manually.
 
-            User: {user.first_name} {user.last_name}
-            Email: {user.email}
+            User: {user_locked.first_name} {user_locked.last_name}
+            Email: {user_locked.email}
             Transaction ID: {transaction_id}
             Amount: ₦{amount:,.2f}
             Source Account: {source_account.capitalize()}
