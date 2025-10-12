@@ -100,11 +100,13 @@ class CustomUserAdmin(UserAdmin):
         "kyc_updated",
         "is_staff",
         "is_active",
+        "is_banned",  # 👈 show banned status
         "profile_picture",
     )
     list_filter = (
         "is_staff",
         "is_active",
+        "is_banned",  # 👈 show banned status
         "kyc_updated",
         "how_did_you_hear",
         "date_joined",
@@ -114,6 +116,8 @@ class CustomUserAdmin(UserAdmin):
     readonly_fields = ("get_total_referrals", "get_confirmed_referrals", "date_joined")
 
     actions = [
+        "ban_user",
+        "unban_user",
         "export_to_csv",  # Add export action
         "send_custom_email",
         "view_kyc_details",
@@ -217,6 +221,16 @@ class CustomUserAdmin(UserAdmin):
                 filter=Q(referral_transactions__status="confirmed"),
             ),
         )
+
+    @admin.action(description="🚫 Ban selected users (cannot reactivate)")
+    def ban_user(self, request, queryset):
+        queryset.update(is_banned=True, is_active=False)
+        self.message_user(request, f"{queryset.count()} user(s) banned successfully.")
+
+    @admin.action(description="✅ Unban selected users")
+    def unban_user(self, request, queryset):
+        queryset.update(is_banned=False)
+        self.message_user(request, f"{queryset.count()} user(s) unbanned successfully.")
 
     def export_to_csv(self, request, queryset):
         # Create the response object and set the content type
