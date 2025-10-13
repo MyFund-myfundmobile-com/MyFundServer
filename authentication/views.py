@@ -58,7 +58,6 @@ from .utils import send_generic_email
 from django.db import transaction
 
 
-
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -558,7 +557,20 @@ class CustomObtainAuthToken(ObtainAuthToken):
             user = serializer.validated_data["user"]
             logger.info(f"User authenticated successfully: {user.email}")
 
-            # If user is inactive: generate & send OTP (via helper) then instruct client to go to OTP screen
+            # 🚫 Block banned users first
+            if getattr(user, "is_banned", False):
+                return Response(
+                    {
+                        "status": "banned",
+                        "message": (
+                            "Your account has been disabled due to some suspicious activities detected.\n\n"
+                            "Contact support at care@myfundmobile.com for review."
+                        ),
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            # If user is inactive: send OTP
             if not user.is_active:
                 try:
                     send_otp_for_user(user)
@@ -581,9 +593,8 @@ class CustomObtainAuthToken(ObtainAuthToken):
                     status=status.HTTP_403_FORBIDDEN,
                 )
 
-            # Active user: generate tokens
+            # ✅ Active user: generate tokens
             tokens = self.get_tokens_for_user(user)
-
             return Response(tokens)
 
         except Exception as e:
@@ -1610,6 +1621,14 @@ def quicksave(request):
     reference = data["data"]["reference"]
     access_code = data["data"]["access_code"]
 
+    # ✅ NEW: Capture authorization data for reusable payments
+    authorization_data = data["data"].get("authorization", {})
+    authorization_code = authorization_data.get("authorization_code")
+    reusable = authorization_data.get("reusable", False)
+    # You can also capture card details if you want to show them to users
+    card_brand = authorization_data.get("brand", "")
+    card_last4 = authorization_data.get("last4", "")
+
     Transaction.objects.create(
         user=request.user,
         transaction_type="credit",
@@ -1618,6 +1637,8 @@ def quicksave(request):
         description="QuickSave",
         transaction_id=reference,
         paystack_access_code=access_code,
+        # ✅ NEW: Store authorization code if available
+        authorization_code=authorization_code,
     )
 
     return Response(
@@ -1626,6 +1647,11 @@ def quicksave(request):
             "message": "Authorization of QuickSave transaction on Paystack required",
             "authorization_url": data["data"]["authorization_url"],
             "access_code": access_code,
+            # ✅ NEW: Return authorization info to frontend
+            "authorization_code": authorization_code,
+            "reusable": reusable,
+            "card_brand": card_brand,
+            "card_last4": card_last4,
         }
     )
 
@@ -4423,7 +4449,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
         )
 
         from_email = "MyFund <info@myfundmobile.com>"
-        recipient_list = ["care@myfundmobile.com", "sammy@myfundmobile.com"]
+        recipient_list = ["webhook@myfundmobile.com", "sammy@myfundmobile.com"]
 
         send_generic_email(subject, message, from_email, recipient_list)
 
@@ -5350,8 +5376,10 @@ def create_groupbuy(request):
         group_type = data["group_type"].lower()
         if group_type not in allowed_group_types:
             return JsonResponse(
-                {"error": f'Invalid groupType. Must be one of: {", ".join(allowed_group_types)}'},
-                status=400
+                {
+                    "error": f'Invalid groupType. Must be one of: {", ".join(allowed_group_types)}'
+                },
+                status=400,
             )
 
         # Step 3: Ensure the property exists
@@ -5382,14 +5410,13 @@ def create_groupbuy(request):
 
             if deadline < now:
                 return JsonResponse(
-                    {"error": "Deadline cannot be in the past."},
-                    status=400
+                    {"error": "Deadline cannot be in the past."}, status=400
                 )
 
             if deadline > max_deadline:
                 return JsonResponse(
                     {"error": "Deadline cannot be more than 3 months from today."},
-                    status=400
+                    status=400,
                 )
         else:
             deadline = max_deadline  # Default deadline to 3 months from now
@@ -5405,7 +5432,7 @@ def create_groupbuy(request):
             group_type=group_type,
             deadline=deadline,
         )
-        
+
         # Reserve a unit
         property_obj.units_available -= 1
         property_obj.save()
@@ -5429,15 +5456,21 @@ def create_groupbuy(request):
                         invalid_emails.append(email)
 
                 if cleaned_emails:
-                    invited_users = get_user_model().objects.filter(email__in=cleaned_emails)
+                    invited_users = get_user_model().objects.filter(
+                        email__in=cleaned_emails
+                    )
 
                     if invited_users.exists():
                         # Add users to group
                         group.invited_users.add(*invited_users)
 
                         # Send invitation emails
-                        subject = "You're Invited to Join a GroupBuy Investment Opportunity"
-                        join_link = f"https://myfundmobile.com/groupbuy-invite/{group.id}"
+                        subject = (
+                            "You're Invited to Join a GroupBuy Investment Opportunity"
+                        )
+                        join_link = (
+                            f"https://myfundmobile.com/groupbuy-invite/{group.id}"
+                        )
 
                         message = (
                             f"Hello,<br><br>"
@@ -5456,7 +5489,9 @@ def create_groupbuy(request):
                         recipient_list = [user.email for user in invited_users]
 
                         try:
-                            send_generic_email(subject, message, from_email, recipient_list)
+                            send_generic_email(
+                                subject, message, from_email, recipient_list
+                            )
                         except Exception as e:
                             return Response(
                                 {"error": f"Failed to send email: {str(e)}"},
@@ -5464,7 +5499,9 @@ def create_groupbuy(request):
                             )
 
                     else:
-                        warning_message = "No registered users found for the provided emails."
+                        warning_message = (
+                            "No registered users found for the provided emails."
+                        )
 
                 if invalid_emails:
                     warning_message = f"Some emails were invalid and skipped: {', '.join(invalid_emails)}"
@@ -5476,7 +5513,7 @@ def create_groupbuy(request):
         if warning_message:
             response_data["warning"] = warning_message
         return Response(response_data, status=status.HTTP_201_CREATED)
-    
+
 
 # GET /groups/:propertyId - Retrieve group buy details for a specific property
 @api_view(["GET"])
@@ -5495,15 +5532,15 @@ def get_groupbuy_by_property(request, property_id):
         return Response(
             {"message": "Group not found."}, status=status.HTTP_404_NOT_FOUND
         )
-        
+
+
 # GET /groupbuys/ - Retrieve group buy details for a specific property
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_active_public_groupbuys(request):
     try:
         groups = Group.objects.filter(
-            status__in=["Active", "active"],
-            group_type="public"
+            status__in=["Active", "active"], group_type="public"
         )
         if groups.exists():
             serializer = GroupSerializer(groups, many=True)
@@ -5515,7 +5552,7 @@ def get_active_public_groupbuys(request):
     except Exception as e:
         return Response(
             {"message": f"An error occurred: {str(e)}"},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
 
@@ -5523,16 +5560,16 @@ def get_active_public_groupbuys(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def join_groupbuy(request, group_id):
-    try:    
+    try:
         user = request.user
-        
+
         # Validate group_id is a valid UUID
         try:
             group_uuid = uuid.UUID(str(group_id))
         except ValueError:
             return Response(
                 {"message": "Invalid group ID. It must be a valid UUID."},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         # Attempt to retrieve the group
@@ -5540,29 +5577,28 @@ def join_groupbuy(request, group_id):
             group = Group.objects.get(id=group_uuid)
         except Group.DoesNotExist:
             return Response(
-                {"message": "Group not found."},
-                status=status.HTTP_404_NOT_FOUND
+                {"message": "Group not found."}, status=status.HTTP_404_NOT_FOUND
             )
 
         # ✅ Ensure group status is Active
         if group.status.lower() != "active":
             return Response(
                 {"message": "You can only join groups that are currently active."},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         # Optional: Deadline check
         if group.deadline < timezone.now():
             return Response(
                 {"message": "You cannot join this group. The deadline has passed."},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         # Check if user already joined
         if group.contributors.filter(id=user.id).exists():
             return Response(
                 {"message": "You have already joined this group."},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         # Check access for private groups
@@ -5570,18 +5606,18 @@ def join_groupbuy(request, group_id):
             if not group.invited_users.filter(id=user.id).exists():
                 return Response(
                     {"message": "You are not invited to join this private group."},
-                    status=status.HTTP_403_FORBIDDEN
+                    status=status.HTTP_403_FORBIDDEN,
                 )
 
         # Proceed to contribution logic
         return contribute_to_groupbuy(request._request, group_id)
-        
+
     except Exception as e:
         logger.error(f"Unexpected error in join_group: {e}")
 
         return Response(
             {"message": "An unexpected error occurred. Please try again later."},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
 
@@ -5631,21 +5667,28 @@ def invite_to_groupbuy(request, group_id):
 
             if not cleaned_emails:
                 return Response(
-                    {"message": "All provided emails are invalid.", "invalidEmails": invalid_emails},
+                    {
+                        "message": "All provided emails are invalid.",
+                        "invalidEmails": invalid_emails,
+                    },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
             if invalid_emails:
                 # Continue but warn about invalids
-                warning_message = f"Some emails were invalid and skipped: {', '.join(invalid_emails)}"
+                warning_message = (
+                    f"Some emails were invalid and skipped: {', '.join(invalid_emails)}"
+                )
             else:
                 warning_message = None
-            
+
             # Step 5: Fetch users with those emails
             invited_users = get_user_model().objects.filter(email__in=cleaned_emails)
             if not invited_users.exists():
                 return Response(
-                    {"message": "No registered users found for the provided email addresses."},
+                    {
+                        "message": "No registered users found for the provided email addresses."
+                    },
                     status=status.HTTP_404_NOT_FOUND,
                 )
 
@@ -5783,7 +5826,7 @@ def get_user_groupbuys(request):
         groups = Group.objects.filter(
             Q(created_by=user) | Q(contributors=user)
         ).distinct()
-        
+
         groups_list = list(groups)
 
         # Serialize the group data
@@ -5794,8 +5837,7 @@ def get_user_groupbuys(request):
 
     except get_user_model().DoesNotExist:
         return Response(
-            {"message": "User not found."},
-            status=status.HTTP_404_NOT_FOUND
+            {"message": "User not found."}, status=status.HTTP_404_NOT_FOUND
         )
 
 
@@ -5825,7 +5867,10 @@ def contribute_to_groupbuy(request, group_id):
             )
 
         # 4. Check private group invitation
-        if group.group_type == "private" and not group.invited_users.filter(id=request.user.id).exists():
+        if (
+            group.group_type == "private"
+            and not group.invited_users.filter(id=request.user.id).exists()
+        ):
             return Response(
                 {"message": "You are not an invited contributor to this group."},
                 status=status.HTTP_403_FORBIDDEN,
@@ -5837,26 +5882,38 @@ def contribute_to_groupbuy(request, group_id):
         try:
             amount = Decimal(request.data.get("amount"))
         except (TypeError, InvalidOperation):
-            return Response({"message": "Invalid or missing amount."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"message": "Invalid or missing amount."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         if amount <= 0:
-            return Response({"message": "Amount must be greater than zero."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"message": "Amount must be greater than zero."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         source = request.data.get("source")
         if not source:
-            return Response({"message": "Source is required."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"message": "Source is required."}, status=status.HTTP_400_BAD_REQUEST
+            )
 
         source = source.capitalize()
         accepted_sources = ["Savings", "Investment", "Wallet"]
         if source not in accepted_sources:
             return Response(
-                {"message": f"Invalid source. Accepted values are: {', '.join(accepted_sources)}."},
+                {
+                    "message": f"Invalid source. Accepted values are: {', '.join(accepted_sources)}."
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
         if amount < group.minimum_contribution:
             return Response(
-                {"message": f"The minimum contribution for this group is {group.minimum_contribution}."},
+                {
+                    "message": f"The minimum contribution for this group is {group.minimum_contribution}."
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -5905,17 +5962,23 @@ def contribute_to_groupbuy(request, group_id):
         # 12. Ownership calculation
         ownership_obj, _ = GroupOwnership.objects.get_or_create(group=group, user=user)
         ownership_obj.total_contributed += amount
-        ownership_obj.ownership_percentage = (ownership_obj.total_contributed / group.goal_amount) * 100
+        ownership_obj.ownership_percentage = (
+            ownership_obj.total_contributed / group.goal_amount
+        ) * 100
         ownership_obj.save()
 
         # 13. Add user to contributors
         if not group.contributors.filter(id=user.id).exists():
             group.contributors.add(user)
 
-        return Response({"message": "Contribution successful."}, status=status.HTTP_201_CREATED)
+        return Response(
+            {"message": "Contribution successful."}, status=status.HTTP_201_CREATED
+        )
 
     except Group.DoesNotExist:
-        return Response({"message": "Group not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(
+            {"message": "Group not found."}, status=status.HTTP_404_NOT_FOUND
+        )
 
 
 # GET /groups/:groupId/contributions - Fetch all contributions for a group
@@ -5926,25 +5989,28 @@ def get_groupbuy_contributions(request, group_id):
         group = Group.objects.get(id=group_id)
 
         # Get all ownership records for this group
-        ownerships = GroupOwnership.objects.filter(group=group).select_related('user')
+        ownerships = GroupOwnership.objects.filter(group=group).select_related("user")
 
         contributions_list = []
 
         for ownership in ownerships:
             user = ownership.user
-            contributions_list.append({
-                "user_id": user.id,
-                "email": user.email,
-                "total_contributed": float(ownership.total_contributed),
-                "ownership_percentage": round(float(ownership.ownership_percentage), 2),
-            })
+            contributions_list.append(
+                {
+                    "user_id": user.id,
+                    "email": user.email,
+                    "total_contributed": float(ownership.total_contributed),
+                    "ownership_percentage": round(
+                        float(ownership.ownership_percentage), 2
+                    ),
+                }
+            )
 
         return Response(contributions_list, status=status.HTTP_200_OK)
 
     except Group.DoesNotExist:
         return Response(
-            {"message": "Group not found."},
-            status=status.HTTP_404_NOT_FOUND
+            {"message": "Group not found."}, status=status.HTTP_404_NOT_FOUND
         )
 
 
@@ -6487,21 +6553,20 @@ def delete_savings_goal(request, id):
         )
 
 
-from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIView
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIView
+from rest_framework.exceptions import ValidationError
 from django.shortcuts import get_object_or_404
-from .serializers import TargetSavingsSerializer
-from .models import TargetSavings, Transaction
 from django.utils import timezone
+from django.conf import settings
+from django.db.models import Sum
 from decimal import Decimal
 import uuid
-from django.conf import settings
-from rest_framework.exceptions import ValidationError
-from django.db.models import Sum
+from .models import TargetSavings, Transaction, TargetSavingsCompletion
+from .serializers import TargetSavingsSerializer
 from .utils import send_generic_email, send_push_notification
-from .models import TargetSavingsCompletion
 
 
 class TargetSavingsListCreate(ListCreateAPIView):
@@ -6512,90 +6577,89 @@ class TargetSavingsListCreate(ListCreateAPIView):
         user = self.request.user
         data = serializer.validated_data
 
-        frequency = data.get("frequency", "").upper()
+        frequency = data["frequency"].upper()
         if frequency not in dict(TargetSavings.FREQUENCY_CHOICES):
             raise ValidationError({"detail": "Invalid frequency"})
 
-        amount = Decimal(str(data.get("monthly_payment", 0)))
-        if amount <= 0:
-            raise ValidationError({"monthly_payment": "Monthly payment must be positive"})
-
-        # ✅ Safely get funding_source
-        funding_source = data.get("funding_source")
-        if not funding_source:
-            raise ValidationError({"funding_source": "This field is required."})
-
-        if funding_source not in ("SAVINGS", "INVESTMENT"):
-            raise ValidationError({"funding_source": "Invalid funding source"})
+        amount = Decimal(str(serializer.validated_data["monthly_payment"]))
+        funding_source = data["funding_source"]
 
         if funding_source == "SAVINGS" and user.savings < amount:
             raise ValidationError({"detail": "Insufficient savings balance"})
         if funding_source == "INVESTMENT" and user.investment < amount:
             raise ValidationError({"detail": "Insufficient investment balance"})
 
+        # Deduct from source and update user balance
+        setattr(
+            user, funding_source.lower(), getattr(user, funding_source.lower()) - amount
+        )
+        user.save()
+
+        # Create the TargetSavings instance
+        instance = serializer.save(
+            user=user,
+            current_amount=amount,
+            start_date=timezone.now().date(),
+        )
+
+        # Set first next_deduction
+        instance.next_deduction = instance.calculate_next_deduction_time()
+        instance.save()
+
+        # Create initial transaction
+        Transaction.objects.create(
+            user=user,
+            transaction_type="credit",
+            status="confirmed",
+            amount=amount,
+            description=f"{instance.name}",
+            service_charge=0,
+            total_amount=amount,
+            target_savings=instance,
+            source=funding_source,
+            transaction_id=f"[{instance.id}]-{uuid.uuid4().hex[:12]}_INITIAL",
+        )
+
+        # Calculate progress
+        progress = (instance.current_amount / instance.target_amount) * 100
+        progress_str = f"{progress:.1f}%"
+
+        # Send creation email via generic template
         try:
-            with transaction.atomic():
-                locked_user = get_object_or_404(
-                    get_user_model().objects.select_for_update(), pk=user.pk
-                )
-
-                source_field = funding_source.lower()
-                current_balance = getattr(locked_user, source_field)
-
-                if current_balance < amount:
-                    raise ValidationError({"detail": f"Insufficient {source_field} balance"})
-
-                get_user_model().objects.filter(pk=locked_user.pk).update(
-                    **{source_field: F(source_field) - amount}
-                )
-
-                locked_user.refresh_from_db()
-
-                instance = serializer.save(
-                    user=locked_user,
-                    current_amount=amount,
-                    start_date=timezone.now().date(),
-                )
-                instance.next_deduction = instance.calculate_next_deduction_time()
-                instance.save()
-
-                Transaction.objects.create(
-                    user=user,
-                    transaction_type="credit",
-                    status="confirmed",
-                    amount=amount,
-                    description=f"{instance.name}",
-                    service_charge=0,
-                    total_amount=amount,
-                    target_savings=instance,
-                    source=funding_source,
-                    transaction_id=f"[{instance.id}]-{uuid.uuid4().hex[:12]}_INITIAL",
-                )
-
-                subject = f"Target Savings '{instance.name}' is Live!"
-                message = (
-                    f"Hi {user.first_name},<br><br>"
-                    f"Well done! Your new Target Savings plan '{instance.name}' has been set up "
-                    f"with a ₦{amount:,} initial deposit. Automatic {frequency.lower()} deductions "
-                    f"will begin according to your schedule.<br><br>"
-                    "Keep an eye on your progress and watch your savings grow! 🥂<br><br>"
-                    "Thanks for choosing MyFund!<br>"
-                )
-                from_email = settings.DEFAULT_FROM_EMAIL
-                recipient_list = [user.email]
-                send_generic_email(subject, message, from_email, recipient_list)
-
-                send_push_notification(
-                    user,
-                    title="🎉 New Target Savings Plan Created",
-                    message=f"Your plan '{instance.name}' has been activated with ₦{amount:,}!",
-                    data={"target_savings_id": instance.id},
-                    notif_type="TARGET_SAVINGS",
-                )
-        except ValidationError:
-            raise
+            subject = f"{instance.name} Target Savings is LIVE!🚀"
+            context = {
+                "user": user,
+                "plan_name": instance.name,
+                "amount": f"₦{amount:,.2f}",
+                "frequency": frequency.lower(),
+                "progress": progress_str,
+            }
+            send_generic_email(
+                subject,
+                context,
+                settings.DEFAULT_FROM_EMAIL,
+                [user.email],
+                template="email/email.html",
+            )
         except Exception as e:
-            logger.exception("Error creating target savings plan")
+            import logging
+
+            logger = logging.getLogger(__name__)
+            logger.error(
+                f"Failed to send target savings creation email to {user.email}: {str(e)}"
+            )
+
+        # Push notification
+        send_push_notification(
+            user,
+            title=f"🎉 {instance.name} Plan Created! ✅",
+            message=(
+                f"Your {instance.name} Target Savings plan has been activated with ₦{amount:,.2f}! "
+                f"You're now {progress_str} closer to your goal. Well done! 🚀"
+            ),
+            data={"target_savings_id": instance.id},
+            notif_type="TARGET_SAVINGS",
+        )
 
     def get_queryset(self):
         return (
@@ -6615,10 +6679,8 @@ def target_savings_total(request):
         TargetSavings.objects.filter(
             user=request.user,
             is_cancelled=False,
-            is_active=True  # Only count active targets
-        ).aggregate(
-            total=Sum("current_amount")
-        )["total"]
+            is_active=True,  # Only count active targets
+        ).aggregate(total=Sum("current_amount"))["total"]
         or 0
     )
     return Response({"total_target_savings": float(total)})
@@ -6630,26 +6692,30 @@ def completed_target_savings(request):
     """Get user's completed or failed target savings"""
     from .models import TargetSavingsCompletion
 
-    completed = TargetSavingsCompletion.objects.filter(
-        user=request.user
-    ).select_related("target_savings").order_by("-completed_date")
+    completed = (
+        TargetSavingsCompletion.objects.filter(user=request.user)
+        .select_related("target_savings")
+        .order_by("-completed_date")
+    )
 
     data = []
     for completion in completed:
-        data.append({
-            "id": completion.id,
-            "name": completion.target_savings.name,
-            "target_amount": completion.target_savings.target_amount,
-            "completed_amount": completion.completed_amount,
-            "bonus_amount": completion.bonus_amount,
-            "total_amount": completion.total_amount,
-            "completed_date": completion.completed_date,
-            "was_on_time": completion.was_on_time,
-            "category": completion.target_savings.category,
-            "start_date": completion.target_savings.start_date,
-            "end_date": completion.target_savings.end_date,
-            "status": completion.status,  # NEW FIELD in response
-        })
+        data.append(
+            {
+                "id": completion.id,
+                "name": completion.target_savings.name,
+                "target_amount": completion.target_savings.target_amount,
+                "completed_amount": completion.completed_amount,
+                "bonus_amount": completion.bonus_amount,
+                "total_amount": completion.total_amount,
+                "completed_date": completion.completed_date,
+                "was_on_time": completion.was_on_time,
+                "category": completion.target_savings.category,
+                "start_date": completion.target_savings.start_date,
+                "end_date": completion.target_savings.end_date,
+                "status": completion.status,  # NEW FIELD in response
+            }
+        )
 
     return Response({"completed_targets": data})
 
@@ -6688,8 +6754,6 @@ class TargetSavingsRetrieveUpdateDestroy(RetrieveUpdateDestroyAPIView):
         )
 
 
-# In your cancel_target_saving view, update the refund logic to respect funding_source:
-
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def cancel_target_saving(request, pk):
@@ -6702,7 +6766,7 @@ def cancel_target_saving(request, pk):
     return_amount = target.current_amount * Decimal("0.99")
     charge = target.current_amount - return_amount
 
-    # Update user balance based on funding source
+    # Update user balance
     user = request.user
     if target.funding_source == "SAVINGS":
         user.savings += return_amount
@@ -6723,7 +6787,40 @@ def cancel_target_saving(request, pk):
         transaction_id=f"[{target.id}]-{uuid.uuid4().hex[:12]}_CANCELLED",
     )
 
-    # Notifications (email + push) remain the same
+    # Send cancellation email via generic template
+    try:
+        subject = f"{target.name} Target Savings Cancelled ❌"
+        context = {
+            "user": user,
+            "plan_name": target.name,
+            "refunded_amount": f"₦{return_amount:,.2f}",
+            "cancellation_charge": f"₦{charge:,.2f}",
+        }
+        send_generic_email(
+            subject,
+            context,
+            settings.DEFAULT_FROM_EMAIL,
+            [user.email],
+            template="email/email.html",
+        )
+    except Exception as e:
+        import logging
+
+        logger = logging.getLogger(__name__)
+        logger.error(
+            f"Failed to send target savings cancellation email to {user.email}: {str(e)}"
+        )
+
+    # Push notification
+    send_push_notification(
+        user,
+        title=f"❌ {target.name} Plan Cancelled",
+        message=(
+            f"Your {target.name} Target Savings plan has been cancelled. ₦{return_amount:,.2f} was refunded after charges."
+        ),
+        data={"target_savings_id": target.id},
+        notif_type="TARGET_SAVINGS",
+    )
 
     # Update target savings
     target.is_active = False
@@ -6731,7 +6828,7 @@ def cancel_target_saving(request, pk):
     target.cancellation_charge = charge
     target.save()
 
-    # 🔴 Create CANCELLED completion record
+    # Create CANCELLED completion record
     TargetSavingsCompletion.objects.create(
         user=user,
         target_savings=target,
@@ -6743,12 +6840,16 @@ def cancel_target_saving(request, pk):
         status="CANCELLED",
     )
 
-    return Response({
-        "status": "cancelled",
-        "returned_amount": float(return_amount),
-        "charge": float(charge),
-        "new_balance": float(user.savings if target.funding_source == 'SAVINGS' else user.investment),
-    })
+    return Response(
+        {
+            "status": "cancelled",
+            "returned_amount": float(return_amount),
+            "charge": float(charge),
+            "new_balance": float(
+                user.savings if target.funding_source == "SAVINGS" else user.investment
+            ),
+        }
+    )
 
 
 from rest_framework import generics
@@ -7047,3 +7148,32 @@ class TopReferralsAPIView(APIView):
                 "current_user": current_user_stats,
             }
         )
+
+
+# views.py - Add this view
+from django.utils import timezone
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+from .utils import get_user_roi_summary  # Add this import
+
+
+@api_view(["GET"])
+def get_roi_summary(request):
+    """Get ROI summary for current month"""
+    today = timezone.now().date()
+    month_start = today.replace(day=1)
+
+    summary = get_user_roi_summary(request.user, month_start, today)
+
+    return Response(
+        {
+            "success": True,
+            "data": {
+                "period": f"{month_start.strftime('%B %Y')}",
+                "savings_roi": summary["savings_roi"],
+                "investment_roi": summary["investment_roi"],
+                "total_roi": summary["total_roi"],
+                "days_count": summary["days_count"],
+            },
+        }
+    )
