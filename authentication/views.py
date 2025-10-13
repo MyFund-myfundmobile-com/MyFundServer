@@ -4302,7 +4302,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
         )
 
         from_email = "MyFund <info@myfundmobile.com>"
-        recipient_list = ["care@myfundmobile.com", "sammy@myfundmobile.com"]
+        recipient_list = ["webhook@myfundmobile.com", "sammy@myfundmobile.com"]
 
         send_generic_email(subject, message, from_email, recipient_list)
 
@@ -7000,3 +7000,32 @@ class TopReferralsAPIView(APIView):
                 "current_user": current_user_stats,
             }
         )
+
+
+# views.py - Add this view
+from django.utils import timezone
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+from .utils import get_user_roi_summary  # Add this import
+
+
+@api_view(["GET"])
+def get_roi_summary(request):
+    """Get ROI summary for current month"""
+    today = timezone.now().date()
+    month_start = today.replace(day=1)
+
+    summary = get_user_roi_summary(request.user, month_start, today)
+
+    return Response(
+        {
+            "success": True,
+            "data": {
+                "period": f"{month_start.strftime('%B %Y')}",
+                "savings_roi": summary["savings_roi"],
+                "investment_roi": summary["investment_roi"],
+                "total_roi": summary["total_roi"],
+                "days_count": summary["days_count"],
+            },
+        }
+    )
