@@ -109,6 +109,7 @@ def send_generic_email(
 
     if from_email is None:
         from django.conf import settings
+
         from_email = settings.DEFAULT_FROM_EMAIL
 
     def send_email_task():
@@ -148,6 +149,7 @@ def get_user_balance(user, source):
     else:
         return 0
 
+
 def set_user_balance(user, source, amount):
     if source == "Savings":
         user.savings = amount
@@ -155,3 +157,77 @@ def set_user_balance(user, source, amount):
         user.investment = amount
     elif source == "Wallet":
         user.wallet = amount
+
+
+from decimal import Decimal
+
+SAVINGS_DAILY_RATE = Decimal("0.00033")  # ~1% per month
+INVESTMENT_DAILY_RATE = Decimal("0.0005")  # ~1.5% per month
+
+
+# utils.py - Replace the entire calculate_daily_roi function
+from django.utils import timezone
+from decimal import Decimal
+from .models import DailyROIAccrual, ROITransaction
+
+
+def calculate_daily_roi(user, date=None):
+    """Calculate and store daily ROI for user"""
+    if date is None:
+        date = timezone.now().date()
+
+    # Check if ROI already calculated for today
+    if DailyROIAccrual.objects.filter(user=user, date=date).exists():
+        accrual = DailyROIAccrual.objects.get(user=user, date=date)
+        return accrual.total_roi, accrual.savings_roi, accrual.investment_roi
+
+    # Calculate ROI
+    roi_data = user.calculate_daily_roi(date)
+
+    # Create daily accrual record
+    accrual = DailyROIAccrual.objects.create(
+        user=user,
+        date=date,
+        savings_balance=user.savings,
+        investment_balance=user.investment,
+        savings_roi=roi_data["savings_roi"],
+        investment_roi=roi_data["investment_roi"],
+        total_roi=roi_data["total_roi"],
+    )
+
+    # Create ROI transaction records
+    if roi_data["savings_roi"] > 0:
+        ROITransaction.objects.create(
+            user=user,
+            amount=roi_data["savings_roi"],
+            roi_type="SAVINGS",
+            accrued_date=date,
+        )
+
+    if roi_data["investment_roi"] > 0:
+        ROITransaction.objects.create(
+            user=user,
+            amount=roi_data["investment_roi"],
+            roi_type="INVESTMENT",
+            accrued_date=date,
+        )
+
+    return roi_data["total_roi"], roi_data["savings_roi"], roi_data["investment_roi"]
+
+
+def get_user_roi_summary(user, start_date, end_date):
+    """Get ROI summary for a date range"""
+    accruals = DailyROIAccrual.objects.filter(
+        user=user, date__range=[start_date, end_date]
+    )
+
+    total_savings_roi = sum(accrual.savings_roi for accrual in accruals)
+    total_investment_roi = sum(accrual.investment_roi for accrual in accruals)
+    total_roi = sum(accrual.total_roi for accrual in accruals)
+
+    return {
+        "savings_roi": total_savings_roi,
+        "investment_roi": total_investment_roi,
+        "total_roi": total_roi,
+        "days_count": accruals.count(),
+    }
