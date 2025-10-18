@@ -14,8 +14,6 @@ from .models import (
     WithdrawalsRequestToAdmin,
     TargetSavings,
     TopSaverHistory,
-    DailyROIAccrual,
-    ROITransaction,
 )
 from django.core.mail import send_mail
 from django.urls import reverse
@@ -42,7 +40,6 @@ from django.http import HttpResponse
 from django.utils.html import format_html
 from django.urls import reverse
 from .utils import send_push_notification
-from decimal import Decimal
 
 
 @admin.action(description="Say Hello")
@@ -77,44 +74,7 @@ class UserPasswordInline(admin.StackedInline):
     verbose_name_plural = "Password"
 
 
-# admin.py - Add these BEFORE CustomUserAdmin class
-
-
-class DailyROIAccrualInline(admin.TabularInline):
-    model = DailyROIAccrual
-    extra = 0
-    readonly_fields = [
-        "date",
-        "savings_balance",
-        "investment_balance",
-        "savings_roi",
-        "investment_roi",
-        "total_roi",
-    ]
-    can_delete = False
-
-    def has_add_permission(self, request, obj=None):
-        return False
-
-
-class ROITransactionInline(admin.TabularInline):
-    model = ROITransaction
-    extra = 0
-    readonly_fields = [
-        "accrued_date",
-        "amount",
-        "roi_type",
-        "is_paid_out",
-        "payout_date",
-    ]
-    can_delete = False
-
-    def has_add_permission(self, request, obj=None):
-        return False
-
-
 from .utils import send_push_notification  # assuming utils is in authentication
-from decimal import Decimal
 
 
 class CustomUserAdmin(UserAdmin):
@@ -140,14 +100,11 @@ class CustomUserAdmin(UserAdmin):
         "kyc_updated",
         "is_staff",
         "is_active",
-        "is_banned",  # 👈 show banned status
         "profile_picture",
-        "pending_roi",  # 👈 add this
     )
     list_filter = (
         "is_staff",
         "is_active",
-        "is_banned",  # 👈 show banned status
         "kyc_updated",
         "how_did_you_hear",
         "date_joined",
@@ -157,8 +114,6 @@ class CustomUserAdmin(UserAdmin):
     readonly_fields = ("get_total_referrals", "get_confirmed_referrals", "date_joined")
 
     actions = [
-        "ban_user",
-        "unban_user",
         "export_to_csv",  # Add export action
         "send_custom_email",
         "view_kyc_details",
@@ -170,10 +125,6 @@ class CustomUserAdmin(UserAdmin):
         "delete_selected",
         "deactivate_user" "notify_outdated_users",
         "say_hello",
-        "simulate_quarterly_payout",
-        "test_daily_roi_calculation",  # ← Add this
-        "test_quarterly_payout",  # ← Add this
-        "view_roi_summary",  # ← Add this
     ]
 
     fieldsets = (
@@ -207,15 +158,7 @@ class CustomUserAdmin(UserAdmin):
         ),
         (
             "Account Balances",
-            {
-                "fields": (
-                    "savings",
-                    "investment",
-                    "properties",
-                    "wallet",
-                    "pending_roi",
-                )
-            },
+            {"fields": ("savings", "investment", "properties", "wallet")},
         ),  # Add account balances fields
         ("Referral", {"fields": ("pending_referral_reward",)}),
         # Add a fieldset for KYC fields
@@ -251,12 +194,7 @@ class CustomUserAdmin(UserAdmin):
     )
     search_fields = ("email", "first_name", "last_name")
     ordering = ("email", "date_joined")
-    inlines = [
-        TransactionInline,
-        UserPasswordInline,
-        DailyROIAccrualInline,
-        ROITransactionInline,
-    ]
+    inlines = [TransactionInline, UserPasswordInline]
 
     def get_total_referrals(self, obj):
         return Transaction.objects.filter(referral_email=obj.email).count()
@@ -279,49 +217,6 @@ class CustomUserAdmin(UserAdmin):
                 filter=Q(referral_transactions__status="confirmed"),
             ),
         )
-
-    def get_daily_savings_roi_rate(self):
-        """Calculate daily savings ROI rate (13% per annum)"""
-        return Decimal("0.13") / Decimal("365")
-
-    def get_daily_investment_roi_rate(self):
-        """Calculate daily investment ROI rate (20% per annum)"""
-        return Decimal("0.20") / Decimal("365")
-
-    def calculate_daily_roi(self, date=None):
-        """Calculate ROI for a specific date based on current balances"""
-        if date is None:
-            date = timezone.now().date()
-
-        daily_savings_rate = self.get_daily_savings_roi_rate()
-        daily_investment_rate = self.get_daily_investment_roi_rate()
-
-        savings_roi = self.savings * daily_savings_rate
-        investment_roi = self.investment * daily_investment_rate
-        total_roi = savings_roi + investment_roi
-
-        return {
-            "savings_roi": round(savings_roi, 2),
-            "investment_roi": round(investment_roi, 2),
-            "total_roi": round(total_roi, 2),
-        }
-
-    @admin.action(description="🚫 Ban selected users (cannot reactivate)")
-    def ban_user(self, request, queryset):
-        queryset.update(is_banned=True, is_active=False)
-        self.message_user(request, f"{queryset.count()} user(s) banned successfully.")
-
-    @admin.action(description="✅ Unban selected users")
-    def unban_user(self, request, queryset):
-        queryset.update(is_banned=False)
-        self.message_user(request, f"{queryset.count()} user(s) unbanned successfully.")
-
-    @admin.action(description="Simulate Quarterly ROI Payout")
-    def simulate_quarterly_payout(self, request, queryset):
-        from .tasks import process_quarterly_payouts_task
-
-        result = process_quarterly_payouts_task()
-        self.message_user(request, f"Simulation completed: {result}")
 
     def export_to_csv(self, request, queryset):
         # Create the response object and set the content type
@@ -389,143 +284,6 @@ class CustomUserAdmin(UserAdmin):
         return response
 
     export_to_csv.short_description = "Export selected users to CSV"
-
-    @admin.action(description="🎯 Test Quarterly Payout")
-    def test_quarterly_payout(self, request, queryset):
-        from django.utils import timezone
-        from datetime import date
-        from django.db import transaction as db_transaction
-        from .models import ROITransaction, Transaction
-        from .utils import send_push_notification
-
-        for user in queryset:
-            try:
-                # Get wallet balance before
-                old_wallet = user.wallet
-
-                # Create some test ROI transactions if none exist
-                from .models import ROITransaction
-
-                # Check if user has any unpaid ROI transactions
-                unpaid_count = ROITransaction.objects.filter(
-                    user=user, is_paid_out=False
-                ).count()
-
-                if unpaid_count == 0:
-                    # Create test ROI transactions
-                    ROITransaction.objects.create(
-                        user=user,
-                        amount=150.75,
-                        roi_type="SAVINGS",
-                        accrued_date=date(2024, 1, 15),
-                        is_paid_out=False,
-                    )
-                    ROITransaction.objects.create(
-                        user=user,
-                        amount=89.25,
-                        roi_type="INVESTMENT",
-                        accrued_date=date(2024, 1, 20),
-                        is_paid_out=False,
-                    )
-                    self.message_user(
-                        request, f"📝 Created test ROI transactions for {user.email}"
-                    )
-
-                # Process payout SYNCHRONOUSLY
-                today = timezone.now().date()
-
-                # Get all unpaid ROI transactions for this user
-                unpaid_roi = ROITransaction.objects.filter(user=user, is_paid_out=False)
-
-                total_payout = sum(transaction.amount for transaction in unpaid_roi)
-
-                if total_payout > 0:
-                    with db_transaction.atomic():
-                        # Credit wallet
-                        user.wallet += total_payout
-                        user.save(update_fields=["wallet"])
-
-                        # Mark ROI transactions as paid
-                        unpaid_roi.update(is_paid_out=True, payout_date=today)
-
-                        # Calculate breakdown for description
-                        savings_roi_total = sum(
-                            t.amount for t in unpaid_roi if t.roi_type == "SAVINGS"
-                        )
-                        investment_roi_total = sum(
-                            t.amount for t in unpaid_roi if t.roi_type == "INVESTMENT"
-                        )
-
-                        # Create transaction record (WITHOUT metadata)
-                        Transaction.objects.create(
-                            user=user,
-                            transaction_type="CREDIT",
-                            source="QUARTERLY_ROI_PAYOUT",
-                            amount=total_payout,
-                            description=f"Quarterly ROI payout - Savings: ₦{savings_roi_total:,.2f}, Investments: ₦{investment_roi_total:,.2f}",
-                        )
-
-                        # Send notification
-                        send_push_notification(
-                            user,
-                            title="🎉 Test Quarterly ROI Payout!",
-                            message=f"₦{total_payout:,.2f} has been credited to your wallet",
-                            data={
-                                "type": "TEST_QUARTERLY_PAYOUT",
-                                "amount": float(total_payout),
-                                "period": "Test",
-                            },
-                        )
-
-                # Refresh user data
-                user.refresh_from_db()
-                new_wallet = user.wallet
-
-                self.message_user(
-                    request,
-                    f"✅ Payout test for {user.email}: Wallet ₦{old_wallet:,.2f} → ₦{new_wallet:,.2f}",
-                )
-
-            except Exception as e:
-                self.message_user(
-                    request,
-                    f"❌ Payout error for {user.email}: {str(e)}",
-                    level=messages.ERROR,
-                )
-
-    @admin.action(description="🧪 Test Daily ROI Calculation")
-    def test_daily_roi_calculation(self, request, queryset):
-        from .utils import calculate_daily_roi, send_push_notification
-
-        for user in queryset:
-            try:
-                # Calculate ROI for this user using the utils function
-                total_roi, savings_roi, investment_roi = calculate_daily_roi(user)
-
-                # Send notification
-                send_push_notification(
-                    user,
-                    title="💰 Test Daily ROI",
-                    message=f"Test: Savings: ₦{savings_roi:,.2f}, Investments: ₦{investment_roi:,.2f}",
-                    data={
-                        "type": "TEST_DAILY_ROI",
-                        "savings_roi": float(savings_roi),
-                        "investment_roi": float(investment_roi),
-                        "total_roi": float(total_roi),
-                    },
-                )
-
-                self.message_user(
-                    request,
-                    f"✅ Test ROI calculated for {user.email}: ₦{total_roi:,.2f} total",
-                )
-
-            except Exception as e:
-                self.message_user(
-                    request,
-                    f"❌ Error for {user.email}: {str(e)}",
-                    level=messages.ERROR,
-                )
 
     @admin.action(description="Notify users with outdated app versions")
     def notify_outdated_users(self, request, queryset):
@@ -1637,46 +1395,7 @@ class PushNotificationsAdmin(admin.ModelAdmin):
         return ", ".join(platforms) if platforms else "Unknown"
 
 
-# admin.py - Add these admin classes
-class DailyROIAccrualAdmin(admin.ModelAdmin):
-    list_display = [
-        "user",
-        "date",
-        "savings_balance",
-        "investment_balance",
-        "savings_roi",
-        "investment_roi",
-        "total_roi",
-    ]
-    list_filter = ["date"]
-    search_fields = ["user__email", "user__first_name", "user__last_name"]
-    readonly_fields = [
-        "user",
-        "date",
-        "savings_balance",
-        "investment_balance",
-        "savings_roi",
-        "investment_roi",
-        "total_roi",
-    ]
-
-
-class ROITransactionAdmin(admin.ModelAdmin):
-    list_display = [
-        "user",
-        "amount",
-        "roi_type",
-        "accrued_date",
-        "payout_date",
-        "is_paid_out",
-    ]
-    list_filter = ["roi_type", "is_paid_out", "accrued_date", "payout_date"]
-    search_fields = ["user__email", "user__first_name", "user__last_name"]
-    readonly_fields = ["user", "amount", "roi_type", "accrued_date"]
-
-
-admin.site.register(DailyROIAccrual, DailyROIAccrualAdmin)
-admin.site.register(ROITransaction, ROITransactionAdmin)
+# Register TopSaverHistory with customized admin
 admin.site.register(TopSaverHistory, TopSaverHistoryAdmin)
 admin.site.register(Card, CardAdmin)
 admin.site.register(Transaction, TransactionAdmin)

@@ -13,12 +13,12 @@ app = Celery("myfundproject")
 # the configuration object to child processes.
 app.config_from_object("django.conf:settings", namespace="CELERY")
 
-# --- Target Savings Tasks ---
+# CORRECTED SCHEDULE - Use the exact task names from your tasks.py
 app.conf.beat_schedule = {
     # Process target savings every 5 minutes for testing
     "process-target-savings-every-5-mins": {
-        "task": "authentication.tasks.process_target_savings_deductions",
-        "schedule": crontab(minute="*/5"),
+        "task": "authentication.tasks.process_target_savings_deductions",  # ← CORRECT NAME
+        "schedule": crontab(minute="*/5"),  # Every 5 minutes
     },
     # Check for completed targets daily at 2:00 AM
     "check-completed-targets-daily": {
@@ -30,7 +30,7 @@ app.conf.beat_schedule = {
         "task": "authentication.tasks.retry_failed_deductions",
         "schedule": crontab(minute="*/5"),
     },
-    # Refund contributions daily at midnight
+    # Existing refund task - daily at midnight
     "refund-contributions": {
         "task": "authentication.tasks.refund_contributions_if_goal_not_reached",
         "schedule": crontab(hour=0, minute=0),
@@ -38,21 +38,6 @@ app.conf.beat_schedule = {
 }
 
 app.autodiscover_tasks()
-app.conf.timezone = settings.TIME_ZONE
 
-# --- ROI & Payout Tasks ---
-# celery.py - Update the beat schedule
-app.conf.beat_schedule.update(
-    {
-        "calculate-daily-roi": {
-            "task": "authentication.tasks.calculate_daily_roi_task",
-            "schedule": crontab(hour=23, minute=59),  # End of day
-        },
-        "process-quarterly-payouts": {
-            "task": "authentication.tasks.process_quarterly_payouts_task",
-            "schedule": crontab(
-                minute=0, hour=9, day_of_month=1, month_of_year="1,4,7,10"
-            ),  # 9AM on first day of quarter
-        },
-    }
-)
+# Use the timezone from your settings
+app.conf.timezone = settings.TIME_ZONE
