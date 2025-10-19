@@ -127,6 +127,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     investment = models.DecimalField(max_digits=11, decimal_places=2, default=0)
     properties = models.PositiveIntegerField(default=0)
     wallet = models.DecimalField(max_digits=11, decimal_places=2, default=0)
+    pending_roi = models.DecimalField(max_digits=11, decimal_places=2, default=0)
     savings_and_investments = models.DecimalField(
         max_digits=11, decimal_places=2, default=0
     )
@@ -144,6 +145,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     is_first_time_signup = models.BooleanField(default=True)
 
     is_active = models.BooleanField(default=True)
+    is_banned = models.BooleanField(default=False)
     is_staff = models.BooleanField(default=False)
     is_superuser = models.BooleanField(default=False)
 
@@ -524,6 +526,39 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
 
         super().save(*args, **kwargs)
 
+    def get_daily_savings_roi_rate(self):
+        """Calculate daily savings ROI rate (13% per annum)"""
+        from decimal import Decimal
+
+        return Decimal("0.13") / Decimal("365")
+
+    def get_daily_investment_roi_rate(self):
+        """Calculate daily investment ROI rate (20% per annum)"""
+        from decimal import Decimal
+
+        return Decimal("0.20") / Decimal("365")
+
+    def calculate_daily_roi(self, date=None):
+        """Calculate ROI for a specific date based on current balances"""
+        from django.utils import timezone
+        from decimal import Decimal
+
+        if date is None:
+            date = timezone.now().date()
+
+        daily_savings_rate = self.get_daily_savings_roi_rate()
+        daily_investment_rate = self.get_daily_investment_roi_rate()
+
+        savings_roi = self.savings * daily_savings_rate
+        investment_roi = self.investment * daily_investment_rate
+        total_roi = savings_roi + investment_roi
+
+        return {
+            "savings_roi": round(savings_roi, 2),
+            "investment_roi": round(investment_roi, 2),
+            "total_roi": round(total_roi, 2),
+        }
+
     @property
     def myfund_pin_encrypted(self):
         return self.myfund_pin
@@ -795,7 +830,36 @@ class MonthlySavings(models.Model):
         unique_together = ["user", "month", "year"]
 
 
-# models.py
+# models.py - Add these models
+class ROITransaction(models.Model):
+    user = models.ForeignKey(
+        CustomUser, on_delete=models.CASCADE, related_name="roi_transactions"
+    )
+    amount = models.DecimalField(max_digits=11, decimal_places=2)
+    roi_type = models.CharField(
+        max_length=10, choices=[("SAVINGS", "Savings"), ("INVESTMENT", "Investment")]
+    )
+    accrued_date = models.DateField()
+    payout_date = models.DateField(null=True, blank=True)
+    is_paid_out = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class DailyROIAccrual(models.Model):
+    user = models.ForeignKey(
+        CustomUser, on_delete=models.CASCADE, related_name="daily_roi_accruals"
+    )
+    date = models.DateField()
+    savings_balance = models.DecimalField(max_digits=11, decimal_places=2, default=0)
+    investment_balance = models.DecimalField(max_digits=11, decimal_places=2, default=0)
+    savings_roi = models.DecimalField(max_digits=11, decimal_places=2, default=0)
+    investment_roi = models.DecimalField(max_digits=11, decimal_places=2, default=0)
+    total_roi = models.DecimalField(max_digits=11, decimal_places=2, default=0)
+
+    class Meta:
+        unique_together = ["user", "date"]
+
+
 from django.db import models
 from django.utils import timezone
 
@@ -1504,7 +1568,7 @@ class TargetSavings(models.Model):
                 )
                 return
 
-            subject = f"🎉 Congrats! {self.name} Target Plan Completed! ✅"
+            subject = f"🎉 Congrats! {self.name} Plan Completed! ✅"
             message = (
                 f"Hi {self.user.first_name},<br><br>"
                 f"Congratulations! You've successfully completed your {self.name} Target Savings plan.<br><br>"
@@ -1978,11 +2042,14 @@ class Group(models.Model):
             f"Group {self.id} for Property {self.property.name} (Status: {self.status})"
         )
 
+
 class GroupOwnership(models.Model):
     group = models.ForeignKey(Group, on_delete=models.CASCADE)
     user = models.ForeignKey(User, on_delete=models.CASCADE)
     total_contributed = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    ownership_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    ownership_percentage = models.DecimalField(
+        max_digits=5, decimal_places=2, default=0
+    )
 
 
 class Contribution(models.Model):
