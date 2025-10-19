@@ -143,3 +143,118 @@ def retry_failed_deductions():
             )
 
     return {"retry_count": retry_targets.count()}
+
+
+from .models import CustomUser, Transaction
+from .utils import calculate_daily_roi, send_push_notification
+from django.db import transaction as db_transaction
+
+
+# tasks.py - Replace the ROI tasks
+@shared_task
+def calculate_daily_roi_task():
+    """Accrue daily ROI for all active users"""
+    users = CustomUser.objects.filter(is_active=True, is_banned=False)
+    today = timezone.now().date()
+
+    for user in users:
+        try:
+            total_roi, savings_roi, investment_roi = calculate_daily_roi(user, today)
+
+            if total_roi > 0:
+                # Send daily notification
+                send_push_notification(
+                    user,
+                    title="💰 Daily ROI Accrued",
+                    message=f"Your funds have grown! Savings: ₦{savings_roi:,.2f}, Investments: ₦{investment_roi:,.2f}. Keep growing your funds!",
+                    data={
+                        "type": "DAILY_ROI",
+                        "savings_roi": float(savings_roi),
+                        "investment_roi": float(investment_roi),
+                        "total_roi": float(total_roi),
+                        "date": today.isoformat(),
+                    },
+                )
+
+        except Exception as e:
+            logger.error(f"Error calculating ROI for user {user.id}: {str(e)}")
+
+    return f"✅ Daily ROI accrued for {users.count()} users."
+
+
+@shared_task
+def process_quarterly_payouts_task():
+    """Process quarterly ROI payouts"""
+    from datetime import date  # ← ADD THIS IMPORT
+    from .models import ROITransaction  # ← ADD THIS IMPORT
+
+    today = timezone.now().date()
+
+    # Calculate quarter start and end dates
+    if today.month in [1, 2, 3]:
+        quarter_start = date(today.year, 1, 1)
+        quarter_end = date(today.year, 3, 31)
+    elif today.month in [4, 5, 6]:
+        quarter_start = date(today.year, 4, 1)
+        quarter_end = date(today.year, 6, 30)
+    elif today.month in [7, 8, 9]:
+        quarter_start = date(today.year, 7, 1)
+        quarter_end = date(today.year, 9, 30)
+    else:
+        quarter_start = date(today.year, 10, 1)
+        quarter_end = date(today.year, 12, 31)
+
+    users = CustomUser.objects.filter(is_active=True, is_banned=False)
+
+    for user in users:
+        try:
+            # Get all unpaid ROI transactions for the quarter
+            unpaid_roi = ROITransaction.objects.filter(
+                user=user,
+                accrued_date__range=[quarter_start, quarter_end],
+                is_paid_out=False,
+            )
+
+            total_payout = sum(transaction.amount for transaction in unpaid_roi)
+
+            if total_payout > 0:
+                with db_transaction.atomic():
+                    # Credit wallet
+                    user.wallet += total_payout
+                    user.save(update_fields=["wallet"])
+
+                    # Mark ROI transactions as paid
+                    unpaid_roi.update(is_paid_out=True, payout_date=today)
+
+                    # Create transaction record
+                    savings_roi_total = sum(
+                        t.amount for t in unpaid_roi if t.roi_type == "SAVINGS"
+                    )
+                    investment_roi_total = sum(
+                        t.amount for t in unpaid_roi if t.roi_type == "INVESTMENT"
+                    )
+
+                    Transaction.objects.create(
+                        user=user,
+                        transaction_type="CREDIT",
+                        source="QUARTERLY_ROI_PAYOUT",
+                        amount=total_payout,
+                        description=f"Quarterly ROI Q{(today.month-1)//3 + 1} {today.year} - Savings: ₦{savings_roi_total:,.2f}, Investments: ₦{investment_roi_total:,.2f}",
+                    )
+
+                    # Send notification
+                    send_push_notification(
+                        user,
+                        title="🎉 Quarterly ROI Payout!",
+                        message=f"Congratulations! A total payout of ₦{total_payout:,.2f} has been credited to your wallet.",
+                        data={
+                            "type": "QUARTERLY_PAYOUT",
+                            "amount": float(total_payout),
+                            "period": f"Q{(today.month-1)//3 + 1} {today.year}",
+                        },
+                    )
+
+        except Exception as e:
+            logger.error(f"Error processing payout for user {user.id}: {str(e)}")
+
+    return "✅ Quarterly ROI payouts processed"
