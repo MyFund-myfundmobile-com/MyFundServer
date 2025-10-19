@@ -253,7 +253,9 @@ urlpatterns = [
     ),
     path("groupbuy/join/<str:group_id>/", views.join_groupbuy, name="join_groupbuy"),
     path(
-        "groupbuy/invite/<str:group_id>/", views.invite_to_groupbuy, name="invite_to_groupbuy"
+        "groupbuy/invite/<str:group_id>/",
+        views.invite_to_groupbuy,
+        name="invite_to_groupbuy",
     ),
     path(
         "groupbuy/contribute/<str:group_id>/",
@@ -330,6 +332,7 @@ urlpatterns = [
         send_admin_notification,
         name="send-admin-notification",
     ),
+    path("roi-summary/", views.get_roi_summary, name="roi-summary"),
     # PushNotification URLs
     path(
         "push-notifications/", get_my_push_notifications, name="get_push_notifications"
