@@ -94,6 +94,9 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         max_digits=10, decimal_places=2, default=0
     )
     last_referral_rank = models.IntegerField(null=True, blank=True)
+    last_top_saver_rank = models.PositiveIntegerField(
+        null=True, blank=True, help_text="Previous Top Savers ranking position"
+    )
     updated_at = models.DateTimeField(auto_now=True)  # 👈 Add this here
 
     how_did_you_hear = models.CharField(

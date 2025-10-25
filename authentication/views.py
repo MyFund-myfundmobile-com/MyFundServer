@@ -53,7 +53,12 @@ from dotenv import load_dotenv
 import logging
 from django.db.models import Min
 from decimal import Decimal, ROUND_HALF_EVEN
-from .utils import generate_reference, get_user_balance, send_push_notification, set_user_balance
+from .utils import (
+    generate_reference,
+    get_user_balance,
+    send_push_notification,
+    set_user_balance,
+)
 from .utils import send_generic_email
 from django.db import transaction
 
@@ -2420,6 +2425,7 @@ def savings_to_investment(request):
         status=status.HTTP_200_OK,
     )
 
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def wallet_to_savings(request):
@@ -2645,7 +2651,7 @@ def withdraw_to_local_bank(request):
     amount = Decimal(request.data.get("amount", 0)).quantize(
         Decimal("0.00"), rounding=ROUND_HALF_EVEN
     )
-    
+
     VALID_SOURCES = ["savings", "investment", "wallet"]
 
     if source_account not in VALID_SOURCES:
@@ -2821,11 +2827,15 @@ def withdraw_to_local_bank(request):
             )
 
         except IntegrityError:
-            return Response({"error": "Transaction conflict, please retry."}, status=400)
+            return Response(
+                {"error": "Transaction conflict, please retry."}, status=400
+            )
 
         except Exception as e:
             print("Error in withdraw_to_local_bank:", e)
-            return Response({"error": "Server error, please try again later."}, status=500)
+            return Response(
+                {"error": "Server error, please try again later."}, status=500
+            )
 
 
 import string
@@ -2856,7 +2866,7 @@ def process_withdrawal_to_local_bank(request):
             {"error": '"source_account" was NOT provided.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
-        
+
     VALID_SOURCES = ["savings", "investment", "wallet"]
 
     if source_account not in VALID_SOURCES:
@@ -2944,24 +2954,33 @@ def process_withdrawal_to_local_bank(request):
     try:
         with transaction.atomic():
             User = get_user_model()
-            
+
             # Lock user row for update to prevent concurrent modifications
             user_locked = User.objects.select_for_update().get(id=user.id)
 
             # Re-check balance inside transaction after locking
             if source_account == "savings":
                 if not hasattr(user_locked, "savings") or user_locked.savings < amount:
-                    return Response({"error": "Insufficient savings balance."}, status=400)
+                    return Response(
+                        {"error": "Insufficient savings balance."}, status=400
+                    )
                 user_locked.savings -= amount
 
             elif source_account == "investment":
-                if not hasattr(user_locked, "investment") or user_locked.investment < amount:
-                    return Response({"error": "Insufficient investment balance."}, status=400)
+                if (
+                    not hasattr(user_locked, "investment")
+                    or user_locked.investment < amount
+                ):
+                    return Response(
+                        {"error": "Insufficient investment balance."}, status=400
+                    )
                 user_locked.investment -= amount
 
             elif source_account == "wallet":
                 if not hasattr(user_locked, "wallet") or user_locked.wallet < amount:
-                    return Response({"error": "Insufficient wallet balance."}, status=400)
+                    return Response(
+                        {"error": "Insufficient wallet balance."}, status=400
+                    )
                 user_locked.wallet -= amount
 
             else:
@@ -2969,7 +2988,7 @@ def process_withdrawal_to_local_bank(request):
 
             # Save updated balances
             user_locked.save()
-            
+
             print(
                 f"✅ STEP 7: Amount {amount} deducted from user's {source_account} balance."
             )
@@ -3144,6 +3163,7 @@ def create_paystack_recipient(bank_name, account_number, bank_code):
         error_message = f"An error occurred while creating Paystack recipient: {str(e)}"
         logger.error(error_message)
         return None
+
 
 def make_withdrawal_through_paystack(user, target_bank_account, amount, reference):
     """
@@ -3574,117 +3594,241 @@ def get_all_property_details(request):
         )
 
 
-from .serializers import CustomUserSerializer
-from django.db.models.functions import Coalesce  # Add this import
-from django.db.models import OuterRef, Subquery, DecimalField  # Add this line
-from django.db.models import Sum
-from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
-from django.db.models import Q  # Make sure to import Q
-from .models import TopSaverHistory
+from rest_framework.permissions import IsAuthenticated
+from django.db import transaction
+from django.db.models import Q, OuterRef, Subquery, Sum, DecimalField
+from django.db.models.functions import Coalesce
+from django.utils import timezone
+from rest_framework.response import Response
+from rest_framework import status
+from .models import CustomUser, Transaction, TopSaverHistory
+from .utils import send_push_notification, send_generic_email
+import traceback
+
+from datetime import datetime
+
+
+def get_ordinal_suffix(position):
+    """Returns the ordinal suffix for a given position number"""
+    if 10 <= position % 100 <= 20:
+        return "th"
+    else:
+        return {1: "st", 2: "nd", 3: "rd"}.get(position % 10, "th")
+
+
+def send_top_saver_notification(user, old_rank, new_rank):
+    """
+    Sends tailored push and (optionally) email notifications when a user's Top Saver position changes.
+    Rules:
+      1. Email notifications only for users in the top 10.
+      2. Personalized body (calls user by first name).
+      3. Congratulates when moving up or maintaining top position.
+      4. Encourages when dropping position.
+      5. Includes current month in the message.
+    """
+    month_name = datetime.now().strftime("%B")  # e.g. "October"
+    in_top_10_now = new_rank <= 10
+
+    # Get ordinal suffixes
+    new_rank_str = f"{new_rank}{get_ordinal_suffix(new_rank)}"
+    old_rank_str = f"{old_rank}{get_ordinal_suffix(old_rank)}" if old_rank else None
+
+    # Build dynamic messages
+    if old_rank == 0:
+        # first time getting a position
+        subject = f"Congratulations, You're Now the {new_rank_str} Top Saver! 🎉"
+        push_title = f"You're Now the {new_rank_str} Top Saver! 🎉"
+        push_message = (
+            f"🎉 Congrats {user.first_name}, You're now the {new_rank_str} Top Saver for {month_name} (was {old_rank_str})! "
+            f"Keep growing your funds to move up and earn more as a top saver this {month_name}. Well done! 🚀"
+        )
+        email_message = (
+            f"Hi {user.first_name},<br><br>"
+            f"You're now the {new_rank_str} Top Saver for {month_name} (was {old_rank_str})!<br>"
+            f"Keep growing your funds to move up and earn more as a top saver this {month_name}. Well done!<br><br>"
+            "— The MyFund Team"
+        )
+
+    elif new_rank < old_rank:
+        # Improved position - Always congratulate for moving up
+        subject = f"🎉 Congratulations, You're Now the {new_rank_str} Top Saver! 🎉"
+        push_title = f"You're Now the {new_rank_str} Top Saver! 🎉"
+        push_message = (
+            f"🎉 Congrats {user.first_name}, You're now the {new_rank_str} Top Saver for {month_name} (was {old_rank_str})! "
+            f"Keep growing your funds to move up and earn more as a top saver this {month_name}. Well done! 🚀"
+        )
+        email_message = (
+            f"Hi {user.first_name},<br><br>"
+            f"You're now the {new_rank_str} Top Saver for {month_name} (was {old_rank_str})!<br>"
+            f"Keep growing your funds to move up and earn more as a top saver this {month_name}. Well done! 💫<br><br>"
+            "— The MyFund Team"
+        )
+
+    elif new_rank > old_rank:
+        # Dropped position - No congrats, just notification
+        subject = f"You're Now the {new_rank_str} Top Saver"
+        push_title = f"You're Now the {new_rank_str} Top Saver"
+        push_message = (
+            f"Hi {user.first_name}, You're now the {new_rank_str} Top Saver for {month_name} (was {old_rank_str}). "
+            f"Keep saving to earn more as a top saver this {month_name}. Well done! 💫"
+        )
+        email_message = (
+            f"Hi {user.first_name},<br><br>"
+            f"You're now the {new_rank_str} Top Saver for {month_name} (was {old_rank_str}).<br>"
+            f"Keep saving to earn more as a top saver this {month_name}. Well done! 💫<br><br>"
+            "— The MyFund Team"
+        )
+
+    else:
+        # same rank, no change
+        return
+
+    # Send push notification to everyone whose position changed
+    send_push_notification(
+        user=user,
+        title=push_title,
+        message=push_message,
+        data={"old_position": old_rank, "new_position": new_rank, "type": "TopSaver"},
+        notif_type="SYSTEM",
+    )
+
+    # Only email if user is currently in Top 10
+    if in_top_10_now:
+        send_generic_email(
+            subject,
+            email_message,
+            "MyFund <info@myfundmobile.com>",
+            [user.email],
+        )
 
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_top_savers(request):
-    now = timezone.now()
-    current_month = now.month
-    current_year = now.year
+    try:
+        now = timezone.now()
+        current_month = now.month
+        current_year = now.year
 
-    with transaction.atomic():
-        # Delete existing top savers for the current month/year
-        TopSaverHistory.objects.filter(month=current_month, year=current_year).delete()
+        with transaction.atomic():
+            TopSaverHistory.objects.filter(
+                month=current_month, year=current_year
+            ).delete()
 
-        # 1. Update user savings totals for current month
-        CustomUser.objects.all().update(
-            total_savings_and_investments_this_month=Coalesce(
-                Subquery(
-                    Transaction.objects.filter(
-                        user=OuterRef("pk"),
-                        date__month=current_month,
-                        date__year=current_year,
-                    )
-                    .filter(
-                        Q(status="confirmed", transaction_type="credit")
-                        | Q(
-                            description__in=[
-                                "AutoSave (Confirmed)",
-                                "AutoInvest (Confirmed)",
-                            ]
+            CustomUser.objects.all().update(
+                total_savings_and_investments_this_month=Coalesce(
+                    Subquery(
+                        Transaction.objects.filter(
+                            user=OuterRef("pk"),
+                            date__month=current_month,
+                            date__year=current_year,
                         )
-                    )
-                    .values("user")
-                    .annotate(total=Sum("amount"))
-                    .values("total"),
-                    output_field=DecimalField(),
-                ),
-                0,
-            )
-        )
-
-        # 2. Get top savers
-        users = CustomUser.objects.filter(
-            total_savings_and_investments_this_month__gt=0
-        ).order_by("-total_savings_and_investments_this_month")
-
-        top_amount = (
-            users.first().total_savings_and_investments_this_month
-            if users.exists()
-            else 1
-        )
-
-        # 3. Build TopSaverHistory records
-        top_savers = []
-        top_history_entries = []
-        rank = 1
-
-        for user in users:
-            amount = user.total_savings_and_investments_this_month
-            percentage = round((amount / top_amount) * 100, 1) if top_amount > 0 else 0
-
-            top_history_entries.append(
-                TopSaverHistory(
-                    month=current_month,
-                    year=current_year,
-                    user=user,
-                    total_savings=amount,
-                    rank=rank,
+                        .filter(
+                            Q(status="confirmed", transaction_type="credit")
+                            | Q(
+                                description__in=[
+                                    "AutoSave (Confirmed)",
+                                    "AutoInvest (Confirmed)",
+                                ]
+                            )
+                        )
+                        .values("user")
+                        .annotate(total=Sum("amount"))
+                        .values("total"),
+                        output_field=DecimalField(),
+                    ),
+                    0,
                 )
             )
 
-            top_savers.append(
-                {
-                    "id": user.id,
-                    "first_name": user.first_name,
-                    "profile_picture": user.profile_picture,
-                    "email": user.email,
-                    "amount": float(amount),
-                    "percentage": percentage,
-                }
+            users = CustomUser.objects.filter(
+                total_savings_and_investments_this_month__gt=0
+            ).order_by("-total_savings_and_investments_this_month")
+
+            top_amount = (
+                users.first().total_savings_and_investments_this_month
+                if users.exists()
+                else 1
             )
 
-            rank += 1
+            top_savers, top_history_entries, rank_changes = [], [], {}
+            rank = 1
 
-        # 4. Bulk insert TopSaverHistory
-        TopSaverHistory.objects.bulk_create(top_history_entries)
+            for user in users:
+                amount = user.total_savings_and_investments_this_month or 0
+                percentage = (
+                    round((amount / top_amount) * 100, 1) if top_amount > 0 else 0
+                )
+                old_rank = getattr(user, "last_top_saver_rank", 0) or 0
 
-    # 5. Prepare response for current user
-    current_user = request.user
-    current_user_amount = current_user.total_savings_and_investments_this_month
-    current_user_percentage = (
-        round((current_user_amount / top_amount) * 100, 1) if top_amount > 0 else 0
-    )
+                if old_rank != rank:
+                    rank_changes[user] = (old_rank, rank)
+                    user.last_top_saver_rank = rank
+                    user.save(update_fields=["last_top_saver_rank"])
 
-    return Response(
-        {
-            "top_savers": top_savers,
-            "current_user": {
-                "email": current_user.email,
-                "percentage": current_user_percentage,
-                "amount": float(current_user_amount),
-            },
-        }
-    )
+                top_history_entries.append(
+                    TopSaverHistory(
+                        month=current_month,
+                        year=current_year,
+                        user=user,
+                        total_savings=amount,
+                        rank=rank,
+                    )
+                )
+
+                top_savers.append(
+                    {
+                        "id": user.id,
+                        "first_name": user.first_name or "",
+                        "email": user.email or "",
+                        "profile_picture": getattr(user.profile_picture, "url", None)
+                        or "",
+                        "amount": float(amount),
+                        "percentage": percentage,
+                    }
+                )
+
+                rank += 1
+
+            if top_history_entries:
+                TopSaverHistory.objects.bulk_create(top_history_entries)
+
+            for user_obj, (old_rank, new_rank) in rank_changes.items():
+                send_top_saver_notification(user_obj, old_rank, new_rank)
+
+        current_user = request.user
+        current_user_amount = (
+            getattr(current_user, "total_savings_and_investments_this_month", 0) or 0
+        )
+        current_user_percentage = (
+            round((current_user_amount / top_amount) * 100, 1) if top_amount > 0 else 0
+        )
+
+        return Response(
+            {
+                "top_savers": top_savers[:50],
+                "current_user": {
+                    "id": current_user.id,
+                    "first_name": current_user.first_name or "",
+                    "last_name": current_user.last_name or "",
+                    "email": current_user.email or "",
+                    "profile_picture": getattr(
+                        current_user.profile_picture, "url", None
+                    )
+                    or "",
+                    "percentage": current_user_percentage,
+                    "individual_percentage": current_user_percentage,
+                },
+            }
+        )
+
+    except Exception as e:
+        traceback.print_exc()
+        return Response(
+            {"error": str(e), "trace": traceback.format_exc()},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
 
 @api_view(["GET"])
@@ -7016,27 +7160,25 @@ class TopReferralsAPIView(APIView):
                 f"Great news! Your referral rank improved from #{old_rank} to #{new_rank}. "
                 "Keep referring friends to climb higher!<br><br>"
                 "Thank you for using MyFund.<br><br>"
-                "MyFund\nSave, Buy Properties, Earn Rent<br>"
-                "www.myfundmobile.com<br>"
-                "13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+                "MyFund"
             )
             push_title = f"🎉 Rank Improved! Now #{new_rank}"
             push_message = (
                 f"Hi {user.first_name}, you moved up to #{new_rank} (from #{old_rank}). "
-                "Keep referring to earn more rewards!"
+                "Keep referring to earn more referral rewards!"
             )
         else:
             subject = f"📉 Your MyFund Rank Changed to #{new_rank}"
             message = (
                 f"Hi {user.first_name},<br><br>"
                 f"Your referral rank changed from #{old_rank} to #{new_rank}. "
-                "Share your referral link to move back up!<br><br>"
+                "Share your referral link to move back up and earn more referral bonus!<br><br>"
                 "Thank you for using MyFund.<br><br>"
             )
-            push_title = f"📉 Rank Changed to #{new_rank}"
+            push_title = f"📉 Referral Rank Changed to #{new_rank}"
             push_message = (
                 f"Hi {user.first_name}, your rank is now #{new_rank} (was #{old_rank}). "
-                "Refer more friends to climb higher!"
+                "Refer more friends to climb higher and earn more referral bonus!"
             )
 
         # Send email
