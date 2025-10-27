@@ -67,3 +67,13 @@ app.conf.beat_schedule.update(
         },
     }
 )
+
+
+app.conf.beat_schedule.update(
+    {
+        "send-birthday-greetings-daily": {
+            "task": "authentication.tasks.send_birthday_greetings",
+            "schedule": crontab(hour=8, minute=0),  # Runs every morning at 8 AM
+        },
+    }
+)

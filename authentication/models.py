@@ -62,6 +62,7 @@ class CustomUserManager(BaseUserManager):
 import uuid
 from datetime import date
 from decimal import Decimal
+from django.core.exceptions import ValidationError
 
 
 class CustomUser(AbstractBaseUser, PermissionsMixin):
@@ -528,6 +529,31 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
             )
 
         super().save(*args, **kwargs)
+
+    def clean(self):
+        super().clean()
+        if self.date_of_birth:
+            today = date.today()
+
+            # Prevent future dates
+            if self.date_of_birth > today:
+                raise ValidationError(
+                    {"date_of_birth": "Birth date cannot be in the future."}
+                )
+
+            # Check minimum age (13+)
+            age = (
+                today.year
+                - self.date_of_birth.year
+                - (
+                    (today.month, today.day)
+                    < (self.date_of_birth.month, self.date_of_birth.day)
+                )
+            )
+            if age < 13:
+                raise ValidationError(
+                    {"date_of_birth": "Users must be at least 13 years old."}
+                )
 
     def get_daily_savings_roi_rate(self):
         """Calculate daily savings ROI rate (13% per annum)"""

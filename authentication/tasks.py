@@ -138,7 +138,7 @@ def retry_failed_deductions():
             send_push_notification(
                 user,
                 title="Retry Successful ✅",
-                message=f"₦{target.monthly_payment:,.2f} was successfully deducted for '{target.name}'.",
+                message=f"Hi {user.first_name}, ₦{target.monthly_payment:,.2f} was successfully Autosaved for your '{target.name}' plan. Keep growing your funds to achieve your goals! 🚀",
                 data={"target_id": target.id, "type": "RETRY_SUCCESS"},
             )
 
@@ -165,8 +165,8 @@ def calculate_daily_roi_task():
                 # Send daily notification
                 send_push_notification(
                     user,
-                    title="💰 Daily ROI Accrued",
-                    message=f"Your funds have grown! Savings: ₦{savings_roi:,.2f}, Investments: ₦{investment_roi:,.2f}. Keep growing your funds!",
+                    title="💹 Your Funds Have Grown!",
+                    message=f"Hi {user.first_name}, your funds have grown returns. Savings: ₦{savings_roi:,.2f}, Investment: ₦{investment_roi:,.2f}. Keep growing your funds for more returns!",
                     data={
                         "type": "DAILY_ROI",
                         "savings_roi": float(savings_roi),
@@ -180,6 +180,10 @@ def calculate_daily_roi_task():
             logger.error(f"Error calculating ROI for user {user.id}: {str(e)}")
 
     return f"✅ Daily ROI accrued for {users.count()} users."
+
+
+from decimal import Decimal
+from datetime import date
 
 
 @shared_task
@@ -234,19 +238,25 @@ def process_quarterly_payouts_task():
                         t.amount for t in unpaid_roi if t.roi_type == "INVESTMENT"
                     )
 
+                    today = date.today()
+                    quarter = (today.month - 1) // 3 + 1
+
                     Transaction.objects.create(
                         user=user,
-                        transaction_type="CREDIT",
-                        source="QUARTERLY_ROI_PAYOUT",
-                        amount=total_payout,
-                        description=f"Quarterly ROI Q{(today.month-1)//3 + 1} {today.year} - Savings: ₦{savings_roi_total:,.2f}, Investments: ₦{investment_roi_total:,.2f}",
+                        transaction_type="credit",
+                        source="INVESTMENT",
+                        status="confirmed",
+                        amount=Decimal(total_payout),
+                        service_charge=Decimal("0.00"),
+                        total_amount=Decimal(total_payout),
+                        description=f"Quarterly ROI Q{quarter} {today.year}",
                     )
 
                     # Send notification
                     send_push_notification(
                         user,
-                        title="🎉 Quarterly ROI Payout!",
-                        message=f"Congratulations! A total payout of ₦{total_payout:,.2f} has been credited to your wallet.",
+                        title="🎉 You Have Received Your Quarterly ROI!",
+                        message=f"Congratulations! A total payout of ₦{total_payout:,.2f} has been credited to your wallet. (Savings: ₦{savings_roi_total:,.2f}, Investment: ₦{investment_roi_total:,.2f}). Keep growing your funds to earn more returns!",
                         data={
                             "type": "QUARTERLY_PAYOUT",
                             "amount": float(total_payout),
@@ -378,3 +388,51 @@ def reward_top_savers_of_month():
             logger.error(f"[TOP_SAVER_TASK][ERROR] Failed for {user.email}: {e}")
 
     return f"Top Saver notifications for {prev_month_name} {year} sent successfully."
+
+
+@shared_task
+def send_birthday_greetings():
+    """Send birthday emails and push notifications to users celebrating today"""
+    from django.utils import timezone
+    from datetime import date
+    from .models import CustomUser
+    from .utils import send_generic_email, send_push_notification
+
+    today = date.today()
+    users = CustomUser.objects.filter(
+        is_active=True,
+        is_banned=False,
+        date_of_birth__month=today.month,
+        date_of_birth__day=today.day,
+    )
+
+    if not users.exists():
+        return "No birthdays today 🎈"
+
+    for user in users:
+        try:
+            # 🎉 Email
+            subject = "🎂 Happy Birthday from MyFund!"
+            message = f"""
+            Hi {user.first_name},<br><br>
+            🎉 The entire MyFund team wishes you a wonderful birthday! <br>
+            May your new year bring you growth, success, and more financial wins.<br><br>
+            🥳 Keep saving and keep shining!<br><br>
+            — The MyFund Team
+            """
+            send_generic_email(
+                subject, message, "MyFund <info@myfundmobile.com>", [user.email]
+            )
+
+            # 🎊 Push notification
+            send_push_notification(
+                user,
+                title=f"🎂 Happy Birthday, {user.first_name}!",
+                message=f"Hi {user.first_name}, the MyFund team wishes you a Happy and memorable Birthday today! 🎉",
+                data={"type": "BIRTHDAY"},
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to send birthday message to {user.email}: {str(e)}")
+
+    return f"🎂 Birthday messages sent to {users.count()} users."
