@@ -12,6 +12,60 @@ logger = logging.getLogger(__name__)
 
 
 @shared_task
+def refund_contributions_if_goal_not_reached():
+    """
+    Refund users whose target savings goals were not reached by the end date.
+    """
+    from django.utils import timezone
+    now = timezone.now()
+    overdue_targets = TargetSavings.objects.filter(
+        is_active=False,
+        is_cancelled=False,
+        current_amount__lt=models.F("target_amount"),
+        end_date__lt=now,
+    ).select_related("user")
+
+    refunded_count = 0
+
+    for target in overdue_targets:
+        try:
+            user = target.user
+            refund_amount = target.current_amount
+
+            if refund_amount > 0:
+                # Credit user wallet
+                user.wallet += refund_amount
+                user.save(update_fields=["wallet"])
+
+                # Mark target as refunded
+                target.is_cancelled = True
+                target.save(update_fields=["is_cancelled"])
+
+                # Log or create transaction record
+                Transaction.objects.create(
+                    user=user,
+                    transaction_type="CREDIT",
+                    amount=refund_amount,
+                    source="TARGET_REFUND",
+                    description=f"Refund for incomplete target '{target.name}'",
+                )
+
+                send_push_notification(
+                    user,
+                    title="Refund Processed 💸",
+                    message=f"₦{refund_amount:,.2f} refunded for incomplete target '{target.name}'.",
+                    data={"target_id": target.id, "type": "TARGET_REFUND"},
+                )
+
+                refunded_count += 1
+
+        except Exception as e:
+            logger.error(f"Error refunding target {target.id}: {e}")
+
+    logger.info(f"✅ Processed refunds for {refunded_count} targets.")
+    return f"{refunded_count} refunds processed."
+
+@shared_task
 def process_target_savings_deductions():
     """Celery task to process all due target savings deductions"""
     now = timezone.now()
