@@ -71,6 +71,8 @@ ALLOWED_HOSTS = [
     "10.10.10.27",
     "192.168.137.1",
     "10.0.0.140",
+    "10.129.202.156",
+    "192.168.1.148"
 ]
 
 SECURE_SSL_REDIRECT = False  # Disable forced HTTPS redirect
@@ -145,8 +147,8 @@ FILE_UPLOAD_MAX_MEMORY_SIZE = 10485760  # 10MB (default is 2.5MB)
 # Celery settings
 from celery.schedules import crontab
 
-CELERY_BROKER_URL = "redis://localhost:6379/0"
-CELERY_RESULT_BACKEND = "redis://localhost:6379/0"
+CELERY_BROKER_URL = os.environ.get("REDIS_URL")
+CELERY_RESULT_BACKEND = os.environ.get("REDIS_URL")
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
