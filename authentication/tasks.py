@@ -166,7 +166,7 @@ def calculate_daily_roi_task():
                 send_push_notification(
                     user,
                     title="💹 Your Funds Have Grown!",
-                    message=f"Hi {user.first_name}, your funds have grown returns. Savings: ₦{savings_roi:,.2f}, Investment: ₦{investment_roi:,.2f}. Keep growing your funds for more returns!",
+                    message=f"Hi {user.first_name}, your funds have earned returns. Savings: ₦{savings_roi:,.2f}, Investment: ₦{investment_roi:,.2f}. Keep growing your funds for more returns! Well done!",
                     data={
                         "type": "DAILY_ROI",
                         "savings_roi": float(savings_roi),
@@ -428,7 +428,7 @@ def send_birthday_greetings():
             send_push_notification(
                 user,
                 title=f"🎂 Happy Birthday, {user.first_name}!",
-                message=f"Hi {user.first_name}, the MyFund team wishes you a Happy and memorable Birthday today! 🎉",
+                message=f"Hi {user.first_name}, the MyFund team wishes you a Happy and memorable Birthday today! Long life and prosperity! 🎉",
                 data={"type": "BIRTHDAY"},
             )
 

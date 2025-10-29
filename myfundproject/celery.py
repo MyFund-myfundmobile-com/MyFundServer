@@ -45,7 +45,7 @@ app.conf.beat_schedule.update(
     {
         "calculate-daily-roi": {
             "task": "authentication.tasks.calculate_daily_roi_task",
-            "schedule": crontab(hour=23, minute=59),  # End of day
+            "schedule": crontab(hour=12, minute=0),  # End of day
         },
         "process-quarterly-payouts": {
             "task": "authentication.tasks.process_quarterly_payouts_task",
