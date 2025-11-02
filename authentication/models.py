@@ -1699,6 +1699,11 @@ class Transaction(models.Model):
         null=True,
         help_text="Where the transaction funds came from",
     )
+    scheduled_date = models.DateField(
+        null=True,
+        blank=True,
+        help_text="For scheduled withdrawals, the processing date.",
+    )
 
     transaction_type = models.CharField(max_length=20, choices=TRANSACTION_TYPES)
     status = models.CharField(
