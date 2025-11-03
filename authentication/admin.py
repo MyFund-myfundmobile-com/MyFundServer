@@ -44,6 +44,11 @@ from django.urls import reverse
 from .utils import send_push_notification
 from decimal import Decimal
 
+GOOGLE_FORM_TEMPLATE = (
+    "https://docs.google.com/forms/d/e/1FAIpQLSfHbVd5EtzSyJskgdvCRfGfYrdGaTw3RwCvnkk7pjl6LvS59A/"
+    "viewform?usp=pp_url&entry.1884265043={name}&entry.390969690={email}"
+)
+
 
 @admin.action(description="Say Hello")
 def say_hello(modeladmin, request, queryset):
@@ -174,6 +179,7 @@ class CustomUserAdmin(UserAdmin):
         "test_daily_roi_calculation",  # ← Add this
         "test_quarterly_payout",  # ← Add this
         "view_roi_summary",  # ← Add this
+        "test_top_saver_reward",
     ]
 
     fieldsets = (
@@ -526,6 +532,78 @@ class CustomUserAdmin(UserAdmin):
                     f"❌ Error for {user.email}: {str(e)}",
                     level=messages.ERROR,
                 )
+
+    @admin.action(description="🏆 Test Top Saver Notification (No Credit)")
+    def test_top_saver_reward(self, request, queryset):
+        from django.utils import timezone
+        from .utils import send_push_notification, send_generic_email
+        import datetime, logging
+
+        logger = logging.getLogger(__name__)
+
+        now = timezone.now()
+        prev_month = now.month - 1 or 12
+        year = now.year if now.month > 1 else now.year - 1
+        prev_month_name = datetime.date(year, prev_month, 1).strftime("%B")
+
+        for user in queryset:
+            try:
+                logger.info(f"[TEST_TOP_SAVER] Processing user: {user.email}")
+
+                pre_filled_link = GOOGLE_FORM_TEMPLATE.format(
+                    name=f"{user.first_name} {user.last_name}", email=user.email
+                )
+
+                has_been_top3_before = TopSaverHistory.objects.filter(
+                    user=user, rank__lte=3
+                ).exists()
+
+                send_push_notification(
+                    user,
+                    title=f"🎉 Test Top Saver Notification!",
+                    message=(
+                        f"Congrats {user.first_name}! You made the Top 3 for {prev_month_name} (test). "
+                        "Check your email for the simulated feedback form."
+                    ),
+                    data={"type": "TOP_SAVER_TEST"},
+                )
+
+                if not has_been_top3_before:
+                    email_message = f"""
+                    Hi {user.first_name or user.email},<br><br>
+                    🎉 This is a <b>test</b> Top Saver Notification for <b>{prev_month_name}</b>.<br><br>
+                    You’ve qualified for a <b>MyFund Branded T-Shirt</b> 👕 as a first-time Top Saver!<br><br>
+                    Please fill this test form so we can record your details:<br><br>
+                    <a href="{pre_filled_link}"><b>MyFund Top Saver Form (Test)</b></a><br><br>
+                    — The MyFund Team
+                    """
+                else:
+                    email_message = f"""
+                    Hi {user.first_name or user.email},<br><br>
+                    🎉 This is a <b>test</b> Top Saver Notification for <b>{prev_month_name}</b>.<br><br>
+                    You’ve made the Top 3 again — great consistency!<br>
+                    Please complete the feedback form:<br>
+                    <a href="{pre_filled_link}">MyFund Feedback Form (Test)</a><br><br>
+                    — The MyFund Team
+                    """
+
+                logger.info(f"[TEST_TOP_SAVER] Sending email to {user.email}")
+
+                send_generic_email(
+                    subject=f"[TEST] Top Saver Notification - {prev_month_name}",
+                    message=email_message,
+                    from_email="MyFund <info@myfundmobile.com>",
+                    recipient_list=[user.email],
+                )
+
+                logger.info(f"[TEST_TOP_SAVER] Email sent to {user.email}")
+                self.message_user(request, f"✅ Test notification sent to {user.email}")
+
+            except Exception as e:
+                logger.error(
+                    f"[TEST_TOP_SAVER] Error for {user.email}: {str(e)}", exc_info=True
+                )
+                self.message_user(request, f"❌ Error for {user.email}: {str(e)}")
 
     @admin.action(description="Notify users with outdated app versions")
     def notify_outdated_users(self, request, queryset):
@@ -1197,78 +1275,125 @@ from django.utils import timezone
 import calendar
 
 
-# Action to export to CSV
-def export_to_csv(modeladmin, request, queryset):
+# Action to export selected entries to CSV
+def export_selected_to_csv(modeladmin, request, queryset):
     response = HttpResponse(content_type="text/csv")
-    response["Content-Disposition"] = "attachment; filename=top_savers.csv"
+    response["Content-Disposition"] = "attachment; filename=selected_top_savers.csv"
 
     writer = csv.writer(response)
-    writer.writerow(["Month", "Year", "Rank", "User", "Total Savings"])
+    writer.writerow(["Month", "Rank", "Full Name", "Phone Number", "Email"])
 
-    for obj in queryset:
-        month_name = calendar.month_name[
-            obj.month
-        ]  # Convert month number to month name
+    for obj in queryset.select_related("user"):
+        user = obj.user
+        if not user:
+            continue
+
+        full_name = f"{getattr(user, 'first_name', '')} {getattr(user, 'last_name', '')}".strip()
         writer.writerow(
             [
-                month_name,  # Month name instead of number
-                obj.year,
+                calendar.month_name[obj.month],
                 obj.rank,
-                obj.user.first_name + " " + obj.user.last_name,
-                obj.total_savings,
+                full_name,
+                getattr(user, "phone_number", ""),
+                getattr(user, "email", ""),
             ]
         )
 
     return response
 
 
-export_to_csv.short_description = "Export to CSV"
+export_selected_to_csv.short_description = "Export selected top savers to CSV"
+
+
+# Action to export all entries to CSV
+def export_all_to_csv(modeladmin, request, queryset):
+    response = HttpResponse(content_type="text/csv")
+    response["Content-Disposition"] = 'attachment; filename="top_saver_history.csv"'
+
+    writer = csv.writer(response)
+    writer.writerow(["Month", "Rank", "Full Name", "Phone Number", "Email"])
+
+    for obj in TopSaverHistory.objects.select_related("user").all():
+        user = obj.user
+        if not user:
+            continue
+
+        full_name = f"{getattr(user, 'first_name', '')} {getattr(user, 'last_name', '')}".strip()
+        writer.writerow(
+            [
+                calendar.month_name[obj.month],
+                obj.rank,
+                full_name,
+                getattr(user, "phone_number", ""),
+                getattr(user, "email", ""),
+            ]
+        )
+
+    return response
+
+
+export_all_to_csv.short_description = "Export ALL top savers to CSV"
 
 
 # Custom Admin for TopSaverHistory
 class TopSaverHistoryAdmin(admin.ModelAdmin):
     list_display = (
-        "get_month_name",  # Use custom method for month name
-        "year",
+        "get_month_name",
         "rank",
-        "user",
+        "get_full_name",
+        "get_phone_number",
+        "get_email",
         "total_savings",
         "is_current_month",
     )
-    search_fields = ("user__first_name", "user__last_name", "month", "year")
-    list_filter = ("month", "year")
-    ordering = ("-year", "-month", "rank")
+    search_fields = (
+        "user__first_name",
+        "user__last_name",
+        "user__email",
+        "user__phone_number",
+        "month",
+    )
+    list_filter = ("month",)
+    ordering = ("-month", "rank")
     list_per_page = 20
-    actions = [export_to_csv]
+    actions = [export_selected_to_csv, export_all_to_csv]
 
-    # Method to convert month number to month name
     def get_month_name(self, obj):
-        return calendar.month_name[obj.month]  # Convert month number to name
+        return calendar.month_name[obj.month]
 
     get_month_name.short_description = "Month"
 
-    # Custom queryset to highlight the current month's top savers
+    def get_full_name(self, obj):
+        user = obj.user
+        if not user:
+            return "—"
+        return f"{user.first_name} {user.last_name}".strip()
+
+    get_full_name.short_description = "Full Name"
+
+    def get_phone_number(self, obj):
+        return getattr(obj.user, "phone_number", "—")
+
+    get_phone_number.short_description = "Phone Number"
+
+    def get_email(self, obj):
+        return obj.user.email
+
+    get_email.short_description = "Email"
+
     def get_queryset(self, request):
         queryset = super().get_queryset(request)
+        return queryset.select_related("user").order_by("-month", "rank")
 
-        # Optionally, this filters to show the current month's data as well,
-        # you can customize this to suit your needs (e.g., current month vs historical).
-        now = timezone.now()
-        current_month = now.month
-        current_year = now.year
-
-        # Optionally, filter for current month only (if you want to show only current month by default)
-        # queryset = queryset.filter(month=current_month, year=current_year)
-
-        return queryset.order_by("-year", "-month", "rank")
-
-    # Optionally, add a method to highlight the current month in the admin list view
     def is_current_month(self, obj):
         now = timezone.now()
         return obj.month == now.month and obj.year == now.year
 
     is_current_month.boolean = True
     is_current_month.short_description = "Current Month"
+
+
+admin.site.register(TopSaverHistory, TopSaverHistoryAdmin)
 
 
 from django.contrib import admin
@@ -1677,7 +1802,6 @@ class ROITransactionAdmin(admin.ModelAdmin):
 
 admin.site.register(DailyROIAccrual, DailyROIAccrualAdmin)
 admin.site.register(ROITransaction, ROITransactionAdmin)
-admin.site.register(TopSaverHistory, TopSaverHistoryAdmin)
 admin.site.register(Card, CardAdmin)
 admin.site.register(Transaction, TransactionAdmin)
 admin.site.register(AutoSave, AutoSaveAdmin)
