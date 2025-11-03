@@ -160,6 +160,11 @@ urlpatterns = [
         name="process_withdrawal_to_local_bank",
     ),
     path(
+        "cancel-scheduled-withdrawal/",
+        views.cancel_scheduled_withdrawal,
+        name="cancel_scheduled_withdrawal",
+    ),
+    path(
         "wallet-transfer/",
         views.wallet_transfer_view,  # ✅ updated view name
         name="wallet_transfer",  # same name, no issue

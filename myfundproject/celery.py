@@ -41,18 +41,39 @@ app.autodiscover_tasks()
 app.conf.timezone = settings.TIME_ZONE
 
 # --- ROI & Payout Tasks ---
-# celery.py - Update the beat schedule
 app.conf.beat_schedule.update(
     {
         "calculate-daily-roi": {
             "task": "authentication.tasks.calculate_daily_roi_task",
-            "schedule": crontab(hour=23, minute=59),  # End of day
+            "schedule": crontab(hour=12, minute=0),  # End of day
         },
         "process-quarterly-payouts": {
             "task": "authentication.tasks.process_quarterly_payouts_task",
             "schedule": crontab(
                 minute=0, hour=9, day_of_month=1, month_of_year="1,4,7,10"
             ),  # 9AM on first day of quarter
+        },
+    }
+)
+
+
+# --- End-of-month Top Saver rewards ---
+app.conf.beat_schedule.update(
+    {
+        "reward-top-savers-monthly": {
+            "task": "authentication.tasks.reward_top_savers_of_month",
+            "schedule": crontab(hour=0, minute=10, day_of_month="28-31"),
+            # runs on last few days to cover months with 28,30,31 days
+        },
+    }
+)
+
+
+app.conf.beat_schedule.update(
+    {
+        "send-birthday-greetings-daily": {
+            "task": "authentication.tasks.send_birthday_greetings",
+            "schedule": crontab(hour=8, minute=0),  # Runs every morning at 8 AM
         },
     }
 )

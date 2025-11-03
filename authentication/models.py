@@ -62,6 +62,7 @@ class CustomUserManager(BaseUserManager):
 import uuid
 from datetime import date
 from decimal import Decimal
+from django.core.exceptions import ValidationError
 
 
 class CustomUser(AbstractBaseUser, PermissionsMixin):
@@ -94,6 +95,9 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         max_digits=10, decimal_places=2, default=0
     )
     last_referral_rank = models.IntegerField(null=True, blank=True)
+    last_top_saver_rank = models.PositiveIntegerField(
+        null=True, blank=True, help_text="Previous Top Savers ranking position"
+    )
     updated_at = models.DateTimeField(auto_now=True)  # 👈 Add this here
 
     how_did_you_hear = models.CharField(
@@ -525,6 +529,31 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
             )
 
         super().save(*args, **kwargs)
+
+    def clean(self):
+        super().clean()
+        if self.date_of_birth:
+            today = date.today()
+
+            # Prevent future dates
+            if self.date_of_birth > today:
+                raise ValidationError(
+                    {"date_of_birth": "Birth date cannot be in the future."}
+                )
+
+            # Check minimum age (13+)
+            age = (
+                today.year
+                - self.date_of_birth.year
+                - (
+                    (today.month, today.day)
+                    < (self.date_of_birth.month, self.date_of_birth.day)
+                )
+            )
+            if age < 13:
+                raise ValidationError(
+                    {"date_of_birth": "Users must be at least 13 years old."}
+                )
 
     def get_daily_savings_roi_rate(self):
         """Calculate daily savings ROI rate (13% per annum)"""
@@ -1669,6 +1698,11 @@ class Transaction(models.Model):
         blank=True,
         null=True,
         help_text="Where the transaction funds came from",
+    )
+    scheduled_date = models.DateField(
+        null=True,
+        blank=True,
+        help_text="For scheduled withdrawals, the processing date.",
     )
 
     transaction_type = models.CharField(max_length=20, choices=TRANSACTION_TYPES)

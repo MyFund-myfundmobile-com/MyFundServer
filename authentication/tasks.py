@@ -192,7 +192,7 @@ def retry_failed_deductions():
             send_push_notification(
                 user,
                 title="Retry Successful ✅",
-                message=f"₦{target.monthly_payment:,.2f} was successfully deducted for '{target.name}'.",
+                message=f"Hi {user.first_name}, ₦{target.monthly_payment:,.2f} was successfully Autosaved for your '{target.name}' plan. Keep growing your funds to achieve your goals! 🚀",
                 data={"target_id": target.id, "type": "RETRY_SUCCESS"},
             )
 
@@ -219,8 +219,8 @@ def calculate_daily_roi_task():
                 # Send daily notification
                 send_push_notification(
                     user,
-                    title="💰 Daily ROI Accrued",
-                    message=f"Your funds have grown! Savings: ₦{savings_roi:,.2f}, Investments: ₦{investment_roi:,.2f}. Keep growing your funds!",
+                    title="💹 Your Funds Have Grown!",
+                    message=f"Hi {user.first_name}, your funds have earned returns. Savings: ₦{savings_roi:,.2f}, Investment: ₦{investment_roi:,.2f}. Keep growing your funds for more returns! Well done!",
                     data={
                         "type": "DAILY_ROI",
                         "savings_roi": float(savings_roi),
@@ -234,6 +234,10 @@ def calculate_daily_roi_task():
             logger.error(f"Error calculating ROI for user {user.id}: {str(e)}")
 
     return f"✅ Daily ROI accrued for {users.count()} users."
+
+
+from decimal import Decimal
+from datetime import date
 
 
 @shared_task
@@ -288,19 +292,25 @@ def process_quarterly_payouts_task():
                         t.amount for t in unpaid_roi if t.roi_type == "INVESTMENT"
                     )
 
+                    today = date.today()
+                    quarter = (today.month - 1) // 3 + 1
+
                     Transaction.objects.create(
                         user=user,
-                        transaction_type="CREDIT",
-                        source="QUARTERLY_ROI_PAYOUT",
-                        amount=total_payout,
-                        description=f"Quarterly ROI Q{(today.month-1)//3 + 1} {today.year} - Savings: ₦{savings_roi_total:,.2f}, Investments: ₦{investment_roi_total:,.2f}",
+                        transaction_type="credit",
+                        source="INVESTMENT",
+                        status="confirmed",
+                        amount=Decimal(total_payout),
+                        service_charge=Decimal("0.00"),
+                        total_amount=Decimal(total_payout),
+                        description=f"Quarterly ROI Q{quarter} {today.year}",
                     )
 
                     # Send notification
                     send_push_notification(
                         user,
-                        title="🎉 Quarterly ROI Payout!",
-                        message=f"Congratulations! A total payout of ₦{total_payout:,.2f} has been credited to your wallet.",
+                        title="🎉 You Have Received Your Quarterly ROI!",
+                        message=f"Congratulations! A total payout of ₦{total_payout:,.2f} has been credited to your wallet. (Savings: ₦{savings_roi_total:,.2f}, Investment: ₦{investment_roi_total:,.2f}). Keep growing your funds to earn more returns!",
                         data={
                             "type": "QUARTERLY_PAYOUT",
                             "amount": float(total_payout),
@@ -312,3 +322,171 @@ def process_quarterly_payouts_task():
             logger.error(f"Error processing payout for user {user.id}: {str(e)}")
 
     return "✅ Quarterly ROI payouts processed"
+
+
+# ✅ tasks.py
+from celery import shared_task
+from django.utils import timezone
+from .models import CustomUser, TopSaverHistory
+from .utils import send_push_notification, send_generic_email
+import datetime
+import logging
+
+logger = logging.getLogger(__name__)
+
+GOOGLE_FORM_TEMPLATE = (
+    "https://docs.google.com/forms/d/e/1FAIpQLSfHbVd5EtzSyJskgdvCRfGfYrdGaTw3RwCvnkk7pjl6LvS59A/"
+    "viewform?usp=pp_url&entry.1884265043={name}&entry.390969690={email}"
+)
+
+
+@shared_task
+def reward_top_savers_of_month():
+    now = timezone.now()
+    prev_month = 12 if now.month == 1 else now.month - 1
+    year = now.year - 1 if now.month == 1 else now.year
+    prev_month_name = datetime.date(year, prev_month, 1).strftime("%B")
+
+    top_savers = TopSaverHistory.objects.filter(month=prev_month, year=year).order_by(
+        "rank"
+    )[:10]
+
+    if not top_savers.exists():
+        msg = f"[TOP_SAVER_TASK] No top savers found for {prev_month_name} {year}"
+        logger.info(msg)
+        return msg
+
+    for entry in top_savers:
+        user = entry.user
+        rank = entry.rank
+        pre_filled_link = GOOGLE_FORM_TEMPLATE.format(
+            name=f"{user.first_name} {user.last_name}", email=user.email
+        )
+
+        try:
+            if rank <= 3:
+                has_been_top3_before = (
+                    TopSaverHistory.objects.filter(user=user, rank__lte=3)
+                    .exclude(id=entry.id)
+                    .exists()
+                )
+
+                send_push_notification(
+                    user,
+                    title=f"🎉 You're the #{rank} Top Saver for {prev_month_name}!",
+                    message=(
+                        f"🎉 Congrats {user.first_name}! You're one of the Top Savers for the month of {prev_month_name} and we'd like to hear from you. "
+                        "Kindly check your email for details. Well done!"
+                    ),
+                    data={"type": "TOP_SAVER_CONGRATS", "rank": rank},
+                )
+
+                if not has_been_top3_before:
+                    email_message = f"""
+                    Hi {user.first_name},<br><br>
+                    🎉 Congratulations! You are the <b>#{rank}</b> Top Savers for <b>{prev_month_name}</b>!<br><br>
+                    You’ve officially qualified for a <b>MyFund Branded T-Shirt</b> 👕 as a first-time Top Saver!<br><br>
+                    Please fill out this form so we can send your T-Shirt and get your quick feedback:<br>
+                    <a href="{pre_filled_link}">MyFund Top Saver Form</a><br><br>
+                    — The MyFund Team
+                    """
+                else:
+                    email_message = f"""
+                    Hi {user.first_name},<br><br>
+                    🎉 Congratulations! You are the <b>#{rank}</b> Top Savers for <b>{prev_month_name}</b>!<br><br>
+                    Thank you for your consistency — we’d love your quick feedback to help us improve. Kindly fill this form:<br>
+                    <a href="{pre_filled_link}"><b>MyFund Top Saver Feedback Form</b></a><br><br>
+                    — The MyFund Team
+                    """
+
+                send_generic_email(
+                    subject=f"🏆 Congrats! You are the #{rank} Top Saver for {prev_month_name}!",
+                    message=email_message,
+                    from_email="MyFund <info@myfundmobile.com>",
+                    recipient_list=[user.email],
+                )
+                logger.info(
+                    f"[TOP_SAVER_TASK] Email sent to {user.email} for rank {rank}"
+                )
+
+            else:
+                send_push_notification(
+                    user,
+                    title=f"You're the #{rank} Top Saver for {prev_month_name}! 🚀",
+                    message=(
+                        f"Congrats {user.first_name}! You're the #{rank} Top Saver for {prev_month_name}! Keep growing your funds to earn more rewards as one of the top savers for this month. "
+                        f"Well done!"
+                    ),
+                    data={"type": "TOP_SAVER_ENCOURAGE", "rank": rank},
+                )
+
+                email_message = f"""
+                Hi {user.first_name},<br><br>
+                You are the <b>#{rank}</b> Top Saver for <b>{prev_month_name}</b>!<br>
+                Keep growing your funds to earn more rewards as one of the top savers for this month.<br><br>
+                Well done! <br><br>
+                — The MyFund Team
+                """
+
+                send_generic_email(
+                    subject=f"You're the #{rank} Top Saver for {prev_month_name}! 🚀",
+                    message=email_message,
+                    from_email="MyFund <info@myfundmobile.com>",
+                    recipient_list=[user.email],
+                )
+                logger.info(
+                    f"[TOP_SAVER_TASK] Encouragement email sent to {user.email} (rank {rank})"
+                )
+
+        except Exception as e:
+            logger.error(f"[TOP_SAVER_TASK][ERROR] Failed for {user.email}: {e}")
+
+    return f"Top Saver notifications for {prev_month_name} {year} sent successfully."
+
+
+@shared_task
+def send_birthday_greetings():
+    """Send birthday emails and push notifications to users celebrating today"""
+    from django.utils import timezone
+    from datetime import date
+    from .models import CustomUser
+    from .utils import send_generic_email, send_push_notification
+
+    today = date.today()
+    users = CustomUser.objects.filter(
+        is_active=True,
+        is_banned=False,
+        date_of_birth__month=today.month,
+        date_of_birth__day=today.day,
+    )
+
+    if not users.exists():
+        return "No birthdays today 🎈"
+
+    for user in users:
+        try:
+            # 🎉 Email
+            subject = "🎂 Happy Birthday from MyFund!"
+            message = f"""
+            Hi {user.first_name},<br><br>
+            🎉 The entire MyFund team wishes you a wonderful birthday! <br>
+            May your new year bring you growth, success, and more financial wins.<br><br>
+            🥳 Keep saving and keep shining!<br><br>
+            — The MyFund Team
+            """
+            send_generic_email(
+                subject, message, "MyFund <info@myfundmobile.com>", [user.email]
+            )
+
+            # 🎊 Push notification
+            send_push_notification(
+                user,
+                title=f"🎂 Happy Birthday, {user.first_name}!",
+                message=f"Hi {user.first_name}, the MyFund team wishes you a Happy and memorable Birthday today! Long life and prosperity! 🎉",
+                data={"type": "BIRTHDAY"},
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to send birthday message to {user.email}: {str(e)}")
+
+    return f"🎂 Birthday messages sent to {users.count()} users."
