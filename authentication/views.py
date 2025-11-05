@@ -3055,22 +3055,40 @@ def process_withdrawal_to_local_bank(request):
             send_generic_email(subject, user_message, from_email, recipient_list)
 
             # ✅ STEP 10.1: Send push notification to user
+            if withdrawal_type == "scheduled" and processing_date:
+                push_message = (
+                    f"Your scheduled withdrawal of ₦{int(amount):,} from your {source_account.capitalize()} account "
+                    f"will be processed on {processing_date.strftime('%A, %B %d, %Y')}. You'll be notified once it's completed."
+                )
+                push_title = "Withdrawal Scheduled 📅"
+            else:
+                push_message = (
+                    f"Your withdrawal of ₦{int(amount):,} from your {source_account.capitalize()} account "
+                    "is pending approval. We'll notify you once it’s processed."
+                )
+                push_title = "Withdrawal Request Pending ⏳"
+
             send_push_notification(
                 user=user_locked,
-                title="Withdrawal Request Pending ⏳",
-                message="Your withdrawal of ₦{:,.2f} from your {} account is pending approval. We'll notify you once it’s processed.".format(
-                    int(amount), source_account.capitalize()
-                ),
+                title=push_title,
+                message=push_message,
                 data={
                     "amount": str(amount),
                     "transaction_id": transaction_id,
                     "source_account": source_account,
                     "type": "Withdrawal",
-                    "status": "pending",
+                    "status": (
+                        "pending" if withdrawal_type == "immediate" else "scheduled"
+                    ),
+                    "processing_date": (
+                        processing_date.strftime("%Y-%m-%d")
+                        if processing_date
+                        else None
+                    ),
                 },
-                notif_type="PENDING",
+                notif_type="SCHEDULED" if withdrawal_type == "scheduled" else "PENDING",
             )
-            print("✅ STEP 10.2: Push notification sent to user.")
+            print("✅ STEP 10.2: Dynamic push notification sent to user.")
 
             # --- Send email to admin (with more details and correct recipients) ---
             admin_subject = (
