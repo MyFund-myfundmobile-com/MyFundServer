@@ -310,11 +310,11 @@ urlpatterns = [
     ),
     # MonthlyFinancial APIs
     path(
-        "current-month/",
+        "financials/current-month/",
         CurrentMonthFinancialView.as_view(),
         name="current-month-financial",
     ),
-    path("history/", FinancialHistoryView.as_view(), name="financial-history"),
+    path("financials/history/", FinancialHistoryView.as_view(), name="financial-history"),
     path("admin-totals/", AllUsersMonthlyTotalsView.as_view(), name="all-users-totals"),
     # Notification URLs
     path(
