@@ -3902,7 +3902,7 @@ def send_top_saver_notification(user, old_rank, new_rank):
       5. Includes current month in the message.
     """
     month_name = datetime.now().strftime("%B")  # e.g. "October"
-    in_top_10_now = new_rank <= 10
+    in_top_3_now = new_rank <= 3
 
     # Get ordinal suffixes
     new_rank_str = f"{new_rank}{get_ordinal_suffix(new_rank)}"
@@ -3968,7 +3968,7 @@ def send_top_saver_notification(user, old_rank, new_rank):
     )
 
     # Only email if user is currently in Top 10
-    if in_top_10_now:
+    if in_top_3_now:
         send_generic_email(
             subject,
             email_message,
