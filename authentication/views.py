@@ -61,6 +61,8 @@ from .utils import (
 )
 from .utils import send_generic_email
 from django.db import transaction
+from .utils import send_sms_via_payless, validate_phone_number, send_bulk_sms
+from rest_framework.exceptions import AuthenticationFailed
 
 
 load_dotenv()
@@ -86,7 +88,7 @@ def signup(request):
                 total_amount=500,
             )
 
-            user.pending_referral_reward = 500  # Ensure only 500 is added
+            user.pending_referral_reward = 500
             user.save(update_fields=["pending_referral_reward"])
 
             # Reward for referrer
@@ -116,47 +118,82 @@ def signup(request):
             logger.info("Referral rewards processed for user %s", user.email)
         except Exception as e:
             logger.error(
-                "Error processing referral rewards for user %s: %s", user.email, str(e)
+                f"Error processing referral rewards for user {user.email}: {str(e)}"
             )
             raise
 
-    def process_otp(user, resend=False):
-        otp = generate_otp()
-        user.otp = otp
-        user.is_active = False if not resend else user.is_active
-        user.save()
-        send_otp_email(user, otp)
-        logger.info("OTP %s to user %s", "resent" if resend else "sent", user.email)
+    # ✅ Validate phone number before saving user
+    phone_number = request.data.get("phone_number")
+    if not phone_number:
+        return Response(
+            {"error": "Phone number is required"}, status=status.HTTP_400_BAD_REQUEST
+        )
+
+    phone_check = validate_phone_number(phone_number)
+    if not phone_check.get("valid"):
+        logger.warning(f"Invalid phone number: {phone_number}")
+        return Response(
+            {"error": phone_check.get("error")}, status=status.HTTP_400_BAD_REQUEST
+        )
+
+    validated_phone = phone_check.get("formatted")
 
     try:
         serializer = SignupSerializer(data=request.data, context={"request": request})
         if serializer.is_valid():
+            # ✅ Save user first
             user = serializer.save()
+            user.phone_number = validated_phone
             user.how_did_you_hear = serializer.validated_data.get(
                 "how_did_you_hear", "OTHER"
             )
-            user.save()
-            logger.info("New user signup data: %s", user.email)
+            user.save(update_fields=["phone_number", "how_did_you_hear"])
 
+            # ✅ Now generate OTP after saving phone number
             is_resend = request.data.get("resend", False)
-            process_otp(user, resend=is_resend)
+            otp = generate_otp()
+            user.otp = otp
+            user.is_active = False if not is_resend else user.is_active
+            user.last_otp_sent_at = timezone.now()
+            user.save(
+                update_fields=["otp", "is_active", "last_otp_sent_at", "updated_at"]
+            )
 
-            if is_resend:
-                return Response(
-                    {"message": "OTP resent successfully"}, status=status.HTTP_200_OK
-                )
+            # Always send email OTP
+            try:
+                send_otp_email(user, otp)
+            except Exception as e:
+                logger.warning(f"⚠️ OTP email failed to send, continuing flow: {e}")
 
+            # Only send SMS OTP on first signup (not resend)
+            # Only send SMS OTP on first signup (not resend)
+            if not is_resend:
+                validated_phone = getattr(user, "phone_number", None)
+                if validated_phone:
+                    sms_sent = send_otp_sms(user, otp)  # <-- pass the user object
+                    if sms_sent:
+                        logger.info(f"📱 SMS OTP sent to {validated_phone}")
+                    else:
+                        logger.warning(
+                            f"⚠️ SMS OTP failed to send for {validated_phone}"
+                        )
+                else:
+                    logger.warning("⚠️ No valid phone number found for SMS OTP")
+
+            # Handle referral rewards
             if user.referral:
                 handle_referral_rewards(user)
 
             response_data = serializer.data
-            if user.referral:
-                response_data["referral_email"] = user.referral.email
-
+            response_data["referral_email"] = (
+                user.referral.email if user.referral else None
+            )
             return Response(response_data, status=status.HTTP_201_CREATED)
+
         else:
             logger.warning("Invalid signup data: %s", serializer.errors)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
     except Exception as e:
         logger.critical("Unexpected error in signup: %s", str(e))
         return Response(
@@ -172,7 +209,10 @@ def send_referrer_pending_reward_email(referrer, referred_email):
     from_email = "MyFund <info@myfundmobile.com>"
     recipient_list = [referrer.email]
 
-    send_generic_email(subject, message, from_email, recipient_list)
+    try:
+        send_generic_email(subject, message, from_email, recipient_list)
+    except Exception as e:
+        logger.warning(f"⚠️ Referral email to referrer failed for {referrer.email}: {e}")
 
 
 def send_referred_pending_reward_email(user):
@@ -183,10 +223,14 @@ def send_referred_pending_reward_email(user):
     recipient_list = [user.email]
     bcc_list = ["newusers@myfundmobile.com"]
 
-    # Combine recipient list and BCC list
     all_recipients = recipient_list + bcc_list
 
-    send_generic_email(subject, message, from_email, all_recipients)
+    try:
+        send_generic_email(subject, message, from_email, all_recipients)
+    except Exception as e:
+        logger.warning(
+            f"⚠️ Referral email to referred user failed for {user.email}: {e}"
+        )
 
 
 @api_view(["POST"])
@@ -297,6 +341,33 @@ def send_otp_email(user, otp):
         except Exception:
             user.save()
         raise
+
+
+def send_otp_sms(user, otp):
+    from authentication.utils import send_sms_via_payless
+
+    phone_number = getattr(user, "phone_number", None)  # should already be +234...
+    first_name = getattr(user, "first_name", "") or "there"
+
+    if not phone_number or len(phone_number) < 10:
+        logger.warning(f"Invalid phone number: {phone_number}")
+        return False
+
+    message = (
+        f"Hi {first_name}, please use {otp} to complete your signup on MyFund. "
+        f"It expires in 20 minutes. Please keep it safe."
+    )
+
+    try:
+        success = send_sms_via_payless(phone_number, message)
+        if success:
+            logger.info(f"📱 SMS OTP sent to {phone_number}")
+        else:
+            logger.warning(f"⚠️ SMS OTP failed to send for {phone_number}")
+        return success
+    except Exception as e:
+        logger.exception(f"❌ SMS sending failed for {phone_number}: {e}")
+        return False
 
 
 def send_otp_for_user(user):
@@ -553,14 +624,25 @@ def delete_my_account(request):
         )
 
 
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework.authtoken.views import ObtainAuthToken
+from rest_framework_simplejwt.tokens import RefreshToken
+from .utils import authenticate_user_by_email_or_phone  # <- import
+from authentication.models import CustomUser
+import logging
+
+logger = logging.getLogger(__name__)
+
+
 class CustomObtainAuthToken(ObtainAuthToken):
     def post(self, request, *args, **kwargs):
         try:
-            serializer = self.serializer_class(data=request.data)
-            serializer.is_valid(raise_exception=True)
+            username = request.data.get("username", "").strip()
+            password = request.data.get("password", "")
 
-            user = serializer.validated_data["user"]
-            logger.info(f"User authenticated successfully: {user.email}")
+            # DRY authentication
+            user = authenticate_user_by_email_or_phone(username, password)
 
             # 🚫 Block banned users first
             if getattr(user, "is_banned", False):
@@ -577,6 +659,8 @@ class CustomObtainAuthToken(ObtainAuthToken):
 
             # If user is inactive: send OTP
             if not user.is_active:
+                from authentication.views import send_otp_for_user
+
                 try:
                     send_otp_for_user(user)
                 except Exception as e:
@@ -602,6 +686,10 @@ class CustomObtainAuthToken(ObtainAuthToken):
             tokens = self.get_tokens_for_user(user)
             return Response(tokens)
 
+        except AuthenticationFailed as auth_exc:
+            return Response(
+                {"error": str(auth_exc)}, status=status.HTTP_401_UNAUTHORIZED
+            )
         except Exception as e:
             logger.error(f"Login error for {request.data.get('username')}: {str(e)}")
             return Response(
@@ -3055,22 +3143,40 @@ def process_withdrawal_to_local_bank(request):
             send_generic_email(subject, user_message, from_email, recipient_list)
 
             # ✅ STEP 10.1: Send push notification to user
+            if withdrawal_type == "scheduled" and processing_date:
+                push_message = (
+                    f"Your scheduled withdrawal of ₦{int(amount):,} from your {source_account.capitalize()} account "
+                    f"will be processed on {processing_date.strftime('%A, %B %d, %Y')}. You'll be notified once it's completed."
+                )
+                push_title = "Withdrawal Scheduled 📅"
+            else:
+                push_message = (
+                    f"Your withdrawal of ₦{int(amount):,} from your {source_account.capitalize()} account "
+                    "is pending approval. We'll notify you once it’s processed."
+                )
+                push_title = "Withdrawal Request Pending ⏳"
+
             send_push_notification(
                 user=user_locked,
-                title="Withdrawal Request Pending ⏳",
-                message="Your withdrawal of ₦{:,.2f} from your {} account is pending approval. We'll notify you once it’s processed.".format(
-                    int(amount), source_account.capitalize()
-                ),
+                title=push_title,
+                message=push_message,
                 data={
                     "amount": str(amount),
                     "transaction_id": transaction_id,
                     "source_account": source_account,
                     "type": "Withdrawal",
-                    "status": "pending",
+                    "status": (
+                        "pending" if withdrawal_type == "immediate" else "scheduled"
+                    ),
+                    "processing_date": (
+                        processing_date.strftime("%Y-%m-%d")
+                        if processing_date
+                        else None
+                    ),
                 },
-                notif_type="PENDING",
+                notif_type="SCHEDULED" if withdrawal_type == "scheduled" else "PENDING",
             )
-            print("✅ STEP 10.2: Push notification sent to user.")
+            print("✅ STEP 10.2: Dynamic push notification sent to user.")
 
             # --- Send email to admin (with more details and correct recipients) ---
             admin_subject = (

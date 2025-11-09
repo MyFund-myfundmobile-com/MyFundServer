@@ -161,11 +161,11 @@ def set_user_balance(user, source, amount):
     elif source == "Wallet":
         user.wallet = amount
 
+
 def generate_reference(length=20):
     """Generate a unique reference string with allowed characters."""
-    allowed_chars = string.ascii_lowercase + string.digits + '-_'
-    return ''.join(random.choice(allowed_chars) for _ in range(length))
-
+    allowed_chars = string.ascii_lowercase + string.digits + "-_"
+    return "".join(random.choice(allowed_chars) for _ in range(length))
 
 
 from decimal import Decimal
@@ -240,3 +240,170 @@ def get_user_roi_summary(user, start_date, end_date):
         "total_roi": total_roi,
         "days_count": accruals.count(),
     }
+
+
+import requests
+import logging
+import phonenumbers
+from django.conf import settings
+from phonenumbers.phonenumberutil import number_type, PhoneNumberType
+import urllib.parse
+
+logger = logging.getLogger(__name__)
+
+
+def send_sms_via_payless(phone_number, message):
+    """
+    Send SMS via Payless SPC API.
+    Returns True if SMS delivered successfully, False otherwise.
+    """
+    base_url = settings.PAYLESS_SMS_URL
+    username = settings.PAYLESS_SMS_USERNAME
+    password = settings.PAYLESS_SMS_PASSWORD
+    sender = settings.PAYLESS_SMS_SENDER_ID
+
+    encoded_message = urllib.parse.quote(message)
+    recipients = phone_number.replace(" ", "")
+
+    full_url = (
+        f"{base_url}?option=com_spc&comm=spc_api"
+        f"&username={username}"
+        f"&password={password}"
+        f"&sender={sender}"
+        f"&recipient={recipients}"
+        f"&message={encoded_message}"
+    )
+
+    logger.info(f"🔗 Sending SMS via: {full_url}")
+
+    try:
+        response = requests.get(full_url, timeout=20)
+        text = response.text.strip()
+        logger.info(f"✅ Payless Response: {text}")
+
+        return text.upper().startswith("OK")
+    except Exception as e:
+        logger.error(f"❌ Error sending SMS: {e}")
+        return False
+
+
+def validate_phone_number(phone_number, region="NG"):
+    """
+    Validate and normalize phone number using Google's libphonenumber.
+    Always returns E.164 format (+234...) if valid.
+    """
+    try:
+        # Clean up common formatting issues
+        phone_number = phone_number.strip().replace(" ", "").replace("-", "")
+
+        # If user entered 080..., add +234 manually for Nigerian defaults
+        if phone_number.startswith("0") and region.upper() == "NG":
+            phone_number = "+234" + phone_number[1:]
+
+        # Parse the number
+        parsed = phonenumbers.parse(phone_number, region)
+        if not phonenumbers.is_valid_number(parsed):
+            return {"valid": False, "error": "Invalid phone number format."}
+
+        formatted = phonenumbers.format_number(
+            parsed, phonenumbers.PhoneNumberFormat.E164
+        )
+
+        line_type = number_type(parsed)
+        is_mobile = line_type in [
+            PhoneNumberType.MOBILE,
+            PhoneNumberType.FIXED_LINE_OR_MOBILE,
+        ]
+
+        if not is_mobile:
+            return {"valid": False, "error": "Only mobile numbers are allowed."}
+
+        return {"valid": True, "formatted": formatted, "error": None}
+
+    except phonenumbers.NumberParseException:
+        return {"valid": False, "error": "Could not parse phone number."}
+
+
+import urllib.parse
+import os
+import requests
+import urllib.parse
+from django.conf import settings
+
+
+def send_bulk_sms(numbers, message):
+    """
+    Send bulk SMS using Payless Bulk SMS (SPC API format)
+    """
+    base_url = settings.PAYLESS_SMS_URL
+    username = settings.PAYLESS_SMS_USERNAME
+    password = settings.PAYLESS_SMS_PASSWORD
+    sender = settings.PAYLESS_SMS_SENDER_ID
+
+    encoded_message = urllib.parse.quote(message)
+    recipients = numbers.replace(" ", "")  # clean up any spaces
+
+    full_url = (
+        f"{base_url}?option=com_spc&comm=spc_api"
+        f"&username={username}"
+        f"&password={password}"
+        f"&sender={sender}"
+        f"&recipient={recipients}"
+        f"&message={encoded_message}"
+    )
+
+    print("🔗 Sending SMS via:", full_url)
+
+    try:
+        response = requests.get(full_url, timeout=20)
+        text = response.text.strip()
+        print("✅ Payless Response:", text)
+
+        if text.upper().startswith("OK"):
+            return {"success": True, "response": text}
+        else:
+            return {"success": False, "response": text}
+
+    except Exception as e:
+        print("❌ Error sending SMS:", e)
+        return {"success": False, "error": str(e)}
+
+
+import logging
+from django.db.models import Q
+from rest_framework.exceptions import AuthenticationFailed
+from authentication.models import CustomUser
+
+logger = logging.getLogger(__name__)
+
+
+def authenticate_user_by_email_or_phone(username: str, password: str) -> CustomUser:
+    """
+    Authenticate a user by email OR phone number.
+
+    Raises AuthenticationFailed if credentials are invalid or user not found.
+    """
+    username = (username or "").strip()
+    password = password or ""
+
+    # Normalize Nigerian phone numbers
+    if username.isdigit() and username.startswith("0") and len(username) == 11:
+        username = "+234" + username[1:]
+    elif username.startswith("+234") and len(username) == 14:
+        username = username  # already normalized
+    # else, treat it as email or other number formats
+
+    try:
+        user = CustomUser.objects.get(
+            Q(email__iexact=username) | Q(phone_number__iexact=username)
+        )
+    except CustomUser.DoesNotExist:
+        logger.warning(f"Authentication failed: user not found for '{username}'")
+        raise AuthenticationFailed("User not found")
+
+    if not user.check_password(password):
+        logger.warning(f"Authentication failed: invalid password for '{username}'")
+        raise AuthenticationFailed("Invalid credentials")
+
+    logger.info(f"User authenticated successfully: {user.email}")
+    return user

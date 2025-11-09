@@ -14,6 +14,7 @@ from pathlib import Path
 from datetime import timedelta
 import os
 from dotenv import load_dotenv
+from decouple import config
 
 load_dotenv()
 
@@ -349,20 +350,32 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 AUTH_USER_MODEL = "authentication.CustomUser"
 
 
-# EMAIL SETTINGS
+# PAYLESS SMS CONFIG
+PAYLESS_SMS_URL = config("PAYLESS_SMS_URL")
+PAYLESS_SMS_USERNAME = config("PAYLESS_SMS_USERNAME")
+PAYLESS_SMS_PASSWORD = config("PAYLESS_SMS_PASSWORD")
+PAYLESS_SMS_SENDER_ID = config("PAYLESS_SMS_SENDER_ID")
+
+
+# settings.py (dev)
+# EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
+# DEFAULT_FROM_EMAIL = "MyFund <info@myfundmobile.com>"
+
+# ===== EMAIL CONFIGURATION =====
+# ===== EMAIL CONFIGURATION =====
+# ===== EMAIL CONFIGURATION =====
+# ===== EMAIL CONFIGURATION =====
 EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+DEFAULT_FROM_EMAIL = "MyFund <message@myfundmobile.com>"
+
 EMAIL_HOST = "myfundmobile.com"
-EMAIL_PORT = 465
-EMAIL_USE_SSL = True  # Use SSL for secure connection
+EMAIL_PORT = 465  # SSL port
+EMAIL_USE_TLS = False  # TLS off for SSL
+EMAIL_USE_SSL = True  # SSL on
 
-
-# SMTP Authentication
 EMAIL_HOST_USER = "message@myfundmobile.com"
 EMAIL_HOST_PASSWORD = "AdminSecure123..."
 
-# Other settings
-DEFAULT_FROM_EMAIL = "MyFund <message@myfundmobile.com>"
-PROTOCOL = "https"
 
 AUTHENTICATION_BACKENDS = [
     "authentication.auth_backends.CustomUserAdminAuthBackend",  # Custom admin authentication
