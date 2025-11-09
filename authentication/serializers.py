@@ -7,6 +7,8 @@ from .models import CustomUser, Message, UserPassword
 from django.db import transaction
 from django.contrib.auth.hashers import make_password
 import logging
+from django.db.models import Q
+
 
 logger = logging.getLogger(__name__)
 
@@ -61,22 +63,27 @@ class SignupSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"password": "Password is required."})
 
         with transaction.atomic():
-            # Create the user without password field
+            # Create the user normally
             user = CustomUser.objects.create(**validated_data)
 
-            # Save password in related UserPassword model
-            user_password, created = UserPassword.objects.get_or_create(
-                user=user, defaults={"password": make_password(password)}
-            )
+            # Save password in CustomUser so authenticate() works
+            user.set_password(password)  # <-- this hashes and stores it
             user.save()
 
+            # Also store in UserPassword if you still want legacy record
+            UserPassword.objects.get_or_create(
+                user=user, defaults={"password": make_password(password)}
+            )
+
         if referral_code:
-            try:
-                referrer = CustomUser.objects.get(email=referral_code)
+            referrer = CustomUser.objects.filter(
+                Q(email__iexact=referral_code) | Q(phone_number__iexact=referral_code)
+            ).first()
+            if referrer:
                 user.referral = referrer
                 user.save()
                 logger.info("Referral applied successfully")
-            except CustomUser.DoesNotExist:
+            else:
                 logger.warning(f"Invalid referral code: {referral_code}")
 
         return user
@@ -165,16 +172,17 @@ class UserSerializer(serializers.ModelSerializer):
         password = validated_data.pop("password")
 
         # Create the user instance first
+        password = validated_data.pop("password")
         user = CustomUser.objects.create(**validated_data)
 
-        # Create the password record manually if it doesn't exist
-        if not hasattr(user, "password_record"):
-            password_record = UserPassword.objects.create(user=user, password=password)
-            user.password_record = password_record
-            user.save()
-        else:
-            user.password_record.set_password(password)
-            user.password_record.save()
+        # Set password on CustomUser for login
+        user.set_password(password)
+        user.save()
+
+        # Optionally keep UserPassword record if still needed
+        UserPassword.objects.get_or_create(
+            user=user, defaults={"password": make_password(password)}
+        )
 
         return user
 
@@ -326,7 +334,7 @@ class TargetSavingsSerializer(serializers.ModelSerializer):
         choices=[("SAVINGS", "SAVINGS"), ("INVESTMENT", "INVESTMENT")],
         required=True,
     )
-    
+
     frequency = serializers.ChoiceField(
         choices=[("DAILY", "Daily"), ("WEEKLY", "Weekly"), ("MONTHLY", "Monthly")],
         required=True,
