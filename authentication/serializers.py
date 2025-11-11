@@ -758,3 +758,12 @@ class PushNotificationsSerializer(serializers.ModelSerializer):
     class Meta:
         model = PushNotifications
         fields = "__all__"
+
+
+from .models import DailyROIAccrual
+
+
+class DailyROISerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DailyROIAccrual
+        fields = ["date", "savings_roi", "investment_roi", "total_roi"]

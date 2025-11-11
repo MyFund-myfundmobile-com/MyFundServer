@@ -7593,3 +7593,71 @@ def get_roi_summary(request):
             },
         }
     )
+
+
+# views.py
+from datetime import date
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from django.utils import timezone
+from django.db.models import Sum
+from .models import DailyROIAccrual
+from .serializers import DailyROISerializer
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def earnings_summary(request):
+    """Return user's total earnings, current quarter ROI, and next payout date"""
+    user = request.user
+    today = timezone.now().date()
+
+    # Determine current quarter
+    if today.month in [1, 2, 3]:
+        quarter_start = date(today.year, 1, 1)
+        quarter_end = date(today.year, 3, 31)
+        next_payout = date(today.year, 4, 1)
+    elif today.month in [4, 5, 6]:
+        quarter_start = date(today.year, 4, 1)
+        quarter_end = date(today.year, 6, 30)
+        next_payout = date(today.year, 7, 1)
+    elif today.month in [7, 8, 9]:
+        quarter_start = date(today.year, 7, 1)
+        quarter_end = date(today.year, 9, 30)
+        next_payout = date(today.year, 10, 1)
+    else:
+        quarter_start = date(today.year, 10, 1)
+        quarter_end = date(today.year, 12, 31)
+        next_payout = date(today.year + 1, 1, 1)
+
+    # Total all-time ROI
+    total_earnings = (
+        DailyROIAccrual.objects.filter(user=user)
+        .aggregate(total=Sum("total_roi"))
+        .get("total")
+        or 0
+    )
+
+    # ROI for current quarter
+    quarterly_earnings = (
+        DailyROIAccrual.objects.filter(
+            user=user, date__range=[quarter_start, quarter_end]
+        )
+        .aggregate(total=Sum("total_roi"))
+        .get("total")
+        or 0
+    )
+
+    # Recent 30 daily ROI records
+    recent_roi = DailyROIAccrual.objects.filter(user=user).order_by("-date")[:30]
+    roi_data = DailyROISerializer(recent_roi, many=True).data
+
+    data = {
+        "total_earnings": float(total_earnings),
+        "quarterly_earnings": float(quarterly_earnings),
+        "next_payout_date": next_payout.isoformat(),
+        "daily_records": roi_data,
+    }
+
+    return Response(data)
