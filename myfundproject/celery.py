@@ -15,27 +15,29 @@ app.config_from_object("django.conf:settings", namespace="CELERY")
 
 # --- Target Savings Tasks ---
 app.conf.beat_schedule = {
-    # Process target savings every 5 minutes for testing
-    "process-target-savings-every-5-mins": {
+    # Process target savings once daily (morning)
+    # even though most are weekly/monthly, this ensures daily due ones are covered
+    "process-target-savings-daily": {
         "task": "authentication.tasks.process_target_savings_deductions",
-        "schedule": crontab(minute="*/5"),
+        "schedule": crontab(hour=6, minute=0),  # once per day
     },
-    # Check for completed targets daily at 2:00 AM
+    # Retry failed deductions once per day (evening)
+    "retry-failed-deductions-daily": {
+        "task": "authentication.tasks.retry_failed_deductions",
+        "schedule": crontab(hour=18, minute=0),  # 6PM daily retry
+    },
+    # Check for completed targets once per day
     "check-completed-targets-daily": {
         "task": "authentication.tasks.check_completed_targets",
         "schedule": crontab(hour=2, minute=0),
     },
-    # Retry failed deductions every 5 minutes
-    "retry-failed-deductions-every-5-mins": {
-        "task": "authentication.tasks.retry_failed_deductions",
-        "schedule": crontab(minute="*/5"),
-    },
-    # Refund contributions daily at midnight
+    # Refund contributions once per day (midnight)
     "refund-contributions": {
         "task": "authentication.tasks.refund_contributions_if_goal_not_reached",
         "schedule": crontab(hour=0, minute=0),
     },
 }
+
 
 app.autodiscover_tasks()
 app.conf.timezone = settings.TIME_ZONE
