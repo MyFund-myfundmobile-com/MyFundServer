@@ -17,6 +17,7 @@ def refund_contributions_if_goal_not_reached():
     Refund users whose target savings goals were not reached by the end date.
     """
     from django.utils import timezone
+
     now = timezone.now()
     overdue_targets = TargetSavings.objects.filter(
         is_active=False,
@@ -64,6 +65,7 @@ def refund_contributions_if_goal_not_reached():
 
     logger.info(f"✅ Processed refunds for {refunded_count} targets.")
     return f"{refunded_count} refunds processed."
+
 
 @shared_task
 def process_target_savings_deductions():
@@ -207,33 +209,40 @@ from django.db import transaction as db_transaction
 # tasks.py - Replace the ROI tasks
 @shared_task
 def calculate_daily_roi_task():
-    """Accrue daily ROI for all active users"""
-    users = CustomUser.objects.filter(is_active=True, is_banned=False)
     today = timezone.now().date()
 
-    for user in users:
+    # Prevent duplicates for the day
+    from .models import ROITransaction  # ← ADD THIS IMPORT
+
+    if ROITransaction.objects.filter(accrued_date=today).exists():
+        return "✅ ROI already calculated for today."
+
+    users = CustomUser.objects.filter(is_active=True, is_banned=False)
+    processed_count = 0
+
+    for user in users.iterator():
         try:
             total_roi, savings_roi, investment_roi = calculate_daily_roi(user, today)
-
             if total_roi > 0:
-                # Send daily notification
                 send_push_notification(
                     user,
                     title="💹 Your Funds Have Grown!",
-                    message=f"Hi {user.first_name}, your funds have earned returns. Savings: ₦{savings_roi:,.2f}, Investment: ₦{investment_roi:,.2f}. Keep growing your funds for more returns! Well done!",
+                    message=(
+                        f"Hi {user.first_name}, your funds have earned returns. "
+                        f"Savings: ₦{savings_roi:,.2f}, Investment: ₦{investment_roi:,.2f}. "
+                        "Keep growing your funds for more returns!"
+                    ),
                     data={
                         "type": "DAILY_ROI",
-                        "savings_roi": float(savings_roi),
-                        "investment_roi": float(investment_roi),
                         "total_roi": float(total_roi),
                         "date": today.isoformat(),
                     },
                 )
-
+                processed_count += 1
         except Exception as e:
-            logger.error(f"Error calculating ROI for user {user.id}: {str(e)}")
+            logger.error(f"ROI error for user {user.id}: {e}")
 
-    return f"✅ Daily ROI accrued for {users.count()} users."
+    return f"✅ Daily ROI accrued for {processed_count} users."
 
 
 from decimal import Decimal
