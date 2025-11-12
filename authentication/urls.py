@@ -36,6 +36,7 @@ from .views import (
     get_my_push_notifications,
     send_admin_push_notification,
     save_expo_push_token,
+    earnings_summary,
 )
 from django.views.decorators.csrf import csrf_exempt
 from authentication.views import CustomGraphQLView
@@ -314,7 +315,9 @@ urlpatterns = [
         CurrentMonthFinancialView.as_view(),
         name="current-month-financial",
     ),
-    path("financials/history/", FinancialHistoryView.as_view(), name="financial-history"),
+    path(
+        "financials/history/", FinancialHistoryView.as_view(), name="financial-history"
+    ),
     path("admin-totals/", AllUsersMonthlyTotalsView.as_view(), name="all-users-totals"),
     # Notification URLs
     path(
@@ -337,7 +340,9 @@ urlpatterns = [
         send_admin_notification,
         name="send-admin-notification",
     ),
+    # ROI & Earnings URLs
     path("roi-summary/", views.get_roi_summary, name="roi-summary"),
+    path("earnings/", earnings_summary, name="earnings-summary"),
     # PushNotification URLs
     path(
         "push-notifications/", get_my_push_notifications, name="get_push_notifications"
