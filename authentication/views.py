@@ -638,7 +638,7 @@ logger = logging.getLogger(__name__)
 class CustomObtainAuthToken(ObtainAuthToken):
     def post(self, request, *args, **kwargs):
         try:
-            username = request.data.get("username", "").strip()
+            username = request.data.get("username", "").strip().lower()
             password = request.data.get("password", "")
 
             # DRY authentication
@@ -778,7 +778,7 @@ def request_password_reset(request):
     """
     Handles password reset requests by sending an OTP to the user's email.
     """
-    email = request.data.get("email")
+    email = request.data.get("email").strip().lower()
 
     if not email:
         logger.warning("Password reset request received without an email.")
@@ -830,7 +830,7 @@ def reset_password(request):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-    email = request.data.get("email")
+    email = request.data.get("email").strip().lower()
     otp = request.data.get("otp")
     password = request.data.get("password")
     confirm_password = request.data.get("confirm_password")
