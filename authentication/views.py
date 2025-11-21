@@ -3975,134 +3975,62 @@ def send_top_saver_notification(user, old_rank, new_rank):
             "MyFund <info@myfundmobile.com>",
             [user.email],
         )
-
+        
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from django.utils import timezone
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_top_savers(request):
-    try:
-        now = timezone.now()
-        current_month = now.month
-        current_year = now.year
+    now = timezone.now()
+    current_month = now.month
+    current_year = now.year
 
-        with transaction.atomic():
-            TopSaverHistory.objects.filter(
-                month=current_month, year=current_year
-            ).delete()
+    # Fetch precomputed top savers
+    top_savers = (
+        TopSaverHistory.objects
+        .filter(month=current_month, year=current_year)
+        .select_related("user")
+        .order_by("rank")[:50]
+    )
 
-            CustomUser.objects.all().update(
-                total_savings_and_investments_this_month=Coalesce(
-                    Subquery(
-                        Transaction.objects.filter(
-                            user=OuterRef("pk"),
-                            date__month=current_month,
-                            date__year=current_year,
-                        )
-                        .filter(
-                            Q(status="confirmed", transaction_type="credit")
-                            | Q(
-                                description__in=[
-                                    "AutoSave (Confirmed)",
-                                    "AutoInvest (Confirmed)",
-                                ]
-                            )
-                        )
-                        .values("user")
-                        .annotate(total=Sum("amount"))
-                        .values("total"),
-                        output_field=DecimalField(),
-                    ),
-                    0,
-                )
-            )
+    if not top_savers:
+        return Response({"top_savers": [], "current_user": {}})
 
-            users = CustomUser.objects.filter(
-                total_savings_and_investments_this_month__gt=0
-            ).order_by("-total_savings_and_investments_this_month")
+    top_amount = top_savers[0].total_savings or 1
+    current_user_history = next(
+        (tsh for tsh in top_savers if tsh.user_id == request.user.id),
+        None
+    )
 
-            top_amount = (
-                users.first().total_savings_and_investments_this_month
-                if users.exists()
-                else 1
-            )
+    current_percentage = round(
+        (current_user_history.total_savings / top_amount) * 100, 1
+    ) if current_user_history else 0
 
-            top_savers, top_history_entries, rank_changes = [], [], {}
-            rank = 1
-
-            for user in users:
-                amount = user.total_savings_and_investments_this_month or 0
-                percentage = (
-                    round((amount / top_amount) * 100, 1) if top_amount > 0 else 0
-                )
-                old_rank = getattr(user, "last_top_saver_rank", 0) or 0
-
-                if old_rank != rank:
-                    rank_changes[user] = (old_rank, rank)
-                    user.last_top_saver_rank = rank
-                    user.save(update_fields=["last_top_saver_rank"])
-
-                top_history_entries.append(
-                    TopSaverHistory(
-                        month=current_month,
-                        year=current_year,
-                        user=user,
-                        total_savings=amount,
-                        rank=rank,
-                    )
-                )
-
-                top_savers.append(
-                    {
-                        "id": user.id,
-                        "first_name": user.first_name or "",
-                        "email": user.email or "",
-                        "profile_picture": getattr(user.profile_picture, "url", None)
-                        or "",
-                        "amount": float(amount),
-                        "percentage": percentage,
-                    }
-                )
-
-                rank += 1
-
-            if top_history_entries:
-                TopSaverHistory.objects.bulk_create(top_history_entries)
-
-            for user_obj, (old_rank, new_rank) in rank_changes.items():
-                send_top_saver_notification(user_obj, old_rank, new_rank)
-
-        current_user = request.user
-        current_user_amount = (
-            getattr(current_user, "total_savings_and_investments_this_month", 0) or 0
-        )
-        current_user_percentage = (
-            round((current_user_amount / top_amount) * 100, 1) if top_amount > 0 else 0
-        )
-
-        return Response(
+    return Response({
+        "top_savers": [
             {
-                "top_savers": top_savers[:50],
-                "current_user": {
-                    "id": current_user.id,
-                    "first_name": current_user.first_name or "",
-                    "last_name": current_user.last_name or "",
-                    "email": current_user.email or "",
-                    "profile_picture": getattr(
-                        current_user.profile_picture, "url", None
-                    )
-                    or "",
-                    "percentage": current_user_percentage,
-                    "individual_percentage": current_user_percentage,
-                },
+                "id": tsh.user.id,
+                "first_name": tsh.user.first_name or "",
+                "email": tsh.user.email or "",
+                "profile_picture": tsh.user.profile_picture or "",
+                "amount": float(tsh.total_savings),
+                "percentage": (round((tsh.total_savings / top_amount) * 100, 1) if top_amount > 0 else 0),
+                "rank": tsh.rank,
             }
-        )
-
-    except Exception as e:
-        traceback.print_exc()
-        return Response(
-            {"error": str(e), "trace": traceback.format_exc()},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
+            for tsh in top_savers
+        ],
+        "current_user": {
+            "id": request.user.id,
+            "first_name": request.user.first_name,
+            "last_name": request.user.last_name,
+            "email": request.user.email,
+            "profile_picture": getattr(request.user.profile_picture, "url", ""),
+            "percentage": current_percentage,
+        }
+    })
 
 
 @api_view(["GET"])
