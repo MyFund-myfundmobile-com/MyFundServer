@@ -518,38 +518,17 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         return self.email
 
     def save(self, *args, **kwargs):
-        # Update combined savings value
+        # Update the savings_and_investments field
         self.savings_and_investments = Decimal(str(self.savings)) + Decimal(
             str(self.investment)
         )
 
-        # Fix profile picture URL
         if self.profile_picture:
             self.profile_picture = self.profile_picture.replace(
                 "https://myfund.onrender.com", "", 1
             )
 
-        # First save the user (important so pk exists)
         super().save(*args, **kwargs)
-
-        # Handle password record updates AFTER user is saved
-        if hasattr(self, "_raw_password"):
-            hashed_pw = make_password(self._raw_password)
-
-            if self.password_record:
-                # Update existing password record
-                self.password_record.password = hashed_pw
-                self.password_record.save()
-            else:
-                # Create new password record
-                pw = UserPassword.objects.create(
-                    user=self,
-                    password=hashed_pw
-                )
-                self.password_record = pw
-                super().save(update_fields=["password_record"])
-
-            del self._raw_password  # Cleanup
 
     def clean(self):
         super().clean()
@@ -850,12 +829,14 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
             print(f"Error calculating savings for {self.first_name}: {e}")
 
     def set_password(self, raw_password):
-        """
-        Do NOT write to the DB here.
-        Django calls this before the user is saved during admin creation.
-        """
-        super().set_password(raw_password)   # Let Django hash its internal password field
-        self._raw_password = raw_password     # Store temporarily for post-save handling
+        with transaction.atomic():
+            if self.password_record:
+                self.password_record.password = make_password(raw_password)
+                self.password_record.save()
+            else:
+                self.password_record, created = UserPassword.objects.get_or_create(
+                    user=self, defaults={"password": make_password(raw_password)}
+                )
 
     def check_password(self, raw_password):
         """Check the provided password with stored password."""
