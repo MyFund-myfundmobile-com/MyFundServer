@@ -830,6 +830,10 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
 
     def set_password(self, raw_password):
         with transaction.atomic():
+            # Save the user first if it's new (no primary key yet)
+            if not self.pk:
+                super().save()
+            
             if self.password_record:
                 self.password_record.password = make_password(raw_password)
                 self.password_record.save()
@@ -837,6 +841,10 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                 self.password_record, created = UserPassword.objects.get_or_create(
                     user=self, defaults={"password": make_password(raw_password)}
                 )
+                # If it already existed, update the password
+                if not created:
+                    self.password_record.password = make_password(raw_password)
+                    self.password_record.save()
 
     def check_password(self, raw_password):
         """Check the provided password with stored password."""
