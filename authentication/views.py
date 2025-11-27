@@ -4296,9 +4296,9 @@ def initiate_bank_transfer(request):
             amount = Decimal(str(amount_raw))
             
             # Validate amount is positive
-            if amount <= 0:
+            if amount <= 100:
                 return Response(
-                    {"error": "Amount must be greater than zero"}, 
+                    {"error": "Amount must be greater than #100"}, 
                     status=status.HTTP_400_BAD_REQUEST
                 )
         except (InvalidOperation, ValueError, TypeError):
@@ -4410,9 +4410,9 @@ def initiate_invest_transfer(request):
             amount = Decimal(str(amount_raw))
             
             # Validate amount is positive
-            if amount <= 0:
+            if amount <= 100000:
                 return Response(
-                    {"error": "Amount must be greater than zero"}, 
+                    {"error": "Amount must be greater than #100000"}, 
                     status=status.HTTP_400_BAD_REQUEST
                 )
         except (InvalidOperation, ValueError, TypeError):
