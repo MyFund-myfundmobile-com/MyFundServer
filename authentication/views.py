@@ -4278,16 +4278,43 @@ def create_notification(user, notification_type, title, message, data=None):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def initiate_bank_transfer(request):
+    transaction_id = None  # ✅ Initialize to avoid UnboundLocalError
+    
     try:
         user = request.user
-        amount = request.data.get("amount")
+        amount_raw = request.data.get("amount")
+
+        # ✅ Validate and convert amount to Decimal
+        if not amount_raw:
+            return Response(
+                {"error": "Amount is required"}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            # ✅ Convert to Decimal properly
+            amount = Decimal(str(amount_raw))
+            
+            # Validate amount is positive
+            if amount <= 0:
+                return Response(
+                    {"error": "Amount must be greater than zero"}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        except (InvalidOperation, ValueError, TypeError):
+            return Response(
+                {"error": "Invalid amount format. Please enter a valid number."}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         # ✅ Generate a unique transaction ID
         transaction_id = str(uuid.uuid4())[:10]
 
         # ✅ Create a BankTransferRequest record with transaction_id
         bank_transfer_request = BankTransferRequest(
-            user=user, amount=amount, transaction_id=transaction_id
+            user=user, 
+            amount=amount, 
+            transaction_id=transaction_id
         )
         bank_transfer_request.save()
 
@@ -4298,21 +4325,21 @@ def initiate_bank_transfer(request):
         transaction = Transaction.objects.create(
             user=user,
             referral_email=referral_email,
-            transaction_type="credit",  # Mark as credit since it's a deposit
+            transaction_type="credit",
             status="pending",
             amount=amount,
             date=current_datetime.date(),
             time=current_datetime.time(),
             description="QuickSave . . .",
-            transaction_id=transaction_id,  # ✅ Ensure both records share the same transaction_id
+            transaction_id=transaction_id,
         )
-        transaction.save()
+        # ✅ No need to call save() after objects.create()
 
         send_push_notification(
             user=user,
             title="QuickSave Pending ⏳",
-            message="Your transfer of ₦{:,.2f} is pending approval. We'll notify you once it’s confirmed. Thank you for using MyFund.".format(
-                int(amount)
+            message="Your transfer of ₦{:,.2f} is pending approval. We'll notify you once it's confirmed. Thank you for using MyFund.".format(
+                float(amount)  # ✅ Convert Decimal to float for formatting
             ),
             data={
                 "amount": str(amount),
@@ -4338,68 +4365,70 @@ def initiate_bank_transfer(request):
         user_subject = "QuickSave Pending..."
         user_message = f"Hi {user.first_name},<br><br>Your bank transfer request of ₦{amount} is pending approval. We'll notify you once it's processed.<br><br>Thank you for using MyFund. <br><br>"
         send_generic_email(
-            user_subject, user_message, "MyFund <info@myfundmobile.com>", [user.email]
+            user_subject, 
+            user_message, 
+            "MyFund <info@myfundmobile.com>", 
+            [user.email]
         )
 
         return Response(
-            {"message": "Bank transfer request created and pending admin approval"},
+            {
+                "message": "Bank transfer request created and pending admin approval",
+                "amount": str(amount)
+            },
             status=status.HTTP_201_CREATED,
         )
 
     except Exception as e:
-        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            {
+                "error": str(e),
+                "transaction_id": transaction_id
+            }, 
+            status=status.HTTP_400_BAD_REQUEST
+        )
 
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def initiate_invest_transfer(request):
+    transaction_id = None
+    
     try:
         user = request.user
-        amount = request.data.get("amount")
+        amount_raw = request.data.get("amount")
 
-        # Send an email to admin
-        subject = f"[CHECK] {user.first_name} Made A QuickInvest Request"
-        message = f"Hi Admin, <br><br>An investment transfer request of ₦{amount} has just been initiated by {user.first_name} ({user.email}).<br><br>Please log in to the admin panel for review.<br><br>"
-        from_email = "MyFund <info@myfundmobile.com>"
-        recipient_list = [
-            "company@myfundmobile.com",
-            "info@myfundmobile.com",
-        ]  # Replace with the admin's email address
-
-        send_generic_email(subject, message, from_email, recipient_list)
-
-        # Send a pending invest email to the user
-        user_subject = "QuickInvest Pending..."
-        user_message = f"Hi {user.first_name},<br><br>Your investment transfer request of ₦{amount} is pending approval. We will notify you once it's processed. <br><br>Thank you for using MyFund. <br><br>"
-        user_email = user.email
-
-        send_generic_email(user_subject, user_message, from_email, [user_email])
-
-        send_push_notification(
-            user=user,
-            title="QuickInvest Pending ⏳",
-            message="Your transfer of ₦{:,.2f} is pending approval. We'll notify you once it’s confirmed.".format(
-                int(amount)
-            ),
-            data={
-                "amount": str(amount),
-                "transaction_id": transaction_id,
-                "type": "QuickInvest",
-                "status": "pending",
-            },
-            notif_type="PENDING",
-        )
-
-        # Create a pending transaction for the user with date and time
-        current_datetime = timezone.now()
-        referral_email = user.referral.email if user.referral else None
+        # Validate and convert amount to Decimal
+        if not amount_raw:
+            return Response(
+                {"error": "Amount is required"}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            # ✅ Convert to Decimal properly
+            amount = Decimal(str(amount_raw))
+            
+            # Validate amount is positive
+            if amount <= 0:
+                return Response(
+                    {"error": "Amount must be greater than zero"}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        except (InvalidOperation, ValueError, TypeError):
+            return Response(
+                {"error": "Invalid amount format"}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         # ✅ Generate a unique transaction ID
         transaction_id = str(uuid.uuid4())[:10]
 
         # ✅ Create an InvestTransferRequest record with transaction_id
         invest_transfer_request = InvestTransferRequest(
-            user=user, amount=amount, transaction_id=transaction_id
+            user=user, 
+            amount=amount, 
+            transaction_id=transaction_id
         )
         invest_transfer_request.save()
 
@@ -4416,19 +4445,58 @@ def initiate_invest_transfer(request):
             date=current_datetime.date(),
             time=current_datetime.time(),
             description="QuickInvest . . .",
-            transaction_id=transaction_id,  # ✅ Ensure both records share the same transaction_id
+            transaction_id=transaction_id,
         )
-        transaction.save()
+        
+        # Send an email to admin
+        subject = f"[CHECK] {user.first_name} Made A QuickInvest Request"
+        message = f"Hi Admin, <br><br>An investment transfer request of ₦{amount} has just been initiated by {user.first_name} ({user.email}).<br><br>Please log in to the admin panel for review.<br><br>"
+        from_email = "MyFund <info@myfundmobile.com>"
+        recipient_list = [
+            "company@myfundmobile.com",
+            "info@myfundmobile.com",
+        ]
+
+        send_generic_email(subject, message, from_email, recipient_list)
+
+        # Send a pending invest email to the user
+        user_subject = "QuickInvest Pending..."
+        user_message = f"Hi {user.first_name},<br><br>Your investment transfer request of ₦{amount} is pending approval. We will notify you once it's processed. <br><br>Thank you for using MyFund. <br><br>"
+        user_email = user.email
+
+        send_generic_email(user_subject, user_message, from_email, [user_email])
+
+        send_push_notification(
+            user=user,
+            title="QuickInvest Pending ⏳",
+            message="Your transfer of ₦{:,.2f} is pending approval. We'll notify you once it's confirmed.".format(
+                float(amount)  # ✅ Convert Decimal to float for formatting
+            ),
+            data={
+                "amount": str(amount),
+                "transaction_id": transaction_id,
+                "type": "QuickInvest",
+                "status": "pending",
+            },
+            notif_type="PENDING",
+        )
 
         return Response(
             {
-                "message": "Investment transfer request created and pending admin approval"
+                "message": "Investment transfer request created and pending admin approval",
+                "amount": str(amount)
             },
             status=status.HTTP_201_CREATED,
         )
+        
     except Exception as e:
-        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
-
+        return Response(
+            {
+                "error": str(e),
+                "transaction_id": transaction_id
+            }, 
+            status=status.HTTP_400_BAD_REQUEST
+        )
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
