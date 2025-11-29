@@ -11,15 +11,8 @@ import smtplib
 import random
 import string
 import requests
+import time
 
-# Set up logging (make sure logging is configured in your settings or app)
-logger = logging.getLogger(__name__)
-from django.template.loader import render_to_string
-from django.utils.html import strip_tags
-import threading
-import logging
-
-# Set up logging (make sure logging is configured in your settings or app)
 logger = logging.getLogger(__name__)
 
 EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
@@ -99,47 +92,95 @@ def send_push_notification(user, title, message, data=None, notif_type="SYSTEM")
     return {"sent": success_count, "total": len(tokens)}
 
 
-def send_generic_email(
-    subject,
-    message,
-    from_email=None,
-    recipient_list=None,
-):
-    if recipient_list is None:
-        recipient_list = []
-    elif isinstance(recipient_list, str):
-        recipient_list = [recipient_list]
+import threading
+import time
+from django.core.mail import send_mail
+from django.template.loader import render_to_string
+from django.utils.html import strip_tags
+from .models import CustomUser
+import logging
 
+logger = logging.getLogger(__name__)
+
+
+def send_generic_email(subject, message, recipient_list, from_email=None):
     if from_email is None:
         from django.conf import settings
 
         from_email = settings.DEFAULT_FROM_EMAIL
 
-    def send_email_task():
-        try:
-            context = {"subject": subject, "message": message}
-            html_message = render_to_string("email/email.html", context=context)
-            plain_message = strip_tags(html_message)
+    total = len(recipient_list)
 
-            send_mail(
-                subject,
-                plain_message,
-                from_email,
-                recipient_list,
-                html_message=html_message,
-                fail_silently=False,
-            )
+    # Helper: prepare personalized message
+    def personalize(email_addr):
+        user = CustomUser.objects.filter(email=email_addr).first()
+        placeholders = {
+            "{first_name}": user.first_name if user else "User",
+            "{last_name}": user.last_name if user else "",
+            "{wallet}": str(user.wallet if user else 0),
+            "{savings}": str(user.savings if user else 0),
+            "{investment}": str(user.investment if user else 0),
+            "{full_name}": user.full_name if user else email_addr,
+        }
+        p_subject = subject
+        p_message = message
+        for k, v in placeholders.items():
+            p_subject = p_subject.replace(k, v)
+            p_message = p_message.replace(k, v)
+        return p_subject, p_message
 
-            logger.info(f"📧 Sent email to {recipient_list} with subject: {subject}")
+    # --- Inline sending for <=50 ---
+    if total <= 50:
 
-        except smtplib.SMTPRecipientsRefused as e:
-            # Log detailed info about rejected recipients
-            logger.error(f"❌ Email rejected by recipient's server: {e.recipients}")
-        except Exception as e:
-            # Log any other error that may occur
-            logger.exception("❌ Failed to send email due to an unexpected error.")
+        def send_inline():
+            for email in recipient_list:
+                try:
+                    p_subject, p_message = personalize(email)
+                    html_message = render_to_string(
+                        "email/email.html", {"subject": p_subject, "message": p_message}
+                    )
+                    plain_message = strip_tags(html_message)
+                    send_mail(
+                        p_subject,
+                        plain_message,
+                        from_email,
+                        [email],
+                        html_message=html_message,
+                        fail_silently=False,
+                    )
+                    logger.info(f"📧 Sent inline email to {email}")
+                except Exception as e:
+                    logger.error(f"❌ Failed inline email to {email}: {e}")
 
-    threading.Thread(target=send_email_task, daemon=True).start()
+        threading.Thread(target=send_inline, daemon=True).start()
+
+    # --- Celery for >50 ---
+    elif total <= 200:
+        from .tasks import send_single_email_task
+
+        for email in recipient_list:
+            p_subject, p_message = personalize(email)
+            send_single_email_task.delay(email, p_subject, p_message, from_email)
+
+    elif total <= 500:
+        from .tasks import send_email_batch_task
+
+        batches = []
+        for email in recipient_list:
+            p_subject, p_message = personalize(email)
+            batches.append({"email": email, "subject": p_subject, "message": p_message})
+        send_email_batch_task.delay(batches, from_email)
+
+    else:
+        from .tasks import send_large_email_batch_task
+
+        batches = []
+        for email in recipient_list:
+            p_subject, p_message = personalize(email)
+            batches.append({"email": email, "subject": p_subject, "message": p_message})
+        send_large_email_batch_task.delay(
+            batches, from_email, batch_size=50, delay_seconds=300
+        )
 
 
 def get_user_balance(user, source):
