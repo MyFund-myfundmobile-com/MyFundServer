@@ -5496,137 +5496,40 @@ def resubscribe_user(request):
     return Response({"error": "Email not provided"}, status=status.HTTP_400_BAD_REQUEST)
 
 
-import logging
-import time
-from smtplib import SMTPException
-from django.core.mail import EmailMultiAlternatives, get_connection
-from django.core.exceptions import ObjectDoesNotExist
-from rest_framework.response import Response
+# views.py
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
 from rest_framework import status
-from .models import CustomUser  # Adjust import based on your project structure
-
-# Email batching settings
-BATCH_SIZE = 15  # Lower batch size for stability
-EMAILS_PER_HOUR_LIMIT = 200  # Adjust based on SMTP limits
-TIME_BETWEEN_BATCHES = 3600 / EMAILS_PER_HOUR_LIMIT  # Approx. 18s per batch
-
-logger = logging.getLogger(__name__)
+from django.conf import settings
+from .utils import send_generic_email  # <- use the new unified function
 
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def send_email(request):
+    """
+    Admin triggers a bulk email. Automatically chooses inline, Celery rate-limit,
+    or batch depending on recipient count.
+    """
     sender = settings.DEFAULT_FROM_EMAIL
     subject = request.data.get("subject")
     body = request.data.get("body")
     recipients = request.data.get("recipients", [])
 
-    if not all([sender, subject, body, recipients]):
+    if not all([subject, body, recipients]):
         return Response(
-            {"message": "All fields are required."}, status=status.HTTP_400_BAD_REQUEST
+            {"message": "All fields are required."},
+            status=status.HTTP_400_BAD_REQUEST,
         )
 
-    failed_recipients = []
-    total_recipients = len(recipients)
-    logger.info(f"Total recipients: {total_recipients}")
+    # Use the new dynamic email sender
+    send_generic_email(subject, body, recipients, from_email=sender)
 
-    # Reuse SMTP connection for performance
-    connection = get_connection()
-    connection.open()
-
-    for i in range(0, total_recipients, BATCH_SIZE):
-        batch_recipients = recipients[i : i + BATCH_SIZE]
-        logger.info(
-            f"Processing batch {i // BATCH_SIZE + 1} with {len(batch_recipients)} recipients"
-        )
-
-        email_objects = []
-        for recipient_email in batch_recipients:
-            try:
-                recipient_user = CustomUser.objects.filter(
-                    email=recipient_email
-                ).first()
-
-                # Personalization placeholders
-                placeholder_map = {
-                    "{first_name}": (
-                        recipient_user.first_name if recipient_user else "User"
-                    ),
-                    "{last_name}": recipient_user.last_name if recipient_user else "",
-                    "{email}": recipient_email,
-                    "{wallet}": str(recipient_user.wallet) if recipient_user else "0",
-                    "{savings}": str(recipient_user.savings) if recipient_user else "0",
-                    "{investment}": (
-                        str(recipient_user.investment) if recipient_user else "0"
-                    ),
-                    "{properties}": (
-                        str(recipient_user.properties) if recipient_user else "0"
-                    ),
-                    "{full_name}": (
-                        recipient_user.full_name if recipient_user else "User"
-                    ),
-                    "{total_savings_and_investments_this_month}": (
-                        str(recipient_user.total_savings_and_investments_this_month)
-                        if recipient_user
-                        else "0"
-                    ),
-                    "{top_saver_percentage}": (
-                        str(recipient_user.top_saver_percentage)
-                        if recipient_user
-                        else "0"
-                    ),
-                }
-
-                personalized_subject = subject
-                personalized_body = body
-                for placeholder, value in placeholder_map.items():
-                    personalized_subject = personalized_subject.replace(
-                        placeholder, value
-                    )
-                    personalized_body = personalized_body.replace(placeholder, value)
-
-                # Create Email Object (Batched BCC Sending)
-                email = EmailMultiAlternatives(
-                    subject=personalized_subject,
-                    body=personalized_body,
-                    from_email=settings.DEFAULT_FROM_EMAIL,
-                    bcc=[recipient_email],  # Use BCC to reduce load
-                    connection=connection,  # Use the same connection for all emails
-                )
-                email.attach_alternative(personalized_body, "text/html")
-                email_objects.append(email)
-
-            except Exception as e:
-                logger.error(f"Error preparing email for {recipient_email}: {str(e)}")
-                failed_recipients.append(recipient_email)
-
-        # Send batched emails together
-        try:
-            if email_objects:
-                connection.send_messages(email_objects)
-                logger.info(f"Batch {i // BATCH_SIZE + 1} sent successfully")
-        except SMTPException as e:
-            logger.error(f"SMTP error sending batch {i // BATCH_SIZE + 1}: {str(e)}")
-            failed_recipients.extend(batch_recipients)
-
-        time.sleep(TIME_BETWEEN_BATCHES)  # Controlled delay between batches
-
-    connection.close()  # Close SMTP connection
-
-    if failed_recipients:
-        return Response(
-            {
-                "message": "Emails sent with some failures.",
-                "failed_recipients": failed_recipients,
-            },
-            status=status.HTTP_207_MULTI_STATUS,
-        )
-    else:
-        return Response(
-            {"message": "All emails sent successfully!"}, status=status.HTTP_200_OK
-        )
+    return Response(
+        {"message": "Bulk email started… you can close this page."},
+        status=status.HTTP_202_ACCEPTED,
+    )
 
 
 from .models import EmailTemplate
