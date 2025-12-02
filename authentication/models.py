@@ -2093,6 +2093,30 @@ class GroupOwnership(models.Model):
         max_digits=5, decimal_places=2, default=0
     )
 
+class GroupDeparture(models.Model):
+    REASON_CHOICES = [
+        ("financial", "Financial constraints"),
+        ("timeline", "Timeline doesn't work for me"),
+        ("property", "Changed mind about the property"),
+        ("group", "Issues with group members"),
+        ("better_opportunity", "Found a better investment opportunity"),
+        ("personal", "Personal reasons"),
+        ("other", "Other"),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    group = models.ForeignKey("Group", on_delete=models.CASCADE, related_name="departures")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    reason = models.CharField(max_length=50, choices=REASON_CHOICES)
+    additional_details = models.TextField(blank=True, null=True)  # Optional free text
+    refunded_amount = models.DecimalField(max_digits=11, decimal_places=2, default=0)
+    left_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        ordering = ["-left_at"]
+    
+    def __str__(self):
+        return f"{self.user.email} left {self.group.id} - {self.reason}"
 
 class Contribution(models.Model):
     PAYMENT_STATUS = [
