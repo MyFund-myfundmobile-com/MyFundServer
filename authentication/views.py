@@ -769,7 +769,7 @@ class OTPVerificationView(APIView):
             )
 
 
-from .models import CustomUser, GroupOwnership, PasswordReset, UserPassword
+from .models import CustomUser, GroupDeparture, GroupOwnership, PasswordReset, UserPassword
 
 
 @api_view(["POST"])
@@ -5802,14 +5802,37 @@ def create_groupbuy(request):
         except Property.DoesNotExist:
             return JsonResponse({"error": "Invalid Property ID"}, status=400)
 
-        # Step 4: Check property availability
+        # Step 4: Validate minimum_contribution against property price
+        try:
+            minimum_contribution = float(data["minimum_contribution"])
+        except (ValueError, TypeError):
+            return JsonResponse(
+                {"error": "Invalid minimum_contribution. Must be a valid number."},
+                status=400,
+            )
+
+        if minimum_contribution > property_obj.price:
+            return JsonResponse(
+                {
+                    "error": f"Minimum contribution (₦{minimum_contribution:,.2f}) cannot exceed the property price (₦{property_obj.price:,.2f})."
+                },
+                status=400,
+            )
+
+        if minimum_contribution <= 0:
+            return JsonResponse(
+                {"error": "Minimum contribution must be greater than zero."},
+                status=400,
+            )
+
+        # Step 5: Check property availability
         if property_obj.units_available < 1:
             return JsonResponse(
                 {"error": "The group limit for this property has already been reached"},
                 status=400,
             )
 
-        # Step 5: Handle deadline logic
+        # Step 6: Handle deadline logic
         now = timezone.now()
         max_deadline = now + timedelta(days=90)
 
@@ -5835,7 +5858,7 @@ def create_groupbuy(request):
         else:
             deadline = max_deadline  # Default deadline to 3 months from now
 
-        # Step 6: Create the group
+        # Step 7: Create the group
         group = Group.objects.create(
             property_id=data["property_id"],
             created_by=request.user,
@@ -5851,7 +5874,7 @@ def create_groupbuy(request):
         property_obj.units_available -= 1
         property_obj.save()
 
-        # Step 7: Handle invited users (if group is private)
+        # Step 8: Handle invited users (if group is private)
         warning_message = None
         if group_type == "private":
             invited_emails = data.get("invited_users", [])
@@ -5920,14 +5943,13 @@ def create_groupbuy(request):
                 if invalid_emails:
                     warning_message = f"Some emails were invalid and skipped: {', '.join(invalid_emails)}"
 
-        # Step 8: Return the serialized group
+        # Step 9: Return the serialized group
         serializer = GroupSerializer(group)
         response_data = serializer.data
         response_data = dict(serializer.data)
         if warning_message:
             response_data["warning"] = warning_message
         return Response(response_data, status=status.HTTP_201_CREATED)
-
 
 # GET /groups/:propertyId - Retrieve group buy details for a specific property
 @api_view(["GET"])
@@ -6150,7 +6172,7 @@ def invite_to_groupbuy(request, group_id):
 
     except Group.DoesNotExist:
         return Response(
-            {"message": "Group not found."}, status=status.HTTP_404_NOT_FOUND
+            {"message": "GroupBuy not found."}, status=status.HTTP_404_NOT_FOUND
         )
 
 
@@ -6176,7 +6198,22 @@ def leave_groupbuy(request, group_id):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # 3. Get all confirmed contributions
+        # 3. Get reason from request data
+        reason = request.data.get("reason")
+        additional_details = request.data.get("additional_details", "")
+        
+        # Validate reason
+        valid_reasons = [choice[0] for choice in GroupDeparture.REASON_CHOICES]
+        if not reason or reason not in valid_reasons:
+            return Response(
+                {
+                    "message": "Please provide a valid reason for leaving.",
+                    "valid_reasons": valid_reasons
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # 4. Get all confirmed contributions
         contributions = Contribution.objects.filter(
             group=group, user=user, payment_status="Confirmed"
         )
@@ -6203,15 +6240,24 @@ def leave_groupbuy(request, group_id):
 
         user.save()
 
-        # 4. Update group total_raised
+        # 5. Update group total_raised
         group.total_raised -= total_refund
         group.save()
 
-        # 5. Remove user from contributors list
+        # 6. Remove user from contributors list
         group.contributors.remove(user)
 
-        # 6. Remove or update GroupOwnership
+        # 7. Remove or update GroupOwnership
         GroupOwnership.objects.filter(group=group, user=user).delete()
+        
+        # 8. Record the departure with reason
+        GroupDeparture.objects.create(
+            group=group,
+            user=user,
+            reason=reason,
+            additional_details=additional_details,
+            refunded_amount=total_refund
+        )
 
         return Response(
             {
@@ -6223,7 +6269,7 @@ def leave_groupbuy(request, group_id):
 
     except Group.DoesNotExist:
         return Response(
-            {"message": "Group not found."},
+            {"message": "GroupBuy not found."},
             status=status.HTTP_404_NOT_FOUND,
         )
 
