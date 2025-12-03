@@ -505,7 +505,7 @@ from django.db.models.functions import Coalesce, Rank
 from django.db import transaction
 from django.utils import timezone
 
-@shared_task(bind=True, max_retries=3)
+@shared_task
 def update_top_savers():
     now = timezone.now()
     current_month = now.month
@@ -557,9 +557,9 @@ def update_top_savers():
             TopSaverHistory.objects.update_or_create(
                 month=current_month,
                 year=current_year,
-                user=user,
+                rank=r["rank"],
                 defaults={
-                    "rank": r["rank"],
+                    "user": user,
                     "total_savings": r["total"]
                 }
             )
