@@ -58,6 +58,7 @@ from .utils import (
     get_user_balance,
     send_push_notification,
     set_user_balance,
+    update_top_savers,
 )
 from .utils import send_generic_email
 from django.db import transaction
@@ -3980,6 +3981,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from django.utils import timezone
+from django.core.cache import cache
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
@@ -3987,8 +3989,30 @@ def get_top_savers(request):
     now = timezone.now()
     current_month = now.month
     current_year = now.year
+    
+    # Use cache lock to ensure only one update runs at a time
+    cache_key = f"top_savers_update_{current_year}_{current_month}"
+    lock_key = f"top_savers_lock_{current_year}_{current_month}"
+    
+    # Check if update is already running
+    is_updating = cache.get(lock_key)
+    
+    # Check if we have recent data (updated in last 5 minutes)
+    last_update = cache.get(cache_key)
+    
+    if not last_update and not is_updating:
+        # Set lock to prevent multiple simultaneous updates
+        cache.set(lock_key, True, timeout=60)  # Lock for 60 seconds max
+        
+        # Start background update but don't wait
+        update_top_savers()
+        
+        # Mark update time
+        cache.set(cache_key, now.isoformat(), timeout=180)  # Cache for 5 minutes
+        
+        logger.info("Started background top savers update")
 
-    # Fetch precomputed top savers
+    # Fetch precomputed top savers (even if stale)
     top_savers = (
         TopSaverHistory.objects
         .filter(month=current_month, year=current_year)
@@ -3997,7 +4021,11 @@ def get_top_savers(request):
     )
 
     if not top_savers:
-        return Response({"top_savers": [], "current_user": {}})
+        return Response({
+            "top_savers": [], 
+            "current_user": {},
+            "updating": bool(is_updating)  # Let frontend know data is being updated
+        })
 
     top_amount = top_savers[0].total_savings or 1
     current_user_history = next(
@@ -4029,7 +4057,9 @@ def get_top_savers(request):
             "email": request.user.email,
             "profile_picture": getattr(request.user.profile_picture, "url", ""),
             "percentage": current_percentage,
-        }
+        },
+        "updating": bool(is_updating),  # Indicate if fresh data is being computed
+        "last_update": last_update  # When data was last refreshed
     })
 
 
