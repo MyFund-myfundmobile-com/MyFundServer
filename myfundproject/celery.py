@@ -86,12 +86,3 @@ app.conf.beat_schedule.update(
     }
 )
 
-# --- Top Saver rewards ---
-app.conf.beat_schedule.update(
-    {
-        "update-top-savers-ranking": {
-            "task": "authentication.tasks.update_top_savers",
-            "schedule": crontab(hour=23, minute=0),
-        },
-    }
-)
