@@ -1,5 +1,5 @@
 import requests
-from .models import PushNotifications
+from .models import PushNotifications, TopSaverHistory, Transaction
 from .models import PushNotifications
 from django.utils import timezone
 from django.core.mail import send_mail
@@ -407,3 +407,106 @@ def authenticate_user_by_email_or_phone(username: str, password: str) -> CustomU
 
     logger.info(f"User authenticated successfully: {user.email}")
     return user
+
+from django.db.models import Sum, F, DecimalField, Q, Window
+from django.db.models.functions import Coalesce, Rank
+from django.db import transaction
+from django.db import connection
+
+
+def _update_top_savers_worker():
+    """
+    Worker function that performs the actual top savers update.
+    Runs in a separate thread.
+    """
+    # Close the existing database connection to avoid threading issues
+    connection.close()
+    
+    try:
+        now = timezone.now()
+        current_month = now.month
+        current_year = now.year
+
+        logger.info(f"Starting top savers update for {current_month}/{current_year}")
+
+        # Aggregate total savings per user
+        user_amounts = (
+            Transaction.objects
+            .filter(
+                date__month=current_month,
+                date__year=current_year,
+            )
+            .filter(
+                Q(status="confirmed", transaction_type="credit") |
+                Q(description__in=["AutoSave (Confirmed)", "AutoInvest (Confirmed)"])
+            )
+            .values("user_id")
+            .annotate(
+                total=Coalesce(
+                    Sum("amount"),
+                    0,
+                    output_field=DecimalField()
+                )
+            )
+            .filter(total__gt=0)
+            .annotate(
+                rank=Window(
+                    expression=Rank(),
+                    order_by=F('total').desc()
+                )
+            )
+            .order_by("rank")
+        )
+
+        ranked = list(user_amounts)
+        if not ranked:
+            logger.info("No users to rank for this month")
+            return
+
+        top_amount = ranked[0]['total'] or 1
+        user_ids = [r["user_id"] for r in ranked]
+        users = {u.id: u for u in CustomUser.objects.filter(id__in=user_ids)}
+
+        # Prepare bulk upsert
+        updated_count = 0
+        with transaction.atomic():
+            for r in ranked:
+                user = users.get(r["user_id"])
+                if not user:
+                    continue
+                TopSaverHistory.objects.update_or_create(
+                    month=current_month,
+                    year=current_year,
+                    rank=r["rank"],
+                    defaults={
+                        "user": user,
+                        "total_savings": r["total"]
+                    }
+                )
+                updated_count += 1
+
+        logger.info(f"Successfully updated {updated_count} top savers")
+
+    except Exception as exc:
+        logger.error(f"Error updating top savers: {str(exc)}", exc_info=True)
+    finally:
+        # Close database connection after thread completes
+        connection.close()
+
+
+def update_top_savers():
+    """
+    Initiates the top savers update in a background thread.
+    Returns immediately without blocking.
+    
+    Usage:
+        update_top_savers()  # Returns immediately, task runs in background
+    """
+    thread = threading.Thread(
+        target=_update_top_savers_worker,
+        daemon=True,
+        name="UpdateTopSaversThread"
+    )
+    thread.start()
+    logger.info("Top savers update thread started")
+    # return thread  # Optional: return thread if you need to join() later
