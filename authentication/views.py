@@ -1731,8 +1731,7 @@ def quicksave(request):
         description="QuickSave",
         transaction_id=reference,
         paystack_access_code=access_code,
-        # ✅ NEW: Store authorization code if available
-        authorization_code=authorization_code,
+        paystack_auth_code=authorization_code,
     )
 
     return Response(
