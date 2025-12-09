@@ -1731,8 +1731,7 @@ def quicksave(request):
         description="QuickSave",
         transaction_id=reference,
         paystack_access_code=access_code,
-        # ✅ NEW: Store authorization code if available
-        authorization_code=authorization_code,
+        paystack_auth_code=authorization_code,
     )
 
     return Response(
@@ -5794,6 +5793,7 @@ from .serializers import GroupSerializer
 from .serializers import ContributionSerializer
 from django.utils import timezone
 from django.core.exceptions import ValidationError
+from dateutil.relativedelta import relativedelta
 
 # Group Related APIs
 
@@ -5864,12 +5864,17 @@ def create_groupbuy(request):
 
         # Step 6: Handle deadline logic
         now = timezone.now()
-        max_deadline = now + timedelta(days=90)
 
+        # Max deadline: exactly 3 months from now
+        max_deadline = now + relativedelta(months=3)
+
+        # Parse user-provided deadline (if any)
         if "deadline" in data and data["deadline"]:
             try:
-                deadline = datetime.strptime(data["deadline"], "%Y-%m-%d")
-                deadline = timezone.make_aware(deadline)
+                # Parse string to naive datetime first
+                deadline_naive = datetime.strptime(data["deadline"], "%Y-%m-%d")
+                # Make it timezone-aware
+                deadline = timezone.make_aware(deadline_naive)
             except ValueError:
                 return JsonResponse(
                     {"error": "Invalid deadline format. Use YYYY-MM-DD."}, status=400
@@ -5880,13 +5885,14 @@ def create_groupbuy(request):
                     {"error": "Deadline cannot be in the past."}, status=400
                 )
 
-            if deadline > max_deadline:
+            if deadline.date() < max_deadline.date():
                 return JsonResponse(
-                    {"error": "Deadline cannot be more than 3 months from today."},
+                    {"error": "Deadline must be at least 3 months from today."},
                     status=400,
                 )
         else:
-            deadline = max_deadline  # Default deadline to 3 months from now
+            # Default deadline to exactly 3 months from now
+            deadline = max_deadline
 
         # Step 7: Create the group
         group = Group.objects.create(
