@@ -104,6 +104,7 @@ class UserSerializer(serializers.ModelSerializer):
     is_subscribed = serializers.BooleanField(read_only=True)
     total_referrals = serializers.IntegerField(read_only=True)
     confirmed_referrals = serializers.IntegerField(read_only=True)
+    wealth_stage = serializers.SerializerMethodField()
 
     class Meta:
         model = CustomUser
@@ -150,6 +151,7 @@ class UserSerializer(serializers.ModelSerializer):
             # Add new referral fields
             "total_referrals",
             "confirmed_referrals",
+            "wealth_stage",
         ]
 
     def get_date_joined(self, obj):
@@ -167,6 +169,15 @@ class UserSerializer(serializers.ModelSerializer):
             return obj.profile_picture.url
 
         return None
+    
+    def get_wealth_stage(self, obj):
+        import math
+        total = obj.savings_and_investments
+        if total == 0:
+            stage = 1
+        else:
+            stage = min(int(math.log10(total + 1)) + 1, 9)
+        return stage
 
     def create(self, validated_data):
         password = validated_data.pop("password")

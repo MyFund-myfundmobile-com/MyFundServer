@@ -22,6 +22,7 @@ urlpatterns = [
     path("api-auth/", include("rest_framework.urls")),
     path("api/token/", TokenObtainPairView.as_view(), name="token_obtain_pair"),
     path("api/", include("authentication.urls")),
+    path('api/admin/', include('authentication.admin_urls')),
     path("", welcome, name="welcome"),
     path(
         "graphql/",

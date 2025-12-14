@@ -13,6 +13,12 @@ app = Celery("myfundproject")
 # the configuration object to child processes.
 app.config_from_object("django.conf:settings", namespace="CELERY")
 
+# Retry connecting to broker on startup
+app.conf.broker_connection_retry_on_startup = True
+
+# Auto-discover tasks
+app.autodiscover_tasks()
+
 # --- Target Savings Tasks ---
 app.conf.beat_schedule = {
     # Process target savings once daily (morning)
@@ -79,3 +85,4 @@ app.conf.beat_schedule.update(
         },
     }
 )
+

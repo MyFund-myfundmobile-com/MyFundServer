@@ -76,10 +76,10 @@ class TransactionInline(admin.TabularInline):
     )
 
 
-class UserPasswordInline(admin.StackedInline):
-    model = UserPassword
-    can_delete = False
-    verbose_name_plural = "Password"
+# class UserPasswordInline(admin.StackedInline):
+#     model = UserPassword
+#     can_delete = False
+#     verbose_name_plural = "Password"
 
 
 # admin.py - Add these BEFORE CustomUserAdmin class
@@ -259,7 +259,7 @@ class CustomUserAdmin(UserAdmin):
     ordering = ("email", "date_joined")
     inlines = [
         TransactionInline,
-        UserPasswordInline,
+        # UserPasswordInline,
         DailyROIAccrualInline,
         ROITransactionInline,
     ]
