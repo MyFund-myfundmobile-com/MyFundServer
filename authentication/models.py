@@ -1996,6 +1996,10 @@ class WithdrawalsRequestToAdmin(models.Model):
 
     transaction_id = models.CharField(max_length=50, unique=False, default="")
     is_approved = models.BooleanField(default=False)
+    is_processed = models.BooleanField(
+        default=False,
+        help_text="Has scheduled withdrawal been credited to wallet?",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     source_account = models.CharField(max_length=255, default="savings")
     target_bank = models.CharField(max_length=100, default="")
