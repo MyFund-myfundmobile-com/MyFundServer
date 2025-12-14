@@ -58,6 +58,7 @@ from .utils import (
     get_user_balance,
     send_push_notification,
     set_user_balance,
+    update_top_savers,
 )
 from .utils import send_generic_email
 from django.db import transaction
@@ -647,7 +648,7 @@ logger = logging.getLogger(__name__)
 class CustomObtainAuthToken(ObtainAuthToken):
     def post(self, request, *args, **kwargs):
         try:
-            username = request.data.get("username", "").strip()
+            username = request.data.get("username", "").strip().lower()
             password = request.data.get("password", "")
 
             # DRY authentication
@@ -778,7 +779,7 @@ class OTPVerificationView(APIView):
             )
 
 
-from .models import CustomUser, GroupOwnership, PasswordReset, UserPassword
+from .models import CustomUser, GroupDeparture, GroupOwnership, PasswordReset, UserPassword
 
 
 @api_view(["POST"])
@@ -787,7 +788,7 @@ def request_password_reset(request):
     """
     Handles password reset requests by sending an OTP to the user's email.
     """
-    email = request.data.get("email")
+    email = request.data.get("email").strip().lower()
 
     if not email:
         logger.warning("Password reset request received without an email.")
@@ -839,7 +840,7 @@ def reset_password(request):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-    email = request.data.get("email")
+    email = request.data.get("email").strip().lower()
     otp = request.data.get("otp")
     password = request.data.get("password")
     confirm_password = request.data.get("confirm_password")
@@ -1739,8 +1740,7 @@ def quicksave(request):
         description="QuickSave",
         transaction_id=reference,
         paystack_access_code=access_code,
-        # ✅ NEW: Store authorization code if available
-        authorization_code=authorization_code,
+        paystack_auth_code=authorization_code,
     )
 
     return Response(
@@ -3984,134 +3984,91 @@ def send_top_saver_notification(user, old_rank, new_rank):
             "MyFund <info@myfundmobile.com>",
             [user.email],
         )
-
+        
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from django.utils import timezone
+from django.core.cache import cache
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_top_savers(request):
-    try:
-        now = timezone.now()
-        current_month = now.month
-        current_year = now.year
+    now = timezone.now()
+    current_month = now.month
+    current_year = now.year
+    
+    # Use cache lock to ensure only one update runs at a time
+    cache_key = f"top_savers_update_{current_year}_{current_month}"
+    lock_key = f"top_savers_lock_{current_year}_{current_month}"
+    
+    # Check if update is already running
+    is_updating = cache.get(lock_key)
+    
+    # Check if we have recent data (updated in last 5 minutes)
+    last_update = cache.get(cache_key)
+    
+    if not last_update and not is_updating:
+        # Set lock to prevent multiple simultaneous updates
+        cache.set(lock_key, True, timeout=60)  # Lock for 60 seconds max
+        
+        # Start background update but don't wait
+        update_top_savers()
+        
+        # Mark update time
+        cache.set(cache_key, now.isoformat(), timeout=180)  # Cache for 5 minutes
+        
+        logger.info("Started background top savers update")
 
-        with transaction.atomic():
-            TopSaverHistory.objects.filter(
-                month=current_month, year=current_year
-            ).delete()
+    # Fetch precomputed top savers (even if stale)
+    top_savers = (
+        TopSaverHistory.objects
+        .filter(month=current_month, year=current_year)
+        .select_related("user")
+        .order_by("rank")[:50]
+    )
 
-            CustomUser.objects.all().update(
-                total_savings_and_investments_this_month=Coalesce(
-                    Subquery(
-                        Transaction.objects.filter(
-                            user=OuterRef("pk"),
-                            date__month=current_month,
-                            date__year=current_year,
-                        )
-                        .filter(
-                            Q(status="confirmed", transaction_type="credit")
-                            | Q(
-                                description__in=[
-                                    "AutoSave (Confirmed)",
-                                    "AutoInvest (Confirmed)",
-                                ]
-                            )
-                        )
-                        .values("user")
-                        .annotate(total=Sum("amount"))
-                        .values("total"),
-                        output_field=DecimalField(),
-                    ),
-                    0,
-                )
-            )
+    if not top_savers:
+        return Response({
+            "top_savers": [], 
+            "current_user": {},
+            "updating": bool(is_updating)  # Let frontend know data is being updated
+        })
 
-            users = CustomUser.objects.filter(
-                total_savings_and_investments_this_month__gt=0
-            ).order_by("-total_savings_and_investments_this_month")
+    top_amount = top_savers[0].total_savings or 1
+    current_user_history = next(
+        (tsh for tsh in top_savers if tsh.user_id == request.user.id),
+        None
+    )
 
-            top_amount = (
-                users.first().total_savings_and_investments_this_month
-                if users.exists()
-                else 1
-            )
+    current_percentage = round(
+        (current_user_history.total_savings / top_amount) * 100, 1
+    ) if current_user_history else 0
 
-            top_savers, top_history_entries, rank_changes = [], [], {}
-            rank = 1
-
-            for user in users:
-                amount = user.total_savings_and_investments_this_month or 0
-                percentage = (
-                    round((amount / top_amount) * 100, 1) if top_amount > 0 else 0
-                )
-                old_rank = getattr(user, "last_top_saver_rank", 0) or 0
-
-                if old_rank != rank:
-                    rank_changes[user] = (old_rank, rank)
-                    user.last_top_saver_rank = rank
-                    user.save(update_fields=["last_top_saver_rank"])
-
-                top_history_entries.append(
-                    TopSaverHistory(
-                        month=current_month,
-                        year=current_year,
-                        user=user,
-                        total_savings=amount,
-                        rank=rank,
-                    )
-                )
-
-                top_savers.append(
-                    {
-                        "id": user.id,
-                        "first_name": user.first_name or "",
-                        "email": user.email or "",
-                        "profile_picture": getattr(user.profile_picture, "url", None)
-                        or "",
-                        "amount": float(amount),
-                        "percentage": percentage,
-                    }
-                )
-
-                rank += 1
-
-            if top_history_entries:
-                TopSaverHistory.objects.bulk_create(top_history_entries)
-
-            for user_obj, (old_rank, new_rank) in rank_changes.items():
-                send_top_saver_notification(user_obj, old_rank, new_rank)
-
-        current_user = request.user
-        current_user_amount = (
-            getattr(current_user, "total_savings_and_investments_this_month", 0) or 0
-        )
-        current_user_percentage = (
-            round((current_user_amount / top_amount) * 100, 1) if top_amount > 0 else 0
-        )
-
-        return Response(
+    return Response({
+        "top_savers": [
             {
-                "top_savers": top_savers[:50],
-                "current_user": {
-                    "id": current_user.id,
-                    "first_name": current_user.first_name or "",
-                    "last_name": current_user.last_name or "",
-                    "email": current_user.email or "",
-                    "profile_picture": getattr(
-                        current_user.profile_picture, "url", None
-                    )
-                    or "",
-                    "percentage": current_user_percentage,
-                    "individual_percentage": current_user_percentage,
-                },
+                "id": tsh.user.id,
+                "first_name": tsh.user.first_name or "",
+                "email": tsh.user.email or "",
+                "profile_picture": tsh.user.profile_picture or "",
+                "amount": float(tsh.total_savings),
+                "percentage": (round((tsh.total_savings / top_amount) * 100, 1) if top_amount > 0 else 0),
+                "rank": tsh.rank,
             }
-        )
-
-    except Exception as e:
-        traceback.print_exc()
-        return Response(
-            {"error": str(e), "trace": traceback.format_exc()},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
+            for tsh in top_savers
+        ],
+        "current_user": {
+            "id": request.user.id,
+            "first_name": request.user.first_name,
+            "last_name": request.user.last_name,
+            "email": request.user.email,
+            "profile_picture": getattr(request.user.profile_picture, "url", ""),
+            "percentage": current_percentage,
+        },
+        "updating": bool(is_updating),  # Indicate if fresh data is being computed
+        "last_update": last_update  # When data was last refreshed
+    })
 
 
 @api_view(["GET"])
@@ -4359,16 +4316,43 @@ def create_notification(user, notification_type, title, message, data=None):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def initiate_bank_transfer(request):
+    transaction_id = None  # ✅ Initialize to avoid UnboundLocalError
+    
     try:
         user = request.user
-        amount = request.data.get("amount")
+        amount_raw = request.data.get("amount")
+
+        # ✅ Validate and convert amount to Decimal
+        if not amount_raw:
+            return Response(
+                {"error": "Amount is required"}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            # ✅ Convert to Decimal properly
+            amount = Decimal(str(amount_raw))
+            
+            # Validate amount is positive
+            if amount <= 100:
+                return Response(
+                    {"error": "Amount must be greater than #100"}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        except (InvalidOperation, ValueError, TypeError):
+            return Response(
+                {"error": "Invalid amount format. Please enter a valid number."}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         # ✅ Generate a unique transaction ID
         transaction_id = str(uuid.uuid4())[:10]
 
         # ✅ Create a BankTransferRequest record with transaction_id
         bank_transfer_request = BankTransferRequest(
-            user=user, amount=amount, transaction_id=transaction_id
+            user=user, 
+            amount=amount, 
+            transaction_id=transaction_id
         )
         bank_transfer_request.save()
 
@@ -4379,21 +4363,21 @@ def initiate_bank_transfer(request):
         transaction = Transaction.objects.create(
             user=user,
             referral_email=referral_email,
-            transaction_type="credit",  # Mark as credit since it's a deposit
+            transaction_type="credit",
             status="pending",
             amount=amount,
             date=current_datetime.date(),
             time=current_datetime.time(),
             description="QuickSave . . .",
-            transaction_id=transaction_id,  # ✅ Ensure both records share the same transaction_id
+            transaction_id=transaction_id,
         )
-        transaction.save()
+        # ✅ No need to call save() after objects.create()
 
         send_push_notification(
             user=user,
             title="QuickSave Pending ⏳",
-            message="Your transfer of ₦{:,.2f} is pending approval. We'll notify you once it’s confirmed. Thank you for using MyFund.".format(
-                int(amount)
+            message="Your transfer of ₦{:,.2f} is pending approval. We'll notify you once it's confirmed. Thank you for using MyFund.".format(
+                float(amount)  # ✅ Convert Decimal to float for formatting
             ),
             data={
                 "amount": str(amount),
@@ -4419,68 +4403,70 @@ def initiate_bank_transfer(request):
         user_subject = "QuickSave Pending..."
         user_message = f"Hi {user.first_name},<br><br>Your bank transfer request of ₦{amount} is pending approval. We'll notify you once it's processed.<br><br>Thank you for using MyFund. <br><br>"
         send_generic_email(
-            user_subject, user_message, "MyFund <info@myfundmobile.com>", [user.email]
+            user_subject, 
+            user_message, 
+            "MyFund <info@myfundmobile.com>", 
+            [user.email]
         )
 
         return Response(
-            {"message": "Bank transfer request created and pending admin approval"},
+            {
+                "message": "Bank transfer request created and pending admin approval",
+                "amount": str(amount)
+            },
             status=status.HTTP_201_CREATED,
         )
 
     except Exception as e:
-        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            {
+                "error": str(e),
+                "transaction_id": transaction_id
+            }, 
+            status=status.HTTP_400_BAD_REQUEST
+        )
 
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def initiate_invest_transfer(request):
+    transaction_id = None
+    
     try:
         user = request.user
-        amount = request.data.get("amount")
+        amount_raw = request.data.get("amount")
 
-        # Send an email to admin
-        subject = f"[CHECK] {user.first_name} Made A QuickInvest Request"
-        message = f"Hi Admin, <br><br>An investment transfer request of ₦{amount} has just been initiated by {user.first_name} ({user.email}).<br><br>Please log in to the admin panel for review.<br><br>"
-        from_email = "MyFund <info@myfundmobile.com>"
-        recipient_list = [
-            "company@myfundmobile.com",
-            "info@myfundmobile.com",
-        ]  # Replace with the admin's email address
-
-        send_generic_email(subject, message, from_email, recipient_list)
-
-        # Send a pending invest email to the user
-        user_subject = "QuickInvest Pending..."
-        user_message = f"Hi {user.first_name},<br><br>Your investment transfer request of ₦{amount} is pending approval. We will notify you once it's processed. <br><br>Thank you for using MyFund. <br><br>"
-        user_email = user.email
-
-        send_generic_email(user_subject, user_message, from_email, [user_email])
-
-        send_push_notification(
-            user=user,
-            title="QuickInvest Pending ⏳",
-            message="Your transfer of ₦{:,.2f} is pending approval. We'll notify you once it’s confirmed.".format(
-                int(amount)
-            ),
-            data={
-                "amount": str(amount),
-                "transaction_id": transaction_id,
-                "type": "QuickInvest",
-                "status": "pending",
-            },
-            notif_type="PENDING",
-        )
-
-        # Create a pending transaction for the user with date and time
-        current_datetime = timezone.now()
-        referral_email = user.referral.email if user.referral else None
+        # Validate and convert amount to Decimal
+        if not amount_raw:
+            return Response(
+                {"error": "Amount is required"}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            # ✅ Convert to Decimal properly
+            amount = Decimal(str(amount_raw))
+            
+            # Validate amount is positive
+            if amount <= 100000:
+                return Response(
+                    {"error": "Amount must be greater than #100000"}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        except (InvalidOperation, ValueError, TypeError):
+            return Response(
+                {"error": "Invalid amount format"}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         # ✅ Generate a unique transaction ID
         transaction_id = str(uuid.uuid4())[:10]
 
         # ✅ Create an InvestTransferRequest record with transaction_id
         invest_transfer_request = InvestTransferRequest(
-            user=user, amount=amount, transaction_id=transaction_id
+            user=user, 
+            amount=amount, 
+            transaction_id=transaction_id
         )
         invest_transfer_request.save()
 
@@ -4497,19 +4483,58 @@ def initiate_invest_transfer(request):
             date=current_datetime.date(),
             time=current_datetime.time(),
             description="QuickInvest . . .",
-            transaction_id=transaction_id,  # ✅ Ensure both records share the same transaction_id
+            transaction_id=transaction_id,
         )
-        transaction.save()
+        
+        # Send an email to admin
+        subject = f"[CHECK] {user.first_name} Made A QuickInvest Request"
+        message = f"Hi Admin, <br><br>An investment transfer request of ₦{amount} has just been initiated by {user.first_name} ({user.email}).<br><br>Please log in to the admin panel for review.<br><br>"
+        from_email = "MyFund <info@myfundmobile.com>"
+        recipient_list = [
+            "company@myfundmobile.com",
+            "info@myfundmobile.com",
+        ]
+
+        send_generic_email(subject, message, from_email, recipient_list)
+
+        # Send a pending invest email to the user
+        user_subject = "QuickInvest Pending..."
+        user_message = f"Hi {user.first_name},<br><br>Your investment transfer request of ₦{amount} is pending approval. We will notify you once it's processed. <br><br>Thank you for using MyFund. <br><br>"
+        user_email = user.email
+
+        send_generic_email(user_subject, user_message, from_email, [user_email])
+
+        send_push_notification(
+            user=user,
+            title="QuickInvest Pending ⏳",
+            message="Your transfer of ₦{:,.2f} is pending approval. We'll notify you once it's confirmed.".format(
+                float(amount)  # ✅ Convert Decimal to float for formatting
+            ),
+            data={
+                "amount": str(amount),
+                "transaction_id": transaction_id,
+                "type": "QuickInvest",
+                "status": "pending",
+            },
+            notif_type="PENDING",
+        )
 
         return Response(
             {
-                "message": "Investment transfer request created and pending admin approval"
+                "message": "Investment transfer request created and pending admin approval",
+                "amount": str(amount)
             },
             status=status.HTTP_201_CREATED,
         )
+        
     except Exception as e:
-        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
-
+        return Response(
+            {
+                "error": str(e),
+                "transaction_id": transaction_id
+            }, 
+            status=status.HTTP_400_BAD_REQUEST
+        )
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
@@ -5680,6 +5705,7 @@ from .serializers import GroupSerializer
 from .serializers import ContributionSerializer
 from django.utils import timezone
 from django.core.exceptions import ValidationError
+from dateutil.relativedelta import relativedelta
 
 # Group Related APIs
 
@@ -5718,21 +5744,49 @@ def create_groupbuy(request):
         except Property.DoesNotExist:
             return JsonResponse({"error": "Invalid Property ID"}, status=400)
 
-        # Step 4: Check property availability
+        # Step 4: Validate minimum_contribution against property price
+        try:
+            minimum_contribution = float(data["minimum_contribution"])
+        except (ValueError, TypeError):
+            return JsonResponse(
+                {"error": "Invalid minimum_contribution. Must be a valid number."},
+                status=400,
+            )
+
+        if minimum_contribution > property_obj.price:
+            return JsonResponse(
+                {
+                    "error": f"Minimum contribution (₦{minimum_contribution:,.2f}) cannot exceed the property price (₦{property_obj.price:,.2f})."
+                },
+                status=400,
+            )
+
+        if minimum_contribution <= 0:
+            return JsonResponse(
+                {"error": "Minimum contribution must be greater than zero."},
+                status=400,
+            )
+
+        # Step 5: Check property availability
         if property_obj.units_available < 1:
             return JsonResponse(
                 {"error": "The group limit for this property has already been reached"},
                 status=400,
             )
 
-        # Step 5: Handle deadline logic
+        # Step 6: Handle deadline logic
         now = timezone.now()
-        max_deadline = now + timedelta(days=90)
 
+        # Max deadline: exactly 3 months from now
+        max_deadline = now + relativedelta(months=3)
+
+        # Parse user-provided deadline (if any)
         if "deadline" in data and data["deadline"]:
             try:
-                deadline = datetime.strptime(data["deadline"], "%Y-%m-%d")
-                deadline = timezone.make_aware(deadline)
+                # Parse string to naive datetime first
+                deadline_naive = datetime.strptime(data["deadline"], "%Y-%m-%d")
+                # Make it timezone-aware
+                deadline = timezone.make_aware(deadline_naive)
             except ValueError:
                 return JsonResponse(
                     {"error": "Invalid deadline format. Use YYYY-MM-DD."}, status=400
@@ -5743,15 +5797,16 @@ def create_groupbuy(request):
                     {"error": "Deadline cannot be in the past."}, status=400
                 )
 
-            if deadline > max_deadline:
+            if deadline.date() < max_deadline.date():
                 return JsonResponse(
-                    {"error": "Deadline cannot be more than 3 months from today."},
+                    {"error": "Deadline must be at least 3 months from today."},
                     status=400,
                 )
         else:
-            deadline = max_deadline  # Default deadline to 3 months from now
+            # Default deadline to exactly 3 months from now
+            deadline = max_deadline
 
-        # Step 6: Create the group
+        # Step 7: Create the group
         group = Group.objects.create(
             property_id=data["property_id"],
             created_by=request.user,
@@ -5767,7 +5822,7 @@ def create_groupbuy(request):
         property_obj.units_available -= 1
         property_obj.save()
 
-        # Step 7: Handle invited users (if group is private)
+        # Step 8: Handle invited users (if group is private)
         warning_message = None
         if group_type == "private":
             invited_emails = data.get("invited_users", [])
@@ -5836,14 +5891,13 @@ def create_groupbuy(request):
                 if invalid_emails:
                     warning_message = f"Some emails were invalid and skipped: {', '.join(invalid_emails)}"
 
-        # Step 8: Return the serialized group
+        # Step 9: Return the serialized group
         serializer = GroupSerializer(group)
         response_data = serializer.data
         response_data = dict(serializer.data)
         if warning_message:
             response_data["warning"] = warning_message
         return Response(response_data, status=status.HTTP_201_CREATED)
-
 
 # GET /groups/:propertyId - Retrieve group buy details for a specific property
 @api_view(["GET"])
@@ -6066,7 +6120,7 @@ def invite_to_groupbuy(request, group_id):
 
     except Group.DoesNotExist:
         return Response(
-            {"message": "Group not found."}, status=status.HTTP_404_NOT_FOUND
+            {"message": "GroupBuy not found."}, status=status.HTTP_404_NOT_FOUND
         )
 
 
@@ -6092,7 +6146,22 @@ def leave_groupbuy(request, group_id):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # 3. Get all confirmed contributions
+        # 3. Get reason from request data
+        reason = request.data.get("reason")
+        additional_details = request.data.get("additional_details", "")
+        
+        # Validate reason
+        valid_reasons = [choice[0] for choice in GroupDeparture.REASON_CHOICES]
+        if not reason or reason not in valid_reasons:
+            return Response(
+                {
+                    "message": "Please provide a valid reason for leaving.",
+                    "valid_reasons": valid_reasons
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # 4. Get all confirmed contributions
         contributions = Contribution.objects.filter(
             group=group, user=user, payment_status="Confirmed"
         )
@@ -6119,15 +6188,24 @@ def leave_groupbuy(request, group_id):
 
         user.save()
 
-        # 4. Update group total_raised
+        # 5. Update group total_raised
         group.total_raised -= total_refund
         group.save()
 
-        # 5. Remove user from contributors list
+        # 6. Remove user from contributors list
         group.contributors.remove(user)
 
-        # 6. Remove or update GroupOwnership
+        # 7. Remove or update GroupOwnership
         GroupOwnership.objects.filter(group=group, user=user).delete()
+        
+        # 8. Record the departure with reason
+        GroupDeparture.objects.create(
+            group=group,
+            user=user,
+            reason=reason,
+            additional_details=additional_details,
+            refunded_amount=total_refund
+        )
 
         return Response(
             {
@@ -6139,7 +6217,7 @@ def leave_groupbuy(request, group_id):
 
     except Group.DoesNotExist:
         return Response(
-            {"message": "Group not found."},
+            {"message": "GroupBuy not found."},
             status=status.HTTP_404_NOT_FOUND,
         )
 
