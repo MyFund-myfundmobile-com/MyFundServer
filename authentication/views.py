@@ -779,7 +779,13 @@ class OTPVerificationView(APIView):
             )
 
 
-from .models import CustomUser, GroupDeparture, GroupOwnership, PasswordReset, UserPassword
+from .models import (
+    CustomUser,
+    GroupDeparture,
+    GroupOwnership,
+    PasswordReset,
+    UserPassword,
+)
 
 
 @api_view(["POST"])
@@ -2779,13 +2785,12 @@ def withdraw_to_local_bank(request):
             return Response({"error": "Target bank account not found."}, status=400)
 
         # 4️⃣ Compute service charge & net amount
-        pct = (
-            10
-            if source_account == "savings"
-            else 15 if source_account == "investment" else 0
+        from .utils import calculate_withdrawal_charges
+
+        rate, service_charge, withdrawal_amount = calculate_withdrawal_charges(
+            amount, source_account
         )
-        service_charge = (pct / Decimal(100)) * amount
-        withdrawal_amount = amount - service_charge
+
         reference_code = generate_reference()
         transaction_id = f"withdrawal-{reference_code}"
 
@@ -2857,10 +2862,14 @@ def withdraw_to_local_bank(request):
                 user.wallet -= amount
             user.save()
 
-            # — record the admin‐processed request
+            # — record the admin‐processed request WITH CHARGE DETAILS
             WithdrawalsRequestToAdmin.objects.create(
                 user=user,
-                amount=amount,
+                amount=withdrawal_amount,  # Net amount (what to send) - NOT the original amount!
+                total_amount=amount,  # Original amount requested
+                charge_percentage=rate
+                * 100,  # Convert decimal to percentage (10.0, 15.0, 0.0)
+                charge_amount=service_charge,
                 transaction_id=transaction_id,
                 source_account=source_account,
                 target_bank=target_bank_account.bank_name,
@@ -3052,6 +3061,13 @@ def process_withdrawal_to_local_bank(request):
         with transaction.atomic():
             User = get_user_model()
 
+            # ✅ STEP: Calculate charges using the utility function
+            from .utils import calculate_withdrawal_charges
+
+            rate, charge_amount, net_amount = calculate_withdrawal_charges(
+                amount, source_account
+            )
+
             # Lock user row for update to prevent concurrent modifications
             user_locked = User.objects.select_for_update().get(id=user.id)
 
@@ -3061,6 +3077,7 @@ def process_withdrawal_to_local_bank(request):
                     return Response(
                         {"error": "Insufficient savings balance."}, status=400
                     )
+                # Deduct FULL amount from user (original amount with charges)
                 user_locked.savings -= amount
 
             elif source_account == "investment":
@@ -3071,6 +3088,7 @@ def process_withdrawal_to_local_bank(request):
                     return Response(
                         {"error": "Insufficient investment balance."}, status=400
                     )
+                # Deduct FULL amount from user (original amount with charges)
                 user_locked.investment -= amount
 
             elif source_account == "wallet":
@@ -3078,6 +3096,7 @@ def process_withdrawal_to_local_bank(request):
                     return Response(
                         {"error": "Insufficient wallet balance."}, status=400
                     )
+                # Deduct FULL amount from user (original amount with charges)
                 user_locked.wallet -= amount
 
             else:
@@ -3089,11 +3108,18 @@ def process_withdrawal_to_local_bank(request):
             print(
                 f"✅ STEP 7: Amount {amount} deducted from user's {source_account} balance."
             )
+            print(
+                f"✅ Charge Rate: {rate*100}%, Charge Amount: ₦{charge_amount}, Net Amount: ₦{net_amount}"
+            )
 
-            # Withdrawal record
+            # ✅ STEP: Update Withdrawal record with charge information
             withdrawal = WithdrawalsRequestToAdmin.objects.create(
                 user=user_locked,
-                amount=amount,
+                amount=net_amount,  # This is what admin should pay (process amount)
+                charge_percentage=rate
+                * 100,  # Convert decimal to percentage (10.0, 15.0, 0.0)
+                charge_amount=charge_amount,
+                total_amount=amount,  # Original requested amount (including charges)
                 transaction_id=transaction_id,
                 source_account=source_account,
                 target_bank=target_bank_account.bank_name,
@@ -3104,41 +3130,49 @@ def process_withdrawal_to_local_bank(request):
                 ),  # Save the date part only
                 is_approved=False,  # Remains False until admin action
             )
-            print("✅ STEP 8: Withdrawal record created.")
+            print("✅ STEP 8: Withdrawal record created with charge details.")
 
-            # Transaction record - Status is "pending" because it's waiting for admin approval,
-            # but the amount is already "debited" from the user's perspective.
+            # ✅ STEP: Update Transaction record with charge information
             Transaction.objects.create(
                 user=user_locked,
                 transaction_id=transaction_id,
                 transaction_type="debit",
                 status="pending",
-                amount=amount,
+                amount=net_amount,  # Amount after charge deduction
+                service_charge=charge_amount,  # Charge deducted
+                total_amount=amount,  # Original amount requested
                 description=f"{source_account.capitalize()} > Bank . . .",
                 scheduled_date=processing_date.date() if processing_date else None,
             )
-            print("✅ STEP 9: Transaction record created.")
+            print("✅ STEP 9: Transaction record created with charge details.")
 
             # --- Send email to user (dynamically based on withdrawal_type) ---
             subject = "Withdrawal Request Received"
+
+            # Calculate percentage display
+            charge_percentage_display = f"{rate * 100}%" if rate > 0 else "0%"
+
             user_message_body = ""
             if withdrawal_type == "immediate":
                 user_message_body = (
                     f"Your immediate withdrawal request of ₦{amount:,.2f} from your {source_account.capitalize()} account to "
                     f"{target_bank_account.bank_name} ({target_bank_account.account_name} - {target_bank_account.account_number}) "
-                    "has been successfully submitted. The amount has been deducted and is pending approval. You will be notified once it is completed."
+                    f"has been successfully submitted. A charge of {charge_percentage_display} (₦{charge_amount:,.2f}) was applied. "
+                    f"₦{net_amount:,.2f} will be processed to your bank account after approval."
                 )
             elif withdrawal_type == "scheduled" and processing_date:
                 user_message_body = (
                     f"Your scheduled withdrawal request of ₦{amount:,.2f} from your {source_account.capitalize()} account to "
                     f"{target_bank_account.bank_name} ({target_bank_account.account_name} - {target_bank_account.account_number}) "
-                    f"has been successfully submitted. The amount has been deducted and it is scheduled to be processed into your account on {processing_date.strftime('%A, %B %d, %Y')}."
+                    f"has been successfully submitted. A charge of {charge_percentage_display} (₦{charge_amount:,.2f}) was applied. "
+                    f"₦{net_amount:,.2f} is scheduled to be processed into your account on {processing_date.strftime('%A, %B %d, %Y')}."
                 )
             else:  # Fallback for unexpected withdrawal type or missing date
                 user_message_body = (
                     f"Your withdrawal request of ₦{amount:,.2f} from your {source_account.capitalize()} account to "
                     f"{target_bank_account.bank_name} ({target_bank_account.account_name} - {target_bank_account.account_number}) "
-                    "has been successfully submitted. The amount has been deducted and is pending approval. You will be notified once it is processed."
+                    f"has been successfully submitted. A charge of {charge_percentage_display} (₦{charge_amount:,.2f}) was applied. "
+                    f"₦{net_amount:,.2f} will be processed after approval."
                 )
 
             user_message = (
@@ -3151,17 +3185,19 @@ def process_withdrawal_to_local_bank(request):
 
             send_generic_email(subject, user_message, from_email, recipient_list)
 
-            # ✅ STEP 10.1: Send push notification to user
+            # ✅ STEP 10.1: Send push notification to user with charge info
             if withdrawal_type == "scheduled" and processing_date:
                 push_message = (
                     f"Your scheduled withdrawal of ₦{int(amount):,} from your {source_account.capitalize()} account "
-                    f"will be processed on {processing_date.strftime('%A, %B %d, %Y')}. You'll be notified once it's completed."
+                    f"({charge_percentage_display} charge applied) will be processed on {processing_date.strftime('%A, %B %d, %Y')}. "
+                    f"You'll receive ₦{int(net_amount):,}."
                 )
                 push_title = "Withdrawal Scheduled 📅"
             else:
                 push_message = (
                     f"Your withdrawal of ₦{int(amount):,} from your {source_account.capitalize()} account "
-                    "is pending approval. We'll notify you once it’s processed."
+                    f"({charge_percentage_display} charge applied) is pending approval. "
+                    f"You'll receive ₦{int(net_amount):,} once processed."
                 )
                 push_title = "Withdrawal Request Pending ⏳"
 
@@ -3170,7 +3206,10 @@ def process_withdrawal_to_local_bank(request):
                 title=push_title,
                 message=push_message,
                 data={
-                    "amount": str(amount),
+                    "total_amount": str(amount),  # Original amount
+                    "charge_percentage": str(rate * 100),  # As percentage
+                    "charge_amount": str(charge_amount),
+                    "net_amount": str(net_amount),  # Amount to receive
                     "transaction_id": transaction_id,
                     "source_account": source_account,
                     "type": "Withdrawal",
@@ -3185,12 +3224,12 @@ def process_withdrawal_to_local_bank(request):
                 },
                 notif_type="SCHEDULED" if withdrawal_type == "scheduled" else "PENDING",
             )
-            print("✅ STEP 10.2: Dynamic push notification sent to user.")
-
-            # --- Send email to admin (with more details and correct recipients) ---
-            admin_subject = (
-                f"[CHECK] {user_locked.first_name} Wants to Withdraw ₦{amount:,.2f}"
+            print(
+                "✅ STEP 10.2: Dynamic push notification sent to user with charge info."
             )
+
+            # --- Send email to admin with detailed charge information ---
+            admin_subject = f"[CHECK] {user_locked.first_name} Wants to Withdraw"
             admin_message = f"""
             Hi Admin,
 
@@ -3200,18 +3239,30 @@ def process_withdrawal_to_local_bank(request):
             User: {user_locked.first_name} {user_locked.last_name}
             Email: {user_locked.email}
             Transaction ID: {transaction_id}
-            Amount: ₦{amount:,.2f}
-            Source Account: {source_account.capitalize()}
-            Withdrawal Type: {withdrawal_type.capitalize()}
-            Target Bank: {target_bank_account.bank_name}
-            Target Account Name: {target_bank_account.account_name}
-            Target Account Number: {target_bank_account.account_number}
-            Request Date: {withdrawal.created_at.strftime('%Y-%m-%d %H:%M:%S')}
+            
+            💰 CHARGE DETAILS:
+            • Requested Amount: ₦{amount:,.2f}
+            • Source Account: {source_account.capitalize()}
+            • Charge Rate: {charge_percentage_display}
+            • Charge Amount: ₦{charge_amount:,.2f}
+            • Amount to Send: ₦{net_amount:,.2f}
+            
+            🏦 BANK DETAILS:
+            • Target Bank: {target_bank_account.bank_name}
+            • Account Name: {target_bank_account.account_name}
+            • Account Number: {target_bank_account.account_number}
+            
+            📋 REQUEST DETAILS:
+            • Withdrawal Type: {withdrawal_type.capitalize()}
+            • Request Date: {withdrawal.created_at.strftime('%Y-%m-%d %H:%M:%S')}
             """
+
             if withdrawal_type == "scheduled" and processing_date:
-                admin_message += f"Scheduled Processing Date: {processing_date.strftime('%A, %B %d, %Y')}<br>"
+                admin_message += f"• Scheduled Processing Date: {processing_date.strftime('%A, %B %d, %Y')}\n"
 
             admin_message += f"""
+            
+            ⚠️ IMPORTANT: Please send exactly ₦{net_amount:,.2f} to the bank account above.
             
             Please log in to the admin panel to mark this request as 'Approved' once payment has been made.
 
@@ -3227,8 +3278,14 @@ def process_withdrawal_to_local_bank(request):
 
         return Response(
             {
-                "message": "Withdrawal request created and pending approval. Amount deducted from your account.",
+                "message": f"Withdrawal request created and pending approval. ₦{charge_amount:,.2f} charge applied. ₦{net_amount:,.2f} will be processed to your bank account.",
                 "transaction_id": transaction_id,
+                "charge_details": {
+                    "charge_percentage": f"{rate * 100}%",
+                    "charge_amount": float(charge_amount),
+                    "net_amount": float(net_amount),
+                    "total_amount": float(amount),
+                },
             },
             status=status.HTTP_201_CREATED,
         )
@@ -3984,12 +4041,14 @@ def send_top_saver_notification(user, old_rank, new_rank):
             "MyFund <info@myfundmobile.com>",
             [user.email],
         )
-        
+
+
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from django.utils import timezone
 from django.core.cache import cache
+
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
@@ -3997,78 +4056,88 @@ def get_top_savers(request):
     now = timezone.now()
     current_month = now.month
     current_year = now.year
-    
+
     # Use cache lock to ensure only one update runs at a time
     cache_key = f"top_savers_update_{current_year}_{current_month}"
     lock_key = f"top_savers_lock_{current_year}_{current_month}"
-    
+
     # Check if update is already running
     is_updating = cache.get(lock_key)
-    
+
     # Check if we have recent data (updated in last 5 minutes)
     last_update = cache.get(cache_key)
-    
+
     if not last_update and not is_updating:
         # Set lock to prevent multiple simultaneous updates
         cache.set(lock_key, True, timeout=60)  # Lock for 60 seconds max
-        
+
         # Start background update but don't wait
         update_top_savers()
-        
+
         # Mark update time
         cache.set(cache_key, now.isoformat(), timeout=180)  # Cache for 5 minutes
-        
+
         logger.info("Started background top savers update")
 
     # Fetch precomputed top savers (even if stale)
     top_savers = (
-        TopSaverHistory.objects
-        .filter(month=current_month, year=current_year)
+        TopSaverHistory.objects.filter(month=current_month, year=current_year)
         .select_related("user")
         .order_by("rank")[:50]
     )
 
     if not top_savers:
-        return Response({
-            "top_savers": [], 
-            "current_user": {},
-            "updating": bool(is_updating)  # Let frontend know data is being updated
-        })
+        return Response(
+            {
+                "top_savers": [],
+                "current_user": {},
+                "updating": bool(
+                    is_updating
+                ),  # Let frontend know data is being updated
+            }
+        )
 
     top_amount = top_savers[0].total_savings or 1
     current_user_history = next(
-        (tsh for tsh in top_savers if tsh.user_id == request.user.id),
-        None
+        (tsh for tsh in top_savers if tsh.user_id == request.user.id), None
     )
 
-    current_percentage = round(
-        (current_user_history.total_savings / top_amount) * 100, 1
-    ) if current_user_history else 0
+    current_percentage = (
+        round((current_user_history.total_savings / top_amount) * 100, 1)
+        if current_user_history
+        else 0
+    )
 
-    return Response({
-        "top_savers": [
-            {
-                "id": tsh.user.id,
-                "first_name": tsh.user.first_name or "",
-                "email": tsh.user.email or "",
-                "profile_picture": tsh.user.profile_picture or "",
-                "amount": float(tsh.total_savings),
-                "percentage": (round((tsh.total_savings / top_amount) * 100, 1) if top_amount > 0 else 0),
-                "rank": tsh.rank,
-            }
-            for tsh in top_savers
-        ],
-        "current_user": {
-            "id": request.user.id,
-            "first_name": request.user.first_name,
-            "last_name": request.user.last_name,
-            "email": request.user.email,
-            "profile_picture": getattr(request.user.profile_picture, "url", ""),
-            "percentage": current_percentage,
-        },
-        "updating": bool(is_updating),  # Indicate if fresh data is being computed
-        "last_update": last_update  # When data was last refreshed
-    })
+    return Response(
+        {
+            "top_savers": [
+                {
+                    "id": tsh.user.id,
+                    "first_name": tsh.user.first_name or "",
+                    "email": tsh.user.email or "",
+                    "profile_picture": tsh.user.profile_picture or "",
+                    "amount": float(tsh.total_savings),
+                    "percentage": (
+                        round((tsh.total_savings / top_amount) * 100, 1)
+                        if top_amount > 0
+                        else 0
+                    ),
+                    "rank": tsh.rank,
+                }
+                for tsh in top_savers
+            ],
+            "current_user": {
+                "id": request.user.id,
+                "first_name": request.user.first_name,
+                "last_name": request.user.last_name,
+                "email": request.user.email,
+                "profile_picture": getattr(request.user.profile_picture, "url", ""),
+                "percentage": current_percentage,
+            },
+            "updating": bool(is_updating),  # Indicate if fresh data is being computed
+            "last_update": last_update,  # When data was last refreshed
+        }
+    )
 
 
 @api_view(["GET"])
@@ -4317,7 +4386,7 @@ def create_notification(user, notification_type, title, message, data=None):
 @permission_classes([IsAuthenticated])
 def initiate_bank_transfer(request):
     transaction_id = None  # ✅ Initialize to avoid UnboundLocalError
-    
+
     try:
         user = request.user
         amount_raw = request.data.get("amount")
@@ -4325,24 +4394,23 @@ def initiate_bank_transfer(request):
         # ✅ Validate and convert amount to Decimal
         if not amount_raw:
             return Response(
-                {"error": "Amount is required"}, 
-                status=status.HTTP_400_BAD_REQUEST
+                {"error": "Amount is required"}, status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         try:
             # ✅ Convert to Decimal properly
             amount = Decimal(str(amount_raw))
-            
+
             # Validate amount is positive
             if amount <= 100:
                 return Response(
-                    {"error": "Amount must be greater than #100"}, 
-                    status=status.HTTP_400_BAD_REQUEST
+                    {"error": "Amount must be greater than #100"},
+                    status=status.HTTP_400_BAD_REQUEST,
                 )
         except (InvalidOperation, ValueError, TypeError):
             return Response(
-                {"error": "Invalid amount format. Please enter a valid number."}, 
-                status=status.HTTP_400_BAD_REQUEST
+                {"error": "Invalid amount format. Please enter a valid number."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         # ✅ Generate a unique transaction ID
@@ -4350,9 +4418,7 @@ def initiate_bank_transfer(request):
 
         # ✅ Create a BankTransferRequest record with transaction_id
         bank_transfer_request = BankTransferRequest(
-            user=user, 
-            amount=amount, 
-            transaction_id=transaction_id
+            user=user, amount=amount, transaction_id=transaction_id
         )
         bank_transfer_request.save()
 
@@ -4403,27 +4469,21 @@ def initiate_bank_transfer(request):
         user_subject = "QuickSave Pending..."
         user_message = f"Hi {user.first_name},<br><br>Your bank transfer request of ₦{amount} is pending approval. We'll notify you once it's processed.<br><br>Thank you for using MyFund. <br><br>"
         send_generic_email(
-            user_subject, 
-            user_message, 
-            "MyFund <info@myfundmobile.com>", 
-            [user.email]
+            user_subject, user_message, "MyFund <info@myfundmobile.com>", [user.email]
         )
 
         return Response(
             {
                 "message": "Bank transfer request created and pending admin approval",
-                "amount": str(amount)
+                "amount": str(amount),
             },
             status=status.HTTP_201_CREATED,
         )
 
     except Exception as e:
         return Response(
-            {
-                "error": str(e),
-                "transaction_id": transaction_id
-            }, 
-            status=status.HTTP_400_BAD_REQUEST
+            {"error": str(e), "transaction_id": transaction_id},
+            status=status.HTTP_400_BAD_REQUEST,
         )
 
 
@@ -4431,7 +4491,7 @@ def initiate_bank_transfer(request):
 @permission_classes([IsAuthenticated])
 def initiate_invest_transfer(request):
     transaction_id = None
-    
+
     try:
         user = request.user
         amount_raw = request.data.get("amount")
@@ -4439,24 +4499,22 @@ def initiate_invest_transfer(request):
         # Validate and convert amount to Decimal
         if not amount_raw:
             return Response(
-                {"error": "Amount is required"}, 
-                status=status.HTTP_400_BAD_REQUEST
+                {"error": "Amount is required"}, status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         try:
             # ✅ Convert to Decimal properly
             amount = Decimal(str(amount_raw))
-            
+
             # Validate amount is positive
             if amount <= 100000:
                 return Response(
-                    {"error": "Amount must be greater than #100000"}, 
-                    status=status.HTTP_400_BAD_REQUEST
+                    {"error": "Amount must be greater than #100000"},
+                    status=status.HTTP_400_BAD_REQUEST,
                 )
         except (InvalidOperation, ValueError, TypeError):
             return Response(
-                {"error": "Invalid amount format"}, 
-                status=status.HTTP_400_BAD_REQUEST
+                {"error": "Invalid amount format"}, status=status.HTTP_400_BAD_REQUEST
             )
 
         # ✅ Generate a unique transaction ID
@@ -4464,9 +4522,7 @@ def initiate_invest_transfer(request):
 
         # ✅ Create an InvestTransferRequest record with transaction_id
         invest_transfer_request = InvestTransferRequest(
-            user=user, 
-            amount=amount, 
-            transaction_id=transaction_id
+            user=user, amount=amount, transaction_id=transaction_id
         )
         invest_transfer_request.save()
 
@@ -4485,7 +4541,7 @@ def initiate_invest_transfer(request):
             description="QuickInvest . . .",
             transaction_id=transaction_id,
         )
-        
+
         # Send an email to admin
         subject = f"[CHECK] {user.first_name} Made A QuickInvest Request"
         message = f"Hi Admin, <br><br>An investment transfer request of ₦{amount} has just been initiated by {user.first_name} ({user.email}).<br><br>Please log in to the admin panel for review.<br><br>"
@@ -4522,19 +4578,17 @@ def initiate_invest_transfer(request):
         return Response(
             {
                 "message": "Investment transfer request created and pending admin approval",
-                "amount": str(amount)
+                "amount": str(amount),
             },
             status=status.HTTP_201_CREATED,
         )
-        
+
     except Exception as e:
         return Response(
-            {
-                "error": str(e),
-                "transaction_id": transaction_id
-            }, 
-            status=status.HTTP_400_BAD_REQUEST
+            {"error": str(e), "transaction_id": transaction_id},
+            status=status.HTTP_400_BAD_REQUEST,
         )
+
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
@@ -5899,6 +5953,7 @@ def create_groupbuy(request):
             response_data["warning"] = warning_message
         return Response(response_data, status=status.HTTP_201_CREATED)
 
+
 # GET /groups/:propertyId - Retrieve group buy details for a specific property
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
@@ -6149,14 +6204,14 @@ def leave_groupbuy(request, group_id):
         # 3. Get reason from request data
         reason = request.data.get("reason")
         additional_details = request.data.get("additional_details", "")
-        
+
         # Validate reason
         valid_reasons = [choice[0] for choice in GroupDeparture.REASON_CHOICES]
         if not reason or reason not in valid_reasons:
             return Response(
                 {
                     "message": "Please provide a valid reason for leaving.",
-                    "valid_reasons": valid_reasons
+                    "valid_reasons": valid_reasons,
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -6197,14 +6252,14 @@ def leave_groupbuy(request, group_id):
 
         # 7. Remove or update GroupOwnership
         GroupOwnership.objects.filter(group=group, user=user).delete()
-        
+
         # 8. Record the departure with reason
         GroupDeparture.objects.create(
             group=group,
             user=user,
             reason=reason,
             additional_details=additional_details,
-            refunded_amount=total_refund
+            refunded_amount=total_refund,
         )
 
         return Response(

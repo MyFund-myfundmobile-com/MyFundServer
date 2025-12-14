@@ -837,7 +837,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
             # Save the user first if it's new (no primary key yet)
             if not self.pk:
                 super().save()
-            
+
             if self.password_record:
                 self.password_record.password = make_password(raw_password)
                 self.password_record.save()
@@ -1669,7 +1669,10 @@ class TargetSavingsCompletion(models.Model):
         )
 
 
-from decimal import Decimal, InvalidOperation
+# TRANSACTION MODEL
+from decimal import Decimal, InvalidOperation, DecimalException
+from django.utils import timezone
+import uuid
 
 
 class Transaction(models.Model):
@@ -1734,20 +1737,17 @@ class Transaction(models.Model):
         editable=False,
         db_index=True,
     )
+
+    # ✅ FIXED: Remove duplicate paystack_auth_code and keep only one
     paystack_auth_code = models.CharField(
-        max_length=255,
-        editable=False,
-        default="",
-        blank=True,
+        max_length=255, null=True, blank=True, default="", editable=False
     )
     paystack_access_code = models.CharField(
         max_length=255,
         null=True,
+        blank=True,
         editable=False,
         db_index=True,
-    )
-    paystack_auth_code = models.CharField(
-        max_length=255, null=True, blank=True, default=None, editable=False
     )
 
     service_charge = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
@@ -1760,16 +1760,37 @@ class Transaction(models.Model):
     )
 
     def save(self, *args, **kwargs):
+        """
+        Calculate total_amount correctly based on transaction_type.
+        For withdrawals: total_amount = amount + service_charge (user sees total)
+        For deposits: total_amount = amount (no service charge)
+        """
         try:
-            if isinstance(self.service_charge, float):
+            # Ensure both are Decimal
+            if isinstance(self.amount, (int, float)):
+                self.amount = Decimal(str(self.amount))
+            if isinstance(self.service_charge, (int, float)):
                 self.service_charge = Decimal(str(self.service_charge))
-            self.total_amount = self.amount + self.service_charge
-        except (TypeError, InvalidOperation):
-            raise ValueError("Amount or service charge is not a valid Decimal.")
+
+            # For withdrawals (debits), total is amount + charge
+            if self.transaction_type == "debit":
+                self.total_amount = self.amount + self.service_charge
+            # For credits (deposits), total is just the amount (no charge)
+            else:
+                self.total_amount = self.amount
+
+        except (TypeError, InvalidOperation, DecimalException) as e:
+            raise ValueError(f"Invalid amount or service charge: {e}")
+
+        # Auto-set date/time if not provided
+        if not self.pk:  # New instance
+            self.date = timezone.now()
+            self.time = timezone.now().time()
+
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.transaction_type} - {self.amount} - {self.status} - {self.paystack_auth_code} - {self.date}"
+        return f"{self.transaction_type} - {self.amount} - {self.status} - {self.date}"
 
 
 class PushNotifications(models.Model):
@@ -1944,29 +1965,101 @@ class InvestTransferRequest(models.Model):
 
 class WithdrawalsRequestToAdmin(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
-    amount = models.DecimalField(max_digits=10, decimal_places=2)
+
+    # ✅ IMPORTANT: This 'amount' field now stores NET AMOUNT (what to send)
+    amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        help_text="Net amount to send to user (after charges)",
+    )
+
+    total_amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0,
+        help_text="Original amount requested by user (including charges)",
+    )
+
+    charge_percentage = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=0,
+        help_text="Percentage charge applied (e.g., 10.00 for 10%)",
+    )
+
+    charge_amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0,
+        help_text="Actual charge amount deducted",
+    )
+
     transaction_id = models.CharField(max_length=50, unique=False, default="")
     is_approved = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
-
-    # Add missing fields (from your previous code)
     source_account = models.CharField(max_length=255, default="savings")
-    target_bank = models.CharField(max_length=100, default="Palmpay")
-    target_account_number = models.CharField(max_length=50, default="8033924595")
+    target_bank = models.CharField(max_length=100, default="")
+    target_account_number = models.CharField(max_length=50, default="")
 
-    # >>> ADD THESE TWO NEW FIELDS <<<
+    # Withdrawal type fields
     withdrawal_type = models.CharField(
-        max_length=50, default="immediate"
-    )  # e.g., 'immediate' or 'scheduled'
+        max_length=50,
+        default="immediate",
+        choices=[("immediate", "Immediate"), ("scheduled", "Scheduled")],
+    )
+
     scheduled_processing_date = models.DateField(
-        null=True, blank=True
-    )  # Date when scheduled withdrawal should be processed
+        null=True,
+        blank=True,
+        help_text="Date when scheduled withdrawal should be processed",
+    )
+
+    # Add a method to calculate net amount if needed
+    @property
+    def net_amount(self):
+        """Property to get net amount (same as amount field)"""
+        return self.amount
+
+    @property
+    def display_total_amount(self):
+        """Property to display total amount with currency"""
+        return f"₦{self.total_amount:,.2f}"
+
+    @property
+    def display_charge_amount(self):
+        """Property to display charge amount with currency"""
+        return f"₦{self.charge_amount:,.2f}"
+
+    @property
+    def display_net_amount(self):
+        """Property to display net amount with currency"""
+        return f"₦{self.amount:,.2f}"
+
+    def save(self, *args, **kwargs):
+        """Ensure amounts are Decimal and calculate if needed"""
+        try:
+            # Convert to Decimal if needed
+            if isinstance(self.amount, (int, float)):
+                self.amount = Decimal(str(self.amount))
+            if isinstance(self.total_amount, (int, float)):
+                self.total_amount = Decimal(str(self.total_amount))
+            if isinstance(self.charge_amount, (int, float)):
+                self.charge_amount = Decimal(str(self.charge_amount))
+            if isinstance(self.charge_percentage, (int, float)):
+                self.charge_percentage = Decimal(str(self.charge_percentage))
+
+        except (TypeError, InvalidOperation, DecimalException) as e:
+            raise ValueError(f"Invalid amount format: {e}")
+
+        super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"Withdrawal request for {self.user.email} - {self.amount}"
+        return f"{self.user.email} - ₦{self.total_amount:,.2f} -> ₦{self.amount:,.2f} ({self.get_withdrawal_type_display()})"
 
     class Meta:
-        ordering = ["-created_at"]  # Optional: order by most recent first
+        ordering = ["-created_at"]
+        verbose_name = "Withdrawal Request"
+        verbose_name_plural = "Withdrawal Requests"
 
 
 class EmailTemplate(models.Model):
@@ -2097,6 +2190,7 @@ class GroupOwnership(models.Model):
         max_digits=5, decimal_places=2, default=0
     )
 
+
 class GroupDeparture(models.Model):
     REASON_CHOICES = [
         ("financial", "Financial constraints"),
@@ -2107,20 +2201,23 @@ class GroupDeparture(models.Model):
         ("personal", "Personal reasons"),
         ("other", "Other"),
     ]
-    
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    group = models.ForeignKey("Group", on_delete=models.CASCADE, related_name="departures")
+    group = models.ForeignKey(
+        "Group", on_delete=models.CASCADE, related_name="departures"
+    )
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     reason = models.CharField(max_length=50, choices=REASON_CHOICES)
     additional_details = models.TextField(blank=True, null=True)  # Optional free text
     refunded_amount = models.DecimalField(max_digits=11, decimal_places=2, default=0)
     left_at = models.DateTimeField(auto_now_add=True)
-    
+
     class Meta:
         ordering = ["-left_at"]
-    
+
     def __str__(self):
         return f"{self.user.email} left {self.group.id} - {self.reason}"
+
 
 class Contribution(models.Model):
     PAYMENT_STATUS = [
