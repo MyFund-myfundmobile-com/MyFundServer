@@ -605,3 +605,28 @@ def send_large_email_batch_task(batches, from_email, batch_size=50, delay_second
         if i + batch_size < len(batches):
             logger.info(f"⏳ Sleeping {delay_seconds}s before next batch...")
             time.sleep(delay_seconds)
+
+
+from django.utils import timezone
+from celery import shared_task
+from authentication.models import WithdrawalsRequestToAdmin
+from .utils import process_scheduled_withdrawal
+
+
+@shared_task
+def process_due_scheduled_withdrawals():
+    today = timezone.now().date()
+
+    withdrawals = WithdrawalsRequestToAdmin.objects.filter(
+        withdrawal_type="scheduled",
+        scheduled_processing_date__lte=today,
+        is_processed=False,
+    )
+
+    for withdrawal in withdrawals:
+        try:
+            process_scheduled_withdrawal(withdrawal)
+        except Exception as e:
+            logger.error(
+                f"Failed to process scheduled withdrawal {withdrawal.id}: {str(e)}"
+            )

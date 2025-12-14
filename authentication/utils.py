@@ -554,3 +554,89 @@ def calculate_withdrawal_charges(amount: Decimal, source_account: str):
     charge_amount = (amount * rate).quantize(Decimal("0.00"))
     net_amount = (amount - charge_amount).quantize(Decimal("0.00"))
     return rate, charge_amount, net_amount
+
+
+from django.db import transaction
+from django.utils import timezone
+from decimal import Decimal
+
+
+def process_scheduled_withdrawal(withdrawal):
+    """
+    Credits wallet for completed scheduled withdrawal
+    + sends push & email notifications
+    """
+    user = withdrawal.user
+    amount = withdrawal.amount  # net amount
+
+    with transaction.atomic():
+        # Lock user
+        user = CustomUser.objects.select_for_update().get(pk=user.pk)
+
+        # 1️⃣ Credit wallet
+        user.wallet += amount
+        user.save()
+
+        # 2️⃣ Create credit transaction
+        Transaction.objects.create(
+            user=user,
+            transaction_type="credit",
+            status="confirmed",
+            amount=amount,
+            source="WALLET",
+            description="Scheduled withdrawal completed – wallet credited",
+        )
+
+        # 3️⃣ Mark withdrawal processed
+        withdrawal.is_approved = True
+        withdrawal.is_processed = True
+        withdrawal.save()
+
+    # 4️⃣ Push notification (user)
+    send_push_notification(
+        user=user,
+        title="Withdrawal Ready 🎉",
+        message=(
+            f"Your scheduled withdrawal of ₦{amount:,.2f} is complete. "
+            "Your wallet has been credited and you can withdraw now with no charges."
+        ),
+        data={
+            "amount": str(amount),
+            "type": "ScheduledWithdrawalCompleted",
+        },
+        notif_type="CREDIT",
+    )
+
+    # 5️⃣ Email user
+    user_subject = "Scheduled Withdrawal Completed"
+    user_message = (
+        f"Hi {user.first_name},<br><br>"
+        f"Your scheduled withdrawal of ₦{amount:,.2f} has been completed successfully.<br>"
+        "The funds have been credited to your MyFund wallet and you can now withdraw "
+        "without any charges.<br><br>"
+        "Thank you for trusting MyFund."
+    )
+
+    send_generic_email(
+        user_subject,
+        user_message,
+        "MyFund <info@myfundmobile.com>",
+        [user.email],
+    )
+
+    # 6️⃣ Email CEO
+    admin_subject = "[AUTO] Scheduled Withdrawal Completed"
+    admin_message = (
+        f"Scheduled withdrawal completed automatically.<br><br>"
+        f"User: {user.full_name} ({user.email})<br>"
+        f"Amount: ₦{amount:,.2f}<br>"
+        f"Source: {withdrawal.source_account}<br>"
+        f"Scheduled Date: {withdrawal.scheduled_processing_date}<br>"
+    )
+
+    send_generic_email(
+        admin_subject,
+        admin_message,
+        "MyFund <info@myfundmobile.com>",
+        ["tolulopeahmed@gmail.com"],
+    )
