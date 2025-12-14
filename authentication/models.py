@@ -625,16 +625,20 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
 
     def confirm_referral_rewards(self, is_referrer):
         if self.referral and not self.referral_reward_granted:
-            # Check if current month is August 2025
+            # Check if current month is December 2024
             current_time = timezone.now()
-            is_august_2025 = current_time.month == 8 and current_time.year == 2025
+            # Check if it's December (any year)
+            is_december_promo = current_time.month == 12 and current_time.year == 2025
 
             # Set threshold based on month
-            savings_threshold = (
-                5000
-                if is_august_2025
-                else (10000 if self.referral.is_ambassador else 20000)
-            )
+            if is_december_promo:
+                savings_threshold = 5000
+            else:
+                if self.referral.is_ambassador:
+                    savings_threshold = 10000
+                else:
+                    savings_threshold = 20000
+
             investment_threshold = 100000
 
             qualifies_by_savings = self.savings >= savings_threshold
@@ -724,7 +728,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
 
     def send_confirmation_email(self, user, is_referrer):
         current_time = timezone.now()
-        is_august_2025 = current_time.month == 8 and current_time.year == 2025
+        is_december_promo = current_time.month == 12 and current_time.year == 2025
 
         if is_referrer:
             ambassador_note = (
@@ -733,9 +737,9 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                 else ""
             )
 
-            august_note = (
-                "\n\nP.S. For August Referral contest, for early referral rewards. Keep up the great work!"
-                if is_august_2025
+            december_note = (
+                "\n\nP.S. For December Savings Challenge, for early referral rewards. Keep up the great work!"
+                if is_december_promo
                 else ""
             )
 
@@ -744,15 +748,15 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                 f"Congratulations {user.first_name},\n\n"
                 f"You have received a referral reward of ₦500.00 in your wallet for referring {self.first_name}."
                 f"{ambassador_note}"
-                f"{august_note}"
+                f"{december_note}"
                 f"\n\nThank you for using MyFund and referring others!"
                 f"\n\nKeep growing your funds.🥂"
                 f"\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
             )
         else:
-            august_note = (
-                "\n\nP.S. For August Referral contest, for early referral rewards. Keep up the great work!"
-                if is_august_2025
+            december_note = (
+                "\n\nP.S. For December Savings Challenge, for early referral rewards. Keep up the great work!"
+                if is_december_promo
                 else ""
             )
 
@@ -760,7 +764,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
             message = (
                 f"Congratulations {self.first_name}, \n\n"
                 f"You have received a referral reward of ₦500.00 in your wallet thanks to your referral."
-                f"{august_note}"
+                f"{december_note}"
                 f"\n\nThank you for using MyFund!"
                 f"\n\nKeep growing your funds.🥂"
                 f"\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
