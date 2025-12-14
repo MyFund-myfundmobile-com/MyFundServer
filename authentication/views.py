@@ -210,15 +210,24 @@ def send_referrer_pending_reward_email(referrer, referred_email):
     recipient_list = [referrer.email]
 
     try:
-        send_generic_email(subject, message, from_email, recipient_list)
+        send_generic_email(subject, message, recipient_list, from_email)
     except Exception as e:
         logger.warning(f"⚠️ Referral email to referrer failed for {referrer.email}: {e}")
 
 
 def send_referred_pending_reward_email(user):
     subject = f"{user.first_name}, Your N500 Referral Reward is Pending"
-    message = f"Hi {user.first_name},<br><br>You have received a welcome referral reward bonus of ₦500.00 for signing up with a referral email. It will be confirmed in your Wallet when you make your first savings of up to ₦20,000.<br><br>Thank you for using MyFund!<br><br>Keep growing your funds.🥂<br><br>"
+    from django.utils import timezone
 
+    current_time = timezone.now()
+    is_december_promo = current_time.month == 12 and current_time.year == 2025
+
+    if is_december_promo:
+        threshold_message = "₦5,000"
+    else:
+        threshold_message = "₦20,000"
+
+    message = f"Hi {user.first_name},<br><br>You have received a welcome referral reward bonus of ₦500.00 for signing up with a referral email. It will be confirmed in your Wallet when you make your first savings of up to {threshold_message}.<br><br>Thank you for using MyFund!<br><br>Keep growing your funds.🥂<br><br>"
     from_email = "MyFund <info@myfundmobile.com>"
     recipient_list = [user.email]
     bcc_list = ["newusers@myfundmobile.com"]
@@ -226,7 +235,7 @@ def send_referred_pending_reward_email(user):
     all_recipients = recipient_list + bcc_list
 
     try:
-        send_generic_email(subject, message, from_email, all_recipients)
+        send_generic_email(subject, message, all_recipients, from_email)
     except Exception as e:
         logger.warning(
             f"⚠️ Referral email to referred user failed for {user.email}: {e}"

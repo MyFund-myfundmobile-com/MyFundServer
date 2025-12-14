@@ -899,8 +899,8 @@ class BankTransferRequestAdmin(admin.ModelAdmin):
             user.save()
 
             # Call the confirm_referral_rewards method here
-            is_referrer = True
-            user.confirm_referral_rewards(is_referrer=is_referrer)
+            if user.referral:
+                user.confirm_referral_rewards(is_referrer=False)
 
             # After processing an investment transfer transaction
             user.update_total_savings_and_investment_this_month()
