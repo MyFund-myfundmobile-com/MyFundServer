@@ -899,8 +899,8 @@ class BankTransferRequestAdmin(admin.ModelAdmin):
             user.save()
 
             # Call the confirm_referral_rewards method here
-            is_referrer = True
-            user.confirm_referral_rewards(is_referrer=is_referrer)
+            if user.referral:
+                user.confirm_referral_rewards(is_referrer=False)
 
             # After processing an investment transfer transaction
             user.update_total_savings_and_investment_this_month()
@@ -1021,18 +1021,23 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
         "user",
         "source_account",
         "withdrawal_type",
-        "amount",
+        "total_amount_display",  # Original amount requested
+        "charge_percentage_display",  # Charge percentage
+        "charge_amount_display",  # Actual charge amount
+        "net_amount_display",  # Amount to send (process amount)
         "target_bank",
         "target_account_number",
         "created_at",
         "scheduled_processing_date",
         "transaction_id",
     )
+
     list_filter = (
         "is_approved",
         "source_account",
-        "withdrawal_type",  # Good to filter by type
+        "withdrawal_type",
     )
+
     search_fields = (
         "user__email",
         "transaction_id",
@@ -1040,13 +1045,75 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
         "source_account",
         "target_account_number",
     )
+
     actions = ["approve_withdrawal"]
+
+    # Custom display methods
+    def total_amount_display(self, obj):
+        """Display original amount requested"""
+        if hasattr(obj, "total_amount") and obj.total_amount:
+            return f"₦{obj.total_amount:,.2f}"
+        # Fallback to amount field if total_amount doesn't exist
+        return f"₦{obj.amount:,.2f}"
+
+    total_amount_display.short_description = "Requested"
+    total_amount_display.admin_order_field = "total_amount"
+
+    def charge_percentage_display(self, obj):
+        """Display charge percentage considering withdrawal type"""
+        if obj.withdrawal_type.lower() != "immediate":
+            rate = 0
+        else:
+            from .utils import calculate_withdrawal_charges
+
+            _, _, _ = calculate_withdrawal_charges(obj.amount, obj.source_account)
+            rate, _, _ = calculate_withdrawal_charges(obj.amount, obj.source_account)
+        return f"{(rate * 100):.0f}%"
+
+    charge_percentage_display.short_description = "%"
+    charge_percentage_display.admin_order_field = "charge_percentage"
+
+    def charge_amount_display(self, obj):
+        """Display actual charge amount"""
+        if obj.withdrawal_type.lower() != "immediate":
+            charge_amount = 0
+        else:
+            from .utils import calculate_withdrawal_charges
+
+            _, charge_amount, _ = calculate_withdrawal_charges(
+                obj.amount, obj.source_account
+            )
+        return f"₦{charge_amount:,.2f}"
+
+    charge_amount_display.short_description = "Charge"
+    charge_amount_display.admin_order_field = "charge_amount"
+
+    def net_amount_display(self, obj):
+        """Display net amount (amount to send)"""
+        if obj.withdrawal_type.lower() != "immediate":
+            net_amount = obj.amount
+        else:
+            from .utils import calculate_withdrawal_charges
+
+            _, _, net_amount = calculate_withdrawal_charges(
+                obj.amount, obj.source_account
+            )
+        return f"₦{net_amount:,.2f}"
+
+    net_amount_display.short_description = "To Send"
+    net_amount_display.admin_order_field = "amount"
 
     def approve_withdrawal(self, request, queryset):
         approved_count = 0
         for withdrawal_request in queryset:
             user = withdrawal_request.user
-            amount = withdrawal_request.amount
+
+            # Use net amount (amount to send) for the approval message
+            if hasattr(withdrawal_request, "amount"):
+                amount_to_send = withdrawal_request.amount  # This is net_amount
+            else:
+                amount_to_send = withdrawal_request.amount  # Fallback
+
             transaction_id = withdrawal_request.transaction_id
 
             # Skip already approved requests
@@ -1054,9 +1121,6 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
                 continue
 
             with db_transaction.atomic():  # Ensure consistency
-                # --- REMOVED DEDUCTION LOGIC HERE ---
-                # The deduction now happens in the view when the request is initially made.
-
                 # Mark withdrawal as approved
                 withdrawal_request.is_approved = True
                 withdrawal_request.save()
@@ -1078,31 +1142,31 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
                         user=user,
                         title="Withdrawal Approved! ✅",
                         message="Your withdrawal of ₦{:,} to your {} has been approved and processed. Thank you for using MyFund.".format(
-                            int(amount), withdrawal_request.target_bank
+                            int(amount_to_send), withdrawal_request.target_bank
                         ),
                         data={
-                            "amount": str(amount),
+                            "amount": str(amount_to_send),
                             "transaction_id": transaction_id,
                             "source_account": withdrawal_request.source_account,
                             "type": "Withdrawal",
                             "status": "confirmed",
                         },
-                        notif_type="DEBIT",  # Can use DEBIT or SYSTEM depending on your preference
+                        notif_type="DEBIT",
                     )
 
                 except Transaction.DoesNotExist:
                     self.message_user(
                         request,
                         f"Warning: Corresponding transaction {transaction_id} not found for user {user.email}. Withdrawal request marked as approved.",
-                        level="warning",  # Changed to warning as it's not a critical failure if the request is approved
+                        level="warning",
                     )
-                    continue  # Continue processing other requests even if transaction record is missing (but ideally it should exist)
+                    continue
 
                 # Send email notification
                 subject = "Withdrawal Approved! ✔"
                 message = (
                     f"Hi {user.first_name},\n\n"
-                    f"Good news! Your withdrawal of ₦{amount:,.2f} from your {withdrawal_request.source_account.capitalize()} account to {withdrawal_request.target_bank} "
+                    f"Good news! Your withdrawal of ₦{amount_to_send:,.2f} from your {withdrawal_request.source_account.capitalize()} account to {withdrawal_request.target_bank} "
                     f"({withdrawal_request.target_account_number}) has been approved and processed successfully.\n\n"
                     f"Transaction ID: {transaction_id}\n\n"
                     f"Thank you for using MyFund.\n\n"
@@ -1114,7 +1178,7 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
                     send_mail(
                         subject,
                         message,
-                        "MyFund <info@myfundmobile.com>",  # Use info@myfundmobile.com for consistency
+                        "MyFund <info@myfundmobile.com>",
                         [user.email],
                         fail_silently=False,
                     )

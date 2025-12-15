@@ -499,3 +499,134 @@ def send_birthday_greetings():
             logger.error(f"Failed to send birthday message to {user.email}: {str(e)}")
 
     return f"🎂 Birthday messages sent to {users.count()} users."
+
+
+# tasks.py
+from celery import shared_task
+from django.core.mail import send_mail
+from django.template.loader import render_to_string
+from django.utils.html import strip_tags
+import logging
+import time
+
+logger = logging.getLogger(__name__)
+
+
+@shared_task(rate_limit="20/m")
+def send_single_email_task(email, subject, message, from_email):
+    try:
+        html_message = render_to_string(
+            "email/email.html", {"subject": subject, "message": message}
+        )
+        plain_message = strip_tags(html_message)
+        send_mail(
+            subject,
+            plain_message,
+            from_email,
+            [email],
+            html_message=html_message,
+            fail_silently=False,
+        )
+        logger.info(f"📧 Sent (Celery) email to {email}")
+    except Exception as e:
+        logger.error(f"❌ Failed to send Celery email to {email}: {e}")
+
+
+@shared_task
+def send_email_batch_task(batches, from_email):
+    """
+    Batches = [{"email": ..., "subject": ..., "message": ...}, ...]
+    Send in groups of 50, sleep 5 minutes between batches.
+    """
+    BATCH_SIZE = 50
+    DELAY_SECONDS = 300
+
+    for i in range(0, len(batches), BATCH_SIZE):
+        batch = batches[i : i + BATCH_SIZE]
+        for entry in batch:
+            try:
+                html_message = render_to_string(
+                    "email/email.html",
+                    {"subject": entry["subject"], "message": entry["message"]},
+                )
+                plain_message = strip_tags(html_message)
+                send_mail(
+                    entry["subject"],
+                    plain_message,
+                    from_email,
+                    [entry["email"]],
+                    html_message=html_message,
+                    fail_silently=False,
+                )
+                logger.info(f"📧 Sent batch email to {entry['email']}")
+            except Exception as e:
+                logger.error(f"❌ Failed batch email to {entry['email']}: {e}")
+
+        if i + BATCH_SIZE < len(batches):
+            logger.info(f"⏳ Sleeping {DELAY_SECONDS}s before next batch...")
+            time.sleep(DELAY_SECONDS)
+
+
+@shared_task
+def send_large_email_batch_task(batches, from_email, batch_size=50, delay_seconds=300):
+    """
+    Send large email lists (>500) safely using Celery + Redis,
+    batching and delaying between groups to avoid Namecheap limits.
+    """
+    import time
+    from django.core.mail import send_mail
+    from django.template.loader import render_to_string
+    from django.utils.html import strip_tags
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    for i in range(0, len(batches), batch_size):
+        batch = batches[i : i + batch_size]
+        for entry in batch:
+            try:
+                html_message = render_to_string(
+                    "email/email.html",
+                    {"subject": entry["subject"], "message": entry["message"]},
+                )
+                plain_message = strip_tags(html_message)
+                send_mail(
+                    entry["subject"],
+                    plain_message,
+                    from_email,
+                    [entry["email"]],
+                    html_message=html_message,
+                    fail_silently=False,
+                )
+                logger.info(f"📧 Sent large batch email to {entry['email']}")
+            except Exception as e:
+                logger.error(f"❌ Failed large batch email to {entry['email']}: {e}")
+
+        if i + batch_size < len(batches):
+            logger.info(f"⏳ Sleeping {delay_seconds}s before next batch...")
+            time.sleep(delay_seconds)
+
+
+from django.utils import timezone
+from celery import shared_task
+from authentication.models import WithdrawalsRequestToAdmin
+from .utils import process_scheduled_withdrawal
+
+
+@shared_task
+def process_due_scheduled_withdrawals():
+    today = timezone.now().date()
+
+    withdrawals = WithdrawalsRequestToAdmin.objects.filter(
+        withdrawal_type="scheduled",
+        scheduled_processing_date__lte=today,
+        is_processed=False,
+    )
+
+    for withdrawal in withdrawals:
+        try:
+            process_scheduled_withdrawal(withdrawal)
+        except Exception as e:
+            logger.error(
+                f"Failed to process scheduled withdrawal {withdrawal.id}: {str(e)}"
+            )
