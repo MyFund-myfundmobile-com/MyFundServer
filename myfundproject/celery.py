@@ -86,3 +86,12 @@ app.conf.beat_schedule.update(
     }
 )
 
+
+app.conf.beat_schedule.update(
+    {
+        "process-scheduled-withdrawals-daily": {
+            "task": "authentication.tasks.process_due_scheduled_withdrawals",
+            "schedule": crontab(hour=11, minute=0),
+        },
+    }
+)

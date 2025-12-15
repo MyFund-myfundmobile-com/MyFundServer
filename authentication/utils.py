@@ -11,15 +11,8 @@ import smtplib
 import random
 import string
 import requests
+import time
 
-# Set up logging (make sure logging is configured in your settings or app)
-logger = logging.getLogger(__name__)
-from django.template.loader import render_to_string
-from django.utils.html import strip_tags
-import threading
-import logging
-
-# Set up logging (make sure logging is configured in your settings or app)
 logger = logging.getLogger(__name__)
 
 EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
@@ -99,47 +92,95 @@ def send_push_notification(user, title, message, data=None, notif_type="SYSTEM")
     return {"sent": success_count, "total": len(tokens)}
 
 
-def send_generic_email(
-    subject,
-    message,
-    from_email=None,
-    recipient_list=None,
-):
-    if recipient_list is None:
-        recipient_list = []
-    elif isinstance(recipient_list, str):
-        recipient_list = [recipient_list]
+import threading
+import time
+from django.core.mail import send_mail
+from django.template.loader import render_to_string
+from django.utils.html import strip_tags
+from .models import CustomUser
+import logging
 
+logger = logging.getLogger(__name__)
+
+
+def send_generic_email(subject, message, recipient_list, from_email=None):
     if from_email is None:
         from django.conf import settings
 
         from_email = settings.DEFAULT_FROM_EMAIL
 
-    def send_email_task():
-        try:
-            context = {"subject": subject, "message": message}
-            html_message = render_to_string("email/email.html", context=context)
-            plain_message = strip_tags(html_message)
+    total = len(recipient_list)
 
-            send_mail(
-                subject,
-                plain_message,
-                from_email,
-                recipient_list,
-                html_message=html_message,
-                fail_silently=False,
-            )
+    # Helper: prepare personalized message
+    def personalize(email_addr):
+        user = CustomUser.objects.filter(email=email_addr).first()
+        placeholders = {
+            "{first_name}": user.first_name if user else "User",
+            "{last_name}": user.last_name if user else "",
+            "{wallet}": str(user.wallet if user else 0),
+            "{savings}": str(user.savings if user else 0),
+            "{investment}": str(user.investment if user else 0),
+            "{full_name}": user.full_name if user else email_addr,
+        }
+        p_subject = subject
+        p_message = message
+        for k, v in placeholders.items():
+            p_subject = p_subject.replace(k, v)
+            p_message = p_message.replace(k, v)
+        return p_subject, p_message
 
-            logger.info(f"📧 Sent email to {recipient_list} with subject: {subject}")
+    # --- Inline sending for <=50 ---
+    if total <= 50:
 
-        except smtplib.SMTPRecipientsRefused as e:
-            # Log detailed info about rejected recipients
-            logger.error(f"❌ Email rejected by recipient's server: {e.recipients}")
-        except Exception as e:
-            # Log any other error that may occur
-            logger.exception("❌ Failed to send email due to an unexpected error.")
+        def send_inline():
+            for email in recipient_list:
+                try:
+                    p_subject, p_message = personalize(email)
+                    html_message = render_to_string(
+                        "email/email.html", {"subject": p_subject, "message": p_message}
+                    )
+                    plain_message = strip_tags(html_message)
+                    send_mail(
+                        p_subject,
+                        plain_message,
+                        from_email,
+                        [email],
+                        html_message=html_message,
+                        fail_silently=False,
+                    )
+                    logger.info(f"📧 Sent inline email to {email}")
+                except Exception as e:
+                    logger.error(f"❌ Failed inline email to {email}: {e}")
 
-    threading.Thread(target=send_email_task, daemon=True).start()
+        threading.Thread(target=send_inline, daemon=True).start()
+
+    # --- Celery for >50 ---
+    elif total <= 200:
+        from .tasks import send_single_email_task
+
+        for email in recipient_list:
+            p_subject, p_message = personalize(email)
+            send_single_email_task.delay(email, p_subject, p_message, from_email)
+
+    elif total <= 500:
+        from .tasks import send_email_batch_task
+
+        batches = []
+        for email in recipient_list:
+            p_subject, p_message = personalize(email)
+            batches.append({"email": email, "subject": p_subject, "message": p_message})
+        send_email_batch_task.delay(batches, from_email)
+
+    else:
+        from .tasks import send_large_email_batch_task
+
+        batches = []
+        for email in recipient_list:
+            p_subject, p_message = personalize(email)
+            batches.append({"email": email, "subject": p_subject, "message": p_message})
+        send_large_email_batch_task.delay(
+            batches, from_email, batch_size=50, delay_seconds=300
+        )
 
 
 def get_user_balance(user, source):
@@ -408,6 +449,7 @@ def authenticate_user_by_email_or_phone(username: str, password: str) -> CustomU
     logger.info(f"User authenticated successfully: {user.email}")
     return user
 
+
 from django.db.models import Sum, F, DecimalField, Q, Window
 from django.db.models.functions import Coalesce, Rank
 from django.db import transaction
@@ -421,7 +463,7 @@ def _update_top_savers_worker():
     """
     # Close the existing database connection to avoid threading issues
     connection.close()
-    
+
     try:
         now = timezone.now()
         current_month = now.month
@@ -431,30 +473,18 @@ def _update_top_savers_worker():
 
         # Aggregate total savings per user
         user_amounts = (
-            Transaction.objects
-            .filter(
+            Transaction.objects.filter(
                 date__month=current_month,
                 date__year=current_year,
             )
             .filter(
-                Q(status="confirmed", transaction_type="credit") |
-                Q(description__in=["AutoSave (Confirmed)", "AutoInvest (Confirmed)"])
+                Q(status="confirmed", transaction_type="credit")
+                | Q(description__in=["AutoSave (Confirmed)", "AutoInvest (Confirmed)"])
             )
             .values("user_id")
-            .annotate(
-                total=Coalesce(
-                    Sum("amount"),
-                    0,
-                    output_field=DecimalField()
-                )
-            )
+            .annotate(total=Coalesce(Sum("amount"), 0, output_field=DecimalField()))
             .filter(total__gt=0)
-            .annotate(
-                rank=Window(
-                    expression=Rank(),
-                    order_by=F('total').desc()
-                )
-            )
+            .annotate(rank=Window(expression=Rank(), order_by=F("total").desc()))
             .order_by("rank")
         )
 
@@ -463,7 +493,7 @@ def _update_top_savers_worker():
             logger.info("No users to rank for this month")
             return
 
-        top_amount = ranked[0]['total'] or 1
+        top_amount = ranked[0]["total"] or 1
         user_ids = [r["user_id"] for r in ranked]
         users = {u.id: u for u in CustomUser.objects.filter(id__in=user_ids)}
 
@@ -478,10 +508,7 @@ def _update_top_savers_worker():
                     month=current_month,
                     year=current_year,
                     rank=r["rank"],
-                    defaults={
-                        "user": user,
-                        "total_savings": r["total"]
-                    }
+                    defaults={"user": user, "total_savings": r["total"]},
                 )
                 updated_count += 1
 
@@ -498,15 +525,118 @@ def update_top_savers():
     """
     Initiates the top savers update in a background thread.
     Returns immediately without blocking.
-    
+
     Usage:
         update_top_savers()  # Returns immediately, task runs in background
     """
     thread = threading.Thread(
-        target=_update_top_savers_worker,
-        daemon=True,
-        name="UpdateTopSaversThread"
+        target=_update_top_savers_worker, daemon=True, name="UpdateTopSaversThread"
     )
     thread.start()
     logger.info("Top savers update thread started")
     # return thread  # Optional: return thread if you need to join() later
+
+
+from decimal import Decimal
+
+WITHDRAWAL_CHARGES = {
+    "savings": Decimal("0.10"),  # 10%
+    "investment": Decimal("0.15"),  # 15%
+    "wallet": Decimal("0.00"),  # 0%
+}
+
+
+def calculate_withdrawal_charges(amount: Decimal, source_account: str):
+    """
+    Returns: (charge_rate, charge_amount, net_amount)
+    """
+    rate = WITHDRAWAL_CHARGES.get(source_account, Decimal("0.00"))
+    charge_amount = (amount * rate).quantize(Decimal("0.00"))
+    net_amount = (amount - charge_amount).quantize(Decimal("0.00"))
+    return rate, charge_amount, net_amount
+
+
+from django.db import transaction
+from django.utils import timezone
+from decimal import Decimal
+
+
+def process_scheduled_withdrawal(withdrawal):
+    """
+    Credits wallet for completed scheduled withdrawal
+    + sends push & email notifications
+    """
+    user = withdrawal.user
+    amount = withdrawal.amount  # net amount
+
+    with transaction.atomic():
+        # Lock user
+        user = CustomUser.objects.select_for_update().get(pk=user.pk)
+
+        # 1️⃣ Credit wallet
+        user.wallet += amount
+        user.save()
+
+        # 2️⃣ Create credit transaction
+        Transaction.objects.create(
+            user=user,
+            transaction_type="credit",
+            status="confirmed",
+            amount=amount,
+            source="WALLET",
+            description="Scheduled withdrawal completed – wallet credited",
+        )
+
+        # 3️⃣ Mark withdrawal processed
+        withdrawal.is_approved = True
+        withdrawal.is_processed = True
+        withdrawal.save()
+
+    # 4️⃣ Push notification (user)
+    send_push_notification(
+        user=user,
+        title="Withdrawal Ready 🎉",
+        message=(
+            f"Your scheduled withdrawal of ₦{amount:,.2f} is complete. "
+            "Your wallet has been credited and you can withdraw now with no charges."
+        ),
+        data={
+            "amount": str(amount),
+            "type": "ScheduledWithdrawalCompleted",
+        },
+        notif_type="CREDIT",
+    )
+
+    # 5️⃣ Email user
+    user_subject = "Scheduled Withdrawal Completed"
+    user_message = (
+        f"Hi {user.first_name},<br><br>"
+        f"Your scheduled withdrawal of ₦{amount:,.2f} has been completed successfully.<br>"
+        "The funds have been credited to your MyFund wallet and you can now withdraw "
+        "without any charges.<br><br>"
+        "Thank you for trusting MyFund."
+    )
+
+    send_generic_email(
+        user_subject,
+        user_message,
+        "MyFund <info@myfundmobile.com>",
+        [user.email],
+    )
+
+    # 6️⃣ Email CEO
+    admin_subject = "[AUTO] Scheduled Withdrawal Completed"
+    admin_message = (
+        f"Scheduled withdrawal completed automatically.<br><br>"
+        f"User: {user.full_name} ({user.email})<br>"
+        f"Amount: ₦{amount:,.2f}<br>"
+        f"Source: {withdrawal.source_account}<br>"
+        f"Scheduled Date: {withdrawal.scheduled_processing_date}<br>"
+    )
+
+    send_generic_email(
+        admin_subject,
+        admin_message,
+        "MyFund <info@myfundmobile.com>",
+        ["tolulopeahmed@gmail.com"],
+    )
