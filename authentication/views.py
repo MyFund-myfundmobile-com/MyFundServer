@@ -2977,7 +2977,7 @@ def withdraw_to_local_bank(request):
             subj_admin = f"[CHECK] {user.first_name} Wants to Withdraw ₦{amount}"
             msg_admin = (
                 f"User: {user.first_name} {user.last_name}<br>"
-                f"Amount: ₦{amount}<br>"
+                f"Amount: ₦{amount:,.2f}<br>"
                 f"Bank: {target_bank_account.bank_name} ({target_bank_account.account_number})<br>"
                 f"Transaction ID: {transaction_id}<br>"
                 "Reason: automatic Paystack withdrawal failed; manual processing required."
@@ -2989,6 +2989,46 @@ def withdraw_to_local_bank(request):
                 "MyFund <info@myfundmobile.com>",
                 ["admin@myfundmobile.com"],
             )
+
+            # — NEW: push notification to admin
+            admin_emails = ["tolulopeahmed@gmail.com", "ceo@myfundmobile.com"]
+            admin_users = CustomUser.objects.filter(email__in=admin_emails)
+
+            for admin_user in admin_users:
+                if (
+                    hasattr(admin_user, "expo_push_tokens")
+                    and admin_user.expo_push_tokens
+                ):
+                    admin_push_title = f"{user.first_name} wants to Withdraw ₦{amount}"
+
+                    admin_push_message = (
+                        f"New Withdrawal: {user.first_name} {user.last_name[:1]}.\n"
+                        f"₦{amount:,.2f} from {source_account.capitalize()}\n"
+                        f"Bank: {target_bank_account.bank_name}\n"
+                        f"Paystack failed — manual processing required."
+                    )
+
+                    send_push_notification(
+                        user=admin_user,
+                        title=admin_push_title,
+                        message=admin_push_message,
+                        data={
+                            "transaction_id": transaction_id,
+                            "user_email": user.email,
+                            "amount": str(amount),
+                            "net_amount": str(withdrawal_amount),
+                            "source_account": source_account,
+                            "bank_name": target_bank_account.bank_name,
+                            "bank_account": target_bank_account.account_number,
+                            "type": "admin_withdrawal_alert",
+                            "status": "pending_manual",
+                        },
+                        notif_type="ADMIN_ALERT",
+                    )
+
+                    print(f"✅ Admin push notification sent to {admin_user.email}")
+                else:
+                    print(f"⚠️ No push tokens for admin {admin_user.email}")
 
             # 0️⃣ Return 200 with success:false so front end enters “processing” flow
             return Response(
