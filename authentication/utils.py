@@ -640,3 +640,35 @@ def process_scheduled_withdrawal(withdrawal):
         "MyFund <info@myfundmobile.com>",
         ["tolulopeahmed@gmail.com"],
     )
+
+
+from django.contrib.auth import get_user_model
+
+ADMIN_PUSH_EMAILS = [
+    "tolulopeahmed@gmail.com",
+    "ceo@myfundmobile.com",
+]
+
+
+def send_admin_push_notification(title, message, data=None, notif_type="ADMIN"):
+    """
+    Reusable admin push notifier.
+    Call this anywhere you need to alert admin via push.
+    """
+    User = get_user_model()
+    data = data or {}
+
+    admins = User.objects.filter(email__in=ADMIN_PUSH_EMAILS)
+
+    if not admins.exists():
+        logger.warning("⚠️ No admin users found for push notification")
+        return
+
+    for admin in admins:
+        send_push_notification(
+            user=admin,
+            title=title,
+            message=message,
+            data=data,
+            notif_type=notif_type,
+        )
