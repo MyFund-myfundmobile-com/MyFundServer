@@ -104,6 +104,14 @@ logger = logging.getLogger(__name__)
 
 
 def send_generic_email(subject, message, recipient_list, from_email=None):
+
+    # 🛡️ Normalize recipient_list
+    if isinstance(recipient_list, str):
+        recipient_list = [recipient_list]
+
+    if not isinstance(recipient_list, (list, tuple)):
+        raise ValueError("recipient_list must be a list or tuple of emails")
+
     if from_email is None:
         from django.conf import settings
 
