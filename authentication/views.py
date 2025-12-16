@@ -2508,6 +2508,30 @@ def savings_to_investment(request):
             user.investment += amount
             user.save()
 
+            # Send push notification after successful transfer
+            send_push_notification(
+                user=user,
+                title="Savings > Investment Transfer ✅",
+                message=f"You have successfully transferred ₦{amount:,.0f} from your Savings to Investment.",
+                data={
+                    "amount": float(amount),
+                    "from": "savings",
+                    "to": "investment",
+                    "debit_transaction_id": debit_transaction_id,
+                    "credit_transaction_id": credit_transaction_id,
+                },
+                notif_type="TRANSACTION",
+            )
+
+            return Response(
+                {
+                    "message": "Savings to investment transfer successful.",
+                    "debit_transaction_id": debit_transaction_id,
+                    "credit_transaction_id": credit_transaction_id,
+                },
+                status=status.HTTP_200_OK,
+            )
+
     except Transaction.DoesNotExist:
         return Response(
             {"error": "User account not found."},
@@ -2604,6 +2628,28 @@ def wallet_to_savings(request):
             user.savings += amount
             user.save()
 
+            # Send push notification after successful transfer
+            send_push_notification(
+                user=user,
+                title="Wallet > Savings Successful ✅",
+                message=f"You have successfully transferred ₦{amount:,.0f} from your Wallet to Savings. Well done!",
+                data={
+                    "amount": float(amount),
+                    "from": "wallet",
+                    "to": "savings",
+                    "transaction_id": base_transaction_id,
+                },
+                notif_type="TRANSACTION",
+            )
+
+            return Response(
+                {
+                    "message": "Wallet to savings transfer successful.",
+                    "transaction_id": base_transaction_id,
+                },
+                status=status.HTTP_200_OK,
+            )
+
     except user.DoesNotExist:
         return Response(
             {"error": "User account not found."},
@@ -2698,6 +2744,28 @@ def wallet_to_investment(request):
             user.wallet -= amount
             user.investment += amount
             user.save()
+
+            # Send push notification after successful transfer
+            send_push_notification(
+                user=user,
+                title="Wallet > Investment Successful ✅",
+                message=f"You have successfully transferred ₦{amount:,.0f} from your Wallet to Investment. Well done!",
+                data={
+                    "amount": float(amount),
+                    "from": "wallet",
+                    "to": "investment",
+                    "transaction_id": base_transaction_id,
+                },
+                notif_type="TRANSACTION",
+            )
+
+            return Response(
+                {
+                    "message": "Wallet to investment transfer successful.",
+                    "transaction_id": base_transaction_id,
+                },
+                status=status.HTTP_200_OK,
+            )
 
     except user.DoesNotExist:
         return Response(
@@ -3273,29 +3341,29 @@ def process_withdrawal_to_local_bank(request):
             print("✅ STEP 10.2: User push notification sent (rules compliant).")
 
             # --- Send email to admin with detailed charge information ---
-            admin_subject = f"[CHECK] {user_locked.first_name} Wants to Withdraw"
+            admin_subject = f"[CHECK] {user_locked.first_name} Wants to Withdraw ₦{amount:,.2f} ({withdrawal_type()})"
             admin_message = f"""
-            Hi Admin,
+            Hi Admin, <br><br>
 
             A new withdrawal request has been submitted. The user's account has already been debited.
-            Please review this request and process the payment manually.
+            Please review this request and process the payment manually.<br><br>
 
             User: {user_locked.first_name} {user_locked.last_name}
             Email: {user_locked.email}
             Transaction ID: {transaction_id}
-            
+            <br><br>
             💰 CHARGE DETAILS:
             • Requested Amount: ₦{amount:,.2f}
             • Source Account: {source_account.capitalize()}
             • Charge Rate: {charge_percentage_display}
             • Charge Amount: ₦{charge_amount:,.2f}
             • Amount to Send: ₦{net_amount:,.2f}
-            
+            <br><br>
             🏦 BANK DETAILS:
             • Target Bank: {target_bank_account.bank_name}
             • Account Name: {target_bank_account.account_name}
             • Account Number: {target_bank_account.account_number}
-            
+            <br><br>
             📋 REQUEST DETAILS:
             • Withdrawal Type: {withdrawal_type.capitalize()}
             • Request Date: {withdrawal.created_at.strftime('%Y-%m-%d %H:%M:%S')}
@@ -3334,7 +3402,7 @@ def process_withdrawal_to_local_bank(request):
                 ):
                     # Prepare short push notification message
                     admin_push_message = (
-                        f"New withdrawal: {user_locked.first_name} {user_locked.last_name[:1]}.\n"
+                        f"New withdrawal: {user_locked.first_name} {user_locked.last_name[:1]} ({withdrawal_type()})\n"
                         f"₦{amount:,.2f} from {source_account.capitalize()}\n"
                     )
 
@@ -3369,7 +3437,7 @@ def process_withdrawal_to_local_bank(request):
 
         return Response(
             {
-                "message": f"Withdrawal request created and pending approval. ₦{charge_amount:,.2f} charge applied. ₦{net_amount:,.2f} will be processed to your bank account.",
+                "message": f"Withdrawal request has been received and will be processed shortly. ₦{net_amount:,.2f} will be processed to your bank account.",
                 "transaction_id": transaction_id,
                 "charge_details": {
                     "charge_percentage": f"{rate * 100}%",
