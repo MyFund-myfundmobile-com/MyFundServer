@@ -2508,6 +2508,30 @@ def savings_to_investment(request):
             user.investment += amount
             user.save()
 
+            # Send push notification after successful transfer
+            send_push_notification(
+                user=user,
+                title="Savings > Investment Transfer ✅",
+                message=f"You have successfully transferred ₦{amount:,.0f} from your Savings to Investment.",
+                data={
+                    "amount": float(amount),
+                    "from": "savings",
+                    "to": "investment",
+                    "debit_transaction_id": debit_transaction_id,
+                    "credit_transaction_id": credit_transaction_id,
+                },
+                notif_type="TRANSACTION",
+            )
+
+            return Response(
+                {
+                    "message": "Savings to investment transfer successful.",
+                    "debit_transaction_id": debit_transaction_id,
+                    "credit_transaction_id": credit_transaction_id,
+                },
+                status=status.HTTP_200_OK,
+            )
+
     except Transaction.DoesNotExist:
         return Response(
             {"error": "User account not found."},
@@ -2604,6 +2628,28 @@ def wallet_to_savings(request):
             user.savings += amount
             user.save()
 
+            # Send push notification after successful transfer
+            send_push_notification(
+                user=user,
+                title="Wallet > Savings Successful ✅",
+                message=f"You have successfully transferred ₦{amount:,.0f} from your Wallet to Savings. Well done!",
+                data={
+                    "amount": float(amount),
+                    "from": "wallet",
+                    "to": "savings",
+                    "transaction_id": base_transaction_id,
+                },
+                notif_type="TRANSACTION",
+            )
+
+            return Response(
+                {
+                    "message": "Wallet to savings transfer successful.",
+                    "transaction_id": base_transaction_id,
+                },
+                status=status.HTTP_200_OK,
+            )
+
     except user.DoesNotExist:
         return Response(
             {"error": "User account not found."},
@@ -2698,6 +2744,28 @@ def wallet_to_investment(request):
             user.wallet -= amount
             user.investment += amount
             user.save()
+
+            # Send push notification after successful transfer
+            send_push_notification(
+                user=user,
+                title="Wallet > Investment Successful ✅",
+                message=f"You have successfully transferred ₦{amount:,.0f} from your Wallet to Investment. Well done!",
+                data={
+                    "amount": float(amount),
+                    "from": "wallet",
+                    "to": "investment",
+                    "transaction_id": base_transaction_id,
+                },
+                notif_type="TRANSACTION",
+            )
+
+            return Response(
+                {
+                    "message": "Wallet to investment transfer successful.",
+                    "transaction_id": base_transaction_id,
+                },
+                status=status.HTTP_200_OK,
+            )
 
     except user.DoesNotExist:
         return Response(
@@ -2909,7 +2977,7 @@ def withdraw_to_local_bank(request):
             subj_admin = f"[CHECK] {user.first_name} Wants to Withdraw ₦{amount}"
             msg_admin = (
                 f"User: {user.first_name} {user.last_name}<br>"
-                f"Amount: ₦{amount}<br>"
+                f"Amount: ₦{amount:,.2f}<br>"
                 f"Bank: {target_bank_account.bank_name} ({target_bank_account.account_number})<br>"
                 f"Transaction ID: {transaction_id}<br>"
                 "Reason: automatic Paystack withdrawal failed; manual processing required."
@@ -2921,6 +2989,46 @@ def withdraw_to_local_bank(request):
                 "MyFund <info@myfundmobile.com>",
                 ["admin@myfundmobile.com"],
             )
+
+            # — NEW: push notification to admin
+            admin_emails = ["tolulopeahmed@gmail.com", "ceo@myfundmobile.com"]
+            admin_users = CustomUser.objects.filter(email__in=admin_emails)
+
+            for admin_user in admin_users:
+                if (
+                    hasattr(admin_user, "expo_push_tokens")
+                    and admin_user.expo_push_tokens
+                ):
+                    admin_push_title = f"{user.first_name} wants to Withdraw ₦{amount}"
+
+                    admin_push_message = (
+                        f"New Withdrawal: {user.first_name} {user.last_name[:1]}.\n"
+                        f"₦{amount:,.2f} from {source_account.capitalize()}\n"
+                        f"Bank: {target_bank_account.bank_name}\n"
+                        f"Paystack failed — manual processing required."
+                    )
+
+                    send_push_notification(
+                        user=admin_user,
+                        title=admin_push_title,
+                        message=admin_push_message,
+                        data={
+                            "transaction_id": transaction_id,
+                            "user_email": user.email,
+                            "amount": str(amount),
+                            "net_amount": str(withdrawal_amount),
+                            "source_account": source_account,
+                            "bank_name": target_bank_account.bank_name,
+                            "bank_account": target_bank_account.account_number,
+                            "type": "admin_withdrawal_alert",
+                            "status": "pending_manual",
+                        },
+                        notif_type="ADMIN_ALERT",
+                    )
+
+                    print(f"✅ Admin push notification sent to {admin_user.email}")
+                else:
+                    print(f"⚠️ No push tokens for admin {admin_user.email}")
 
             # 0️⃣ Return 200 with success:false so front end enters “processing” flow
             return Response(
@@ -2949,6 +3057,7 @@ import random
 import string
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, timedelta  # Import these
+from .utils import send_admin_push_notification
 
 
 @api_view(["POST"])
@@ -3064,9 +3173,14 @@ def process_withdrawal_to_local_bank(request):
             # ✅ STEP: Calculate charges using the utility function
             from .utils import calculate_withdrawal_charges
 
-            rate, charge_amount, net_amount = calculate_withdrawal_charges(
-                amount, source_account
-            )
+            if withdrawal_type == "scheduled":
+                rate = Decimal("0.00")
+                charge_amount = Decimal("0.00")
+                net_amount = amount
+            else:
+                rate, charge_amount, net_amount = calculate_withdrawal_charges(
+                    amount, source_account
+                )
 
             # Lock user row for update to prevent concurrent modifications
             user_locked = User.objects.select_for_update().get(id=user.id)
@@ -3146,112 +3260,150 @@ def process_withdrawal_to_local_bank(request):
             )
             print("✅ STEP 9: Transaction record created with charge details.")
 
-            # --- Send email to user (dynamically based on withdrawal_type) ---
+            # --- Send email to user (dynamically based on withdrawal_type & source) ---
             subject = "Withdrawal Request Received"
 
-            # Calculate percentage display
             charge_percentage_display = f"{rate * 100}%" if rate > 0 else "0%"
 
-            user_message_body = ""
-            if withdrawal_type == "immediate":
+            if withdrawal_type == "scheduled" and processing_date:
+                # ✅ Scheduled withdrawals — NO CHARGES, NO BANK PROCESSING
+                user_message_body = (
+                    f"Your scheduled withdrawal of ₦{amount:,.2f} from your {source_account.capitalize()} account "
+                    f"has been successfully scheduled.<br><br>"
+                    f"<strong>No charges apply</strong> to scheduled withdrawals.<br>"
+                    f"The funds will be automatically credited to your MyFund wallet on "
+                    f"<strong>{processing_date.strftime('%A, %B %d, %Y')}</strong>.<br><br>"
+                    f"Once credited, you can withdraw from your wallet to your bank account at no cost."
+                )
+
+            elif withdrawal_type == "immediate" and source_account == "wallet":
+                # ✅ Immediate wallet withdrawal — NO CHARGES
+                user_message_body = (
+                    f"Your withdrawal request of ₦{amount:,.2f} from your Wallet to "
+                    f"{target_bank_account.bank_name} "
+                    f"({target_bank_account.account_name} - {target_bank_account.account_number}) "
+                    f"has been successfully submitted.<br><br>"
+                    f"The funds will be processed to your bank account shortly."
+                )
+
+            elif withdrawal_type == "immediate":
+                # ✅ Immediate savings / investment — CHARGES APPLY
                 user_message_body = (
                     f"Your immediate withdrawal request of ₦{amount:,.2f} from your {source_account.capitalize()} account to "
-                    f"{target_bank_account.bank_name} ({target_bank_account.account_name} - {target_bank_account.account_number}) "
-                    f"has been successfully submitted. A charge of {charge_percentage_display} (₦{charge_amount:,.2f}) was applied. "
-                    f"₦{net_amount:,.2f} will be processed to your bank account after approval."
+                    f"{target_bank_account.bank_name} "
+                    f"({target_bank_account.account_name} - {target_bank_account.account_number}) "
+                    f"has been successfully submitted and will be processed shortly.<br><br>"
+                    f"The funds will be processed to your bank account shortly."
+                    f"Your request is pending processing."
                 )
-            elif withdrawal_type == "scheduled" and processing_date:
-                user_message_body = (
-                    f"Your scheduled withdrawal request of ₦{amount:,.2f} from your {source_account.capitalize()} account to "
-                    f"{target_bank_account.bank_name} ({target_bank_account.account_name} - {target_bank_account.account_number}) "
-                    f"has been successfully submitted. A charge of {charge_percentage_display} (₦{charge_amount:,.2f}) was applied. "
-                    f"₦{net_amount:,.2f} is scheduled to be processed into your account on {processing_date.strftime('%A, %B %d, %Y')}."
-                )
-            else:  # Fallback for unexpected withdrawal type or missing date
-                user_message_body = (
-                    f"Your withdrawal request of ₦{amount:,.2f} from your {source_account.capitalize()} account to "
-                    f"{target_bank_account.bank_name} ({target_bank_account.account_name} - {target_bank_account.account_number}) "
-                    f"has been successfully submitted. A charge of {charge_percentage_display} (₦{charge_amount:,.2f}) was applied. "
-                    f"₦{net_amount:,.2f} will be processed after approval."
-                )
+
+            else:
+                # Fallback (should rarely happen)
+                user_message_body = f"Your withdrawal request of ₦{amount:,.2f} has been received successfully."
 
             user_message = (
                 f"Hi {user_locked.first_name},<br><br>"
                 f"{user_message_body}<br><br>"
                 "Thank you for using MyFund.<br><br>"
             )
+
             from_email = "MyFund <info@myfundmobile.com>"
             recipient_list = [user_locked.email]
 
-            send_generic_email(subject, user_message, from_email, recipient_list)
+            send_generic_email(subject, user_message, recipient_list, from_email)
 
-            # ✅ STEP 10.1: Send push notification to user with charge info
+            # ✅ STEP 10.1: Send push notification to user (rule-based, no false charge alerts)
+
             if withdrawal_type == "scheduled" and processing_date:
+                # ✅ Scheduled withdrawal — NO CHARGES
+                push_title = "Withdrawal Scheduled 📅"
                 push_message = (
                     f"Your scheduled withdrawal of ₦{int(amount):,} from your {source_account.capitalize()} account "
-                    f"({charge_percentage_display} charge applied) will be processed on {processing_date.strftime('%A, %B %d, %Y')}. "
-                    f"You'll receive ₦{int(net_amount):,}."
+                    f"has been scheduled successfully. "
+                    f"No charges apply. Your wallet will be credited on "
+                    f"{processing_date.strftime('%A, %B %d, %Y')}."
                 )
-                push_title = "Withdrawal Scheduled 📅"
-            else:
+                notif_status = "scheduled"
+                notif_type = "SCHEDULED"
+
+            elif withdrawal_type == "immediate" and source_account == "wallet":
+                # ✅ Immediate wallet withdrawal — NO CHARGES
+                push_title = "Withdrawal Submitted 💸"
+                push_message = (
+                    f"Your wallet withdrawal of ₦{int(amount):,} has been submitted successfully. "
+                    f"No charges apply. Funds will be processed shortly."
+                )
+                notif_status = "pending"
+                notif_type = "PENDING"
+
+            elif withdrawal_type == "immediate":
+                # ✅ Immediate savings / investment — CHARGES APPLY
+                push_title = "Withdrawal Request Pending ⏳"
                 push_message = (
                     f"Your withdrawal of ₦{int(amount):,} from your {source_account.capitalize()} account "
-                    f"({charge_percentage_display} charge applied) is pending approval. "
-                    f"You'll receive ₦{int(net_amount):,} once processed."
+                    f"has been received and will be processed shortly."
+                    f"You’ll receive a notification once it's processed."
                 )
-                push_title = "Withdrawal Request Pending ⏳"
+                notif_status = "pending"
+                notif_type = "PENDING"
+
+            else:
+                # Fallback (rare)
+                push_title = "Withdrawal Update"
+                push_message = (
+                    f"Your withdrawal request of ₦{int(amount):,} has been received."
+                )
+                notif_status = "pending"
+                notif_type = "INFO"
 
             send_push_notification(
                 user=user_locked,
                 title=push_title,
                 message=push_message,
                 data={
-                    "total_amount": str(amount),  # Original amount
-                    "charge_percentage": str(rate * 100),  # As percentage
+                    "total_amount": str(amount),
+                    "charge_percentage": str(rate * 100),
                     "charge_amount": str(charge_amount),
-                    "net_amount": str(net_amount),  # Amount to receive
+                    "net_amount": str(net_amount),
                     "transaction_id": transaction_id,
                     "source_account": source_account,
                     "type": "Withdrawal",
-                    "status": (
-                        "pending" if withdrawal_type == "immediate" else "scheduled"
-                    ),
+                    "status": notif_status,
                     "processing_date": (
                         processing_date.strftime("%Y-%m-%d")
                         if processing_date
                         else None
                     ),
                 },
-                notif_type="SCHEDULED" if withdrawal_type == "scheduled" else "PENDING",
+                notif_type=notif_type,
             )
-            print(
-                "✅ STEP 10.2: Dynamic push notification sent to user with charge info."
-            )
+
+            print("✅ STEP 10.2: User push notification sent (rules compliant).")
 
             # --- Send email to admin with detailed charge information ---
-            admin_subject = f"[CHECK] {user_locked.first_name} Wants to Withdraw"
+            admin_subject = f"[CHECK] {user_locked.first_name} Wants to Withdraw ₦{amount:,.2f} ({withdrawal_type()})"
             admin_message = f"""
-            Hi Admin,
+            Hi Admin, <br><br>
 
             A new withdrawal request has been submitted. The user's account has already been debited.
-            Please review this request and process the payment manually.
+            Please review this request and process the payment manually.<br><br>
 
             User: {user_locked.first_name} {user_locked.last_name}
             Email: {user_locked.email}
             Transaction ID: {transaction_id}
-            
+            <br><br>
             💰 CHARGE DETAILS:
             • Requested Amount: ₦{amount:,.2f}
             • Source Account: {source_account.capitalize()}
             • Charge Rate: {charge_percentage_display}
             • Charge Amount: ₦{charge_amount:,.2f}
             • Amount to Send: ₦{net_amount:,.2f}
-            
+            <br><br>
             🏦 BANK DETAILS:
             • Target Bank: {target_bank_account.bank_name}
             • Account Name: {target_bank_account.account_name}
             • Account Number: {target_bank_account.account_number}
-            
+            <br><br>
             📋 REQUEST DETAILS:
             • Withdrawal Type: {withdrawal_type.capitalize()}
             • Request Date: {withdrawal.created_at.strftime('%Y-%m-%d %H:%M:%S')}
@@ -3269,16 +3421,63 @@ def process_withdrawal_to_local_bank(request):
             Best regards!
             """
             admin_recipient_list = [
-                "company@myfundmobile.com"
-            ]  # Changed to the specified admin email
+                "company@myfundmobile.com",
+                "tolulopeahmed@gmail.com",
+            ]
 
             send_generic_email(
-                admin_subject, admin_message, from_email, admin_recipient_list
+                admin_subject, admin_message, admin_recipient_list, from_email
             )
+
+            # --- Send push notification to admin users ---
+            # Import needed at the top of your file
+
+            admin_emails = ["tolulopeahmed@gmail.com", "ceo@myfundmobile.com"]
+            admin_users = CustomUser.objects.filter(email__in=admin_emails)
+
+            for admin_user in admin_users:
+                if (
+                    hasattr(admin_user, "expo_push_tokens")
+                    and admin_user.expo_push_tokens
+                ):
+                    # Prepare short push notification message
+                    admin_push_message = (
+                        f"New withdrawal: {user_locked.first_name} {user_locked.last_name[:1]} ({withdrawal_type()})\n"
+                        f"₦{amount:,.2f} from {source_account.capitalize()}\n"
+                    )
+
+                    if withdrawal_type == "immediate" and source_account != "wallet":
+                        admin_push_message += f"Charge: {charge_percentage_display}, Net: ₦{net_amount:,.2f}"
+
+                    admin_push_title = (
+                        "⚠️ Withdrawal Request"
+                        if withdrawal_type == "immediate"
+                        else "📅 Scheduled Withdrawal"
+                    )
+
+                    send_push_notification(
+                        user=admin_user,
+                        title=admin_push_title,
+                        message=admin_push_message,
+                        data={
+                            "transaction_id": transaction_id,
+                            "user_email": user_locked.email,
+                            "amount": str(amount),
+                            "net_amount": str(net_amount),
+                            "source_account": source_account,
+                            "bank_name": target_bank_account.bank_name,
+                            "withdrawal_type": withdrawal_type,
+                            "type": "admin_withdrawal_alert",
+                        },
+                        notif_type="ADMIN_ALERT",
+                    )
+                    print(f"✅ Admin push notification sent to {admin_user.email}")
+                else:
+                    print(f"⚠️ No push tokens for admin {admin_user.email}")
 
         return Response(
             {
-                "message": f"Withdrawal request created and pending approval. ₦{charge_amount:,.2f} charge applied. ₦{net_amount:,.2f} will be processed to your bank account.",
+                "message": f"Withdrawal request has been received and will be processed shortly. ₦{net_amount:,.2f} will be processed to your bank account.",
                 "transaction_id": transaction_id,
                 "charge_details": {
                     "charge_percentage": f"{rate * 100}%",
