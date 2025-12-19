@@ -3432,6 +3432,7 @@ def process_withdrawal_to_local_bank(request):
             admin_recipient_list = [
                 "company@myfundmobile.com",
                 "tolulopeahmed@gmail.com",
+                "janet.adegbenro@gmail.com",
             ]
 
             send_generic_email(
