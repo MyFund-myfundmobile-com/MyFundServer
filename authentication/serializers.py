@@ -169,9 +169,10 @@ class UserSerializer(serializers.ModelSerializer):
             return obj.profile_picture.url
 
         return None
-    
+
     def get_wealth_stage(self, obj):
         import math
+
         total = obj.savings_and_investments
         if total == 0:
             stage = 1
@@ -596,9 +597,33 @@ from .models import EmailTemplate
 
 
 class EmailTemplateSerializer(serializers.ModelSerializer):
+    design = serializers.SerializerMethodField()
+
     class Meta:
         model = EmailTemplate
-        fields = "__all__"
+        fields = [
+            "id",
+            "title",
+            "design",  # JSON (for Unlayer)
+            "design_html",  # HTML (for preview/send)
+            "last_update",
+        ]
+
+    def get_design(self, obj):
+        if not obj.design_body:
+            return {"body": {}, "counters": {}, "schemaVersion": 1}
+
+        if isinstance(obj.design_body, str):
+            try:
+                parsed = json.loads(obj.design_body)
+                return (
+                    parsed
+                    if parsed and isinstance(parsed, dict)
+                    else {"body": {}, "counters": {}, "schemaVersion": 1}
+                )
+            except Exception:
+                return {"body": {}, "counters": {}, "schemaVersion": 1}
+        return obj.design_body
 
 
 from rest_framework import serializers

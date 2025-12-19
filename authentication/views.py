@@ -62,7 +62,12 @@ from .utils import (
 )
 from .utils import send_generic_email
 from django.db import transaction
-from .utils import send_sms_via_payless, validate_phone_number, send_bulk_sms
+from .utils import (
+    send_sms_via_payless,
+    validate_phone_number,
+    send_bulk_sms,
+    send_admin_push_notification,
+)
 from rest_framework.exceptions import AuthenticationFailed
 
 
@@ -2991,7 +2996,11 @@ def withdraw_to_local_bank(request):
             )
 
             # — NEW: push notification to admin
-            admin_emails = ["tolulopeahmed@gmail.com", "ceo@myfundmobile.com"]
+            admin_emails = [
+                "tolulopeahmed@gmail.com",
+                "ceo@myfundmobile.com",
+                "janet.adegbenro@gmail.com",
+            ]
             admin_users = CustomUser.objects.filter(email__in=admin_emails)
 
             for admin_user in admin_users:
@@ -3268,7 +3277,7 @@ def process_withdrawal_to_local_bank(request):
             if withdrawal_type == "scheduled" and processing_date:
                 # ✅ Scheduled withdrawals — NO CHARGES, NO BANK PROCESSING
                 user_message_body = (
-                    f"Your scheduled withdrawal of ₦{amount:,.2f} from your {source_account.capitalize()} account "
+                    f"Hi {user_locked.first_name},<br><br>"
                     f"has been successfully scheduled.<br><br>"
                     f"<strong>No charges apply</strong> to scheduled withdrawals.<br>"
                     f"The funds will be automatically credited to your MyFund wallet on "
@@ -3318,7 +3327,7 @@ def process_withdrawal_to_local_bank(request):
                 # ✅ Scheduled withdrawal — NO CHARGES
                 push_title = "Withdrawal Scheduled 📅"
                 push_message = (
-                    f"Your scheduled withdrawal of ₦{int(amount):,} from your {source_account.capitalize()} account "
+                    f"Hi {user_locked.first_name},<br><br>"
                     f"has been scheduled successfully. "
                     f"No charges apply. Your wallet will be credited on "
                     f"{processing_date.strftime('%A, %B %d, %Y')}."
@@ -3432,7 +3441,11 @@ def process_withdrawal_to_local_bank(request):
             # --- Send push notification to admin users ---
             # Import needed at the top of your file
 
-            admin_emails = ["tolulopeahmed@gmail.com", "ceo@myfundmobile.com"]
+            admin_emails = [
+                "tolulopeahmed@gmail.com",
+                "ceo@myfundmobile.com",
+                "janet.adegbenro@gmail.com",
+            ]
             admin_users = CustomUser.objects.filter(email__in=admin_emails)
 
             for admin_user in admin_users:
@@ -3624,7 +3637,7 @@ def cancel_scheduled_withdrawal(request):
             send_push_notification(
                 user=user_locked,
                 title="Withdrawal Cancelled ✅",
-                message="Your scheduled withdrawal has been cancelled. ₦{:,.2f} has been refunded to your Savings account.".format(
+                message="Hi {user_locked.first_name}, your scheduled withdrawal has been cancelled. ₦{:,.2f} has been refunded to your Savings account.".format(
                     float(refund_amount)
                 ),
                 data={
@@ -4653,7 +4666,14 @@ def initiate_bank_transfer(request):
             notif_type="PENDING",
         )
 
-        # ✅ Notify Admin
+        # ✅ Notify User via email
+        user_subject = "QuickSave Pending..."
+        user_message = f"Hi {user.first_name},<br><br>Your bank transfer request of ₦{amount} is pending approval. We'll notify you once it's processed.<br><br>Thank you for using MyFund. <br><br>"
+        send_generic_email(
+            user_subject, user_message, "MyFund <info@myfundmobile.com>", [user.email]
+        )
+
+        # ✅ Notify Admin via Email
         subject = f"[CHECK] {user.first_name} Made A QuickSave Request"
         message = f"Hi Admin,<br><br>A bank transfer request of ₦{amount} has been initiated by {user.first_name} {user.last_name} ({user.email}).<br><br>Review here: https://myfundapi-myfund-07ce351a.koyeb.app/admin/<br><br>MyFund Team"
 
@@ -4664,12 +4684,41 @@ def initiate_bank_transfer(request):
             ["company@myfundmobile.com", "info@myfundmobile.com"],
         )
 
-        # ✅ Notify User
-        user_subject = "QuickSave Pending..."
-        user_message = f"Hi {user.first_name},<br><br>Your bank transfer request of ₦{amount} is pending approval. We'll notify you once it's processed.<br><br>Thank you for using MyFund. <br><br>"
-        send_generic_email(
-            user_subject, user_message, "MyFund <info@myfundmobile.com>", [user.email]
-        )
+        # ✅ Notify Admin via Push Notification
+        admin_emails = [
+            "tolulopeahmed@gmail.com",
+            "ceo@myfundmobile.com",
+            "janet.adegbenro@gmail.com",
+        ]
+        admin_users = CustomUser.objects.filter(email__in=admin_emails)
+
+        for admin_user in admin_users:
+            if hasattr(admin_user, "expo_push_tokens") and admin_user.expo_push_tokens:
+                admin_push_title = f"{user.first_name} initiated a New QuickSave"
+                admin_push_message = (
+                    f"{user.first_name} {user.last_name} ({user.email}) has initiated ₦{amount:,.2f} to Savings Account.\n"
+                    f"Please check to confirm."
+                )
+
+                send_push_notification(
+                    user=admin_user,
+                    title=admin_push_title,
+                    message=admin_push_message,
+                    data={
+                        "transaction_id": transaction_id,
+                        "user_email": user.email,
+                        "amount": str(amount),
+                        "type": "QuickSave",
+                        "status": "pending",
+                        "source": "admin_quicksave_alert",
+                    },
+                    notif_type="ADMIN_ALERT",
+                )
+                print(
+                    f"✅ Admin QuickSave push notification sent to {admin_user.email}"
+                )
+            else:
+                print(f"⚠️ No push tokens for admin {admin_user.email}")
 
         return Response(
             {
@@ -4742,6 +4791,7 @@ def initiate_invest_transfer(request):
         )
 
         # Send an email to admin
+        # ✅ Send an email to admin
         subject = f"[CHECK] {user.first_name} Made A QuickInvest Request"
         message = f"Hi Admin, <br><br>An investment transfer request of ₦{amount} has just been initiated by {user.first_name} ({user.email}).<br><br>Please log in to the admin panel for review.<br><br>"
         from_email = "MyFund <info@myfundmobile.com>"
@@ -4752,13 +4802,14 @@ def initiate_invest_transfer(request):
 
         send_generic_email(subject, message, from_email, recipient_list)
 
-        # Send a pending invest email to the user
+        # ✅ Send a pending invest email to the user
         user_subject = "QuickInvest Pending..."
         user_message = f"Hi {user.first_name},<br><br>Your investment transfer request of ₦{amount} is pending approval. We will notify you once it's processed. <br><br>Thank you for using MyFund. <br><br>"
         user_email = user.email
 
         send_generic_email(user_subject, user_message, from_email, [user_email])
 
+        # ✅ Send user push notification
         send_push_notification(
             user=user,
             title="QuickInvest Pending ⏳",
@@ -4773,6 +4824,42 @@ def initiate_invest_transfer(request):
             },
             notif_type="PENDING",
         )
+
+        # ✅ Notify Admin via Push Notification (NEW)
+        admin_emails = [
+            "tolulopeahmed@gmail.com",
+            "ceo@myfundmobile.com",
+            "janet.adegbenro@gmail.com",
+        ]
+        admin_users = CustomUser.objects.filter(email__in=admin_emails)
+
+        for admin_user in admin_users:
+            if hasattr(admin_user, "expo_push_tokens") and admin_user.expo_push_tokens:
+                admin_push_title = f"{user.first_name} initiated a New QuickInvest"
+                admin_push_message = (
+                    f"{user.first_name} {user.last_name} ({user.email}) has initiated ₦{amount:,.2f} to Investment Account.\n"
+                    f"Please check to confirm."
+                )
+
+                send_push_notification(
+                    user=admin_user,
+                    title=admin_push_title,
+                    message=admin_push_message,
+                    data={
+                        "transaction_id": transaction_id,
+                        "user_email": user.email,
+                        "amount": str(amount),
+                        "type": "QuickInvest",
+                        "status": "pending",
+                        "source": "admin_quickinvest_alert",
+                    },
+                    notif_type="ADMIN_ALERT",
+                )
+                print(
+                    f"✅ Admin QuickInvest push notification sent to {admin_user.email}"
+                )
+            else:
+                print(f"⚠️ No push tokens for admin {admin_user.email}")
 
         return Response(
             {
@@ -5275,7 +5362,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             user=user,
                             title="AutoSave Successful! ✅",
                             message=(
-                                f"Your scheduled AutoSave of ₦{Decimal(amount):,.2f} "
+                                f"Hi {user.first_name}, your scheduled AutoSave of ₦{Decimal(amount):,.2f} "
                                 f"({autosave.frequency.capitalize()}) has just been deposited into your savings."
                             ),
                             data={
@@ -5836,13 +5923,11 @@ def save_template(request):
         last_update = data.get("lastUpdate")
 
         # Create or update template
-        template, created = EmailTemplate.objects.update_or_create(
+        template = EmailTemplate.objects.create(
             title=title,
-            defaults={
-                "design_body": design_body,
-                "design_html": design_html,
-                "last_update": last_update,
-            },
+            design_body=design_body,
+            design_html=design_html,
+            last_update=last_update,
         )
 
         serializer = EmailTemplateSerializer(template)
@@ -5886,39 +5971,38 @@ def delete_template(request, template_id):
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
-@require_http_methods(["GET"])
+@api_view(["GET"])
 def get_template(request, template_id):
     try:
         template = EmailTemplate.objects.get(id=template_id)
-        return JsonResponse(
-            {
-                "id": template.id,
-                "title": template.title,
-                "design": template.design_body,  # JSON version
-                "design_html": template.design_html,  # HTML version
-            },
-            safe=False,
-        )
+        serializer = EmailTemplateSerializer(template)
+        return Response(serializer.data, status=status.HTTP_200_OK)
     except EmailTemplate.DoesNotExist:
-        return JsonResponse({"error": "Template not found"}, status=404)
+        return Response(
+            {"error": "Template not found"}, status=status.HTTP_404_NOT_FOUND
+        )
 
 
 @csrf_exempt
-@require_http_methods(["POST"])
+@api_view(["PUT"])
 def update_template(request, template_id):
     try:
         template = EmailTemplate.objects.get(id=template_id)
-        data = json.loads(request.body)
-        template.title = data.get("title", template.title)
-        template.design_body = data.get(
-            "design", template.design_body
-        )  # Update this field
+
+        template.title = request.data.get("title", template.title)
+        template.design_body = request.data.get("designBody", template.design_body)
+        template.design_html = request.data.get("designHTML", template.design_html)
+        template.last_update = request.data.get("lastUpdate", template.last_update)
+
         template.save()
-        return JsonResponse({"message": "Template updated successfully"})
+
+        return Response(
+            EmailTemplateSerializer(template).data,
+            status=status.HTTP_200_OK,
+        )
+
     except EmailTemplate.DoesNotExist:
-        return JsonResponse({"error": "Template not found"}, status=404)
-    except json.JSONDecodeError:
-        return JsonResponse({"error": "Invalid JSON"}, status=400)
+        return Response({"error": "Template not found"}, status=404)
 
 
 @api_view(["GET"])
