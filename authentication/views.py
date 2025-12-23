@@ -3390,7 +3390,7 @@ def process_withdrawal_to_local_bank(request):
             print("✅ STEP 10.2: User push notification sent (rules compliant).")
 
             # --- Send email to admin with detailed charge information ---
-            admin_subject = f"[CHECK] {user_locked.first_name} Wants to Withdraw ₦{amount:,.2f} ({withdrawal_type()})"
+            admin_subject = f"[CHECK] {user_locked.first_name} Wants to Withdraw ₦{amount:,.2f} ({withdrawal_type.capitalize()})"
             admin_message = f"""
             Hi Admin, <br><br>
 
@@ -3456,7 +3456,7 @@ def process_withdrawal_to_local_bank(request):
                 ):
                     # Prepare short push notification message
                     admin_push_message = (
-                        f"New withdrawal: {user_locked.first_name} {user_locked.last_name[:1]} ({withdrawal_type()})\n"
+                        f"New withdrawal: {user_locked.first_name} {user_locked.last_name[:1]} ({withdrawal_type})\n"
                         f"₦{amount:,.2f} from {source_account.capitalize()}\n"
                     )
 
