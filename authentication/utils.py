@@ -559,6 +559,7 @@ def update_top_savers():
 
 
 from decimal import Decimal
+from decimal import Decimal
 
 WITHDRAWAL_CHARGES = {
     "savings": Decimal("0.10"),  # 10%
@@ -567,23 +568,17 @@ WITHDRAWAL_CHARGES = {
 }
 
 
-def calculate_withdrawal_charges(total_amount: Decimal, source_account: str):
+def calculate_withdrawal_charges(amount: Decimal, source_account: str):
     """
-    Calculates charges where total_amount = net_amount + charge_amount
-    If rate is 10%, net_amount is total / 1.10
+    Business rule (FINAL):
+    - Charge is a percentage of the requested amount
+    - Net amount = requested amount - charge
+    - Scheduled withdrawals are handled BEFORE calling this function
     """
     rate = WITHDRAWAL_CHARGES.get(source_account, Decimal("0.00"))
 
-    if rate > 0:
-        # If total is 4790 and rate is 10% (0.10)
-        # Net = 4790 / 1.10 = 4354.54
-        # BUT, based on your specific example:
-        # You want Charge to be 10% of the Net.
-        net_amount = (total_amount / (Decimal("1.0") + rate)).quantize(Decimal("0.01"))
-        charge_amount = (total_amount - net_amount).quantize(Decimal("0.01"))
-    else:
-        net_amount = total_amount
-        charge_amount = Decimal("0.00")
+    charge_amount = (amount * rate).quantize(Decimal("0.01"))
+    net_amount = (amount - charge_amount).quantize(Decimal("0.01"))
 
     return rate, charge_amount, net_amount
 
