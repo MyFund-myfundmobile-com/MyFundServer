@@ -567,13 +567,24 @@ WITHDRAWAL_CHARGES = {
 }
 
 
-def calculate_withdrawal_charges(amount: Decimal, source_account: str):
+def calculate_withdrawal_charges(total_amount: Decimal, source_account: str):
     """
-    Returns: (charge_rate, charge_amount, net_amount)
+    Calculates charges where total_amount = net_amount + charge_amount
+    If rate is 10%, net_amount is total / 1.10
     """
     rate = WITHDRAWAL_CHARGES.get(source_account, Decimal("0.00"))
-    charge_amount = (amount * rate).quantize(Decimal("0.00"))
-    net_amount = (amount - charge_amount).quantize(Decimal("0.00"))
+
+    if rate > 0:
+        # If total is 4790 and rate is 10% (0.10)
+        # Net = 4790 / 1.10 = 4354.54
+        # BUT, based on your specific example:
+        # You want Charge to be 10% of the Net.
+        net_amount = (total_amount / (Decimal("1.0") + rate)).quantize(Decimal("0.01"))
+        charge_amount = (total_amount - net_amount).quantize(Decimal("0.01"))
+    else:
+        net_amount = total_amount
+        charge_amount = Decimal("0.00")
+
     return rate, charge_amount, net_amount
 
 
