@@ -142,7 +142,7 @@ class CustomUserAdmin(UserAdmin):
         "how_did_you_hear",
         "is_hired_referrer",
         "is_ambassador",
-        "kyc_updated",
+        "kyc_status",
         "is_staff",
         "is_active",
         "is_banned",  # 👈 show banned status
@@ -656,9 +656,9 @@ class CustomUserAdmin(UserAdmin):
         for user in queryset:
             if not user.kyc_updated:
                 user.kyc_updated = True
-                user.kyc_status = "Updated!"
-                user.admin_approval_status = "Approved!"
-                user.save()
+                user.kyc_status = "approved"
+                user.save(update_fields=["kyc_status", "kyc_updated"])
+
                 updated_users.append(user)
 
                 # Send an approval email to the user
@@ -675,9 +675,7 @@ class CustomUserAdmin(UserAdmin):
                 send_push_notification(
                     user=user,
                     title="KYC Verified ✅",
-                    message="Hi {}, your KYC has been verified. You can now enjoy full access.".format(
-                        user.first_name
-                    ),
+                    message=f"Hi {user.first_name}, your KYC has been verified. You can now enjoy full access.",
                     data={"kyc_status": "verified"},
                     notif_type="ACCOUNT",
                 )
@@ -707,10 +705,8 @@ class CustomUserAdmin(UserAdmin):
         for user in queryset:
             if user.kyc_updated:
                 user.kyc_updated = False
-                user.kyc_status = "failed"
-                user.admin_approval_status = "rejected"  # Update admin approval status
-
-                user.save()
+                user.kyc_status = "rejected"
+                user.save(update_fields=["kyc_status", "kyc_updated"])
 
                 # Send a rejection email to the user
                 subject = "KYC Update Failed!"
@@ -857,65 +853,80 @@ import uuid
 
 @admin.register(BankTransferRequest)
 class BankTransferRequestAdmin(admin.ModelAdmin):
-    list_display = ("user", "amount", "is_approved", "created_at")
+    list_display = (
+        "user_full_name",
+        "is_approved",
+        "amount",
+        "user_email",
+        "created_at",
+    )
     list_filter = ("is_approved",)
-    search_fields = ("user__email", "transaction_id", "amount")
+    search_fields = (
+        "user__email",
+        "user__first_name",
+        "user__last_name",
+        "transaction_id",
+    )
     actions = ["approve_bank_transfer"]
 
+    # ✅ DISPLAY HELPERS (must be class-level)
+    def user_email(self, obj):
+        return obj.user.email
+
+    user_email.short_description = "Email"
+    user_email.admin_order_field = "user__email"
+
+    def user_full_name(self, obj):
+        return f"{obj.user.first_name} {obj.user.last_name}"
+
+    user_full_name.short_description = "Full Name"
+    user_full_name.admin_order_field = "user__first_name"
+
+    # ✅ ACTION
     def approve_bank_transfer(self, request, queryset):
         for transfer_request in queryset:
             user = transfer_request.user
             transaction_id = transfer_request.transaction_id
 
-            # ✅ Check for existing pending transaction using transaction_id
             transaction = Transaction.objects.filter(
                 user=user, transaction_id=transaction_id, status="pending"
             ).first()
 
-            if transaction:
-                # ✅ Update transaction status
-                transaction.status = "confirmed"
-                transaction.date = timezone.now()
-                transaction.description = "QuickSave (Transfer)"
-                transaction.save()
-            else:
-                # ❌ Log error if transaction is not found
-                print(
-                    f"❌ ERROR: Pending transaction {transaction_id} not found for {user.email}"
-                )
+            if not transaction:
                 self.message_user(
                     request,
                     f"Pending transaction {transaction_id} not found for {user.email}!",
                     level="error",
                 )
-                continue  # Skip processing this request
+                continue
 
-            # ✅ Approve the transfer request
+            transaction.status = "confirmed"
+            transaction.date = timezone.now()
+            transaction.description = "QuickSave (Transfer)"
+            transaction.save()
+
             transfer_request.is_approved = True
             transfer_request.save()
 
-            # ✅ Update user savings
-            user.savings += int(transfer_request.amount)
+            user.savings += transfer_request.amount
             user.save()
 
-            # Call the confirm_referral_rewards method here
             if user.referral:
                 user.confirm_referral_rewards(is_referrer=False)
 
-            # After processing an investment transfer transaction
             user.update_total_savings_and_investment_this_month()
 
-            # ✅ Send Approval Email
-            subject = "QuickSave Updated! ✅"
-            message = f"Hi {user.first_name},\n\nYour bank transfer of ₦{transfer_request.amount} has been approved and added to your savings!\n\nKeep growing your funds! \n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-            send_mail(subject, message, "MyFund <info@myfundmobile.com>", [user.email])
+            send_mail(
+                "QuickSave Updated! ✅",
+                f"Hi {user.first_name},\n\nYour bank transfer of ₦{transfer_request.amount} has been approved.",
+                "MyFund <info@myfundmobile.com>",
+                [user.email],
+            )
 
             send_push_notification(
                 user=user,
                 title="QuickSave Approved ✅",
-                message="Hi {}, your transfer of ₦{:,} has been added to your Savings account. Check to confirm.".format(
-                    user.first_name, int(transfer_request.amount)
-                ),
+                message=f"Hi {user.first_name}, your transfer of ₦{int(transfer_request.amount):,} has been added to your Savings account.",
                 data={
                     "amount": str(transfer_request.amount),
                     "transaction_id": transaction_id,
@@ -925,7 +936,9 @@ class BankTransferRequestAdmin(admin.ModelAdmin):
             )
 
         self.message_user(
-            request, "Selected bank transfers approved successfully!", level="success"
+            request,
+            "Selected bank transfers approved successfully!",
+            level="success",
         )
 
     approve_bank_transfer.short_description = "Approve selected bank transfers"

@@ -499,9 +499,20 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     )
 
     # KYC status
-    kyc_updated = models.BooleanField(default=False)
-    kyc_status = models.CharField(max_length=20, default="Not yet started")
-    admin_approval_status = models.CharField(max_length=20, default="Not yet started")
+    KYC_STATUS_CHOICES = (
+        ("not_started", "Not Started"),
+        ("submitted", "Submitted (Pending Review)"),
+        ("approved", "Approved"),
+        ("rejected", "Rejected"),
+    )
+
+    kyc_status = models.CharField(
+        max_length=20,
+        choices=KYC_STATUS_CHOICES,
+        default="not_started",
+    )
+
+    kyc_updated = models.BooleanField(default=False)  # keep for backward compatibility
 
     notification_preferences = models.JSONField(default=dict, null=True, blank=True)
 

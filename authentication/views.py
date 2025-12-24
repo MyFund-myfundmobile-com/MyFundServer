@@ -2997,8 +2997,6 @@ def withdraw_to_local_bank(request):
 
             # — NEW: push notification to admin
             # --- Send push notification to admin users ---
-            # — NEW: push notification to admin
-            # --- Send push notification to admin users ---
             admin_emails = [
                 "tolulopeahmed@gmail.com",
                 "ceo@myfundmobile.com",
@@ -3445,7 +3443,6 @@ def process_withdrawal_to_local_bank(request):
 
             # --- Send push notification to admin users ---
             # Import needed at the top of your file
-
             admin_emails = [
                 "tolulopeahmed@gmail.com",
                 "ceo@myfundmobile.com",
@@ -3462,7 +3459,7 @@ def process_withdrawal_to_local_bank(request):
                     admin_push_message = f"{user_locked.first_name} {user_locked.last_name} wants to withdraw ₦{amount:,.2f} from {source_account.capitalize()}\n"
 
                     if withdrawal_type == "immediate" and source_account != "wallet":
-                        admin_push_message += f"Charge: {charge_percentage_display}. Send ₦{net_amount:,.2f} to {target_bank_account.account_name} ({target_bank_account.account_number}"
+                        admin_push_message += f"Charge: {charge_percentage_display}. Send ₦{net_amount:,.2f} to {target_bank_account.account_name} ({target_bank_account.account_number})."
 
                     admin_push_title = (
                         f"⚠️ Withdrawal Request ({withdrawal_type})"
@@ -4396,9 +4393,11 @@ class KYCUpdateView(generics.UpdateAPIView):
         self.perform_update(serializer)
 
         # If not yet approved, mark as pending and notify user by email
-        if user.kyc_status != "Updated!":
-            user.kyc_status = "Pending..."
-            user.save()
+        # Mark KYC as submitted (pending review)
+        if user.kyc_status != "approved":
+            user.kyc_status = "submitted"
+            user.kyc_updated = False
+            user.save(update_fields=["kyc_status", "kyc_updated"])
 
             # 1️⃣ Email to user
             user_subject = "KYC Update Received... 🕒"
@@ -4435,6 +4434,32 @@ class KYCUpdateView(generics.UpdateAPIView):
             admin_subject, admin_message, "MyFund <info@myfundmobile.com>", admin_email
         )
 
+        # 4️⃣ Push notification to admin (KYC alert)
+        admin_emails = [
+            "tolulopeahmed@gmail.com",
+            "ceo@myfundmobile.com",
+            "janet.adegbenro@gmail.com",
+        ]
+
+        admin_users = CustomUser.objects.filter(email__in=admin_emails)
+
+        for admin_user in admin_users:
+            if hasattr(admin_user, "expo_push_tokens") and admin_user.expo_push_tokens:
+                send_push_notification(
+                    user=admin_user,
+                    title=f"🪪 {user.first_name} Submitted KYC",
+                    message=(
+                        f"{user.first_name} {user.last_name} has submitted KYC details.\n"
+                        f"Please check Django admin to review."
+                    ),
+                    data={
+                        "user_email": user.email,
+                        "kyc_status": "pending",
+                        "type": "admin_kyc_alert",
+                    },
+                    notif_type="ADMIN_ALERT",
+                )
+
         return Response(serializer.data)
 
 
@@ -4451,12 +4476,12 @@ class GetKYCStatusView(APIView):
 
         if kyc_status is None:
             message = "You haven't started your KYC process."
-        elif kyc_status == "Pending...":
-            message = "KYC status is pending approval."
-        elif kyc_status == "Updated!":
-            message = "KYC status has been updated."
-        elif kyc_status == "Failed":
-            message = "KYC update has been rejected."
+        elif kyc_status == "submitted":
+            message = "Your KYC is pending review."
+        elif kyc_status == "approved":
+            message = "Your KYC has been approved."
+        elif kyc_status == "rejected":
+            message = "Your KYC was rejected."
 
         return Response(
             {"kycStatus": kyc_status, "message": message}, status=status.HTTP_200_OK
