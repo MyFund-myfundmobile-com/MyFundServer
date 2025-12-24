@@ -12,17 +12,25 @@ import random
 import string
 import requests
 import time
+import logging
+import requests
+from django.contrib.auth import get_user_model
+from .models import PushNotifications  # Ensure this is the correct import
 
 logger = logging.getLogger(__name__)
 
 EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
 
+ADMIN_PUSH_EMAILS = [
+    "tolulopeahmed@gmail.com",
+    "ceo@myfundmobile.com",
+]
+
 
 def send_push_notification(user, title, message, data=None, notif_type="SYSTEM"):
+    """Send a push notification to a user via Expo and store in DB."""
     data = data or {}
-    tokens = user.expo_push_tokens or []
-
-    tokens = user.expo_push_tokens or []
+    tokens = getattr(user, "expo_push_tokens", []) or []
 
     notification = PushNotifications.objects.create(
         user=user,
@@ -31,18 +39,13 @@ def send_push_notification(user, title, message, data=None, notif_type="SYSTEM")
         notification_type=notif_type,
         data=data,
     )
-    print(f"📝 Created notification ID {notification.id} for {user.email}")
+    logger.info(f"Created notification ID {notification.id} for {user.email}")
 
     if not tokens:
-        print(f"❌ No push tokens for {user.email}")
-        return None
+        logger.warning(f"No push tokens for {user.email}")
+        return {"sent": 0, "total": 0}
 
-    success_count = 0
-    for token_entry in tokens:
-        token = token_entry.get("token")
-        if not token:
-            continue
-
+    sent_count = 0
     for token_entry in tokens:
         token = token_entry.get("token")
         if not token:
@@ -54,42 +57,52 @@ def send_push_notification(user, title, message, data=None, notif_type="SYSTEM")
             "title": title,
             "body": message,
             "data": {**data, "notification_id": str(notification.id)},
-            "data": {**data, "notification_id": str(notification.id)},
             "channelId": "default",
             "priority": "high",
         }
 
-        headers = {
-            "Accept": "application/json",
-            "Accept-encoding": "gzip, deflate",
-            "Content-Type": "application/json",
-        }
-
-        headers = {
-            "Accept": "application/json",
-            "Accept-encoding": "gzip, deflate",
-            "Content-Type": "application/json",
-        }
+        headers = {"Accept": "application/json", "Content-Type": "application/json"}
 
         try:
-            response = requests.post(
+            resp = requests.post(
                 EXPO_PUSH_URL, json=payload, headers=headers, timeout=10
             )
-            res_data = response.json()
-            print(f"📤 Sent to {token}: {res_data}")
-
-            if res_data.get("data", {}).get("status") != "ok":
-                print(f"❌ Failed for token: {token}")
-            if res_data.get("data", {}).get("status") != "ok":
-                print(f"❌ Failed for token: {token}")
+            res_data = resp.json()
+            if res_data.get("data", {}).get("status") == "ok":
+                sent_count += 1
             else:
-                success_count += 1
-
+                logger.warning(f"Failed sending push to {token}: {res_data}")
         except Exception as e:
-            print(f"🔥 Error sending to {token}: {str(e)}")
+            logger.error(f"Error sending push to {token}: {e}")
 
-    return {"sent": success_count, "total": len(tokens)}
-    return {"sent": success_count, "total": len(tokens)}
+    return {"sent": sent_count, "total": len(tokens)}
+
+
+def send_admin_push_notification(title, message, data=None, notif_type="ADMIN_ALERT"):
+    """Send push notifications to all admin users."""
+    User = get_user_model()
+    admins = User.objects.filter(email__in=ADMIN_PUSH_EMAILS)
+    if not admins.exists():
+        logger.warning("No admin users found for push notification")
+        return {"sent": 0, "total": 0}
+
+    sent_count = 0
+    for admin in admins:
+        if getattr(admin, "expo_push_tokens", []):
+            result = send_push_notification(
+                user=admin,
+                title=title,
+                message=message,
+                data=data,
+                notif_type=notif_type,
+            )
+            if result and result.get("sent", 0) > 0:
+                sent_count += 1
+                logger.info(f"Admin push sent to {admin.email}")
+        else:
+            logger.warning(f"No push tokens for admin {admin.email}")
+
+    return {"sent": sent_count, "total": admins.count()}
 
 
 import threading
@@ -546,6 +559,7 @@ def update_top_savers():
 
 
 from decimal import Decimal
+from decimal import Decimal
 
 WITHDRAWAL_CHARGES = {
     "savings": Decimal("0.10"),  # 10%
@@ -556,11 +570,16 @@ WITHDRAWAL_CHARGES = {
 
 def calculate_withdrawal_charges(amount: Decimal, source_account: str):
     """
-    Returns: (charge_rate, charge_amount, net_amount)
+    Business rule (FINAL):
+    - Charge is a percentage of the requested amount
+    - Net amount = requested amount - charge
+    - Scheduled withdrawals are handled BEFORE calling this function
     """
     rate = WITHDRAWAL_CHARGES.get(source_account, Decimal("0.00"))
-    charge_amount = (amount * rate).quantize(Decimal("0.00"))
-    net_amount = (amount - charge_amount).quantize(Decimal("0.00"))
+
+    charge_amount = (amount * rate).quantize(Decimal("0.01"))
+    net_amount = (amount - charge_amount).quantize(Decimal("0.01"))
+
     return rate, charge_amount, net_amount
 
 
@@ -605,7 +624,7 @@ def process_scheduled_withdrawal(withdrawal):
         user=user,
         title="Withdrawal Ready 🎉",
         message=(
-            f"Your scheduled withdrawal of ₦{amount:,.2f} is complete. "
+            f"Hi {user.first_name}, your scheduled withdrawal of ₦{amount:,.2f} is complete. "
             "Your wallet has been credited and you can withdraw now with no charges."
         ),
         data={
@@ -648,35 +667,3 @@ def process_scheduled_withdrawal(withdrawal):
         "MyFund <info@myfundmobile.com>",
         ["tolulopeahmed@gmail.com"],
     )
-
-
-from django.contrib.auth import get_user_model
-
-ADMIN_PUSH_EMAILS = [
-    "tolulopeahmed@gmail.com",
-    "ceo@myfundmobile.com",
-]
-
-
-def send_admin_push_notification(title, message, data=None, notif_type="ADMIN"):
-    """
-    Reusable admin push notifier.
-    Call this anywhere you need to alert admin via push.
-    """
-    User = get_user_model()
-    data = data or {}
-
-    admins = User.objects.filter(email__in=ADMIN_PUSH_EMAILS)
-
-    if not admins.exists():
-        logger.warning("⚠️ No admin users found for push notification")
-        return
-
-    for admin in admins:
-        send_push_notification(
-            user=admin,
-            title=title,
-            message=message,
-            data=data,
-            notif_type=notif_type,
-        )
