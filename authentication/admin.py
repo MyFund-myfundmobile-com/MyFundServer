@@ -1021,10 +1021,10 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
         "user",
         "source_account",
         "withdrawal_type",
-        "total_amount_display",  # Original amount requested
-        "charge_percentage_display",  # Charge percentage
-        "charge_amount_display",  # Actual charge amount
-        "net_amount_display",  # Amount to send (process amount)
+        "total_amount_display",  # Original requested amount
+        "charge_percentage_display",  # %
+        "charge_amount_display",  # ₦ charge
+        "net_amount_display",  # ₦ to send
         "target_bank",
         "target_account_number",
         "created_at",
@@ -1048,181 +1048,113 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
 
     actions = ["approve_withdrawal"]
 
-    # Custom display methods
+    # =========================
+    # DISPLAY HELPERS (READ-ONLY)
+    # =========================
+
     def total_amount_display(self, obj):
-        """Display original amount requested"""
-        if hasattr(obj, "total_amount") and obj.total_amount:
-            return f"₦{obj.total_amount:,.2f}"
-        # Fallback to amount field if total_amount doesn't exist
-        return f"₦{obj.amount:,.2f}"
+        """Original amount requested by user"""
+        return f"₦{obj.total_amount:,.2f}"
 
     total_amount_display.short_description = "Requested"
-    total_amount_display.admin_order_field = "total_amount"
 
     def charge_percentage_display(self, obj):
-        """Display charge percentage considering withdrawal type"""
+        """Stored charge percentage"""
         if obj.withdrawal_type.lower() != "immediate":
-            rate = 0
-        else:
-            from .utils import calculate_withdrawal_charges
-
-            _, _, _ = calculate_withdrawal_charges(obj.amount, obj.source_account)
-            rate, _, _ = calculate_withdrawal_charges(obj.amount, obj.source_account)
-        return f"{(rate * 100):.0f}%"
+            return "0%"
+        return f"{obj.charge_percentage:.0f}%"
 
     charge_percentage_display.short_description = "%"
-    charge_percentage_display.admin_order_field = "charge_percentage"
 
     def charge_amount_display(self, obj):
-        """Display actual charge amount"""
-        if obj.withdrawal_type.lower() != "immediate":
-            charge_amount = 0
-        else:
-            from .utils import calculate_withdrawal_charges
-
-            _, charge_amount, _ = calculate_withdrawal_charges(
-                obj.amount, obj.source_account
-            )
-        return f"₦{charge_amount:,.2f}"
+        """Stored charge amount"""
+        return f"₦{obj.charge_amount:,.2f}"
 
     charge_amount_display.short_description = "Charge"
-    charge_amount_display.admin_order_field = "charge_amount"
 
     def net_amount_display(self, obj):
-        """Display net amount (amount to send)"""
-        if obj.withdrawal_type.lower() != "immediate":
-            net_amount = obj.amount
-        else:
-            from .utils import calculate_withdrawal_charges
-
-            _, _, net_amount = calculate_withdrawal_charges(
-                obj.amount, obj.source_account
-            )
-        return f"₦{net_amount:,.2f}"
+        """Amount admin should send"""
+        return f"₦{obj.amount:,.2f}"
 
     net_amount_display.short_description = "To Send"
-    net_amount_display.admin_order_field = "amount"
+
+    # =========================
+    # ADMIN ACTION
+    # =========================
 
     def approve_withdrawal(self, request, queryset):
         approved_count = 0
-        for withdrawal_request in queryset:
-            user = withdrawal_request.user
 
-            # Use net amount (amount to send) for the approval message
-            if hasattr(withdrawal_request, "amount"):
-                amount_to_send = withdrawal_request.amount  # This is net_amount
-            else:
-                amount_to_send = withdrawal_request.amount  # Fallback
-
-            transaction_id = withdrawal_request.transaction_id
-
-            # Skip already approved requests
-            if withdrawal_request.is_approved:
+        for withdrawal in queryset:
+            if withdrawal.is_approved:
                 continue
 
-            with db_transaction.atomic():  # Ensure consistency
-                # Mark withdrawal as approved
-                withdrawal_request.is_approved = True
-                withdrawal_request.save()
+            user = withdrawal.user
+            transaction_id = withdrawal.transaction_id
 
-                # Update the transaction record's status
-                try:
-                    transaction_record = Transaction.objects.get(
+            try:
+                with db_transaction.atomic():
+                    withdrawal.is_approved = True
+                    withdrawal.save(update_fields=["is_approved"])
+
+                    transaction = Transaction.objects.get(
                         user=user, transaction_id=transaction_id
                     )
-                    transaction_record.status = (
-                        "confirmed"  # Update status to confirmed
+                    transaction.status = "confirmed"
+                    transaction.description = (
+                        f"Withdrawal: Sent ₦{withdrawal.amount:,.2f} "
+                        f"(Fee: ₦{withdrawal.charge_amount:,.2f})"
                     )
-                    transaction_record.description = f"{withdrawal_request.source_account.capitalize()} > Bank"  # Updated description
-                    transaction_record.save()  # Save changes
+                    transaction.save()
+
                     approved_count += 1
 
-                    # ✅ Send push notification
+                    # Push notification
                     send_push_notification(
                         user=user,
                         title="Withdrawal Approved! ✅",
-                        message="Your withdrawal of ₦{:,} to your {} has been approved and processed. Thank you for using MyFund.".format(
-                            int(amount_to_send), withdrawal_request.target_bank
+                        message=(
+                            f"Your withdrawal of ₦{withdrawal.amount:,.2f} "
+                            f"to {withdrawal.target_bank} has been approved."
                         ),
                         data={
-                            "amount": str(amount_to_send),
+                            "amount": str(withdrawal.amount),
                             "transaction_id": transaction_id,
-                            "source_account": withdrawal_request.source_account,
-                            "type": "Withdrawal",
+                            "source_account": withdrawal.source_account,
                             "status": "confirmed",
                         },
                         notif_type="DEBIT",
                     )
 
-                except Transaction.DoesNotExist:
-                    self.message_user(
-                        request,
-                        f"Warning: Corresponding transaction {transaction_id} not found for user {user.email}. Withdrawal request marked as approved.",
-                        level="warning",
-                    )
-                    continue
-
-                # Send email notification
-                subject = "Withdrawal Approved! ✔"
-                message = (
-                    f"Hi {user.first_name},\n\n"
-                    f"Good news! Your withdrawal of ₦{amount_to_send:,.2f} from your {withdrawal_request.source_account.capitalize()} account to {withdrawal_request.target_bank} "
-                    f"({withdrawal_request.target_account_number}) has been approved and processed successfully.\n\n"
-                    f"Transaction ID: {transaction_id}\n\n"
-                    f"Thank you for using MyFund.\n\n"
-                    f"MyFund\nSave, Buy Properties, Earn Rent\n"
-                    f"www.myfundmobile.com\n"
-                    f"13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-                )
-                try:
+                    # Email
                     send_mail(
-                        subject,
-                        message,
-                        "MyFund <info@myfundmobile.com>",
-                        [user.email],
+                        subject="Withdrawal Approved ✔",
+                        message=(
+                            f"Hi {user.first_name},\n\n"
+                            f"Your withdrawal of ₦{withdrawal.amount:,.2f} from your "
+                            f"{withdrawal.source_account.capitalize()} account "
+                            f"has been approved.\n\n"
+                            f"Transaction ID: {transaction_id}\n\n"
+                            f"MyFund Team"
+                        ),
+                        from_email="MyFund <info@myfundmobile.com>",
+                        recipient_list=[user.email],
                         fail_silently=False,
                     )
-                except Exception as e:
-                    self.message_user(
-                        request,
-                        f"Error sending email for withdrawal {transaction_id}: {e}",
-                        level="error",
-                    )
 
-        if approved_count > 0:
+            except Exception as e:
+                self.message_user(
+                    request,
+                    f"Error approving {transaction_id}: {str(e)}",
+                    level="error",
+                )
+
+        if approved_count:
             self.message_user(
-                request,
-                f"{approved_count} selected withdrawal(s) have been approved and confirmed.",
+                request, f"{approved_count} withdrawal(s) approved successfully."
             )
         else:
-            self.message_user(
-                request,
-                "No new withdrawals were approved (they might have already been approved).",
-            )
-
-    approve_withdrawal.short_description = (
-        "Approve selected withdrawal requests (mark as paid)"
-    )
-
-
-@admin.register(Message)
-class MessageAdmin(admin.ModelAdmin):
-    list_display = ("sender", "recipient", "content", "timestamp")
-    list_filter = ("timestamp",)
-    search_fields = ("sender__email", "recipient__email", "content")
-
-    actions = ["reply_to_selected_messages"]  # Add a custom action
-
-
-def reply_to_messages(modeladmin, request, queryset):
-    for message in queryset:
-        # Implement your reply logic here, e.g., sending a notification to the user
-        # or performing any other actions needed to send a reply.
-        pass
-
-
-reply_to_messages.short_description = "Reply to selected messages"
-admin.site.add_action(reply_to_messages)
+            self.message_user(request, "No withdrawals were approved.")
 
 
 class BankAccountAdmin(admin.ModelAdmin):
