@@ -2985,7 +2985,7 @@ def withdraw_to_local_bank(request):
                 f"Amount: ₦{amount:,.2f}<br>"
                 f"Bank: {target_bank_account.bank_name} ({target_bank_account.account_number})<br>"
                 f"Transaction ID: {transaction_id}<br>"
-                "Reason: automatic Paystack withdrawal failed; manual processing required."
+                "Reason: automatic Paystack withdrawal failed; manual processing required.<br>"
             )
 
             send_generic_email(
@@ -2996,6 +2996,9 @@ def withdraw_to_local_bank(request):
             )
 
             # — NEW: push notification to admin
+            # --- Send push notification to admin users ---
+            # — NEW: push notification to admin
+            # --- Send push notification to admin users ---
             admin_emails = [
                 "tolulopeahmed@gmail.com",
                 "ceo@myfundmobile.com",
@@ -3003,19 +3006,22 @@ def withdraw_to_local_bank(request):
             ]
             admin_users = CustomUser.objects.filter(email__in=admin_emails)
 
+            # Calculate charge percentage display
+            charge_percentage_display = f"{rate * 100}%" if rate > 0 else "0%"
+
             for admin_user in admin_users:
                 if (
                     hasattr(admin_user, "expo_push_tokens")
                     and admin_user.expo_push_tokens
                 ):
-                    admin_push_title = f"{user.first_name} wants to Withdraw ₦{amount}"
-
+                    # Prepare short push notification message with bank details
+                    # Note: In this function, withdrawal_type is always "immediate" for Paystack fallback
                     admin_push_message = (
-                        f"New Withdrawal: {user.first_name} {user.last_name[:1]}.\n"
-                        f"₦{amount:,.2f} from {source_account.capitalize()}\n"
-                        f"Bank: {target_bank_account.bank_name}\n"
-                        f"Paystack failed — manual processing required."
+                        f"{user.first_name} {user.last_name} wants to withdraw ₦{amount:,.2f} from {source_account.capitalize()}\n"
+                        f"Charge: {charge_percentage_display}. Send ₦{withdrawal_amount:,.2f} to {target_bank_account.bank_name} ({target_bank_account.account_number})"
                     )
+
+                    admin_push_title = "⚠️ Withdrawal Request (immediate)"
 
                     send_push_notification(
                         user=admin_user,
@@ -3028,13 +3034,11 @@ def withdraw_to_local_bank(request):
                             "net_amount": str(withdrawal_amount),
                             "source_account": source_account,
                             "bank_name": target_bank_account.bank_name,
-                            "bank_account": target_bank_account.account_number,
+                            "withdrawal_type": "immediate",
                             "type": "admin_withdrawal_alert",
-                            "status": "pending_manual",
                         },
                         notif_type="ADMIN_ALERT",
                     )
-
                     print(f"✅ Admin push notification sent to {admin_user.email}")
                 else:
                     print(f"⚠️ No push tokens for admin {admin_user.email}")
@@ -3455,16 +3459,13 @@ def process_withdrawal_to_local_bank(request):
                     and admin_user.expo_push_tokens
                 ):
                     # Prepare short push notification message
-                    admin_push_message = (
-                        f"New withdrawal: {user_locked.first_name} {user_locked.last_name[:1]} ({withdrawal_type})\n"
-                        f"₦{amount:,.2f} from {source_account.capitalize()}\n"
-                    )
+                    admin_push_message = f"{user_locked.first_name} {user_locked.last_name} wants to withdraw ₦{amount:,.2f} from {source_account.capitalize()}\n"
 
                     if withdrawal_type == "immediate" and source_account != "wallet":
-                        admin_push_message += f"Charge: {charge_percentage_display}, Net: ₦{net_amount:,.2f}"
+                        admin_push_message += f"Charge: {charge_percentage_display}. Send ₦{net_amount:,.2f} to {target_bank_account.account_name} ({target_bank_account.account_number}"
 
                     admin_push_title = (
-                        "⚠️ Withdrawal Request"
+                        f"⚠️ Withdrawal Request ({withdrawal_type})"
                         if withdrawal_type == "immediate"
                         else "📅 Scheduled Withdrawal"
                     )
