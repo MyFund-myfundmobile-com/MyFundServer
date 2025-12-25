@@ -2985,7 +2985,7 @@ def withdraw_to_local_bank(request):
                 f"Amount: ₦{amount:,.2f}<br>"
                 f"Bank: {target_bank_account.bank_name} ({target_bank_account.account_number})<br>"
                 f"Transaction ID: {transaction_id}<br>"
-                "Reason: automatic Paystack withdrawal failed; manual processing required."
+                "Reason: automatic Paystack withdrawal failed; manual processing required.<br>"
             )
 
             send_generic_email(
@@ -2996,6 +2996,7 @@ def withdraw_to_local_bank(request):
             )
 
             # — NEW: push notification to admin
+            # --- Send push notification to admin users ---
             admin_emails = [
                 "tolulopeahmed@gmail.com",
                 "ceo@myfundmobile.com",
@@ -3003,19 +3004,22 @@ def withdraw_to_local_bank(request):
             ]
             admin_users = CustomUser.objects.filter(email__in=admin_emails)
 
+            # Calculate charge percentage display
+            charge_percentage_display = f"{rate * 100}%" if rate > 0 else "0%"
+
             for admin_user in admin_users:
                 if (
                     hasattr(admin_user, "expo_push_tokens")
                     and admin_user.expo_push_tokens
                 ):
-                    admin_push_title = f"{user.first_name} wants to Withdraw ₦{amount}"
-
+                    # Prepare short push notification message with bank details
+                    # Note: In this function, withdrawal_type is always "immediate" for Paystack fallback
                     admin_push_message = (
-                        f"New Withdrawal: {user.first_name} {user.last_name[:1]}.\n"
-                        f"₦{amount:,.2f} from {source_account.capitalize()}\n"
-                        f"Bank: {target_bank_account.bank_name}\n"
-                        f"Paystack failed — manual processing required."
+                        f"{user.first_name} {user.last_name} wants to withdraw ₦{amount:,.2f} from {source_account.capitalize()}\n"
+                        f"Charge: {charge_percentage_display}. Send ₦{withdrawal_amount:,.2f} to {target_bank_account.bank_name} ({target_bank_account.account_number})"
                     )
+
+                    admin_push_title = "⚠️ Withdrawal Request (immediate)"
 
                     send_push_notification(
                         user=admin_user,
@@ -3028,13 +3032,11 @@ def withdraw_to_local_bank(request):
                             "net_amount": str(withdrawal_amount),
                             "source_account": source_account,
                             "bank_name": target_bank_account.bank_name,
-                            "bank_account": target_bank_account.account_number,
+                            "withdrawal_type": "immediate",
                             "type": "admin_withdrawal_alert",
-                            "status": "pending_manual",
                         },
                         notif_type="ADMIN_ALERT",
                     )
-
                     print(f"✅ Admin push notification sent to {admin_user.email}")
                 else:
                     print(f"⚠️ No push tokens for admin {admin_user.email}")
@@ -3441,7 +3443,6 @@ def process_withdrawal_to_local_bank(request):
 
             # --- Send push notification to admin users ---
             # Import needed at the top of your file
-
             admin_emails = [
                 "tolulopeahmed@gmail.com",
                 "ceo@myfundmobile.com",
@@ -3455,16 +3456,13 @@ def process_withdrawal_to_local_bank(request):
                     and admin_user.expo_push_tokens
                 ):
                     # Prepare short push notification message
-                    admin_push_message = (
-                        f"New withdrawal: {user_locked.first_name} {user_locked.last_name[:1]} ({withdrawal_type})\n"
-                        f"₦{amount:,.2f} from {source_account.capitalize()}\n"
-                    )
+                    admin_push_message = f"{user_locked.first_name} {user_locked.last_name} wants to withdraw ₦{amount:,.2f} from {source_account.capitalize()}\n"
 
                     if withdrawal_type == "immediate" and source_account != "wallet":
-                        admin_push_message += f"Charge: {charge_percentage_display}, Net: ₦{net_amount:,.2f}"
+                        admin_push_message += f"Charge: {charge_percentage_display}. Send ₦{net_amount:,.2f} to {target_bank_account.account_name} ({target_bank_account.account_number})."
 
                     admin_push_title = (
-                        "⚠️ Withdrawal Request"
+                        f"⚠️ Withdrawal Request ({withdrawal_type})"
                         if withdrawal_type == "immediate"
                         else "📅 Scheduled Withdrawal"
                     )
@@ -4395,9 +4393,11 @@ class KYCUpdateView(generics.UpdateAPIView):
         self.perform_update(serializer)
 
         # If not yet approved, mark as pending and notify user by email
-        if user.kyc_status != "Updated!":
-            user.kyc_status = "Pending..."
-            user.save()
+        # Mark KYC as submitted (pending review)
+        if user.kyc_status != "approved":
+            user.kyc_status = "submitted"
+            user.kyc_updated = False
+            user.save(update_fields=["kyc_status", "kyc_updated"])
 
             # 1️⃣ Email to user
             user_subject = "KYC Update Received... 🕒"
@@ -4434,6 +4434,32 @@ class KYCUpdateView(generics.UpdateAPIView):
             admin_subject, admin_message, "MyFund <info@myfundmobile.com>", admin_email
         )
 
+        # 4️⃣ Push notification to admin (KYC alert)
+        admin_emails = [
+            "tolulopeahmed@gmail.com",
+            "ceo@myfundmobile.com",
+            "janet.adegbenro@gmail.com",
+        ]
+
+        admin_users = CustomUser.objects.filter(email__in=admin_emails)
+
+        for admin_user in admin_users:
+            if hasattr(admin_user, "expo_push_tokens") and admin_user.expo_push_tokens:
+                send_push_notification(
+                    user=admin_user,
+                    title=f"🪪 {user.first_name} Submitted KYC",
+                    message=(
+                        f"{user.first_name} {user.last_name} has submitted KYC details.\n"
+                        f"Please check Django admin to review."
+                    ),
+                    data={
+                        "user_email": user.email,
+                        "kyc_status": "pending",
+                        "type": "admin_kyc_alert",
+                    },
+                    notif_type="ADMIN_ALERT",
+                )
+
         return Response(serializer.data)
 
 
@@ -4450,12 +4476,12 @@ class GetKYCStatusView(APIView):
 
         if kyc_status is None:
             message = "You haven't started your KYC process."
-        elif kyc_status == "Pending...":
-            message = "KYC status is pending approval."
-        elif kyc_status == "Updated!":
-            message = "KYC status has been updated."
-        elif kyc_status == "Failed":
-            message = "KYC update has been rejected."
+        elif kyc_status == "submitted":
+            message = "Your KYC is pending review."
+        elif kyc_status == "approved":
+            message = "Your KYC has been approved."
+        elif kyc_status == "rejected":
+            message = "Your KYC was rejected."
 
         return Response(
             {"kycStatus": kyc_status, "message": message}, status=status.HTTP_200_OK
