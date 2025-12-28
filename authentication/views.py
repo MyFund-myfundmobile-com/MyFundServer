@@ -4641,7 +4641,7 @@ def initiate_bank_transfer(request):
             amount = Decimal(str(amount_raw))
 
             # Validate amount is positive
-            if amount <= 100:
+            if amount < 100:
                 return Response(
                     {"error": "Amount must be greater than #100"},
                     status=status.HTTP_400_BAD_REQUEST,
@@ -4771,41 +4771,37 @@ def initiate_invest_transfer(request):
         user = request.user
         amount_raw = request.data.get("amount")
 
-        # Validate and convert amount to Decimal
         if not amount_raw:
             return Response(
-                {"error": "Amount is required"}, status=status.HTTP_400_BAD_REQUEST
+                {"error": "Amount is required"},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         try:
-            # ✅ Convert to Decimal properly
             amount = Decimal(str(amount_raw))
-
-            # Validate amount is positive
-            if amount <= 100000:
+            if amount < 100000:
                 return Response(
-                    {"error": "Amount must be greater than #100000"},
+                    {"error": "Amount must be greater than ₦100,000"},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
         except (InvalidOperation, ValueError, TypeError):
             return Response(
-                {"error": "Invalid amount format"}, status=status.HTTP_400_BAD_REQUEST
+                {"error": "Invalid amount format"},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # ✅ Generate a unique transaction ID
         transaction_id = str(uuid.uuid4())[:10]
 
-        # ✅ Create an InvestTransferRequest record with transaction_id
-        invest_transfer_request = InvestTransferRequest(
-            user=user, amount=amount, transaction_id=transaction_id
+        InvestTransferRequest.objects.create(
+            user=user,
+            amount=amount,
+            transaction_id=transaction_id,
         )
-        invest_transfer_request.save()
 
-        # ✅ Create a pending transaction for the user
         current_datetime = timezone.now()
         referral_email = user.referral.email if user.referral else None
 
-        transaction = Transaction.objects.create(
+        Transaction.objects.create(
             user=user,
             referral_email=referral_email,
             transaction_type="credit",
@@ -4817,80 +4813,67 @@ def initiate_invest_transfer(request):
             transaction_id=transaction_id,
         )
 
-        # Send an email to admin
-        # ✅ Send an email to admin
-        subject = f"[CHECK] {user.first_name} Made A QuickInvest Request"
-        message = f"Hi Admin, <br><br>An investment transfer request of ₦{amount} has just been initiated by {user.first_name} ({user.email}).<br><br>Please log in to the admin panel for review.<br><br>"
-        from_email = "MyFund <info@myfundmobile.com>"
-        recipient_list = [
-            "company@myfundmobile.com",
-            "info@myfundmobile.com",
-        ]
-
-        send_generic_email(subject, message, from_email, recipient_list)
-
-        # ✅ Send a pending invest email to the user
-        user_subject = "QuickInvest Pending..."
-        user_message = f"Hi {user.first_name},<br><br>Your investment transfer request of ₦{amount} is pending approval. We will notify you once it's processed. <br><br>Thank you for using MyFund. <br><br>"
-        user_email = user.email
-
-        send_generic_email(user_subject, user_message, from_email, [user_email])
-
-        # ✅ Send user push notification
+        # 🔔 USER PUSH
         send_push_notification(
             user=user,
             title="QuickInvest Pending ⏳",
-            message="Your transfer of ₦{:,.2f} is pending approval. We'll notify you once it's confirmed.".format(
-                float(amount)  # ✅ Convert Decimal to float for formatting
-            ),
+            message=f"Your investment of ₦{amount:,.2f} is pending approval.",
             data={
-                "amount": str(amount),
                 "transaction_id": transaction_id,
+                "amount": str(amount),
                 "type": "QuickInvest",
                 "status": "pending",
             },
             notif_type="PENDING",
         )
 
-        # ✅ Notify Admin via Push Notification (NEW)
-        admin_emails = [
-            "tolulopeahmed@gmail.com",
-            "ceo@myfundmobile.com",
-            "janet.adegbenro@gmail.com",
-        ]
-        admin_users = CustomUser.objects.filter(email__in=admin_emails)
+        # 📧 USER EMAIL
+        send_generic_email(
+            "QuickInvest Pending...",
+            f"Hi {user.first_name},<br><br>"
+            f"Your investment transfer of ₦{amount:,.2f} is pending approval.<br><br>"
+            "Thank you for using MyFund.",
+            "MyFund <info@myfundmobile.com>",
+            [user.email],
+        )
 
-        for admin_user in admin_users:
-            if hasattr(admin_user, "expo_push_tokens") and admin_user.expo_push_tokens:
-                admin_push_title = f"{user.first_name} initiated a New QuickInvest"
-                admin_push_message = (
-                    f"{user.first_name} {user.last_name} ({user.email}) has initiated ₦{amount:,.2f} to Investment Account.\n"
-                    f"Please check to confirm."
-                )
+        # 📧 ADMIN EMAIL
+        send_generic_email(
+            f"[CHECK] {user.first_name} Made A QuickInvest Request",
+            f"{user.first_name} {user.last_name} ({user.email}) initiated "
+            f"₦{amount:,.2f} QuickInvest.",
+            "MyFund <info@myfundmobile.com>",
+            ["company@myfundmobile.com", "info@myfundmobile.com"],
+        )
 
+        # 🔔 ADMIN PUSH
+        admin_users = CustomUser.objects.filter(
+            email__in=[
+                "tolulopeahmed@gmail.com",
+                "ceo@myfundmobile.com",
+                "janet.adegbenro@gmail.com",
+            ]
+        )
+
+        for admin in admin_users:
+            if admin.expo_push_tokens:
                 send_push_notification(
-                    user=admin_user,
-                    title=admin_push_title,
-                    message=admin_push_message,
+                    user=admin,
+                    title=f"{user.first_name} initiated a New QuickInvest",
+                    message=f"{user.first_name} {user.last_name} ({user.email}) initiated ₦{amount:,.2f} to Investment Account.\nPlease check to confirm.",
                     data={
                         "transaction_id": transaction_id,
                         "user_email": user.email,
-                        "amount": str(amount),
                         "type": "QuickInvest",
                         "status": "pending",
-                        "source": "admin_quickinvest_alert",
                     },
                     notif_type="ADMIN_ALERT",
                 )
-                print(
-                    f"✅ Admin QuickInvest push notification sent to {admin_user.email}"
-                )
-            else:
-                print(f"⚠️ No push tokens for admin {admin_user.email}")
 
+        # ✅ IMPORTANT — RETURN CONSISTENT PAYLOAD
         return Response(
             {
-                "message": "Investment transfer request created and pending admin approval",
+                "message": "QuickInvest request created and pending approval",
                 "amount": str(amount),
             },
             status=status.HTTP_201_CREATED,
