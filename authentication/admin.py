@@ -154,6 +154,7 @@ class CustomUserAdmin(UserAdmin):
         "is_active",
         "is_banned",  # 👈 show banned status
         "kyc_updated",
+        "kyc_status",
         "how_did_you_hear",
         "date_joined",
         "is_hired_referrer",
@@ -164,6 +165,7 @@ class CustomUserAdmin(UserAdmin):
     actions = [
         "ban_user",
         "unban_user",
+        "export_kyc_data",  # NEW: KYC-only export
         "export_to_csv",  # Add export action
         "send_custom_email",
         "view_kyc_details",
@@ -255,7 +257,13 @@ class CustomUserAdmin(UserAdmin):
             },
         ),
     )
-    search_fields = ("email", "first_name", "last_name")
+    search_fields = (
+        "email",
+        "first_name",
+        "last_name",
+        "how_did_you_hear",
+        "kyc_status",
+    )
     ordering = ("email", "date_joined")
     inlines = [
         TransactionInline,
@@ -329,13 +337,18 @@ class CustomUserAdmin(UserAdmin):
         result = process_quarterly_payouts_task()
         self.message_user(request, f"Simulation completed: {result}")
 
+    @admin.action(description="Export selected users to CSV")
     def export_to_csv(self, request, queryset):
         # Create the response object and set the content type
         response = HttpResponse(content_type="text/csv")
-        response["Content-Disposition"] = 'attachment; filename="custom_users.csv"'
+        response["Content-Disposition"] = (
+            'attachment; filename="users_with_full_kyc.csv"'
+        )
 
-        # Create the CSV writer
+        # Create the CSV writer with UTF-8 encoding for special characters
         writer = csv.writer(response)
+
+        # Write comprehensive header with ALL KYC fields
         writer.writerow(
             [
                 "ID",
@@ -344,28 +357,207 @@ class CustomUserAdmin(UserAdmin):
                 "Last Name",
                 "Phone Number",
                 "Date Joined",
-                "Profile Picture",
+                "KYC Status",
                 "KYC Updated",
-                "Is Staff",
-                "Is Active",
-                "Preferred Asset",
-                "Savings Goal Amount",
-                "Time Period",
+                # Personal Information
+                "Gender",
+                "Date of Birth",
+                "Address",
+                "State of Residence",
+                "Country of Residence",
+                # Employment & Financial
+                "Employment Status",
+                "Yearly Income",
+                # Identification
+                "Identification Type",
+                "ID Upload URL",
+                # Family Information
+                "Mother's Maiden Name",
+                "Relationship Status",
+                # Next of Kin Information
+                "Next of Kin Name",
+                "Relationship with Next of Kin",
+                "Next of Kin Phone Number",
+                # Referral Source
+                "How Did You Hear",  # ADDED - Shows user acquisition source
+                # Account Information
+                "Is Hired Referrer",
+                "Is Ambassador",
+                # Account Balances
                 "Savings",
                 "Investment",
                 "Properties",
                 "Wallet",
                 "Total Savings and Investments",
                 "Total Savings and Investments This Month",
-                "User Percentage to Top Saver",
-                "How Did You Hear",
-                "Is Hired Referrer",
-                "Is Ambassador",
+                # Account Status
+                "Is Staff",
+                "Is Active",
+                "Is Banned",
+                "Profile Picture URL",
             ]
         )
 
         # Write user data rows
         for user in queryset:
+            # Format date of birth if it exists
+            dob = ""
+            if user.date_of_birth and user.date_of_birth.year > 1900:
+                dob = user.date_of_birth.strftime("%Y-%m-%d")
+
+            # Format date joined
+            date_joined = (
+                user.date_joined.strftime("%Y-%m-%d %H:%M:%S")
+                if user.date_joined
+                else ""
+            )
+
+            # Get profile picture URL
+            profile_pic_url = user.profile_picture.url if user.profile_picture else ""
+
+            # Get ID upload URL
+            id_upload_url = user.id_upload.url if user.id_upload else ""
+
+            # Format "How Did You Hear" for better readability
+            how_did_you_hear_display = dict(
+                user._meta.get_field("how_did_you_hear").choices
+            ).get(user.how_did_you_hear, user.how_did_you_hear)
+
+            writer.writerow(
+                [
+                    # Basic Info
+                    user.id,
+                    user.email,
+                    user.first_name,
+                    user.last_name,
+                    user.phone_number,
+                    date_joined,
+                    user.kyc_status,
+                    "Yes" if user.kyc_updated else "No",
+                    # Personal Information
+                    user.gender if user.gender != "Choose" else "",
+                    dob,
+                    user.address if user.address != "Enter Address" else "",
+                    user.state if user.state != "Choose" else "",
+                    user.country if user.country != "Nigeria" else "",
+                    # Employment & Financial
+                    (
+                        user.employment_status
+                        if user.employment_status != "Choose"
+                        else ""
+                    ),
+                    user.yearly_income if user.yearly_income != "Choose" else "",
+                    # Identification
+                    (
+                        user.identification_type
+                        if user.identification_type != "Choose"
+                        else ""
+                    ),
+                    request.build_absolute_uri(id_upload_url) if id_upload_url else "",
+                    # Family Information
+                    (
+                        user.mothers_maiden_name
+                        if user.mothers_maiden_name != "Enter Name"
+                        else ""
+                    ),
+                    (
+                        user.relationship_status
+                        if user.relationship_status != "Choose"
+                        else ""
+                    ),
+                    # Next of Kin Information
+                    (
+                        user.next_of_kin_name
+                        if user.next_of_kin_name != "Enter Name"
+                        else ""
+                    ),
+                    (
+                        user.relationship_with_next_of_kin
+                        if user.relationship_with_next_of_kin != "Choose"
+                        else ""
+                    ),
+                    (
+                        user.next_of_kin_phone_number
+                        if user.next_of_kin_phone_number != "Enter Number"
+                        else ""
+                    ),
+                    # Referral Source - ADDED
+                    how_did_you_hear_display,  # Shows the full readable value
+                    # Account Information
+                    "Yes" if user.is_hired_referrer else "No",
+                    "Yes" if user.is_ambassador else "No",
+                    # Account Balances
+                    str(user.savings),
+                    str(user.investment),
+                    str(user.properties),
+                    str(user.wallet),
+                    str(user.savings + user.investment),
+                    str(getattr(user, "total_savings_and_investments_this_month", 0)),
+                    # Account Status
+                    "Yes" if user.is_staff else "No",
+                    "Yes" if user.is_active else "No",
+                    "Yes" if user.is_banned else "No",
+                    (
+                        request.build_absolute_uri(profile_pic_url)
+                        if profile_pic_url
+                        else ""
+                    ),
+                ]
+            )
+
+        return response
+
+    export_to_csv.short_description = "Export selected users to CSV"
+
+    @admin.action(description="Export KYC data only")
+    def export_kyc_data(self, request, queryset):
+        """Export only KYC-related fields for compliance reporting"""
+        response = HttpResponse(content_type="text/csv")
+        response["Content-Disposition"] = (
+            'attachment; filename="kyc_compliance_data.csv"'
+        )
+
+        writer = csv.writer(response)
+
+        # KYC-specific headers
+        writer.writerow(
+            [
+                "ID",
+                "Email",
+                "First Name",
+                "Last Name",
+                "Phone Number",
+                "KYC Status",
+                "KYC Submission Date",
+                "Gender",
+                "Date of Birth",
+                "Address",
+                "State",
+                "Country",
+                "Employment Status",
+                "Yearly Income",
+                "Identification Type",
+                "ID Uploaded",
+                "Mother's Maiden Name",
+                "Relationship Status",
+                "Next of Kin Name",
+                "Next of Kin Relationship",
+                "Next of Kin Phone",
+            ]
+        )
+
+        for user in queryset:
+            # Format dates
+            dob = ""
+            if user.date_of_birth and user.date_of_birth.year > 1900:
+                dob = user.date_of_birth.strftime("%Y-%m-%d")
+
+            # Find when KYC was last updated
+            kyc_date = ""
+            if user.kyc_status and user.kyc_status != "Not yet started":
+                # Try to get from user's update time or use date_joined
+                kyc_date = user.date_joined.strftime("%Y-%m-%d")
+
             writer.writerow(
                 [
                     user.id,
@@ -373,28 +565,32 @@ class CustomUserAdmin(UserAdmin):
                     user.first_name,
                     user.last_name,
                     user.phone_number,
-                    user.date_joined,
-                    user.profile_picture,
-                    user.kyc_updated,
-                    user.is_staff,
-                    user.is_active,
-                    user.preferred_asset,
-                    user.savings_goal_amount,
-                    user.time_period,
-                    user.savings,
-                    user.investment,
-                    user.properties,
-                    user.wallet,
-                    user.total_savings_and_investments_this_month,
-                    user.how_did_you_hear,
-                    user.is_hired_referrer,
-                    user.is_ambassador,
+                    user.kyc_status,
+                    kyc_date,
+                    user.gender,
+                    dob,
+                    user.address,
+                    user.state,
+                    user.country,
+                    user.employment_status,
+                    user.yearly_income,
+                    user.identification_type,
+                    (
+                        "Yes"
+                        if user.id_upload
+                        and not user.id_upload.name.endswith("placeholder.png")
+                        else "No"
+                    ),
+                    user.mothers_maiden_name,
+                    user.relationship_status,
+                    user.next_of_kin_name,
+                    user.relationship_with_next_of_kin,
+                    user.next_of_kin_phone_number,
                 ]
             )
 
+        self.message_user(request, f"Exported KYC data for {queryset.count()} users.")
         return response
-
-    export_to_csv.short_description = "Export selected users to CSV"
 
     @admin.action(description="🎯 Test Quarterly Payout")
     def test_quarterly_payout(self, request, queryset):
