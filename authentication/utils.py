@@ -107,32 +107,35 @@ def send_admin_push_notification(title, message, data=None, notif_type="ADMIN_AL
 
 import threading
 import time
-from django.core.mail import send_mail
+import logging
+from django.conf import settings
 from django.template.loader import render_to_string
 from django.utils.html import strip_tags
+from django.core.mail import send_mail
 from .models import CustomUser
-import logging
 
 logger = logging.getLogger(__name__)
 
 
-def send_generic_email(subject, message, recipient_list, from_email=None):
+def send_generic_email(
+    subject, message, recipient_list, from_email=None, batch_size=30, delay_seconds=25
+):
+    """
+    Sends personalized emails in controlled batches to prevent SMTP throttling.
+    Continues sending even if some emails fail (connection closed, etc.).
+    """
 
-    # 🛡️ Normalize recipient_list
     if isinstance(recipient_list, str):
         recipient_list = [recipient_list]
 
     if not isinstance(recipient_list, (list, tuple)):
-        raise ValueError("recipient_list must be a list or tuple of emails")
+        raise ValueError("recipient_list must be a list or tuple")
+    if not recipient_list:
+        logger.warning("send_generic_email called with empty recipient_list")
+        return
 
-    if from_email is None:
-        from django.conf import settings
+    from_email = from_email or settings.DEFAULT_FROM_EMAIL
 
-        from_email = settings.DEFAULT_FROM_EMAIL
-
-    total = len(recipient_list)
-
-    # Helper: prepare personalized message
     def personalize(email_addr):
         user = CustomUser.objects.filter(email=email_addr).first()
         placeholders = {
@@ -150,58 +153,46 @@ def send_generic_email(subject, message, recipient_list, from_email=None):
             p_message = p_message.replace(k, v)
         return p_subject, p_message
 
-    # --- Inline sending for <=50 ---
-    if total <= 50:
+    sent_count = 0
+    for i in range(0, len(recipient_list), batch_size):
+        batch = recipient_list[i : i + batch_size]
 
-        def send_inline():
-            for email in recipient_list:
+        for email in batch:
+            try:
+                p_subject, p_message = personalize(email)
+
+                html_message = render_to_string(
+                    "email/email.html", {"subject": p_subject, "message": p_message}
+                )
+                plain_message = strip_tags(html_message)
+
                 try:
-                    p_subject, p_message = personalize(email)
-                    html_message = render_to_string(
-                        "email/email.html", {"subject": p_subject, "message": p_message}
-                    )
-                    plain_message = strip_tags(html_message)
                     send_mail(
-                        p_subject,
-                        plain_message,
-                        from_email,
-                        [email],
+                        subject=p_subject,
+                        message=plain_message,
+                        from_email=from_email,
+                        recipient_list=[email],
                         html_message=html_message,
                         fail_silently=False,
                     )
-                    logger.info(f"📧 Sent inline email to {email}")
+                    logger.info(f"📧 Email sent to {email}")
                 except Exception as e:
-                    logger.error(f"❌ Failed inline email to {email}: {e}")
+                    # Catch SMTP disconnects or other failures, log, and continue
+                    logger.error(f"⚠️ Email failed for {email} (continuing): {e}")
 
-        threading.Thread(target=send_inline, daemon=True).start()
+                sent_count += 1
 
-    # --- Celery for >50 ---
-    elif total <= 200:
-        from .tasks import send_single_email_task
+            except Exception as e:
+                logger.exception(f"❌ Personalization failed for {email}: {e}")
 
-        for email in recipient_list:
-            p_subject, p_message = personalize(email)
-            send_single_email_task.delay(email, p_subject, p_message, from_email)
-
-    elif total <= 500:
-        from .tasks import send_email_batch_task
-
-        batches = []
-        for email in recipient_list:
-            p_subject, p_message = personalize(email)
-            batches.append({"email": email, "subject": p_subject, "message": p_message})
-        send_email_batch_task.delay(batches, from_email)
-
-    else:
-        from .tasks import send_large_email_batch_task
-
-        batches = []
-        for email in recipient_list:
-            p_subject, p_message = personalize(email)
-            batches.append({"email": email, "subject": p_subject, "message": p_message})
-        send_large_email_batch_task.delay(
-            batches, from_email, batch_size=50, delay_seconds=300
+        logger.info(
+            f"📬 Batch of {len(batch)} complete — waiting {delay_seconds}s before next batch"
         )
+        time.sleep(delay_seconds)
+
+    logger.info(
+        f"📊 Completed processing {sent_count} emails out of {len(recipient_list)}"
+    )
 
 
 def get_user_balance(user, source):

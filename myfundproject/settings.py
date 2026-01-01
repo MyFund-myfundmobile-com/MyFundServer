@@ -363,16 +363,16 @@ PAYLESS_SMS_SENDER_ID = config("PAYLESS_SMS_SENDER_ID")
 # DEFAULT_FROM_EMAIL = "MyFund <info@myfundmobile.com>"
 
 # ===== EMAIL CONFIGURATION =====
-# ===== EMAIL CONFIGURATION =====
-# ===== EMAIL CONFIGURATION =====
-# ===== EMAIL CONFIGURATION =====
 EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
 DEFAULT_FROM_EMAIL = "MyFund <message@myfundmobile.com>"
 
 EMAIL_HOST = "myfundmobile.com"
-EMAIL_PORT = 465  # SSL port
-EMAIL_USE_TLS = False  # TLS off for SSL
-EMAIL_USE_SSL = True  # SSL on
+# EMAIL_PORT = 465  # SSL port
+# EMAIL_USE_TLS = False  # TLS off for SSL
+EMAIL_PORT = 587
+EMAIL_USE_TLS = True  # important
+EMAIL_TIMEOUT = 20
+
 
 EMAIL_HOST_USER = "message@myfundmobile.com"
 EMAIL_HOST_PASSWORD = "AdminSecure123..."
