@@ -202,7 +202,7 @@ def retry_failed_deductions():
 
 
 from .models import CustomUser, Transaction
-from .utils import calculate_daily_roi, send_push_notification
+from .utils import get_next_payout_date, calculate_daily_roi, send_push_notification
 from django.db import transaction as db_transaction
 
 
@@ -224,20 +224,25 @@ def calculate_daily_roi_task():
         try:
             total_roi, savings_roi, investment_roi = calculate_daily_roi(user, today)
             if total_roi > 0:
+                next_payout = get_next_payout_date(today)
+
                 send_push_notification(
                     user,
                     title="💹 Your Funds Have Grown!",
                     message=(
                         f"Hi {user.first_name}, your funds have earned returns. "
                         f"Savings: ₦{savings_roi:,.2f}, Investment: ₦{investment_roi:,.2f}. "
-                        "Keep growing your funds for more returns!"
+                        f"Next payout: {next_payout.day}{'st' if next_payout.day == 1 else 'th'} "
+                        f"{next_payout.strftime('%B %Y')} 🎉"
                     ),
                     data={
                         "type": "DAILY_ROI",
                         "total_roi": float(total_roi),
                         "date": today.isoformat(),
+                        "next_payout": next_payout.isoformat(),
                     },
                 )
+
                 processed_count += 1
         except Exception as e:
             logger.error(f"ROI error for user {user.id}: {e}")
@@ -245,31 +250,22 @@ def calculate_daily_roi_task():
     return f"✅ Daily ROI accrued for {processed_count} users."
 
 
-from celery import shared_task
-from django.utils import timezone
-from .models import CustomUser, ROITransaction, Transaction
-from .utils import send_push_notification
-from decimal import Decimal
-from django.db import transaction as db_transaction
-from datetime import date
-from .utils import send_generic_email  # make sure this import exists at top
-
-from celery import shared_task
-from django.utils import timezone
-from .models import CustomUser, ROITransaction, Transaction
-from .utils import send_push_notification, send_generic_email
-from decimal import Decimal
-from django.db import transaction as db_transaction
-from datetime import date
-
-
 @shared_task
 def process_quarterly_payouts_task_fixed():
     """
     Process quarterly ROI payouts for the previous quarter.
-    Uses resilient, batched emails to avoid SMTP throttling.
-    Works for Jan, Apr, Jul, Oct first day.
+    Uses the new send_generic_email which handles batching automatically.
     """
+    from django.utils import timezone
+    from .models import CustomUser, ROITransaction, Transaction
+    from .utils import send_push_notification, send_generic_email
+    from decimal import Decimal
+    from django.db import transaction as db_transaction
+    from datetime import date
+    import logging
+
+    logger = logging.getLogger(__name__)
+
     today = timezone.now().date()
     current_year = today.year
     current_month = today.month
@@ -296,91 +292,104 @@ def process_quarterly_payouts_task_fixed():
 
     total_paid_users = 0
     total_amount = Decimal("0.00")
-    email_recipients = []
 
-    # First pass: credit wallets and mark ROI
+    # Collect all recipients for batch sending
+    all_recipients = []
+
     for user in users.iterator():
-        unpaid_roi = ROITransaction.objects.filter(
-            user=user,
-            accrued_date__range=[quarter_start, quarter_end],
-            is_paid_out=False,
-        )
+        try:
+            unpaid_roi = ROITransaction.objects.filter(
+                user=user,
+                accrued_date__range=[quarter_start, quarter_end],
+                is_paid_out=False,
+            )
 
-        total_payout = sum(t.amount for t in unpaid_roi)
-        if total_payout <= 0:
+            total_payout = sum(t.amount for t in unpaid_roi)
+            if total_payout <= 0:
+                continue
+
+            with db_transaction.atomic():
+                user.wallet += total_payout
+                user.save(update_fields=["wallet"])
+                unpaid_roi.update(is_paid_out=True, payout_date=today)
+
+                Transaction.objects.create(
+                    user=user,
+                    transaction_type="credit",
+                    source="INVESTMENT",
+                    status="confirmed",
+                    amount=Decimal(total_payout),
+                    service_charge=Decimal("0.00"),
+                    total_amount=Decimal(total_payout),
+                    description=f"Dividends: {quarter_label} ROI",
+                )
+
+                # Send push notification immediately
+                savings_roi = sum(
+                    t.amount for t in unpaid_roi if t.roi_type == "SAVINGS"
+                )
+                investment_roi = sum(
+                    t.amount for t in unpaid_roi if t.roi_type == "INVESTMENT"
+                )
+
+                send_push_notification(
+                    user,
+                    title=f"🎉 {quarter_label} Dividends Paid! (₦{total_payout:,.2f})",
+                    message=f"Hi {user.first_name}, ₦{total_payout:,.2f} has been credited to your wallet! "
+                    f"(Savings: ₦{savings_roi:,.2f}, Investment: ₦{investment_roi:,.2f})",
+                    data={
+                        "type": "QUARTERLY_PAYOUT",
+                        "amount": float(total_payout),
+                        "period": quarter_label,
+                    },
+                )
+
+                total_paid_users += 1
+                total_amount += Decimal(total_payout)
+
+                # Add to batch list
+                all_recipients.append(
+                    {
+                        "email": user.email,
+                        "subject": f"🎉 {user.first_name}, ₦{total_payout:,.2f} Has Been Added to Your Wallet!",
+                        "message": (
+                            f"Hi {user.first_name},<br><br>"
+                            f"Your ROI of ₦{total_payout:,.2f} has been credited to your MyFund wallet for your funds in the last quarter ({quarter_label})!<br>"
+                            f"(Savings: ₦{savings_roi:,.2f}, Investment: ₦{investment_roi:,.2f})<br><br>"
+                            "Thank you for using MyFund. Keep growing your funds to earn more in the next quarter! 🚀"
+                        ),
+                    }
+                )
+
+        except Exception as e:
+            logger.error(f"Error processing user {user.email}: {e}")
             continue
 
-        with db_transaction.atomic():
-            user.wallet += total_payout
-            user.save(update_fields=["wallet"])
-            unpaid_roi.update(is_paid_out=True, payout_date=today)
+    # Send all emails using the smart function (will batch if >30)
+    if all_recipients:
+        logger.info(
+            f"📧 Preparing to send quarterly payout emails to {len(all_recipients)} users"
+        )
 
-            Transaction.objects.create(
-                user=user,
-                transaction_type="credit",
-                source="INVESTMENT",
-                status="confirmed",
-                amount=Decimal(total_payout),
-                service_charge=Decimal("0.00"),
-                total_amount=Decimal(total_payout),
-                description=f"Dividends: {quarter_label} ROI",
+        # Send emails in one go - send_generic_email will handle batching
+        # We need to send individually since each has personalized subject/message
+        email_results = []
+        for recipient_data in all_recipients:
+            result = send_generic_email(
+                subject=recipient_data["subject"],
+                message=recipient_data["message"],
+                recipient_list=[recipient_data["email"]],
+                from_email="MyFund <info@myfundmobile.com>",
             )
+            email_results.append(result)
 
-            # Send push notification immediately
-            savings_roi = sum(t.amount for t in unpaid_roi if t.roi_type == "SAVINGS")
-            investment_roi = sum(
-                t.amount for t in unpaid_roi if t.roi_type == "INVESTMENT"
-            )
-            send_push_notification(
-                user,
-                title=f"🎉 {quarter_label} Dividends Paid! (₦{total_payout:,.2f})",
-                message=f"Hi {user.first_name}, ₦{total_payout:,.2f} has been credited to your wallet! "
-                f"(Savings: ₦{savings_roi:,.2f}, Investment: ₦{investment_roi:,.2f})",
-                data={
-                    "type": "QUARTERLY_PAYOUT",
-                    "amount": float(total_payout),
-                    "period": quarter_label,
-                },
-            )
-
-            total_paid_users += 1
-            total_amount += Decimal(total_payout)
-
-            # Queue email for batch sending
-            email_recipients.append(
-                {
-                    "email": user.email,
-                    "subject": f"🎉 {user.first_name}, ₦{total_payout:,.2f} Has Been Added to Your Wallet!",
-                    "message": (
-                        f"Hi {user.first_name},<br><br>"
-                        f"Your ROI of ₦{total_payout:,.2f} has been credited to your MyFund wallet for your funds in the last quarter ({quarter_label})!<br>"
-                        f"(Savings: ₦{savings_roi:,.2f}, Investment: ₦{investment_roi:,.2f})<br><br>"
-                        "Thank you for using MyFund. Keep growing your funds to earn more in the next quarter! 🚀"
-                    ),
-                }
-            )
-
-    # --- Send emails in batches safely ---
-    recipient_list = [r["email"] for r in email_recipients]
-    messages_dict = {
-        r["email"]: {"subject": r["subject"], "message": r["message"]}
-        for r in email_recipients
-    }
-
-    for i in range(0, len(recipient_list), 30):  # safer batch size
-        batch = recipient_list[i : i + 30]
-        for email in batch:
-            try:
-                send_generic_email(
-                    subject=messages_dict[email]["subject"],
-                    message=messages_dict[email]["message"],
-                    recipient_list=[email],
-                    from_email="MyFund <info@myfundmobile.com>",
-                    batch_size=1,  # send one by one in this batch
-                    delay_seconds=5,  # short delay between each email in the batch
-                )
-            except Exception as e:
-                logger.error(f"⚠️ Failed to send email to {email}, continuing: {e}")
+        # Log summary
+        successful_sends = sum(
+            1 for r in email_results if r.get("status") in ["completed", "queued"]
+        )
+        logger.info(
+            f"📊 Quarterly payout: {successful_sends}/{len(all_recipients)} email sends initiated"
+        )
 
     return f"✅ Quarterly ROI processed for {total_paid_users} users, total ₦{total_amount:,.2f}, period {quarter_label}"
 
@@ -421,10 +430,8 @@ def process_quarterly_payout_single_user(email):
         return f"User {email} not found"
 
     unpaid_roi = ROITransaction.objects.filter(
-        user=user,
-        is_paid_out=False,
+        user=user, accrued_date__range=[quarter_start, quarter_end], is_paid_out=False
     )
-
     total_payout = sum(t.amount for t in unpaid_roi)
 
     if total_payout <= 0:
@@ -772,3 +779,267 @@ def process_due_scheduled_withdrawals():
             logger.error(
                 f"Failed to process scheduled withdrawal {withdrawal.id}: {str(e)}"
             )
+
+
+from celery import shared_task
+from django.core.mail import send_mail
+from django.template.loader import render_to_string
+from django.utils.html import strip_tags
+import logging
+import time
+
+logger = logging.getLogger(__name__)
+
+
+@shared_task
+def send_single_email_task(email, subject, message, from_email):
+    """
+    Single email task - used by send_generic_email when >30 recipients
+    """
+    try:
+        # Create HTML content
+        try:
+            html_content = render_to_string(
+                "email/email.html",
+                {"subject": subject, "message": message, "user_email": email},
+            )
+        except Exception as e:
+            logger.warning(f"Template error for {email}: {e}")
+            html_content = f"<html><body>{message}</body></html>"
+
+        # Send email
+        send_mail(
+            subject=subject,
+            message=strip_tags(message),
+            from_email=from_email,
+            recipient_list=[email],
+            html_message=html_content,
+            fail_silently=False,
+        )
+
+        logger.info(f"✅ Celery single email sent to {email}")
+        return {"status": "sent", "email": email}
+
+    except Exception as e:
+        logger.error(f"❌ Celery single email failed for {email}: {e}")
+        return {"status": "failed", "email": email, "error": str(e)}
+
+
+@shared_task
+def send_bulk_email_task(emails, batch_size=30, delay_seconds=15):
+    """
+    Bulk email with batching + delays to avoid Namecheap limits
+    Called when send_generic_email has >30 recipients
+    """
+    total_emails = len(emails)
+    sent_count = 0
+    failed_emails = []
+
+    logger.info(f"📦 Processing {total_emails} emails in batches of {batch_size}")
+
+    # Process in batches
+    for i in range(0, total_emails, batch_size):
+        batch = emails[i : i + batch_size]
+        batch_number = (i // batch_size) + 1
+        total_batches = (total_emails - 1) // batch_size + 1
+
+        logger.info(
+            f"📬 Processing batch {batch_number}/{total_batches} ({len(batch)} emails)"
+        )
+
+        batch_sent = 0
+        batch_failed = []
+
+        for email_data in batch:
+            try:
+                email = email_data["email"]
+                subject = email_data["subject"]
+                message = email_data["message"]
+                from_email = email_data["from_email"]
+
+                # Create HTML content
+                try:
+                    html_content = render_to_string(
+                        "email/email.html",
+                        {"subject": subject, "message": message, "user_email": email},
+                    )
+                except Exception as e:
+                    logger.warning(f"Template error for {email}: {e}")
+                    html_content = f"<html><body>{message}</body></html>"
+
+                # Send email
+                send_mail(
+                    subject=subject,
+                    message=strip_tags(message),
+                    from_email=from_email,
+                    recipient_list=[email],
+                    html_message=html_content,
+                    fail_silently=False,
+                )
+
+                sent_count += 1
+                batch_sent += 1
+
+                # Small delay between emails within batch (500ms)
+                time.sleep(0.5)
+
+            except Exception as e:
+                error_info = {"email": email, "error": str(e)}
+                failed_emails.append(error_info)
+                batch_failed.append(error_info)
+                logger.error(f"❌ Batch email failed for {email}: {e}")
+
+        # Log batch completion
+        logger.info(f"✅ Batch {batch_number} complete: {batch_sent}/{len(batch)} sent")
+
+        # Add failed emails from this batch to overall
+        if batch_failed:
+            logger.warning(f"⚠️ Batch {batch_number} had {len(batch_failed)} failures")
+
+        # Delay between batches (unless last batch)
+        if i + batch_size < total_emails:
+            logger.info(f"⏳ Waiting {delay_seconds}s before next batch...")
+            time.sleep(delay_seconds)
+
+    # Final summary
+    logger.info(
+        f"📊 Bulk email complete: {sent_count}/{total_emails} sent successfully"
+    )
+
+    result = {
+        "sent": sent_count,
+        "failed": len(failed_emails),
+        "total": total_emails,
+        "batch_size": batch_size,
+        "delay_seconds": delay_seconds,
+    }
+
+    if failed_emails:
+        result["failed_emails"] = failed_emails
+
+    return result
+
+
+@shared_task
+def backfill_q3_2025_roi(email=None, dry_run=True):
+    """
+    Backfill Q3 2025 ROI as goodwill payout.
+    - Savings: 13% annual (3.25% quarterly)
+    - Investment: 20% annual (5% quarterly)
+    - Wallet: 0%
+
+    dry_run=True → logs only, no wallet credit
+    email=None → all users
+    """
+
+    from decimal import Decimal
+    from datetime import date
+    from django.db import transaction as db_transaction
+    from .models import CustomUser, ROITransaction, Transaction
+    from .utils import send_push_notification, send_generic_email
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    Q3_LABEL = "Q3 2025"
+    Q3_DATE = date(2025, 9, 30)
+
+    SAVINGS_RATE = Decimal("0.0325")  # 3.25%
+    INVESTMENT_RATE = Decimal("0.05")  # 5%
+
+    users = (
+        CustomUser.objects.filter(email=email)
+        if email
+        else CustomUser.objects.filter(is_active=True, is_banned=False)
+    )
+
+    processed = 0
+
+    for user in users.iterator():
+        savings_balance = Decimal(user.savings or 0)
+        investment_balance = Decimal(user.investment or 0)
+
+        savings_roi = (savings_balance * SAVINGS_RATE).quantize(Decimal("0.01"))
+        investment_roi = (investment_balance * INVESTMENT_RATE).quantize(
+            Decimal("0.01")
+        )
+        total_roi = savings_roi + investment_roi
+
+        if total_roi <= 0:
+            continue
+
+        logger.info(
+            f"[Q3 BACKFILL]{' DRY RUN' if dry_run else ''} "
+            f"{user.email} → ₦{total_roi}"
+        )
+
+        if dry_run:
+            continue
+
+        with db_transaction.atomic():
+            # Credit wallet
+            user.wallet += total_roi
+            user.save(update_fields=["wallet"])
+
+            # Create ROI records
+            if savings_roi > 0:
+                ROITransaction.objects.create(
+                    user=user,
+                    amount=savings_roi,
+                    roi_type="SAVINGS",
+                    accrued_date=Q3_DATE,
+                    is_paid_out=True,
+                    payout_date=Q3_DATE,
+                )
+
+            if investment_roi > 0:
+                ROITransaction.objects.create(
+                    user=user,
+                    amount=investment_roi,
+                    roi_type="INVESTMENT",
+                    accrued_date=Q3_DATE,
+                    is_paid_out=True,
+                    payout_date=Q3_DATE,
+                )
+
+            # Transaction log
+            Transaction.objects.create(
+                user=user,
+                transaction_type="credit",
+                source="ROI_BACKFILL",
+                status="confirmed",
+                amount=total_roi,
+                service_charge=Decimal("0.00"),
+                total_amount=total_roi,
+                description=f"{Q3_LABEL} ROI Adjustment",
+            )
+
+            # Push
+            send_push_notification(
+                user,
+                title="🎉 Q3 2025 ROI Credited",
+                message=(
+                    f"Hi {user.first_name}, ₦{total_roi:,.2f} "
+                    f"has been credited to your wallet for Q3 2025 ROI."
+                ),
+                data={"type": "Q3_ROI_BACKFILL"},
+            )
+
+            # Email
+            send_generic_email(
+                subject="🎉 Q3 2025 ROI Credited",
+                message=(
+                    f"Hi {user.first_name},\n\n"
+                    f"We’ve credited your wallet with ₦{total_roi:,.2f} "
+                    f"as your Q3 2025 ROI.\n\n"
+                    f"Savings ROI: ₦{savings_roi:,.2f}\n"
+                    f"Investment ROI: ₦{investment_roi:,.2f}\n\n"
+                    "Thank you for growing with MyFund."
+                ),
+                recipient_list=[user.email],
+                from_email="MyFund <info@myfundmobile.com>",
+            )
+
+        processed += 1
+
+    return f"Q3 2025 ROI backfill completed for {processed} users (dry_run={dry_run})"
