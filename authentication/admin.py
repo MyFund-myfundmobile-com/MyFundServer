@@ -1114,7 +1114,7 @@ class BankTransferRequestAdmin(admin.ModelAdmin):
 
             send_mail(
                 "QuickSave Updated! ✅",
-                f"Hi {user.first_name},\n\nYour bank transfer of ₦{transfer_request.amount} has been approved.",
+                f"Hi {user.first_name},\n\nYour bank transfer of ₦{transfer_request.amount} has been proccessed successfully and added to your Savings account.",
                 "MyFund <info@myfundmobile.com>",
                 [user.email],
             )
@@ -1191,7 +1191,7 @@ class InvestTransferRequestAdmin(admin.ModelAdmin):
 
             # ✅ Send Approval Email
             subject = "QuickInvest Updated! ✔"
-            message = f"Hi {user.first_name},\n\nYour investment transfer of ₦{transfer_request.amount} has been approved and added to your investments!\n\nKeep growing your funds! \n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+            message = f"Hi {user.first_name},\n\nYour investment transfer of ₦{transfer_request.amount} has been processed successfully and added to your investments!\n\nKeep growing your funds! \n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
             send_mail(subject, message, "MyFund <info@myfundmobile.com>", [user.email])
 
             send_push_notification(
@@ -1321,10 +1321,10 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
                     # Push notification
                     send_push_notification(
                         user=user,
-                        title="Withdrawal Approved! ✅",
+                        title="Withdrawal Successful! ✅",
                         message=(
-                            f"Your withdrawal of ₦{withdrawal.amount:,.2f} "
-                            f"to {withdrawal.target_bank} has been approved."
+                            f"{user.first_name}, your withdrawal of ₦{withdrawal.amount:,.2f} "
+                            f"to your {withdrawal.target_bank} account has been processed successfully."
                         ),
                         data={
                             "amount": str(withdrawal.amount),
@@ -1337,12 +1337,12 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
 
                     # Email
                     send_mail(
-                        subject="Withdrawal Approved ✔",
+                        subject="Withdrawal Successful ✔",
                         message=(
                             f"Hi {user.first_name},\n\n"
                             f"Your withdrawal of ₦{withdrawal.amount:,.2f} from your "
                             f"{withdrawal.source_account.capitalize()} account "
-                            f"has been approved.\n\n"
+                            f"has been processed successfully.\n\n"
                             f"Transaction ID: {transaction_id}\n\n"
                             f"MyFund Team"
                         ),
