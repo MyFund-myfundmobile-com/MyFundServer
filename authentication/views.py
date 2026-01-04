@@ -639,15 +639,17 @@ def delete_my_account(request):
         )
 
 
+from django.contrib.auth import get_user_model
+from django.contrib.auth.hashers import check_password
+from rest_framework.authtoken.views import ObtainAuthToken
 from rest_framework.response import Response
 from rest_framework import status
-from rest_framework.authtoken.views import ObtainAuthToken
+from rest_framework.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.tokens import RefreshToken
-from .utils import authenticate_user_by_email_or_phone  # <- import
-from authentication.models import CustomUser
 import logging
 
 logger = logging.getLogger(__name__)
+User = get_user_model()
 
 
 class CustomObtainAuthToken(ObtainAuthToken):
@@ -656,10 +658,35 @@ class CustomObtainAuthToken(ObtainAuthToken):
             username = request.data.get("username", "").strip().lower()
             password = request.data.get("password", "")
 
-            # DRY authentication
-            user = authenticate_user_by_email_or_phone(username, password)
+            # First, check if user exists by email or phone
+            try:
+                user = CustomUser.objects.get(
+                    Q(email__iexact=username) | Q(phone_number__iexact=username)
+                )
+            except CustomUser.DoesNotExist:
+                # User not found - email/phone doesn't exist
+                return Response(
+                    {
+                        "status": "email_not_found",
+                        "message": "This email/phone isn't registered. Would you like to sign up instead?",
+                        "suggestion": "signup",
+                    },
+                    status=status.HTTP_404_NOT_FOUND,
+                )
 
-            # 🚫 Block banned users first
+            # User exists, now check password
+            if not user.check_password(password):
+                # Correct email but wrong password
+                return Response(
+                    {
+                        "status": "wrong_password",
+                        "message": "The password for this email/phone number is incorrect. Please check and try again",
+                        "suggestion": "forgot_password",
+                    },
+                    status=status.HTTP_401_UNAUTHORIZED,
+                )
+
+            # 🚫 Block banned users
             if getattr(user, "is_banned", False):
                 return Response(
                     {
@@ -701,15 +728,11 @@ class CustomObtainAuthToken(ObtainAuthToken):
             tokens = self.get_tokens_for_user(user)
             return Response(tokens)
 
-        except AuthenticationFailed as auth_exc:
-            return Response(
-                {"error": str(auth_exc)}, status=status.HTTP_401_UNAUTHORIZED
-            )
         except Exception as e:
             logger.error(f"Login error for {request.data.get('username')}: {str(e)}")
             return Response(
-                {"error": "Invalid credentials or account issue"},
-                status=status.HTTP_400_BAD_REQUEST,
+                {"error": "An unexpected error occurred. Please try again."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
     @staticmethod
