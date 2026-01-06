@@ -816,63 +816,135 @@ from .models import (
 )
 
 
+import logging
+import random
+from datetime import timedelta, datetime
+from django.utils import timezone
+from django.conf import settings
+from django.template.loader import render_to_string
+from django.utils.html import strip_tags
+from django.core.mail import send_mail
+from rest_framework.response import Response
+from rest_framework.permissions import AllowAny
+from rest_framework.decorators import api_view, permission_classes
+from django.views.decorators.csrf import csrf_exempt
+
+from .models import CustomUser, PasswordReset
+from .utils import send_sms_via_payless, send_generic_email
+
+logger = logging.getLogger(__name__)
+
+
+def _send_otp(user, otp, purpose="signup"):
+    """
+    Internal helper to send OTP via email and SMS.
+    purpose: 'signup' | 'password_reset'
+    """
+    try:
+        # Compose template message
+        if purpose == "signup":
+            subject = f"[OTP-{otp}] Complete Your MyFund Signup"
+            inner_html = f"""
+                <p>Hi {user.first_name},</p>
+                <p>Use the One-Time-Password (OTP) below to complete your MyFund signup. Valid for 20 minutes.</p>
+                <h1 style="text-align:center; font-size:36px;">{otp}</h1>
+                <p>If you did not request this, ignore this email.</p>
+                <p>Cheers! 🥂</p>
+            """
+        else:  # password_reset
+            subject = f"[OTP-{otp}] Password Reset Request"
+            inner_html = f"""
+                <p>Hi {user.first_name},</p>
+                <p>You requested to reset your password. Use the OTP below to continue. Valid for 20 minutes.</p>
+                <h1 style="text-align:center; font-size:36px;">{otp}</h1>
+                <p>If you did not request this, ignore this email.</p>
+                <p>Thanks, <br> MyFund Team</p>
+            """
+
+        context = {"subject": subject, "message": inner_html, "user": user}
+        send_generic_email(
+            subject=subject,
+            message_or_context=context,
+            recipient_list=[user.email],
+            from_email="MyFund <info@myfundmobile.com>",
+            use_celery_threshold=30,
+            template="email/email.html",
+        )
+        logger.info(f"OTP email sent to {user.email} for {purpose}")
+
+        # Send SMS OTP if phone is available
+        phone_number = getattr(user, "phone_number", None)
+        if phone_number:
+            sms_message = (
+                f"Hi {user.first_name}, your OTP for MyFund "
+                f"{'signup' if purpose=='signup' else 'password reset'} is {otp}. "
+                "Valid for 20 minutes."
+            )
+            if send_sms_via_payless(phone_number, sms_message):
+                logger.info(f"SMS OTP sent to {phone_number}")
+            else:
+                logger.warning(f"Failed to send SMS OTP to {phone_number}")
+
+        return True
+
+    except Exception as e:
+        logger.exception(f"Error sending OTP to {user.email}: {e}")
+        raise
+
+
 @api_view(["POST"])
 @csrf_exempt
+@permission_classes([AllowAny])
 def request_password_reset(request):
     """
-    Handles password reset requests by sending an OTP to the user's email.
+    Send OTP for password reset via email and SMS.
     """
-    email = request.data.get("email").strip().lower()
-
+    email = (request.data.get("email") or "").strip().lower()
     if not email:
-        logger.warning("Password reset request received without an email.")
-        return Response(
-            {"detail": "Email is required."}, status=status.HTTP_400_BAD_REQUEST
-        )
+        return Response({"detail": "Email is required."}, status=400)
 
     try:
         user = CustomUser.objects.get(email=email)
-        logger.info("Password reset request for user: %s", user.email)
+        logger.info(f"Password reset request for user: {user.email}")
 
-        # Generate and store OTP
+        # Remove previous OTPs
+        PasswordReset.objects.filter(user=user).delete()
+
         otp = generate_otp()
-        PasswordReset.objects.create(user=user, otp=otp)
-
-        # Send OTP reset email
-        send_otp_reset_email(user, otp)
-        logger.info("Password reset OTP sent successfully to user: %s", user.email)
-
-        return Response(
-            {"detail": "Password reset OTP sent successfully."},
-            status=status.HTTP_200_OK,
+        PasswordReset.objects.create(user=user, otp=otp, created_at=timezone.now())
+        user.otp = otp
+        if hasattr(user, "last_otp_sent_at"):
+            user.last_otp_sent_at = timezone.now()
+        user.save(
+            update_fields=(
+                ["otp", "last_otp_sent_at", "updated_at"]
+                if hasattr(user, "last_otp_sent_at")
+                else ["otp", "updated_at"]
+            )
         )
+
+        # Send OTP via email + SMS
+        _send_otp(user, otp, purpose="password_reset")
+
+        return Response({"detail": "Password reset OTP sent successfully."}, status=200)
 
     except CustomUser.DoesNotExist:
-        logger.warning("Password reset requested for non-existent user: %s", email)
-        return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
-
+        return Response({"detail": "User not found."}, status=404)
     except Exception as e:
-        logger.error("Error handling password reset request: %s", str(e))
-        return Response(
-            {"detail": "An error occurred while processing the request."},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
+        logger.exception(f"Error in password reset request: {e}")
+        return Response({"detail": "An error occurred. Try again later."}, status=500)
 
 
 @api_view(["POST"])
 @csrf_exempt
 def reset_password(request):
     """
-    Handles password reset using an email, OTP, and new password.
+    Complete password reset using email + OTP + new password.
     """
     required_fields = ["email", "otp", "password", "confirm_password"]
     for field in required_fields:
         if field not in request.data:
-            logger.warning("Password reset request missing required field: %s", field)
-            return Response(
-                {"error": f"'{field}' is required."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            return Response({"error": f"'{field}' is required."}, status=400)
 
     email = request.data.get("email").strip().lower()
     otp = request.data.get("otp")
@@ -880,44 +952,79 @@ def reset_password(request):
     confirm_password = request.data.get("confirm_password")
 
     if password != confirm_password:
-        logger.warning("Password mismatch for user email: %s", email)
-        return Response(
-            {"error": "Passwords do not match."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+        return Response({"error": "Passwords do not match."}, status=400)
 
     try:
         user = CustomUser.objects.get(email=email)
         password_reset = PasswordReset.objects.get(user=user, otp=otp)
-    except CustomUser.DoesNotExist:
-        logger.warning("Password reset attempted with non-existent email: %s", email)
-        return Response(
-            {"error": "Invalid email."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-    except PasswordReset.DoesNotExist:
-        logger.warning("Invalid OTP for email: %s", email)
-        return Response(
-            {"error": "Invalid OTP."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
 
-    try:
-        # Reset the password
         user.set_password(password)
         user.save()
-        password_reset.delete()  # Delete the used OTP entry
-        logger.info("Password reset successful for user: %s", user.email)
-        return Response(
-            {"message": "Password reset successful."},
-            status=status.HTTP_200_OK,
-        )
+        password_reset.delete()
+        user.otp = None
+        user.save(update_fields=["otp", "updated_at"])
+        logger.info(f"Password reset successful for user: {user.email}")
+        return Response({"message": "Password reset successful."}, status=200)
+
+    except CustomUser.DoesNotExist:
+        return Response({"error": "Invalid email."}, status=400)
+    except PasswordReset.DoesNotExist:
+        return Response({"error": "Invalid or expired OTP."}, status=400)
     except Exception as e:
-        logger.error("Error during password reset for user %s: %s", email, str(e))
+        logger.exception(f"Error resetting password for {email}: {e}")
         return Response(
-            {"error": "An error occurred while resetting the password."},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            {"error": "An error occurred while resetting password."}, status=500
         )
+
+
+@api_view(["POST"])
+@csrf_exempt
+@permission_classes([AllowAny])
+def resend_password_otp(request):
+    """
+    Resend OTP for password reset to email + SMS.
+    Payload: { "email": "user@example.com" }
+    """
+    email = (request.data.get("email") or "").strip().lower()
+    if not email:
+        return Response({"detail": "Email is required."}, status=400)
+
+    try:
+        user = CustomUser.objects.get(email=email)
+
+        if hasattr(user, "last_otp_sent_at"):
+            cooldown = timedelta(seconds=60)
+            last_sent = user.last_otp_sent_at
+            if last_sent and timezone.now() - last_sent < cooldown:
+                return Response(
+                    {"detail": "Please wait before requesting another OTP."}, status=429
+                )
+
+        # Generate new OTP
+        otp = generate_otp()
+        PasswordReset.objects.filter(user=user).delete()
+        PasswordReset.objects.create(user=user, otp=otp, created_at=timezone.now())
+        user.otp = otp
+        if hasattr(user, "last_otp_sent_at"):
+            user.last_otp_sent_at = timezone.now()
+        user.save(
+            update_fields=(
+                ["otp", "last_otp_sent_at", "updated_at"]
+                if hasattr(user, "last_otp_sent_at")
+                else ["otp", "updated_at"]
+            )
+        )
+
+        # Send via email + SMS
+        _send_otp(user, otp, purpose="password_reset")
+
+        return Response({"detail": "OTP resent successfully."}, status=200)
+
+    except CustomUser.DoesNotExist:
+        return Response({"detail": "User not found."}, status=404)
+    except Exception as e:
+        logger.exception(f"Error resending password OTP to {email}: {e}")
+        return Response({"detail": "Failed to resend OTP."}, status=500)
 
 
 @api_view(["GET"])
@@ -7444,95 +7551,113 @@ import uuid
 from .models import TargetSavings, Transaction, TargetSavingsCompletion
 from .serializers import TargetSavingsSerializer
 from .utils import send_generic_email, send_push_notification
+from .permissions import IsNotBannedUser  # Add this import
 
 
 class TargetSavingsListCreate(ListCreateAPIView):
     serializer_class = TargetSavingsSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsNotBannedUser]
 
     def perform_create(self, serializer):
-        user = self.request.user
-        data = serializer.validated_data
+        logger = logging.getLogger(__name__)
 
-        frequency = data["frequency"].upper()
-        if frequency not in dict(TargetSavings.FREQUENCY_CHOICES):
-            raise ValidationError({"detail": "Invalid frequency"})
+        with transaction.atomic():
 
-        amount = Decimal(str(serializer.validated_data["monthly_payment"]))
-        funding_source = data["funding_source"]
+            user = CustomUser.objects.select_for_update().get(id=self.request.user.id)
 
-        if funding_source == "SAVINGS" and user.savings < amount:
-            raise ValidationError({"detail": "Insufficient savings balance"})
-        if funding_source == "INVESTMENT" and user.investment < amount:
-            raise ValidationError({"detail": "Insufficient investment balance"})
+            if user.is_banned:
+                raise ValidationError(
+                    {"detail": "Account is banned. Cannot create target savings."}
+                )
 
-        # Deduct from source and update user balance
-        setattr(
-            user, funding_source.lower(), getattr(user, funding_source.lower()) - amount
-        )
-        user.save()
+            if not user.is_active:
+                raise ValidationError(
+                    {"detail": "Account is inactive. Cannot create target savings."}
+                )
 
-        # Create the TargetSavings instance
-        instance = serializer.save(
-            user=user,
-            current_amount=amount,
-            start_date=timezone.now().date(),
-        )
+            data = serializer.validated_data
+            frequency = data["frequency"].upper()
 
-        # Set first next_deduction
-        instance.next_deduction = instance.calculate_next_deduction_time()
-        instance.save()
+            if frequency not in dict(TargetSavings.FREQUENCY_CHOICES):
+                raise ValidationError({"detail": "Invalid frequency"})
 
-        # Create initial transaction
-        Transaction.objects.create(
-            user=user,
-            transaction_type="credit",
-            status="confirmed",
-            amount=amount,
-            description=f"{instance.name}",
-            service_charge=0,
-            total_amount=amount,
-            target_savings=instance,
-            source=funding_source,
-            transaction_id=f"[{instance.id}]-{uuid.uuid4().hex[:12]}_INITIAL",
-        )
+            amount = Decimal(str(data["monthly_payment"]))
+            funding_source = data["funding_source"]
 
-        # Calculate progress
+            balance = getattr(user, funding_source.lower())
+
+            if balance < amount:
+                raise ValidationError(
+                    {"detail": "Insufficient confirmed balance to create target"}
+                )
+
+            setattr(user, funding_source.lower(), balance - amount)
+            user.save(update_fields=[funding_source.lower()])
+
+            instance = serializer.save(
+                user=user,
+                current_amount=amount,
+                start_date=timezone.now().date(),
+            )
+
+            instance.next_deduction = instance.calculate_next_deduction_time()
+            instance.save(update_fields=["next_deduction"])
+
+            Transaction.objects.create(
+                user=user,
+                transaction_type="credit",
+                status="confirmed",
+                amount=amount,
+                description=f"{instance.name}",
+                service_charge=0,
+                total_amount=amount,
+                target_savings=instance,
+                source=funding_source,
+                transaction_id=f"[{instance.id}]-{uuid.uuid4().hex[:12]}_INITIAL",
+            )
+
+        # 🔔 OUTSIDE TRANSACTION
         progress = (instance.current_amount / instance.target_amount) * 100
         progress_str = f"{progress:.1f}%"
 
-        # Send creation email via generic template
         try:
-            subject = f"{instance.name} Target Savings is LIVE!🚀"
+            subject = f"{instance.name} Target Savings is LIVE! 🚀"
+
+            message = (
+                f"Hi {user.first_name},\n\n"
+                f'Your target savings plan "{instance.name}" has been successfully created.\n\n'
+                f"Initial Amount: ₦{amount:,.2f}\n"
+                f"Funding Frequency: {frequency.lower()}\n"
+                f"Progress: {progress_str}\n\n"
+                f"Consistency is key — you’re on the right path 💪"
+            )
+
             context = {
                 "user": user,
+                "message": message,
                 "plan_name": instance.name,
                 "amount": f"₦{amount:,.2f}",
                 "frequency": frequency.lower(),
                 "progress": progress_str,
             }
+
             send_generic_email(
-                subject,
-                context,
-                settings.DEFAULT_FROM_EMAIL,
-                [user.email],
+                subject=subject,
+                message_or_context=context,
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[user.email],
                 template="email/email.html",
             )
+
         except Exception as e:
-            import logging
+            logger.error(f"Target savings email failed for {user.email}: {str(e)}")
 
-            logger = logging.getLogger(__name__)
-            logger.error(
-                f"Failed to send target savings creation email to {user.email}: {str(e)}"
-            )
-
-        # Push notification
         send_push_notification(
             user,
-            title=f"🎉 {instance.name} Plan Created! ✅",
+            title=f"🎉 {instance.name} Plan Created!",
             message=(
-                f"Your {instance.name} Target Savings plan has been activated with ₦{amount:,.2f}! "
-                f"You're now {progress_str} closer to your goal. Well done! 🚀"
+                f"Your {instance.name} Target Savings plan is live with ₦{amount:,.2f}. "
+                f"You're {progress_str} closer to your goal 🚀"
             ),
             data={"target_savings_id": instance.id},
             notif_type="TARGET_SAVINGS",
@@ -7639,19 +7764,18 @@ def cancel_target_saving(request, pk):
     if target.is_cancelled:
         return Response({"detail": "Plan already cancelled"}, status=400)
 
-    # Calculate return amount with 1% charge
     return_amount = target.current_amount * Decimal("0.99")
     charge = target.current_amount - return_amount
 
-    # Update user balance
     user = request.user
+
     if target.funding_source == "SAVINGS":
         user.savings += return_amount
     elif target.funding_source == "INVESTMENT":
         user.investment += return_amount
+
     user.save()
 
-    # Create transaction
     Transaction.objects.create(
         user=user,
         transaction_type="debit",
@@ -7664,48 +7788,52 @@ def cancel_target_saving(request, pk):
         transaction_id=f"[{target.id}]-{uuid.uuid4().hex[:12]}_CANCELLED",
     )
 
-    # Send cancellation email via generic template
     try:
         subject = f"{target.name} Target Savings Cancelled ❌"
+
+        message = (
+            f"Hi {user.first_name},\n\n"
+            f'Your target savings plan "{target.name}" has been cancelled.\n\n'
+            f"Refunded Amount: ₦{return_amount:,.2f}\n"
+            f"Cancellation Charge: ₦{charge:,.2f}\n\n"
+            f"The funds have been returned to your {target.funding_source.lower()} balance."
+        )
+
         context = {
             "user": user,
+            "message": message,
             "plan_name": target.name,
             "refunded_amount": f"₦{return_amount:,.2f}",
             "cancellation_charge": f"₦{charge:,.2f}",
         }
+
         send_generic_email(
-            subject,
-            context,
-            settings.DEFAULT_FROM_EMAIL,
-            [user.email],
+            subject=subject,
+            message_or_context=context,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[user.email],
             template="email/email.html",
         )
+
     except Exception as e:
-        import logging
+        logger.error(f"Target savings cancel email failed for {user.email}: {str(e)}")
 
-        logger = logging.getLogger(__name__)
-        logger.error(
-            f"Failed to send target savings cancellation email to {user.email}: {str(e)}"
-        )
-
-    # Push notification
     send_push_notification(
         user,
         title=f"❌ {target.name} Plan Cancelled",
         message=(
-            f"Hi {user.first_name}, Your {target.name} Target Savings plan has been cancelled. ₦{return_amount:,.2f} has been refunded to the sources account."
+            f"Your {target.name} Target Savings plan has been cancelled. "
+            f"₦{return_amount:,.2f} has been refunded."
         ),
         data={"target_savings_id": target.id},
         notif_type="TARGET_SAVINGS",
     )
 
-    # Update target savings
     target.is_active = False
     target.is_cancelled = True
     target.cancellation_charge = charge
     target.save()
 
-    # Create CANCELLED completion record
     TargetSavingsCompletion.objects.create(
         user=user,
         target_savings=target,

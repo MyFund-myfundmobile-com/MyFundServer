@@ -1219,10 +1219,20 @@ class TargetSavings(models.Model):
                 )
 
                 # Skip if no longer actionable
+                # Skip if no longer actionable
                 if target.is_completed or target.is_cancelled or not target.is_active:
                     logger.info(
                         f"Target {target.id} is completed/cancelled/inactive, skipping deduction"
                     )
+                    return False
+
+                # 🔴 ADDED: Check if user is banned or inactive
+                if user.is_banned or not user.is_active:
+                    logger.warning(
+                        f"User {user.email} (ID: {user.id}) is banned/inactive but target {target.id} still exists. Pausing target."
+                    )
+                    target.is_active = False
+                    target.save(update_fields=["is_active"])
                     return False
 
                 # Base amount (guard against None)
@@ -1279,7 +1289,13 @@ class TargetSavings(models.Model):
                         )
 
                         # Refund 99%
-                        refund_amount = target.current_amount * Decimal("0.99")
+                        # 🚫 BANNED USERS DO NOT GET REFUNDS
+                        if user.is_banned:
+                            logger.warning(
+                                f"Banned user {user.email} attempted refund on target {target.id}. Blocking refund."
+                            )
+                            refund_amount = Decimal("0")
+                            charge = target.current_amount
                         charge = target.current_amount - refund_amount
 
                         if refund_amount > 0:
