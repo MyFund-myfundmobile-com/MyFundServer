@@ -639,15 +639,17 @@ def delete_my_account(request):
         )
 
 
+from django.contrib.auth import get_user_model
+from django.contrib.auth.hashers import check_password
+from rest_framework.authtoken.views import ObtainAuthToken
 from rest_framework.response import Response
 from rest_framework import status
-from rest_framework.authtoken.views import ObtainAuthToken
+from rest_framework.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.tokens import RefreshToken
-from .utils import authenticate_user_by_email_or_phone  # <- import
-from authentication.models import CustomUser
 import logging
 
 logger = logging.getLogger(__name__)
+User = get_user_model()
 
 
 class CustomObtainAuthToken(ObtainAuthToken):
@@ -656,10 +658,35 @@ class CustomObtainAuthToken(ObtainAuthToken):
             username = request.data.get("username", "").strip().lower()
             password = request.data.get("password", "")
 
-            # DRY authentication
-            user = authenticate_user_by_email_or_phone(username, password)
+            # First, check if user exists by email or phone
+            try:
+                user = CustomUser.objects.get(
+                    Q(email__iexact=username) | Q(phone_number__iexact=username)
+                )
+            except CustomUser.DoesNotExist:
+                # User not found - email/phone doesn't exist
+                return Response(
+                    {
+                        "status": "email_not_found",
+                        "message": "This email/phone isn't registered. Would you like to sign up instead?",
+                        "suggestion": "signup",
+                    },
+                    status=status.HTTP_404_NOT_FOUND,
+                )
 
-            # 🚫 Block banned users first
+            # User exists, now check password
+            if not user.check_password(password):
+                # Correct email but wrong password
+                return Response(
+                    {
+                        "status": "wrong_password",
+                        "message": "The password for this email/phone number is incorrect. Please check and try again",
+                        "suggestion": "forgot_password",
+                    },
+                    status=status.HTTP_401_UNAUTHORIZED,
+                )
+
+            # 🚫 Block banned users
             if getattr(user, "is_banned", False):
                 return Response(
                     {
@@ -701,15 +728,11 @@ class CustomObtainAuthToken(ObtainAuthToken):
             tokens = self.get_tokens_for_user(user)
             return Response(tokens)
 
-        except AuthenticationFailed as auth_exc:
-            return Response(
-                {"error": str(auth_exc)}, status=status.HTTP_401_UNAUTHORIZED
-            )
         except Exception as e:
             logger.error(f"Login error for {request.data.get('username')}: {str(e)}")
             return Response(
-                {"error": "Invalid credentials or account issue"},
-                status=status.HTTP_400_BAD_REQUEST,
+                {"error": "An unexpected error occurred. Please try again."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
     @staticmethod
@@ -5880,40 +5903,138 @@ def resubscribe_user(request):
     return Response({"error": "Email not provided"}, status=status.HTTP_400_BAD_REQUEST)
 
 
-# views.py
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 from django.conf import settings
-from .utils import send_generic_email  # <- use the new unified function
+from .utils import send_generic_email
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def send_email(request):
     """
-    Admin triggers a bulk email. Automatically chooses inline, Celery rate-limit,
-    or batch depending on recipient count.
+    Admin sends email via Unlayer modal.
+    - ≤30 recipients → Immediate inline send
+    - >30 recipients → Celery batch with delays
+    - Returns immediately so user doesn't wait
     """
     sender = settings.DEFAULT_FROM_EMAIL
-    subject = request.data.get("subject")
-    body = request.data.get("body")
+    subject = request.data.get("subject", "").strip()
+    body = request.data.get("body", "").strip()
     recipients = request.data.get("recipients", [])
 
-    if not all([subject, body, recipients]):
+    # Validation
+    if not subject or not body:
         return Response(
-            {"message": "All fields are required."},
+            {"message": "Subject and body are required."},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    # Use the new dynamic email sender
-    send_generic_email(subject, body, recipients, from_email=sender)
+    if not recipients or not isinstance(recipients, list):
+        return Response(
+            {"message": "Recipients must be a non-empty list."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
-    return Response(
-        {"message": "Bulk email started… you can close this page."},
-        status=status.HTTP_202_ACCEPTED,
-    )
+    # Clean recipients
+    cleaned_recipients = []
+    for email in recipients:
+        if isinstance(email, str):
+            email = email.strip().lower()
+            if email:  # Skip empty strings
+                cleaned_recipients.append(email)
+
+    if not cleaned_recipients:
+        return Response(
+            {"message": "No valid recipients provided."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    total_recipients = len(cleaned_recipients)
+
+    try:
+        # Use the smart email sender
+        result = send_generic_email(
+            subject=subject,
+            message=body,
+            recipient_list=cleaned_recipients,
+            from_email=sender,
+            use_celery_threshold=30,  # Use 30 as threshold
+        )
+
+        # Prepare response based on strategy used
+        if result.get("status") == "completed":
+            # Inline send completed
+            sent = result.get("sent", 0)
+            failed = result.get("failed", 0)
+
+            if failed == 0:
+                message = f"Email sent successfully to {sent} recipients!"
+                if result.get("invalid_skipped", 0) > 0:
+                    message += f" ({result['invalid_skipped']} invalid emails skipped)"
+                return Response(
+                    {
+                        "status": "success",
+                        "message": message,
+                        "sent": sent,
+                        "total": total_recipients,
+                        "method": "inline",
+                    },
+                    status=status.HTTP_200_OK,
+                )
+            else:
+                return Response(
+                    {
+                        "status": "partial",
+                        "message": f"Email sent to {sent} recipients, {failed} failed.",
+                        "sent": sent,
+                        "failed": failed,
+                        "total": total_recipients,
+                        "failed_emails": result.get("failed_emails", []),
+                        "method": "inline",
+                    },
+                    status=status.HTTP_207_MULTI_STATUS,
+                )
+
+        elif result.get("status") == "queued":
+            # Queued to Celery
+            return Response(
+                {
+                    "status": "queued",
+                    "message": f"Emails queued for {total_recipients} recipients. Processing in background.",
+                    "total": total_recipients,
+                    "method": "celery_batch",
+                    "estimated_time": f"Approx {max(2, total_recipients // 20)} minutes",
+                    "note": "You can close this page. Emails will continue sending in the background.",
+                },
+                status=status.HTTP_202_ACCEPTED,
+            )
+
+        else:
+            # Error
+            return Response(
+                {
+                    "status": "error",
+                    "message": "Failed to process email request",
+                    "details": result,
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    except Exception as e:
+        logger.error(f"Email sending error: {str(e)}", exc_info=True)
+        return Response(
+            {
+                "status": "error",
+                "message": f"Failed to process email request: {str(e)}",
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
 
 from .models import EmailTemplate
