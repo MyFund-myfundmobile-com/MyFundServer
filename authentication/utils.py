@@ -105,103 +105,215 @@ def send_admin_push_notification(title, message, data=None, notif_type="ADMIN_AL
     return {"sent": sent_count, "total": admins.count()}
 
 
-import threading
-import time
-from django.core.mail import send_mail
+import logging
+from django.conf import settings
 from django.template.loader import render_to_string
 from django.utils.html import strip_tags
-from .models import CustomUser
-import logging
+from django.core.mail import send_mail
+from .models import CustomUser, ROITransaction
+from django.utils import timezone
+import re
+from datetime import date
 
 logger = logging.getLogger(__name__)
 
 
-def send_generic_email(subject, message, recipient_list, from_email=None):
+def validate_email(email):
+    """Validate email format"""
+    pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
+    return re.match(pattern, email) is not None
 
-    # 🛡️ Normalize recipient_list
+
+def send_generic_email(
+    subject, message, recipient_list, from_email=None, use_celery_threshold=30
+):
+    """
+    Smart email sender:
+    - ≤30 recipients → Send inline immediately (for quicksave, single alerts)
+    - >30 recipients → Use Celery with batching (for unlayer bulk emails)
+    - Validates emails before sending
+    """
+
     if isinstance(recipient_list, str):
         recipient_list = [recipient_list]
 
-    if not isinstance(recipient_list, (list, tuple)):
-        raise ValueError("recipient_list must be a list or tuple of emails")
+    if not recipient_list:
+        logger.warning("No recipients provided")
+        return {"status": "skipped", "reason": "No recipients"}
 
-    if from_email is None:
-        from django.conf import settings
+    valid_recipients = []
+    invalid_recipients = []
 
-        from_email = settings.DEFAULT_FROM_EMAIL
+    for email in recipient_list:
+        email = str(email).strip().lower()
+        if validate_email(email):
+            valid_recipients.append(email)
+        else:
+            invalid_recipients.append(email)
+            logger.warning(f"Invalid email format skipped: {email}")
 
-    total = len(recipient_list)
-
-    # Helper: prepare personalized message
-    def personalize(email_addr):
-        user = CustomUser.objects.filter(email=email_addr).first()
-        placeholders = {
-            "{first_name}": user.first_name if user else "User",
-            "{last_name}": user.last_name if user else "",
-            "{wallet}": str(user.wallet if user else 0),
-            "{savings}": str(user.savings if user else 0),
-            "{investment}": str(user.investment if user else 0),
-            "{full_name}": user.full_name if user else email_addr,
+    if not valid_recipients:
+        logger.error("No valid email addresses to send to")
+        return {
+            "status": "error",
+            "reason": "No valid emails",
+            "invalid": invalid_recipients,
         }
-        p_subject = subject
-        p_message = message
-        for k, v in placeholders.items():
-            p_subject = p_subject.replace(k, v)
-            p_message = p_message.replace(k, v)
-        return p_subject, p_message
 
-    # --- Inline sending for <=50 ---
-    if total <= 50:
+    from_email = from_email or settings.DEFAULT_FROM_EMAIL
+    total_valid = len(valid_recipients)
 
-        def send_inline():
-            for email in recipient_list:
+    logger.info(f"📧 Preparing to send '{subject}' to {total_valid} valid recipients")
+    if invalid_recipients:
+        logger.warning(f"⚠️ Skipped {len(invalid_recipients)} invalid emails")
+
+    # Personalization function
+    def personalize(email_addr):
+        try:
+            user = CustomUser.objects.filter(email=email_addr).first()
+
+            # --- Quarterly ROI context (computed on demand) ---
+            today = timezone.now().date()
+            year = today.year
+            month = today.month
+
+            if month in [1, 2, 3]:
+                qs = date(year - 1, 10, 1)
+                qe = date(year - 1, 12, 31)
+                ql = f"Q4 {year - 1}"
+            elif month in [4, 5, 6]:
+                qs = date(year, 1, 1)
+                qe = date(year, 3, 31)
+                ql = f"Q1 {year}"
+            elif month in [7, 8, 9]:
+                qs = date(year, 4, 1)
+                qe = date(year, 6, 30)
+                ql = f"Q2 {year}"
+            else:
+                qs = date(year, 7, 1)
+                qe = date(year, 9, 30)
+                ql = f"Q3 {year}"
+
+            roi_qs = ROITransaction.objects.filter(
+                user=user,
+                accrued_date__range=[qs, qe],
+                is_paid_out=True,  # only paid ROI
+            )
+
+            total_roi = sum(r.amount for r in roi_qs)
+            savings_roi = sum(r.amount for r in roi_qs if r.roi_type == "SAVINGS")
+            investment_roi = sum(r.amount for r in roi_qs if r.roi_type == "INVESTMENT")
+
+            placeholders = {
+                "{first_name}": user.first_name if user else "User",
+                "{last_name}": user.last_name if user else "",
+                "{full_name}": user.full_name if user else email_addr,
+                "{email}": email_addr,
+                # Financial
+                "{wallet}": f"{user.wallet:,.2f}" if user else "0.00",
+                "{savings}": f"{user.savings:,.2f}" if user else "0.00",
+                "{investment}": f"{user.investment:,.2f}" if user else "0.00",
+                # ROI placeholders
+                "{total_payout}": f"{total_roi:,.2f}",
+                "{savings_roi}": f"{savings_roi:,.2f}",
+                "{investment_roi}": f"{investment_roi:,.2f}",
+                "{quarter_label}": ql,
+            }
+
+            p_subject = subject
+            p_message = message
+            for k, v in placeholders.items():
+                p_subject = p_subject.replace(k, v)
+                p_message = p_message.replace(k, v)
+
+            return p_subject, p_message, email_addr
+
+        except Exception as e:
+            logger.error(f"Personalization error for {email_addr}: {e}")
+            return subject, message, email_addr
+
+    # --- INLINE SEND (≤30) ---
+    if total_valid <= use_celery_threshold:
+        sent_count = 0
+        failed_emails = []
+        import time
+
+        for email in valid_recipients:
+            try:
+                p_subject, p_message, email_addr = personalize(email)
+
                 try:
-                    p_subject, p_message = personalize(email)
-                    html_message = render_to_string(
-                        "email/email.html", {"subject": p_subject, "message": p_message}
+                    html_content = render_to_string(
+                        "email/email.html",
+                        {
+                            "subject": p_subject,
+                            "message": p_message,
+                            "user_email": email_addr,
+                        },
                     )
-                    plain_message = strip_tags(html_message)
-                    send_mail(
-                        p_subject,
-                        plain_message,
-                        from_email,
-                        [email],
-                        html_message=html_message,
-                        fail_silently=False,
-                    )
-                    logger.info(f"📧 Sent inline email to {email}")
-                except Exception as e:
-                    logger.error(f"❌ Failed inline email to {email}: {e}")
+                except Exception as template_error:
+                    logger.warning(f"Template error for {email}: {template_error}")
+                    html_content = f"<html><body>{p_message}</body></html>"
 
-        threading.Thread(target=send_inline, daemon=True).start()
+                send_mail(
+                    subject=p_subject,
+                    message=strip_tags(p_message),
+                    from_email=from_email,
+                    recipient_list=[email],
+                    html_message=html_content,
+                    fail_silently=False,
+                )
 
-    # --- Celery for >50 ---
-    elif total <= 200:
-        from .tasks import send_single_email_task
+                sent_count += 1
+                logger.info(f"✅ Inline email sent to {email}")
+                if total_valid > 1:
+                    time.sleep(0.5)
 
-        for email in recipient_list:
-            p_subject, p_message = personalize(email)
-            send_single_email_task.delay(email, p_subject, p_message, from_email)
+            except Exception as e:
+                logger.error(f"❌ Inline email failed for {email}: {e}")
+                failed_emails.append({"email": email, "error": str(e)})
 
-    elif total <= 500:
-        from .tasks import send_email_batch_task
+        result = {
+            "status": "completed" if sent_count > 0 else "failed",
+            "sent": sent_count,
+            "failed": len(failed_emails),
+            "total": total_valid,
+            "method": "inline",
+            "invalid_skipped": len(invalid_recipients),
+        }
 
-        batches = []
-        for email in recipient_list:
-            p_subject, p_message = personalize(email)
-            batches.append({"email": email, "subject": p_subject, "message": p_message})
-        send_email_batch_task.delay(batches, from_email)
+        if failed_emails:
+            result["failed_emails"] = failed_emails
+        if invalid_recipients:
+            result["invalid_emails"] = invalid_recipients
 
+        return result
+
+    # --- CELERY BATCH SEND (>30) ---
     else:
-        from .tasks import send_large_email_batch_task
+        personalized_emails = []
+        for email in valid_recipients:
+            p_subject, p_message, email_addr = personalize(email)
+            personalized_emails.append(
+                {
+                    "email": email,
+                    "subject": p_subject,
+                    "message": p_message,
+                    "from_email": from_email,
+                }
+            )
 
-        batches = []
-        for email in recipient_list:
-            p_subject, p_message = personalize(email)
-            batches.append({"email": email, "subject": p_subject, "message": p_message})
-        send_large_email_batch_task.delay(
-            batches, from_email, batch_size=50, delay_seconds=300
-        )
+        from .tasks import send_bulk_email_task
+
+        send_bulk_email_task.delay(personalized_emails)
+
+        return {
+            "status": "queued",
+            "total": total_valid,
+            "method": "celery_batch",
+            "invalid_skipped": len(invalid_recipients),
+            "message": f"Emails queued for {total_valid} recipients via Celery batch processing",
+        }
 
 
 def get_user_balance(user, source):
@@ -667,3 +779,23 @@ def process_scheduled_withdrawal(withdrawal):
         "MyFund <info@myfundmobile.com>",
         ["tolulopeahmed@gmail.com"],
     )
+
+
+from datetime import date
+
+
+def get_next_payout_date(today: date) -> date:
+    year = today.year
+    payout_dates = [
+        date(year, 1, 1),
+        date(year, 4, 1),
+        date(year, 7, 1),
+        date(year, 10, 1),
+    ]
+
+    for payout in payout_dates:
+        if today < payout:
+            return payout
+
+    # If we've passed Oct 1, next payout is Jan 1 of next year
+    return date(year + 1, 1, 1)

@@ -111,13 +111,16 @@ ASGI_APPLICATION = "myfundproject.routing.application"
 ADMIN_URL = "admin/"
 
 
-# Celery settings]
-# CELERY_BROKER_URL = 'redis://localhost:6379/0'  # Use the appropri\n.ate broker URL for your environment.
-888  # CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'  # Use the appropriate result backend URL for your environment.
+# Celery settings
+CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL")
+CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND")
+
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 
+CELERY_TASK_ALWAYS_EAGER = os.getenv("CELERY_TASK_ALWAYS_EAGER") == "True"
+CELERY_TASK_IGNORE_RESULT = os.getenv("CELERY_TASK_IGNORE_RESULT") == "True"
 
 # from celery.schedules import crontab
 
@@ -358,21 +361,19 @@ PAYLESS_SMS_PASSWORD = config("PAYLESS_SMS_PASSWORD")
 PAYLESS_SMS_SENDER_ID = config("PAYLESS_SMS_SENDER_ID")
 
 
-# settings.py (dev)
-# EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
-# DEFAULT_FROM_EMAIL = "MyFund <info@myfundmobile.com>"
-
-# ===== EMAIL CONFIGURATION =====
-# ===== EMAIL CONFIGURATION =====
-# ===== EMAIL CONFIGURATION =====
 # ===== EMAIL CONFIGURATION =====
 EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
 DEFAULT_FROM_EMAIL = "MyFund <message@myfundmobile.com>"
 
 EMAIL_HOST = "myfundmobile.com"
 EMAIL_PORT = 465  # SSL port
+EMAIL_USE_SSL = True  # Use SSL directly
 EMAIL_USE_TLS = False  # TLS off for SSL
-EMAIL_USE_SSL = True  # SSL on
+EMAIL_TIMEOUT = 20  # seconds
+
+# EMAIL_PORT = 587
+# EMAIL_USE_TLS = True  # important
+
 
 EMAIL_HOST_USER = "message@myfundmobile.com"
 EMAIL_HOST_PASSWORD = "AdminSecure123..."
