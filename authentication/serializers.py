@@ -353,6 +353,19 @@ class TargetSavingsSerializer(serializers.ModelSerializer):
     )
 
     def validate(self, data):
+        user = self.context["request"].user
+
+        # 🔴 CRITICAL SECURITY CHECK: Prevent banned/inactive users
+        if hasattr(user, "is_banned") and user.is_banned:
+            raise serializers.ValidationError(
+                {"detail": "Your account has been banned. Please contact support."}
+            )
+
+        if not user.is_active:
+            raise serializers.ValidationError(
+                {"detail": "Your account is inactive. Please contact support."}
+            )
+
         # Ensure end_date is in the future
         if data["end_date"] < timezone.now().date():
             raise serializers.ValidationError(
