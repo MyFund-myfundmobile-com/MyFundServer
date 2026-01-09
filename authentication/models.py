@@ -1696,7 +1696,7 @@ class TargetSavingsCompletion(models.Model):
         )
 
 
-# TRANSACTION MODEL
+# TRANSACTIONS MODEL
 from decimal import Decimal, InvalidOperation, DecimalException
 from django.utils import timezone
 import uuid
