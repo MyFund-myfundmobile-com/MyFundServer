@@ -1180,3 +1180,95 @@ def backfill_q3_2025_roi_from_transactions(self, email=None, test_only=False):
         print(f"[Q3 2025 ROI BACKFILL] {user.email} → ₦{total_payout:,.2f}")
 
     return f"✅ Backfill completed for {users.count()} user(s)."
+
+
+from celery import shared_task
+from django.conf import settings
+from django.utils import timezone
+from .models import CustomUser
+from .utils import send_generic_email  # adjust import if needed
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+@shared_task(bind=True, max_retries=3, rate_limit="45/h")
+def send_feedback_email_task(self, test_emails=None):
+    """
+    Send MyFund feedback email safely via Namecheap.
+    - If test_emails is provided -> sends ONLY to those
+    - Else -> sends to all active users
+    """
+
+    SUBJECT = "📬 {first_name}, YOUR DIVIDENDS FEEDBACK"
+
+    MESSAGE = """
+<!-- Header Image -->
+<p style="text-align:center; margin-bottom:24px;">
+  <img src="https://i.imgur.com/Tu5r2bh.png" alt="Testimonial" style="max-width:100%; height:auto; border-radius:8px;">
+</p>
+
+<p>Hi {first_name},</p>
+
+<p>We’d love to hear about your experience with MyFund, especially regarding recent dividends paid.</p>
+
+<p>Please take a minute to fill out this short feedback form:</p>
+
+<p>
+<a href="https://docs.google.com/forms/d/e/1FAIpQLSdqbbvW6xIlSkkPMXmSzsUYKHhroqktMgBzVtCY9p905SRK6Q/viewform?usp=header"
+   style="
+     display:block;
+     width:100%;
+     max-width:100%;
+     background-color:#4c28BC;
+     color:#ffffff;
+     text-align:center;
+     padding:16px;
+     font-weight:bold;
+     text-decoration:none;
+     border-radius:6px;
+     margin:24px 0;
+     letter-spacing:1px;
+   ">
+   FEEDBACK FORM
+</a>
+</p>
+
+<p>You may also share your testimonial on social media and tag us:</p>
+
+<p>@myfundmobile (all platforms)<br>
+@myfundmobile1 (Instagram)</p>
+
+<p>Thank you for your support.</p>
+
+<p>Best regards,<br>
+Deola</p>
+"""
+
+    # --------------------------------------------------
+    # Decide who to send to
+    # --------------------------------------------------
+    if test_emails:
+        recipients = test_emails
+        logger.info(f"🧪 TEST MODE: Sending to {len(recipients)} emails")
+    else:
+        recipients = list(
+            CustomUser.objects.filter(is_active=True)
+            .exclude(email__isnull=True)
+            .exclude(email__exact="")
+            .values_list("email", flat=True)
+        )
+        logger.info(f"🚀 LIVE MODE: Sending to {len(recipients)} active users")
+
+    # --------------------------------------------------
+    # Send using your existing safe logic
+    # --------------------------------------------------
+    result = send_generic_email(
+        subject=SUBJECT,
+        message_or_context=MESSAGE,
+        recipient_list=recipients,
+        from_email=settings.DEFAULT_FROM_EMAIL,
+    )
+
+    logger.info(f"📊 Feedback email task result: {result}")
+    return result
