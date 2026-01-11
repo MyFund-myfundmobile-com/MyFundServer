@@ -126,7 +126,7 @@ def validate_email(email):
 
 def send_generic_email(
     subject,
-    message_or_context,
+    message,
     recipient_list,
     from_email=None,
     use_celery_threshold=30,
