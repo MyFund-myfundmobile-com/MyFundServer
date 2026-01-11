@@ -1154,18 +1154,23 @@ def profile_picture_update(request):
     # optional: enforce size/type here…
 
     ext = pic.name.rsplit(".", 1)[-1]
-    filename = f"profile_{user.id}_{int(time.time())}.{ext}"
+    filename = f"profile_{user.id}.{ext}"
 
     try:
         # upload to ImageKit
         result = imagekit.upload_file(
-            file=pic,
+            file=pic.read(),  # 🔥 THIS IS KEY
             file_name=filename,
             options={
                 "folder": "/profile_pictures/",
                 "tags": [f"user_{user.id}"],
+                "use_unique_file_name": False,
+                "overwrite_file": True,
+                "overwrite_ai_tags": True,
+                "overwrite_tags": True,
             },
         )
+
         url = result["response"]["url"]
 
         user.profile_picture = url
@@ -1192,7 +1197,7 @@ def profile_picture_update(request):
 
         return Response(
             {
-                "message": "Profile picture saved locally",
+                "message": "Profile picture updated successfully!",
                 "profile_picture": local_url,
                 "warning": "Cloud upload failed, using local storage",
             },
