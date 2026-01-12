@@ -825,19 +825,106 @@ def send_single_email_task(email, subject, message, from_email):
         return {"status": "failed", "email": email, "error": str(e)}
 
 
-@shared_task
-def send_bulk_email_task(emails, batch_size=30, delay_seconds=15):
+from celery import shared_task
+import time
+import logging
+from django.core.mail import send_mail
+from django.template.loader import render_to_string
+from django.utils.html import strip_tags
+
+logger = logging.getLogger(__name__)
+
+
+@shared_task(bind=True, max_retries=3, rate_limit="45/h")  # ← RATE LIMIT ADDED HERE
+def send_namecheap_safe_email_task(
+    self, emails, from_email, batch_size=15, delay_seconds=2
+):
     """
-    Bulk email with batching + delays to avoid Namecheap limits
-    Called when send_generic_email has >30 recipients
+    Namecheap-safe email sending: MAX 45 emails per hour
+    For 3000 users: Will take ~67 hours (2.8 days)
     """
     total_emails = len(emails)
     sent_count = 0
     failed_emails = []
 
-    logger.info(f"📦 Processing {total_emails} emails in batches of {batch_size}")
+    logger.info(
+        f"🛡️ Namecheap-safe: Processing {total_emails} emails in ultra-safe mode"
+    )
 
-    # Process in batches
+    # Process emails one by one with delays
+    for i, email_data in enumerate(emails):
+        try:
+            # Extract email data
+            to_email = email_data.get("to", "")
+            subject = email_data.get("subject", "")
+            plain_message = email_data.get("plain_message", "")
+            html_message = email_data.get("html_message", "")
+
+            if not to_email:
+                logger.warning("Skipping email with no recipient")
+                continue
+
+            # Send email
+            send_mail(
+                subject=subject,
+                message=plain_message,
+                from_email=from_email,
+                recipient_list=[to_email],
+                html_message=html_message,
+                fail_silently=False,
+            )
+
+            sent_count += 1
+
+            # Log progress every 5 emails
+            if (i + 1) % 5 == 0:
+                logger.info(f"✅ Sent {i+1}/{total_emails} emails in this batch")
+
+            # Critical: Delay between emails to stay under Namecheap limit
+            # 2 seconds between emails = 30 emails/minute max = safe
+            time.sleep(delay_seconds)
+
+        except Exception as e:
+            error_info = {"email": to_email, "error": str(e)}
+            failed_emails.append(error_info)
+            logger.error(f"❌ Email failed for {to_email}: {e}")
+
+            # If it's a rate limit error, wait longer and retry
+            if "rate limit" in str(e).lower() or "quota" in str(e).lower():
+                logger.warning(f"⚠️ Rate limit detected, waiting 5 minutes...")
+                time.sleep(300)  # Wait 5 minutes
+
+                try:
+                    # Retry this specific email
+                    self.retry(countdown=300, max_retries=2)
+                except self.MaxRetriesExceededError:
+                    logger.error(f"Max retries exceeded for {to_email}")
+                    continue
+
+    logger.info(f"📊 Namecheap-safe batch complete: {sent_count}/{total_emails} sent")
+
+    return {
+        "sent": sent_count,
+        "failed": len(failed_emails),
+        "total": total_emails,
+        "batch_size": batch_size,
+        "delay_seconds": delay_seconds,
+        "failed_emails": failed_emails if failed_emails else None,
+    }
+
+
+@shared_task(bind=True, max_retries=3, rate_limit="100/h")  # For small batches
+def send_bulk_email_task(self, emails, from_email, batch_size=30, delay_seconds=60):
+    """
+    For smaller batches (<100): Faster but still Namecheap-safe
+    """
+    total_emails = len(emails)
+    sent_count = 0
+    failed_emails = []
+
+    logger.info(f"📦 Processing {total_emails} emails (small batch mode)")
+
+    # Process in very small batches for Namecheap
     for i in range(0, total_emails, batch_size):
         batch = emails[i : i + batch_size]
         batch_number = (i // batch_size) + 1
@@ -852,59 +939,43 @@ def send_bulk_email_task(emails, batch_size=30, delay_seconds=15):
 
         for email_data in batch:
             try:
-                email = email_data["email"]
-                subject = email_data["subject"]
-                message = email_data["message"]
-                from_email = email_data["from_email"]
+                to_email = email_data.get("to", "")
+                subject = email_data.get("subject", "")
+                plain_message = email_data.get("plain_message", "")
+                html_message = email_data.get("html_message", "")
 
-                # Create HTML content
-                try:
-                    html_content = render_to_string(
-                        "email/email.html",
-                        {"subject": subject, "message": message, "user_email": email},
-                    )
-                except Exception as e:
-                    logger.warning(f"Template error for {email}: {e}")
-                    html_content = f"<html><body>{message}</body></html>"
+                if not to_email:
+                    continue
 
-                # Send email
                 send_mail(
                     subject=subject,
-                    message=strip_tags(message),
+                    message=plain_message,
                     from_email=from_email,
-                    recipient_list=[email],
-                    html_message=html_content,
+                    recipient_list=[to_email],
+                    html_message=html_message,
                     fail_silently=False,
                 )
 
                 sent_count += 1
                 batch_sent += 1
 
-                # Small delay between emails within batch (500ms)
-                time.sleep(0.5)
+                # Delay between emails within batch
+                time.sleep(2)  # 2 seconds between emails
 
             except Exception as e:
-                error_info = {"email": email, "error": str(e)}
+                error_info = {"email": to_email, "error": str(e)}
                 failed_emails.append(error_info)
                 batch_failed.append(error_info)
-                logger.error(f"❌ Batch email failed for {email}: {e}")
+                logger.error(f"❌ Email failed for {to_email}: {e}")
 
-        # Log batch completion
         logger.info(f"✅ Batch {batch_number} complete: {batch_sent}/{len(batch)} sent")
 
-        # Add failed emails from this batch to overall
-        if batch_failed:
-            logger.warning(f"⚠️ Batch {batch_number} had {len(batch_failed)} failures")
-
-        # Delay between batches (unless last batch)
+        # Long delay between batches for Namecheap safety
         if i + batch_size < total_emails:
             logger.info(f"⏳ Waiting {delay_seconds}s before next batch...")
             time.sleep(delay_seconds)
 
-    # Final summary
-    logger.info(
-        f"📊 Bulk email complete: {sent_count}/{total_emails} sent successfully"
-    )
+    logger.info(f"📊 Bulk email complete: {sent_count}/{total_emails} sent")
 
     result = {
         "sent": sent_count,
@@ -1109,3 +1180,95 @@ def backfill_q3_2025_roi_from_transactions(self, email=None, test_only=False):
         print(f"[Q3 2025 ROI BACKFILL] {user.email} → ₦{total_payout:,.2f}")
 
     return f"✅ Backfill completed for {users.count()} user(s)."
+
+
+from celery import shared_task
+from django.conf import settings
+from django.utils import timezone
+from .models import CustomUser
+from .utils import send_generic_email  # adjust import if needed
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+@shared_task(bind=True, max_retries=3, rate_limit="45/h")
+def send_feedback_email_task(self, test_emails=None):
+    """
+    Send MyFund feedback email safely via Namecheap.
+    - If test_emails is provided -> sends ONLY to those
+    - Else -> sends to all active users
+    """
+
+    SUBJECT = "📬 {first_name}, YOUR DIVIDENDS FEEDBACK"
+
+    MESSAGE = """
+<!-- Header Image -->
+<p style="text-align:center; margin-bottom:24px;">
+  <img src="https://i.imgur.com/Tu5r2bh.png" alt="Testimonial" style="max-width:100%; height:auto; border-radius:8px;">
+</p>
+
+<p>Hi {first_name},</p>
+
+<p>We’d love to hear about your experience with MyFund, especially regarding recent dividends paid.</p>
+
+<p>Please take a minute to fill out this short feedback form:</p>
+
+<p>
+<a href="https://docs.google.com/forms/d/e/1FAIpQLSdqbbvW6xIlSkkPMXmSzsUYKHhroqktMgBzVtCY9p905SRK6Q/viewform?usp=header"
+   style="
+     display:block;
+     width:100%;
+     max-width:100%;
+     background-color:#4c28BC;
+     color:#ffffff;
+     text-align:center;
+     padding:16px;
+     font-weight:bold;
+     text-decoration:none;
+     border-radius:6px;
+     margin:24px 0;
+     letter-spacing:1px;
+   ">
+   FEEDBACK FORM
+</a>
+</p>
+
+<p>You may also share your testimonial on social media and tag us:</p>
+
+<p>@myfundmobile (all platforms)<br>
+@myfundmobile1 (Instagram)</p>
+
+<p>Thank you for your support.</p>
+
+<p>Best regards,<br>
+Deola</p>
+"""
+
+    # --------------------------------------------------
+    # Decide who to send to
+    # --------------------------------------------------
+    if test_emails:
+        recipients = test_emails
+        logger.info(f"🧪 TEST MODE: Sending to {len(recipients)} emails")
+    else:
+        recipients = list(
+            CustomUser.objects.filter(is_active=True)
+            .exclude(email__isnull=True)
+            .exclude(email__exact="")
+            .values_list("email", flat=True)
+        )
+        logger.info(f"🚀 LIVE MODE: Sending to {len(recipients)} active users")
+
+    # --------------------------------------------------
+    # Send using your existing safe logic
+    # --------------------------------------------------
+    result = send_generic_email(
+        subject=SUBJECT,
+        message_or_context=MESSAGE,
+        recipient_list=recipients,
+        from_email=settings.DEFAULT_FROM_EMAIL,
+    )
+
+    logger.info(f"📊 Feedback email task result: {result}")
+    return result

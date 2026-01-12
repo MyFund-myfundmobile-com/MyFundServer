@@ -1154,18 +1154,23 @@ def profile_picture_update(request):
     # optional: enforce size/type here…
 
     ext = pic.name.rsplit(".", 1)[-1]
-    filename = f"profile_{user.id}_{int(time.time())}.{ext}"
+    filename = f"profile_{user.id}.{ext}"
 
     try:
         # upload to ImageKit
         result = imagekit.upload_file(
-            file=pic,
+            file=pic.read(),  # 🔥 THIS IS KEY
             file_name=filename,
             options={
                 "folder": "/profile_pictures/",
                 "tags": [f"user_{user.id}"],
+                "use_unique_file_name": False,
+                "overwrite_file": True,
+                "overwrite_ai_tags": True,
+                "overwrite_tags": True,
             },
         )
+
         url = result["response"]["url"]
 
         user.profile_picture = url
@@ -1192,7 +1197,7 @@ def profile_picture_update(request):
 
         return Response(
             {
-                "message": "Profile picture saved locally",
+                "message": "Profile picture updated successfully!",
                 "profile_picture": local_url,
                 "warning": "Cloud upload failed, using local storage",
             },
@@ -6026,119 +6031,136 @@ logger = logging.getLogger(__name__)
 def send_email(request):
     """
     Admin sends email via Unlayer modal.
-    - ≤30 recipients → Immediate inline send
-    - >30 recipients → Celery batch with delays
-    - Returns immediately so user doesn't wait
     """
-    sender = settings.DEFAULT_FROM_EMAIL
-    subject = request.data.get("subject", "").strip()
-    body = request.data.get("body", "").strip()
-    recipients = request.data.get("recipients", [])
-
-    # Validation
-    if not subject or not body:
-        return Response(
-            {"message": "Subject and body are required."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-
-    if not recipients or not isinstance(recipients, list):
-        return Response(
-            {"message": "Recipients must be a non-empty list."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-
-    # Clean recipients
-    cleaned_recipients = []
-    for email in recipients:
-        if isinstance(email, str):
-            email = email.strip().lower()
-            if email:  # Skip empty strings
-                cleaned_recipients.append(email)
-
-    if not cleaned_recipients:
-        return Response(
-            {"message": "No valid recipients provided."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-
-    total_recipients = len(cleaned_recipients)
+    logger.info(f"📧 API send_email called by user: {request.user.email}")
 
     try:
-        # Use the smart email sender
-        result = send_generic_email(
-            subject=subject,
-            message=body,
-            recipient_list=cleaned_recipients,
-            from_email=sender,
-            use_celery_threshold=30,  # Use 30 as threshold
+        sender = settings.DEFAULT_FROM_EMAIL
+        subject = request.data.get("subject", "").strip()
+        body = request.data.get("body", "").strip()  # This is the HTML content
+        recipients = request.data.get("recipients", [])
+
+        logger.info(
+            f"📧 Request data - Subject: '{subject}', Body length: {len(body)}, Recipients: {len(recipients)}"
         )
 
-        # Prepare response based on strategy used
-        if result.get("status") == "completed":
-            # Inline send completed
-            sent = result.get("sent", 0)
-            failed = result.get("failed", 0)
+        # Validation
+        if not subject or not body:
+            logger.warning("Validation failed: Subject or body missing")
+            return Response(
+                {"message": "Subject and body are required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-            if failed == 0:
-                message = f"Email sent successfully to {sent} recipients!"
-                if result.get("invalid_skipped", 0) > 0:
-                    message += f" ({result['invalid_skipped']} invalid emails skipped)"
-                return Response(
-                    {
-                        "status": "success",
-                        "message": message,
-                        "sent": sent,
-                        "total": total_recipients,
-                        "method": "inline",
-                    },
-                    status=status.HTTP_200_OK,
-                )
-            else:
-                return Response(
-                    {
-                        "status": "partial",
-                        "message": f"Email sent to {sent} recipients, {failed} failed.",
-                        "sent": sent,
-                        "failed": failed,
-                        "total": total_recipients,
-                        "failed_emails": result.get("failed_emails", []),
-                        "method": "inline",
-                    },
-                    status=status.HTTP_207_MULTI_STATUS,
-                )
+        if not recipients or not isinstance(recipients, list):
+            logger.warning("Validation failed: Recipients not a list or empty")
+            return Response(
+                {"message": "Recipients must be a non-empty list."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        elif result.get("status") == "queued":
-            # Queued to Celery
+        # Clean recipients
+        cleaned_recipients = []
+        for email in recipients:
+            if isinstance(email, str):
+                email = email.strip().lower()
+                if email:
+                    cleaned_recipients.append(email)
+
+        if not cleaned_recipients:
+            logger.warning("Validation failed: No valid recipients after cleaning")
+            return Response(
+                {"message": "No valid recipients provided."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        logger.info(f"📧 Cleaned recipients: {cleaned_recipients}")
+
+        # Use the smart email sender - FIXED PARAMETER NAME
+        logger.info("📧 Calling send_generic_email...")
+        result = send_generic_email(
+            subject=subject,
+            message_or_context=body,  # CHANGED FROM 'message' TO 'message_or_context'
+            recipient_list=cleaned_recipients,
+            from_email=sender,
+            use_celery_threshold=30,
+        )
+
+        logger.info(f"📧 send_generic_email result: {result}")
+
+        # Handle the result based on status
+        if result["status"] == "completed":
+            logger.info(f"✅ Email send completed: {result['sent']} sent")
+            return Response(
+                {
+                    "status": "success",
+                    "message": f"Email sent successfully to {result['sent']} recipients!",
+                    "sent": result["sent"],
+                    "total": len(cleaned_recipients),
+                    "method": "inline",
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        elif result["status"] == "partial":
+            logger.warning(
+                f"⚠️ Partial email send: {result['sent']} sent, {result['failed']} failed"
+            )
+            return Response(
+                {
+                    "status": "partial",
+                    "message": f"Email sent to {result['sent']} recipients, {result['failed']} failed.",
+                    "sent": result["sent"],
+                    "failed": result["failed"],
+                    "total": len(cleaned_recipients),
+                    "failed_emails": result.get("failed_emails", []),
+                    "method": "inline",
+                },
+                status=status.HTTP_207_MULTI_STATUS,
+            )
+
+        elif result["status"] == "queued":
+            logger.info(f"📦 Email queued to Celery: {result['total']} recipients")
             return Response(
                 {
                     "status": "queued",
-                    "message": f"Emails queued for {total_recipients} recipients. Processing in background.",
-                    "total": total_recipients,
+                    "message": f"Emails queued for {result['total']} recipients. Processing in background.",
+                    "total": result["total"],
                     "method": "celery_batch",
-                    "estimated_time": f"Approx {max(2, total_recipients // 20)} minutes",
-                    "note": "You can close this page. Emails will continue sending in the background.",
                 },
                 status=status.HTTP_202_ACCEPTED,
             )
 
-        else:
-            # Error
+        elif result["status"] == "error":
+            logger.error(
+                f"❌ Email send error: {result.get('reason', 'Unknown error')}"
+            )
             return Response(
                 {
                     "status": "error",
-                    "message": "Failed to process email request",
+                    "message": result.get("reason", "Failed to process email request"),
+                    "details": result,
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        else:
+            logger.error(f"❌ Unknown status from send_generic_email: {result}")
+            return Response(
+                {
+                    "status": "error",
+                    "message": "Unexpected response from email service",
                     "details": result,
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
     except Exception as e:
-        logger.error(f"Email sending error: {str(e)}", exc_info=True)
+        logger.error(f"❌ UNHANDLED EXCEPTION in send_email API: {e}", exc_info=True)
         return Response(
             {
                 "status": "error",
-                "message": f"Failed to process email request: {str(e)}",
+                "message": f"Internal server error: {str(e)}",
             },
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )

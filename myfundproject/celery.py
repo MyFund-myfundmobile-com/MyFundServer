@@ -95,3 +95,22 @@ app.conf.beat_schedule.update(
         },
     }
 )
+
+# Celery settings for Namecheap-safe email sending
+app.conf.update(
+    # Rate limiting for email tasks
+    task_annotations={
+        "authentication.tasks.send_namecheap_safe_email_task": {
+            "rate_limit": "45/h",  # MAX 45 emails per hour
+        },
+        "authentication.tasks.send_bulk_email_task": {
+            "rate_limit": "100/h",  # 100 per hour for small batches
+        },
+    },
+    # Retry settings
+    task_default_retry_delay=300,  # 5 minutes
+    task_max_retries=3,
+    # Worker settings
+    worker_prefetch_multiplier=1,  # Process one task at a time
+    worker_max_tasks_per_child=50,  # Restart worker after 50 tasks
+)
