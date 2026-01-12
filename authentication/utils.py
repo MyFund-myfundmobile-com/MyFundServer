@@ -132,178 +132,271 @@ def send_generic_email(
     use_celery_threshold=30,
     template="email/email.html",
 ):
-     
     """
-    Smart, universal email sender:
-
-    - ≤use_celery_threshold recipients → send inline immediately
-    - >use_celery_threshold → send via Celery worker (batch)
-    - Always renders message with template for header/footer
-    - Supports string message or dict context
-    - Performs user-level personalization
+    Smart, universal email sender with Namecheap-safe bulk sending.
     """
-    
-    if isinstance(recipient_list, str):
-        recipient_list = [recipient_list]
-
-    if not recipient_list:
-        return {
-            "status": "error",
-            "reason": "No recipients provided",
-        }
-
-    valid_recipients = []
-    invalid_recipients = []
-
-    for email in recipient_list:
-        email = str(email).strip().lower()
-        if validate_email(email):
-            valid_recipients.append(email)
-        else:
-            invalid_recipients.append(email)
-            logger.warning(f"Invalid email skipped: {email}")
-
-    if not valid_recipients:
-        return {
-            "status": "error",
-            "reason": "No valid emails",
-            "invalid": invalid_recipients,
-        }
-
-    from_email = from_email or settings.DEFAULT_FROM_EMAIL
-    total_valid = len(valid_recipients)
-
-    logger.info(f"📧 Preparing to send '{subject}' to {total_valid} recipients")
-
-    # ---------- Personalization ----------
-    def personalize(email_addr):
-        try:
-            user = CustomUser.objects.filter(email=email_addr).first()
-
-            today = timezone.now().date()
-            year, month = today.year, today.month
-            if month <= 3:
-                qs, qe, ql = date(year - 1, 10, 1), date(year - 1, 12, 31), f"Q4 {year-1}"
-            elif month <= 6:
-                qs, qe, ql = date(year, 1, 1), date(year, 3, 31), f"Q1 {year}"
-            elif month <= 9:
-                qs, qe, ql = date(year, 4, 1), date(year, 6, 30), f"Q2 {year}"
-            else:
-                qs, qe, ql = date(year, 7, 1), date(year, 9, 30), f"Q3 {year}"
-
-            roi_qs = (
-                ROITransaction.objects.filter(
-                    user=user,
-                    accrued_date__range=[qs, qe],
-                    is_paid_out=True,
-                )
-                if user
-                else []
-            )
-
-            total_roi = sum(r.amount for r in roi_qs)
-            savings_roi = sum(r.amount for r in roi_qs if r.roi_type == "SAVINGS")
-            investment_roi = sum(r.amount for r in roi_qs if r.roi_type == "INVESTMENT")
-
-            placeholders = {
-                "{first_name}": user.first_name if user else "User",
-                "{last_name}": user.last_name if user else "",
-                "{full_name}": getattr(user, "full_name", email_addr),
-                "{email}": email_addr,
-                "{wallet}": f"{getattr(user, 'wallet', 0):,.2f}",
-                "{savings}": f"{getattr(user, 'savings', 0):,.2f}",
-                "{investment}": f"{getattr(user, 'investment', 0):,.2f}",
-                "{total_payout}": f"{total_roi:,.2f}",
-                "{savings_roi}": f"{savings_roi:,.2f}",
-                "{investment_roi}": f"{investment_roi:,.2f}",
-                "{quarter_label}": ql,
-            }
-
-            p_subject = subject
-            p_message = message if isinstance(message, str) else message.get("message", "")
-
-            for k, v in placeholders.items():
-                p_subject = p_subject.replace(k, v)
-                p_message = p_message.replace(k, v)
-
-            context = {
-                "subject": p_subject,
-                "message": p_message,
-                "user": user,
-                "email": email_addr,
-            }
-
-            try:
-                html_message = render_to_string(template, context)
-            except Exception:
-                html_message = f"<html><body>{p_message}</body></html>"
-
-            plain_message = strip_tags(html_message) or p_message
-
-            return {
-                "to": email_addr,
-                "subject": p_subject,
-                "html_message": html_message,
-                "plain_message": plain_message,
-            }
-
-        except Exception as e:
-            logger.error(f"Personalization error for {email_addr}: {e}")
-            raise
-
-    payloads = []
-    failed_emails = []
-
-    for email in valid_recipients:
-        try:
-            payloads.append(personalize(email))
-        except Exception:
-            failed_emails.append(email)
-
-    # ---------- INLINE SEND ----------
-    if len(payloads) <= use_celery_threshold:
-        sent = 0
-        failed = 0
-
-        for p in payloads:
-            try:
-                send_mail(
-                    subject=p["subject"],
-                    message=p["plain_message"],
-                    from_email=from_email,
-                    recipient_list=[p["to"]],
-                    html_message=p["html_message"],
-                    fail_silently=False,
-                )
-                sent += 1
-                logger.info(f"✅ Inline email sent to {p['to']}")
-            except Exception as e:
-                failed += 1
-                failed_emails.append(p["to"])
-                logger.error(f"❌ Email failed for {p['to']}: {e}")
-
-        return {
-            "status": "completed",
-            "sent": sent,
-            "failed": failed,
-            "invalid_skipped": len(invalid_recipients),
-            "failed_emails": failed_emails,
-        }
-
-    # ---------- CELERY BATCH SEND ----------
-    from .tasks import send_bulk_email_task
-
-    send_bulk_email_task.delay(payloads, from_email)
-
     logger.info(
-        f"📦 Emails queued for Celery batch processing ({len(payloads)} recipients)"
+        f"📧 START send_generic_email - Subject: '{subject}', Recipients: {len(recipient_list) if isinstance(recipient_list, list) else 'single'}"
     )
 
-    return {
-        "status": "queued",
-        "queued": len(payloads),
-        "invalid_skipped": len(invalid_recipients),
-    }
+    try:
+        if isinstance(recipient_list, str):
+            recipient_list = [recipient_list]
+
+        if not recipient_list:
+            logger.warning("No recipients provided")
+            return {"status": "skipped", "reason": "No recipients"}
+
+        valid_recipients = []
+        invalid_recipients = []
+
+        for email in recipient_list:
+            email = str(email).strip().lower()
+            if validate_email(email):
+                valid_recipients.append(email)
+            else:
+                invalid_recipients.append(email)
+                logger.warning(f"Invalid email skipped: {email}")
+
+        if not valid_recipients:
+            logger.error("No valid email addresses")
+            return {
+                "status": "error",
+                "reason": "No valid emails",
+                "invalid": invalid_recipients,
+            }
+
+        from_email = from_email or settings.DEFAULT_FROM_EMAIL
+        total_valid = len(valid_recipients)
+        logger.info(
+            f"📧 Valid recipients: {total_valid}, Invalid skipped: {len(invalid_recipients)}"
+        )
+
+        # ---------- Personalization ----------
+        def personalize(email_addr):
+            try:
+                logger.debug(f"Personalizing email for: {email_addr}")
+                user = CustomUser.objects.filter(email=email_addr).first()
+
+                # ROI / Quarter placeholders
+                today = timezone.now().date()
+                year, month = today.year, today.month
+                if month <= 3:
+                    qs, qe, ql = (
+                        date(year - 1, 10, 1),
+                        date(year - 1, 12, 31),
+                        f"Q4 {year-1}",
+                    )
+                elif month <= 6:
+                    qs, qe, ql = date(year, 1, 1), date(year, 3, 31), f"Q1 {year}"
+                elif month <= 9:
+                    qs, qe, ql = date(year, 4, 1), date(year, 6, 30), f"Q2 {year}"
+                else:
+                    qs, qe, ql = date(year, 7, 1), date(year, 9, 30), f"Q3 {year}"
+
+                roi_qs = (
+                    ROITransaction.objects.filter(
+                        user=user, accrued_date__range=[qs, qe], is_paid_out=True
+                    )
+                    if user
+                    else []
+                )
+
+                total_roi = sum(r.amount for r in roi_qs)
+                savings_roi = sum(r.amount for r in roi_qs if r.roi_type == "SAVINGS")
+                investment_roi = sum(
+                    r.amount for r in roi_qs if r.roi_type == "INVESTMENT"
+                )
+
+                placeholders = {
+                    "{first_name}": user.first_name if user else "User",
+                    "{last_name}": user.last_name if user else "",
+                    "{full_name}": getattr(user, "full_name", email_addr),
+                    "{email}": email_addr,
+                    "{wallet}": f"{getattr(user, 'wallet', 0):,.2f}",
+                    "{savings}": f"{getattr(user, 'savings', 0):,.2f}",
+                    "{investment}": f"{getattr(user, 'investment', 0):,.2f}",
+                    "{total_payout}": f"{total_roi:,.2f}",
+                    "{savings_roi}": f"{savings_roi:,.2f}",
+                    "{investment_roi}": f"{investment_roi:,.2f}",
+                    "{quarter_label}": ql,
+                }
+
+                # Replace placeholders in subject & message
+                p_subject = subject
+                if isinstance(message_or_context, str):
+                    p_message = message_or_context
+                elif isinstance(message_or_context, dict):
+                    p_message = message_or_context.get("message", "")
+                else:
+                    p_message = str(message_or_context)
+
+                for k, v in placeholders.items():
+                    p_subject = p_subject.replace(k, v)
+                    p_message = p_message.replace(k, v)
+
+                # Render template
+                context = {
+                    "subject": p_subject,
+                    "message": p_message,
+                    "user": user,
+                    "email": email_addr,
+                }
+
+                try:
+                    html_message = render_to_string(template, context)
+                except Exception as e:
+                    logger.warning(f"Template rendering failed for {email_addr}: {e}")
+                    html_message = f"<html><body>{p_message}</body></html>"
+
+                plain_message = strip_tags(html_message) or p_message
+
+                return {
+                    "to": email_addr,
+                    "subject": p_subject,
+                    "html_message": html_message,
+                    "plain_message": plain_message,
+                }
+
+            except Exception as e:
+                logger.error(f"Personalization error for {email_addr}: {e}")
+                return {
+                    "to": email_addr,
+                    "subject": subject,
+                    "html_message": f"<html><body>{message_or_context}</body></html>",
+                    "plain_message": str(message_or_context),
+                }
+
+        payloads = [personalize(e) for e in valid_recipients]
+        logger.info(f"📧 Personalization complete. Payloads: {len(payloads)}")
+
+        # ---------- INLINE SEND (≤30 recipients) ----------
+        if total_valid <= use_celery_threshold:
+            logger.info(f"📧 Using INLINE send for {total_valid} recipients")
+            sent_count = 0
+            failed_emails = []
+
+            for p in payloads:
+                try:
+                    logger.debug(f"Sending email to: {p['to']}")
+                    send_mail(
+                        subject=p["subject"],
+                        message=p["plain_message"],
+                        from_email=from_email,
+                        recipient_list=[p["to"]],
+                        html_message=p["html_message"],
+                        fail_silently=False,
+                    )
+                    sent_count += 1
+                    logger.info(f"✅ Inline email sent to {p['to']}")
+                except Exception as e:
+                    logger.error(f"❌ Failed to send email to {p['to']}: {e}")
+                    failed_emails.append(p["to"])
+
+            logger.info(
+                f"📧 Inline send complete: {sent_count} sent, {len(failed_emails)} failed"
+            )
+
+            # Return proper result dictionary
+            if failed_emails == []:
+                return {
+                    "status": "completed",
+                    "sent": sent_count,
+                    "failed": 0,
+                    "failed_emails": [],
+                    "total": total_valid,
+                    "invalid_skipped": len(invalid_recipients),
+                    "invalid_emails": invalid_recipients,
+                }
+            else:
+                return {
+                    "status": "partial",
+                    "sent": sent_count,
+                    "failed": len(failed_emails),
+                    "failed_emails": failed_emails,
+                    "total": total_valid,
+                    "invalid_skipped": len(invalid_recipients),
+                    "invalid_emails": invalid_recipients,
+                }
+
+        # ---------- CELERY BATCH SEND (>30 recipients) WITH NAMECHEAP SAFETY ----------
+        logger.info(f"📧 Using CELERY batch send for {total_valid} recipients")
+        try:
+            from .tasks import send_bulk_email_task, send_namecheap_safe_email_task
+
+            # Namecheap-safe settings (MAX 50 emails per hour)
+            NAMECHEAP_MAX_PER_HOUR = 45  # Keep it safe at 45
+            BATCH_SIZE = 15  # Small batches
+            DELAY_BETWEEN_BATCHES_MINUTES = 60  # 1 hour between batches
+
+            if total_valid <= 100:
+                # Small batch (<100): Send immediately with small delay
+                send_bulk_email_task.delay(payloads, from_email)
+                logger.info(f"📦 Small batch queued: {total_valid} recipients")
+            else:
+                # Large batch: Split into Namecheap-safe chunks
+                num_batches = (total_valid + BATCH_SIZE - 1) // BATCH_SIZE
+                batches = [
+                    payloads[i : i + BATCH_SIZE]
+                    for i in range(0, total_valid, BATCH_SIZE)
+                ]
+
+                logger.info(
+                    f"📦 Splitting {total_valid} emails into {num_batches} batches of {BATCH_SIZE}"
+                )
+
+                # Schedule batches with 1-hour delays
+                for i, batch in enumerate(batches):
+                    delay_minutes = i * DELAY_BETWEEN_BATCHES_MINUTES
+
+                    send_namecheap_safe_email_task.apply_async(
+                        args=[batch, from_email],
+                        countdown=delay_minutes * 60,  # Convert minutes to seconds
+                        retry=True,
+                        retry_policy={
+                            "max_retries": 3,
+                            "interval_start": 10,
+                            "interval_step": 10,
+                            "interval_max": 50,
+                        },
+                    )
+
+                    logger.info(
+                        f"📦 Batch {i+1}/{num_batches} queued with {delay_minutes} min delay"
+                    )
+
+            # Return queued status
+            return {
+                "status": "queued",
+                "total": total_valid,
+                "invalid_skipped": len(invalid_recipients),
+                "method": "celery_namecheap_safe",
+                "note": "Emails will be sent in safe batches to avoid Namecheap limits",
+                "estimated_completion": f"~{max(1, (total_valid // BATCH_SIZE))} hours",
+            }
+
+        except ImportError as e:
+            logger.error(f"❌ Cannot import Celery task module: {e}")
+            return {
+                "status": "error",
+                "reason": f"Cannot import Celery task module: {str(e)}",
+                "total": total_valid,
+            }
+        except Exception as e:
+            logger.error(f"❌ Failed to queue Celery task: {e}")
+            return {
+                "status": "error",
+                "reason": f"Celery queue failed: {str(e)}",
+                "total": total_valid,
+            }
+
+    except Exception as e:
+        logger.error(f"❌ UNEXPECTED ERROR in send_generic_email: {e}", exc_info=True)
+        return {
+            "status": "error",
+            "reason": f"Unexpected error: {str(e)}",
+            "traceback": str(e.__traceback__) if hasattr(e, "__traceback__") else None,
+        }
 
 
 def get_user_balance(user, source):
