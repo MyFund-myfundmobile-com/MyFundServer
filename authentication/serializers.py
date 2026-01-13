@@ -90,7 +90,14 @@ class SignupSerializer(serializers.ModelSerializer):
 
 
 class ConfirmOTPSerializer(serializers.Serializer):
-    otp = serializers.CharField(max_length=6)  # Assuming OTP is a 6-digit string
+    otp = serializers.CharField(max_length=6)
+
+    def validate_otp(self, value):
+        """
+        Ensure OTP is always a 6-character string, even if frontend sends an int.
+        """
+        value_str = str(value).zfill(6)  # pads numbers like 123 -> '000123'
+        return value_str
 
 
 from django.conf import settings  # Import settings to get the MEDIA_URL
