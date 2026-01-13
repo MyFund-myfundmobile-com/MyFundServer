@@ -634,6 +634,109 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         msg.attach_alternative(html_message, "text/html")
         msg.send()
 
+    def create_pending_referral_reward(self):
+        """
+        Creates pending referral reward transactions for new signup,
+        sends referral emails and pushes.
+        """
+        from .utils import send_push_notification, send_generic_email
+
+        # Prevent duplicates
+        if Transaction.objects.filter(
+            user=self, description="Referral Reward"
+        ).exists():
+            logger.info(f"Pending referral reward already exists for {self.email}")
+            return
+
+        transaction_id = str(uuid.uuid4())[:10]
+
+        # Referred user reward (pending)
+        Transaction.objects.create(
+            user=self,
+            referral_email=self.referral.email if self.referral else None,
+            transaction_type="credit",
+            status="pending",
+            amount=500,
+            description="Referral Reward",
+            transaction_id=transaction_id,
+            total_amount=500,
+        )
+
+        self.pending_referral_reward = 500
+        self.save(update_fields=["pending_referral_reward"])
+
+        # Referrer reward (pending)
+        if not self.referral.is_hired_referrer:
+            transaction_id = str(uuid.uuid4())[:10]
+            Transaction.objects.create(
+                user=self.referral,
+                referral_email=self.email,
+                transaction_type="credit",
+                status="pending",
+                amount=500,
+                description="Referral Reward",
+                transaction_id=transaction_id,
+                total_amount=500,
+            )
+
+            self.referral.pending_referral_reward = F("pending_referral_reward") + 500
+            self.referral.save(update_fields=["pending_referral_reward"])
+
+            # Send email to referrer
+            subject = f"{self.referral.first_name}, Your Referral Reward is Pending..."
+            message = f"""
+            Hi {self.referral.first_name},<br><br>
+            Your referral reward of ₦500 is pending. When your friend ({self.email}) makes their first savings/investment, it will be confirmed in your wallet.<br><br>
+            Thank you for using MyFund!<br><br>
+            Keep growing your funds.🥂<br><br>
+            """
+            try:
+                send_generic_email(
+                    subject,
+                    message,
+                    [self.referral.email],
+                    "MyFund <info@myfundmobile.com>",
+                )
+            except Exception as e:
+                logger.warning(
+                    f"⚠️ Referral email to referrer failed for {self.referral.email}: {e}"
+                )
+
+        # Send email to referred user
+        subject = f"{self.first_name}, Your ₦500 Referral Reward is Pending"
+        message = f"""
+        Hi {self.first_name},<br><br>
+        You have received a welcome referral reward bonus of ₦500 for signing up with a referral email.
+        It will be confirmed in your Wallet when you make your first savings.<br><br>
+        Thank you for using MyFund!<br><br>
+        Keep growing your funds.🥂<br><br>
+        """
+        try:
+            send_generic_email(
+                subject, message, [self.email], "MyFund <info@myfundmobile.com>"
+            )
+        except Exception as e:
+            logger.warning(
+                f"⚠️ Referral email to referred user failed for {self.email}: {e}"
+            )
+
+        # Send push notifications
+        try:
+            send_push_notification(
+                user=self,
+                title="₦500 Referral Reward Pending 💰",
+                message=f"{self.first_name}, you’ve earned ₦500 referral reward. Complete your first savings to confirm it in your Wallet.",
+                data={"type": "referral_pending"},
+            )
+            send_push_notification(
+                user=self.referral,
+                title="₦500 Referral Reward Pending 💰",
+                message=f"{self.referral.first_name}, your friend {self.first_name} signed up. ₦500 referral reward pending for you.",
+                data={"type": "referral_pending"},
+            )
+        except Exception as e:
+            logger.warning(f"Referral push failed: {e}")
+
     def confirm_referral_rewards(self, is_referrer):
         if self.referral and not self.referral_reward_granted:
             # Check if current month is December 2024
