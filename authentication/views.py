@@ -78,225 +78,188 @@ logger = logging.getLogger(__name__)
 
 @api_view(["POST"])
 @csrf_exempt
+@permission_classes([AllowAny])
 def signup(request):
-    def handle_referral_rewards(user):
-        try:
-            transaction_id = str(uuid.uuid4())[:10]
-            # Reward for referred user
-            Transaction.objects.create(
-                user=user,
-                referral_email=user.referral.email,
-                transaction_type="credit",
-                status="pending",
-                amount=500,
-                description="Referral Reward . . .",
-                transaction_id=transaction_id,
-                total_amount=500,
-            )
-
-            user.pending_referral_reward = 500
-            user.save(update_fields=["pending_referral_reward"])
-
-            # Reward for referrer
-            if not user.referral.is_hired_referrer:
-                transaction_id = str(uuid.uuid4())[:10]
-                Transaction.objects.create(
-                    user=user.referral,
-                    referral_email=user.email,
-                    transaction_type="credit",
-                    status="pending",
-                    amount=500,
-                    description="Referral Reward . . .",
-                    transaction_id=transaction_id,
-                    total_amount=500,
-                )
-
-                user.referral.pending_referral_reward = (
-                    F("pending_referral_reward") + 500
-                )
-                user.referral.save()
-                send_referrer_pending_reward_email(user.referral, user.email)
-
-            if user.referral.is_hired_referrer:
-                Referral.objects.create(user=user, referrer=user.referral)
-
-            send_referred_pending_reward_email(user)
-            logger.info("Referral rewards processed for user %s", user.email)
-        except Exception as e:
-            logger.error(
-                f"Error processing referral rewards for user {user.email}: {str(e)}"
-            )
-            raise
-
-    # ✅ Validate phone number before saving user
     phone_number = request.data.get("phone_number")
     if not phone_number:
         return Response(
-            {"error": "Phone number is required"}, status=status.HTTP_400_BAD_REQUEST
+            {"error": "Phone number is required"},
+            status=status.HTTP_400_BAD_REQUEST,
         )
 
     phone_check = validate_phone_number(phone_number)
     if not phone_check.get("valid"):
-        logger.warning(f"Invalid phone number: {phone_number}")
         return Response(
-            {"error": phone_check.get("error")}, status=status.HTTP_400_BAD_REQUEST
+            {"error": phone_check.get("error")},
+            status=status.HTTP_400_BAD_REQUEST,
         )
 
     validated_phone = phone_check.get("formatted")
 
     try:
         serializer = SignupSerializer(data=request.data, context={"request": request})
-        if serializer.is_valid():
-            # ✅ Save user first
-            user = serializer.save()
-            user.phone_number = validated_phone
-            user.how_did_you_hear = serializer.validated_data.get(
-                "how_did_you_hear", "OTHER"
-            )
-            user.save(update_fields=["phone_number", "how_did_you_hear"])
-
-            # ✅ Now generate OTP after saving phone number
-            is_resend = request.data.get("resend", False)
-            otp = generate_otp()
-            user.otp = otp
-            user.is_active = False if not is_resend else user.is_active
-            user.last_otp_sent_at = timezone.now()
-            user.save(
-                update_fields=["otp", "is_active", "last_otp_sent_at", "updated_at"]
-            )
-
-            # Always send email OTP
-            try:
-                send_otp_email(user, otp)
-            except Exception as e:
-                logger.warning(f"⚠️ OTP email failed to send, continuing flow: {e}")
-
-            # Only send SMS OTP on first signup (not resend)
-            # Only send SMS OTP on first signup (not resend)
-            if not is_resend:
-                validated_phone = getattr(user, "phone_number", None)
-                if validated_phone:
-                    sms_sent = send_otp_sms(user, otp)  # <-- pass the user object
-                    if sms_sent:
-                        logger.info(f"📱 SMS OTP sent to {validated_phone}")
-                    else:
-                        logger.warning(
-                            f"⚠️ SMS OTP failed to send for {validated_phone}"
-                        )
-                else:
-                    logger.warning("⚠️ No valid phone number found for SMS OTP")
-
-            # Handle referral rewards
-            if user.referral:
-                handle_referral_rewards(user)
-
-            response_data = serializer.data
-            response_data["referral_email"] = (
-                user.referral.email if user.referral else None
-            )
-            return Response(response_data, status=status.HTTP_201_CREATED)
-
-        else:
-            logger.warning("Invalid signup data: %s", serializer.errors)
+        if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+        # --- Create inactive user ---
+        user = serializer.save()
+        user.phone_number = validated_phone
+        user.how_did_you_hear = serializer.validated_data.get(
+            "how_did_you_hear", "OTHER"
+        )
+        user.is_active = False
+        user.save(update_fields=["phone_number", "how_did_you_hear", "is_active"])
+
+        # --- Generate OTP ---
+        otp = generate_otp()
+        user.otp = otp
+        user.last_otp_sent_at = timezone.now()
+        user.save(update_fields=["otp", "last_otp_sent_at", "updated_at"])
+
+        # --- Send OTP ---
+        try:
+            send_otp_email(user, otp)
+        except Exception as exc:
+            logger.warning(f"OTP email sending failed for {user.email}: {exc}")
+        # continue to send SMS anyway
+        if user.phone_number:
+            send_otp_sms(user, otp)
+
+        response_data = serializer.data
+        response_data["referral_email"] = user.referral.email if user.referral else None
+        response_data["message"] = "OTP sent successfully"
+
+        return Response(response_data, status=status.HTTP_201_CREATED)
+
     except Exception as e:
-        logger.critical("Unexpected error in signup: %s", str(e))
+        logger.exception("Unexpected error during signup")
         return Response(
             {"error": "Unexpected server error"},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
 
-def send_referrer_pending_reward_email(referrer, referred_email):
-    subject = f"{referrer.first_name}, Your Referral Reward is Pending..."
-    message = f"Hi {referrer.first_name},<br><br>Your referral reward of ₦500.00 is pending. When your friend ({referred_email}) becomes active by making their first savings/investment, your reward will be confirmed in your wallet.<br><br>Thank you for using MyFund!<br><br>Keep growing your funds.🥂<br><br>"
+# def send_referrer_pending_reward_email(referrer, referred_email):
+#     subject = f"{referrer.first_name}, Your Referral Reward is Pending..."
+#     message = f"Hi {referrer.first_name},<br><br>Your referral reward of ₦500.00 is pending. When your friend ({referred_email}) becomes active by making their first savings/investment, your reward will be confirmed in your wallet.<br><br>Thank you for using MyFund!<br><br>Keep growing your funds.🥂<br><br>"
 
-    from_email = "MyFund <info@myfundmobile.com>"
-    recipient_list = [referrer.email]
+#     from_email = "MyFund <info@myfundmobile.com>"
+#     recipient_list = [referrer.email]
 
-    try:
-        send_generic_email(subject, message, recipient_list, from_email)
-    except Exception as e:
-        logger.warning(f"⚠️ Referral email to referrer failed for {referrer.email}: {e}")
+#     try:
+#         send_generic_email(subject, message, recipient_list, from_email)
+#     except Exception as e:
+#         logger.warning(f"⚠️ Referral email to referrer failed for {referrer.email}: {e}")
 
 
-def send_referred_pending_reward_email(user):
-    subject = f"{user.first_name}, Your N500 Referral Reward is Pending"
-    from django.utils import timezone
+# def send_referred_pending_reward_email(user):
+#     subject = f"{user.first_name}, Your N500 Referral Reward is Pending"
+#     from django.utils import timezone
 
-    current_time = timezone.now()
-    is_december_promo = current_time.month == 12 and current_time.year == 2025
+#     current_time = timezone.now()
+#     is_december_promo = current_time.month == 12 and current_time.year == 2025
 
-    if is_december_promo:
-        threshold_message = "₦5,000"
-    else:
-        threshold_message = "₦20,000"
+#     if is_december_promo:
+#         threshold_message = "₦5,000"
+#     else:
+#         threshold_message = "₦20,000"
 
-    message = f"Hi {user.first_name},<br><br>You have received a welcome referral reward bonus of ₦500.00 for signing up with a referral email. It will be confirmed in your Wallet when you make your first savings of up to {threshold_message}.<br><br>Thank you for using MyFund!<br><br>Keep growing your funds.🥂<br><br>"
-    from_email = "MyFund <info@myfundmobile.com>"
-    recipient_list = [user.email]
-    bcc_list = ["newusers@myfundmobile.com"]
+#     message = f"Hi {user.first_name},<br><br>You have received a welcome referral reward bonus of ₦500.00 for signing up with a referral email. It will be confirmed in your Wallet when you make your first savings of up to {threshold_message}.<br><br>Thank you for using MyFund!<br><br>Keep growing your funds.🥂<br><br>"
+#     from_email = "MyFund <info@myfundmobile.com>"
+#     recipient_list = [user.email]
+#     bcc_list = ["newusers@myfundmobile.com"]
 
-    all_recipients = recipient_list + bcc_list
+#     all_recipients = recipient_list + bcc_list
 
-    try:
-        send_generic_email(subject, message, all_recipients, from_email)
-    except Exception as e:
-        logger.warning(
-            f"⚠️ Referral email to referred user failed for {user.email}: {e}"
-        )
+#     try:
+#         send_generic_email(subject, message, all_recipients, from_email)
+#     except Exception as e:
+#         logger.warning(
+#             f"⚠️ Referral email to referred user failed for {user.email}: {e}"
+#         )
+
+import threading
 
 
 @api_view(["POST"])
-@permission_classes([AllowAny])
 @csrf_exempt
+@permission_classes([AllowAny])
 def confirm_otp(request):
-    def activate_user_account(user):
-        user.is_active = True
-        user.save()
-        logger.info("Account confirmed successfully for user %s", user.email)
-
-        # Attempt to send welcome email, but don't break activation if mail fails.
-        try:
-            send_welcome_email(user)
-        except Exception as e:
-            logger.exception(
-                "Failed to send welcome email to %s after activation: %s",
-                user.email,
-                str(e),
-            )
-
     serializer = ConfirmOTPSerializer(data=request.data)
-    if serializer.is_valid():
-        otp = serializer.validated_data["otp"]
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+    otp = serializer.validated_data["otp"]
+
+    try:
+        user = CustomUser.objects.get(otp=otp)
+    except CustomUser.DoesNotExist:
+        return Response({"message": "Invalid OTP."}, status=status.HTTP_400_BAD_REQUEST)
+
+    if user.is_active:
+        return Response({"message": "Account already confirmed."}, status=400)
+
+    # --- Activate user immediately ---
+    user.is_active = True
+    user.otp = None
+    user.save(update_fields=["is_active", "otp"])
+    logger.info("Account activated for %s", user.email)
+
+    # --- Background function for emails/pushes/referrals ---
+    def background_tasks(u):
         try:
-            user = CustomUser.objects.get(otp=otp)
-            if user.is_active:
-                logger.info(
-                    "Attempted to confirm an already active account for user %s",
-                    user.email,
+            if hasattr(u, "send_welcome_email"):
+                try:
+                    u.send_welcome_email()
+                except Exception as e:
+                    logger.warning(f"Welcome email failed: {e}")
+            try:
+                send_push_notification(
+                    user=u,
+                    title="Welcome to MyFund 🎉",
+                    message="Your account is now active. Start saving and growing your money.",
+                    data={"type": "welcome"},
+                    notif_type="SYSTEM",
                 )
-                return Response(
-                    {"message": "Account already confirmed."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+            except Exception as e:
+                logger.warning(f"Welcome push failed: {e}")
+            try:
+                if u.referral:
+                    u.create_pending_referral_reward()
+            except Exception as e:
+                logger.warning(f"Referral reward failed: {e}")
 
-            activate_user_account(user)
-            return Response(
-                {"message": "Account confirmed successfully."},
-                status=status.HTTP_200_OK,
-            )
-        except CustomUser.DoesNotExist:
-            logger.warning("Invalid OTP provided: %s", otp)
-            return Response(
-                {"message": "Invalid OTP."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            # Admin push
+            admin_emails = [
+                "tolulopeahmed@gmail.com",
+                "ceo@myfundmobile.com",
+                "lioness@myfundmobile.com",
+            ]
+            admin_users = CustomUser.objects.filter(email__in=admin_emails)
+            for admin_user in admin_users:
+                try:
+                    if getattr(admin_user, "expo_push_tokens", None):
+                        send_push_notification(
+                            user=admin_user,
+                            title=f"🎉 New User Signup ({u.first_name})",
+                            message=f"{u.first_name} {u.last_name} ({u.email}) just completed signup.",
+                            data={
+                                "user_id": u.id,
+                                "email": u.email,
+                                "type": "admin_signup_alert",
+                            },
+                            notif_type="ADMIN_ALERT",
+                        )
+                        logger.info(f"Admin push sent to {admin_user.email}")
+                except Exception as e:
+                    logger.warning(f"Admin push failed for {admin_user.email}: {e}")
+        except Exception as e:
+            logger.exception(f"Unexpected background error for {u.email}: {e}")
 
-    logger.warning("Invalid data submitted for OTP confirmation: %s", serializer.errors)
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    # Start background thread
+    threading.Thread(target=background_tasks, args=(user,), daemon=True).start()
+
+    return Response({"message": "Account confirmed successfully."}, status=200)
 
 
 def generate_otp():
@@ -487,44 +450,59 @@ image_url = (
 
 
 def send_welcome_email(user):
-    subject = f"{user.first_name}, WELCOME TO MyFund! 🥂🎊🔥"
+    try:
+        subject = f"{user.first_name}, WELCOME TO MyFund! 🥂🎊🔥"
 
-    image_url = (
-        "https://drive.google.com/uc?export=view&id=1K7sBCm3mgW5jQ1Cfh73LQDZuvGuNFTKw"
-    )
-    savings_image_url = (
-        "https://drive.google.com/uc?export=view&id=1bOVTTicGZJgUKX2aTm2SAqyX-8qfH41Q"
-    )
+        image_url = "https://drive.google.com/uc?export=view&id=1K7sBCm3mgW5jQ1Cfh73LQDZuvGuNFTKw"
+        savings_image_url = "https://drive.google.com/uc?export=view&id=1bOVTTicGZJgUKX2aTm2SAqyX-8qfH41Q"
 
-    message_html = f"""
-    <p>Hi {user.first_name},</p>
-    <p>I'm personally welcoming you to the MyFund family.</p>
-    <p>By signing up, you've entered the 4th step toward financial freedom,
-       <strong>SAVINGS</strong> (click WealthMap on the app for details).</p>
-    <p><img src="{savings_image_url}" alt="Savings Step Image" style="display: block; margin: 10px auto; max-width: 100%; height: auto;"></p>
-    <p>The app tracks your progress as you save towards buying properties for a lifetime rental (passive) income.</p>
-    <p>In the last few years, thousands have saved to sort their rents, started a business, saved their first million, earned their first passive income, traveled abroad, got married... it's amazing.</p>
-    <p>I can't wait to hear your financial success story in the shortest time possible here at MyFund.</p>
-    <p>Once again, you're welcome!</p>
-    <br>
-   <p style="display: inline-flex; align-items: center; margin: 0;">
-    <img src="{image_url}" alt="Dr Tee"
-        style="width: 50px; height: 50px; border-radius: 50%; margin-right: 10px;">
-    <span>
-        <strong style="font-size: 16px;">Tolulope Ahmed (Dr Tee)</strong><br>
-        <span style="font-size: 12px; font-style: italic; color: #555;">
-        CEO/Co-founder, MyFund
+        message_html = f"""
+        <p>Hi {user.first_name},</p>
+        <p>I'm personally welcoming you to the MyFund family.</p>
+        <p>By signing up, you've entered the 4th step toward financial freedom,
+           <strong>SAVINGS</strong> (click WealthMap on the app for details).</p>
+        <p><img src="{savings_image_url}" alt="Savings Step Image" style="display: block; margin: 10px auto; max-width: 100%; height: auto;"></p>
+        <p>The app tracks your progress as you save towards buying properties for a lifetime rental (passive) income.</p>
+        <p>In the last few years, thousands have saved to sort their rents, started a business, saved their first million, earned their first passive income, traveled abroad, got married... it's amazing.</p>
+        <p>I can't wait to hear your financial success story in the shortest time possible here at MyFund.</p>
+        <p>Once again, you're welcome!</p>
+        <br>
+       <p style="display: inline-flex; align-items: center; margin: 0;">
+        <img src="{image_url}" alt="Dr Tee"
+            style="width: 50px; height: 50px; border-radius: 50%; margin-right: 10px;">
+        <span>
+            <strong style="font-size: 16px;">Tolulope Ahmed (Dr Tee)</strong><br>
+            <span style="font-size: 12px; font-style: italic; color: #555;">
+            CEO/Co-founder, MyFund
+            </span>
         </span>
-    </span>
-    </p>
-    """
+        </p>
+        """
 
-    # Just call the generic helper
-    send_generic_email(
-        subject=subject,
-        message=message_html,
-        recipient_list=[user.email],
-    )
+        # Just call the generic helper
+        send_generic_email(
+            subject=subject,
+            message=message_html,
+            recipient_list=[user.email],
+        )
+        print(f"✅ Welcome email sent successfully to {user.email}")
+
+    except KeyError as e:
+        print(f"❌ KeyError: Missing field {e} in user object")
+        # Handle missing user fields gracefully
+        raise
+    except AttributeError as e:
+        print(f"❌ AttributeError: User object missing attribute: {e}")
+        raise
+    except Exception as e:
+        print(
+            f"❌ Error sending welcome email to {user.email if hasattr(user, 'email') else 'unknown user'}: {e}"
+        )
+        # Log the error but don't crash the signup process
+        # You could also log to a monitoring service here
+        import traceback
+
+        print(f"Full traceback: {traceback.format_exc()}")
 
 
 def send_otp_reset_email(user, otp):
@@ -3135,7 +3113,7 @@ def withdraw_to_local_bank(request):
             admin_emails = [
                 "tolulopeahmed@gmail.com",
                 "ceo@myfundmobile.com",
-                "janet.adegbenro@gmail.com",
+                "lioness@myfundmobile.com",
             ]
             admin_users = CustomUser.objects.filter(email__in=admin_emails)
 
@@ -3569,7 +3547,7 @@ def process_withdrawal_to_local_bank(request):
             admin_recipient_list = [
                 "company@myfundmobile.com",
                 "tolulopeahmed@gmail.com",
-                "janet.adegbenro@gmail.com",
+                "lioness@myfundmobile.com",
             ]
 
             send_generic_email(
@@ -3581,7 +3559,7 @@ def process_withdrawal_to_local_bank(request):
             admin_emails = [
                 "tolulopeahmed@gmail.com",
                 "ceo@myfundmobile.com",
-                "janet.adegbenro@gmail.com",
+                "lioness@myfundmobile.com",
             ]
             admin_users = CustomUser.objects.filter(email__in=admin_emails)
 
@@ -4573,7 +4551,7 @@ class KYCUpdateView(generics.UpdateAPIView):
         admin_emails = [
             "tolulopeahmed@gmail.com",
             "ceo@myfundmobile.com",
-            "janet.adegbenro@gmail.com",
+            "lioness@myfundmobile.com",
         ]
 
         admin_users = CustomUser.objects.filter(email__in=admin_emails)
@@ -4850,7 +4828,7 @@ def initiate_bank_transfer(request):
         admin_emails = [
             "tolulopeahmed@gmail.com",
             "ceo@myfundmobile.com",
-            "janet.adegbenro@gmail.com",
+            "lioness@myfundmobile.com",
         ]
         admin_users = CustomUser.objects.filter(email__in=admin_emails)
 
