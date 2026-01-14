@@ -223,14 +223,8 @@ def send_generic_email(
                 }
 
                 # Replace placeholders in subject & message
-                p_subject = subject
-                if isinstance(message_or_context, str):
-                    p_message = message_or_context
-                elif isinstance(message_or_context, dict):
-                    p_message = message_or_context.get("message", "")
-                else:
-                    p_message = str(message_or_context)
-
+                p_subject = subject  # <-- add this before the loop
+                p_message = message  # you already have this
                 for k, v in placeholders.items():
                     p_subject = p_subject.replace(k, v)
                     p_message = p_message.replace(k, v)
@@ -263,8 +257,8 @@ def send_generic_email(
                 return {
                     "to": email_addr,
                     "subject": subject,
-                    "html_message": f"<html><body>{message_or_context}</body></html>",
-                    "plain_message": str(message_or_context),
+                    "html_message": f"<html><body>{message}</body></html>",
+                    "plain_message": str(message),
                 }
 
         payloads = [personalize(e) for e in valid_recipients]

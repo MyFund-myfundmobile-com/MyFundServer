@@ -634,6 +634,50 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         msg.attach_alternative(html_message, "text/html")
         msg.send()
 
+    def send_welcome_email(self):
+        from authentication.utils import send_generic_email
+
+        """
+        Sends the Welcome email to this user.
+        Safe to call from confirm_otp background thread.
+        """
+        subject = f"{self.first_name}, WELCOME TO MyFund! 🥂🎊🔥"
+        savings_image_url = "https://drive.google.com/uc?export=view&id=1bOVTTicGZJgUKX2aTm2SAqyX-8qfH41Q"
+        logo_url = "https://drive.google.com/uc?export=view&id=1K7sBCm3mgW5jQ1Cfh73LQDZuvGuNFTKw"
+
+        message_html = f"""
+        <p>Hi {self.first_name},</p>
+        <p>I'm personally welcoming you to the MyFund family.</p>
+        <p>By signing up, you've entered the 4th step toward financial freedom,
+        <strong>SAVINGS</strong> (click WealthMap on the app for details).</p>
+        <p><img src="{savings_image_url}" alt="Savings Step Image" style="display: block; margin: 10px auto; max-width: 100%; height: auto;"></p>
+        <p>The app tracks your progress as you save towards buying properties for a lifetime rental (passive) income.</p>
+        <p>Once again, you're welcome!</p>
+        <br>
+    <p style="display: inline-flex; align-items: center; margin: 0;">
+        <img src="{logo_url}" alt="Dr Tee"
+            style="width: 50px; height: 50px; border-radius: 50%; margin-right: 10px;">
+        <span>
+            <strong style="font-size: 16px;">Tolulope Ahmed (Dr Tee)</strong><br>
+            <span style="font-size: 12px; font-style: italic; color: #555;">
+            CEO/Co-founder, MyFund
+            </span>
+        </span>
+        </p>
+        """
+
+        try:
+            send_generic_email(
+                subject=subject,
+                message=message_html,
+                recipient_list=[self.email],
+                from_email="MyFund <info@myfundmobile.com>",
+                template="email/email.html",  # <-- add this
+            )
+            logger.info(f"✅ Welcome email sent to {self.email}")
+        except Exception as e:
+            logger.warning(f"❌ Welcome email failed for {self.email}: {e}")
+
     def create_pending_referral_reward(self):
         """
         Creates pending referral reward transactions for new signup,
@@ -692,10 +736,11 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
             """
             try:
                 send_generic_email(
-                    subject,
-                    message,
-                    [self.referral.email],
-                    "MyFund <info@myfundmobile.com>",
+                    subject=subject,
+                    message=message,
+                    recipient_list=[self.referral.email],
+                    from_email="MyFund <info@myfundmobile.com>",
+                    template="email/email.html",
                 )
             except Exception as e:
                 logger.warning(
@@ -713,7 +758,11 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         """
         try:
             send_generic_email(
-                subject, message, [self.email], "MyFund <info@myfundmobile.com>"
+                subject=subject,
+                message=message,
+                recipient_list=[self.email],
+                from_email="MyFund <info@myfundmobile.com>",
+                template="email/email.html",
             )
         except Exception as e:
             logger.warning(
@@ -731,7 +780,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
             send_push_notification(
                 user=self.referral,
                 title="₦500 Referral Reward Pending 💰",
-                message=f"{self.referral.first_name}, your friend {self.first_name} signed up. ₦500 referral reward pending for you.",
+                message=f"{self.referral.first_name}, your friend, {self.first_name} signed up. ₦500 referral reward pending for you. It'll be confirmed when they make their first savings.",
                 data={"type": "referral_pending"},
             )
         except Exception as e:
@@ -884,10 +933,19 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                 f"\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
             )
 
-        from_email = "MyFund <info@myfundmobile.com>"
-        recipient_list = [user.email]
+        from authentication.utils import send_generic_email
 
-        send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+        try:
+            send_generic_email(
+                subject=subject,
+                message=message,
+                recipient_list=[user.email],
+                from_email="MyFund <info@myfundmobile.com>",
+                template="email/email.html",  # <-- ensures your header/footer template is used
+            )
+            logger.info(f"✅ Confirmation email sent to {user.email}")
+        except Exception as e:
+            logger.warning(f"❌ Confirmation email failed for {user.email}: {e}")
 
     def calculate_user_percentage_to_top_saver(self):
         top_saver = (
