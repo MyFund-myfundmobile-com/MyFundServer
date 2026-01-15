@@ -69,12 +69,14 @@ from .utils import (
     send_admin_push_notification,
 )
 from rest_framework.exceptions import AuthenticationFailed
+import threading
 
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+from django.db import transaction
 
 @api_view(["POST"])
 @csrf_exempt
@@ -108,79 +110,58 @@ def signup(request):
             "how_did_you_hear", "OTHER"
         )
         user.is_active = False
-        user.save(update_fields=["phone_number", "how_did_you_hear", "is_active"])
 
         # --- Generate OTP ---
         otp = generate_otp()
         user.otp = otp
         user.last_otp_sent_at = timezone.now()
-        user.save(update_fields=["otp", "last_otp_sent_at", "updated_at"])
 
-        # --- Send OTP ---
-        try:
-            send_otp_email(user, otp)
-        except Exception as exc:
-            logger.warning(f"OTP email sending failed for {user.email}: {exc}")
-        # continue to send SMS anyway
-        if user.phone_number:
-            send_otp_sms(user, otp)
+        user.save(
+            update_fields=[
+                "phone_number",
+                "how_did_you_hear",
+                "is_active",
+                "otp",
+                "last_otp_sent_at",
+                "updated_at",
+            ]
+        )
+
+        # --- Send OTP AFTER response (never block, never fail signup) ---
+        def send_otp_async():
+            # Email (best-effort)
+            try:
+                send_otp_email(user, otp)
+            except Exception as exc:
+                logger.warning(
+                    f"OTP email failed for {user.email}: {exc}"
+                )
+
+            # SMS should still attempt even if email fails
+            try:
+                if user.phone_number:
+                    send_otp_sms(user, otp)
+            except Exception as exc:
+                logger.warning(
+                    f"OTP SMS failed for {user.phone_number}: {exc}"
+                )
+
+        transaction.on_commit(send_otp_async)
 
         response_data = serializer.data
-        response_data["referral_email"] = user.referral.email if user.referral else None
+        response_data["referral_email"] = (
+            user.referral.email if user.referral else None
+        )
         response_data["message"] = "OTP sent successfully"
 
         return Response(response_data, status=status.HTTP_201_CREATED)
 
-    except Exception as e:
+    except Exception:
         logger.exception("Unexpected error during signup")
-        return Response(
-            {"error": "Unexpected server error"},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
 
 
-# def send_referrer_pending_reward_email(referrer, referred_email):
-#     subject = f"{referrer.first_name}, Your Referral Reward is Pending..."
-#     message = f"Hi {referrer.first_name},<br><br>Your referral reward of ₦500.00 is pending. When your friend ({referred_email}) becomes active by making their first savings/investment, your reward will be confirmed in your wallet.<br><br>Thank you for using MyFund!<br><br>Keep growing your funds.🥂<br><br>"
-
-#     from_email = "MyFund <info@myfundmobile.com>"
-#     recipient_list = [referrer.email]
-
-#     try:
-#         send_generic_email(subject, message, recipient_list, from_email)
-#     except Exception as e:
-#         logger.warning(f"⚠️ Referral email to referrer failed for {referrer.email}: {e}")
-
-
-# def send_referred_pending_reward_email(user):
-#     subject = f"{user.first_name}, Your N500 Referral Reward is Pending"
-#     from django.utils import timezone
-
-#     current_time = timezone.now()
-#     is_december_promo = current_time.month == 12 and current_time.year == 2025
-
-#     if is_december_promo:
-#         threshold_message = "₦5,000"
-#     else:
-#         threshold_message = "₦20,000"
-
-#     message = f"Hi {user.first_name},<br><br>You have received a welcome referral reward bonus of ₦500.00 for signing up with a referral email. It will be confirmed in your Wallet when you make your first savings of up to {threshold_message}.<br><br>Thank you for using MyFund!<br><br>Keep growing your funds.🥂<br><br>"
-#     from_email = "MyFund <info@myfundmobile.com>"
-#     recipient_list = [user.email]
-#     bcc_list = ["newusers@myfundmobile.com"]
-
-#     all_recipients = recipient_list + bcc_list
-
-#     try:
-#         send_generic_email(subject, message, all_recipients, from_email)
-#     except Exception as e:
-#         logger.warning(
-#             f"⚠️ Referral email to referred user failed for {user.email}: {e}"
-#         )
 
 import threading
-
-
 @api_view(["POST"])
 @csrf_exempt
 @permission_classes([AllowAny])
@@ -208,16 +189,16 @@ def confirm_otp(request):
     # --- Background function for emails/pushes/referrals ---
     def background_tasks(u):
         try:
-            if hasattr(u, "send_welcome_email"):
-                try:
-                    u.send_welcome_email()
-                except Exception as e:
-                    logger.warning(f"Welcome email failed: {e}")
+            try:
+                u.send_welcome_email()
+            except Exception as e:
+                logger.warning(f"Welcome email failed: {e}")
+
             try:
                 send_push_notification(
                     user=u,
                     title="Welcome to MyFund 🎉",
-                    message="Your account is now active. Start saving and growing your money.",
+                    message=f"Hi {u.first_name}, Welcome to MyFund! Your account is now active. Earn daily returns up to 20% p.a. Make a quicksave to get started!",
                     data={"type": "welcome"},
                     notif_type="SYSTEM",
                 )
@@ -242,7 +223,7 @@ def confirm_otp(request):
                         send_push_notification(
                             user=admin_user,
                             title=f"🎉 New User Signup ({u.first_name})",
-                            message=f"{u.first_name} {u.last_name} ({u.email}) just completed signup.",
+                            message=f"{u.first_name} {u.last_name} ({u.email}) has just completed signup.",
                             data={
                                 "user_id": u.id,
                                 "email": u.email,
@@ -794,6 +775,7 @@ from .models import (
 )
 
 
+
 import logging
 import random
 from datetime import timedelta, datetime
@@ -811,7 +793,6 @@ from .models import CustomUser, PasswordReset
 from .utils import send_sms_via_payless, send_generic_email
 
 logger = logging.getLogger(__name__)
-
 
 def _send_otp(user, otp, purpose="signup"):
     """
@@ -839,16 +820,19 @@ def _send_otp(user, otp, purpose="signup"):
                 <p>Thanks, <br> MyFund Team</p>
             """
 
-        context = {"subject": subject, "message": inner_html, "user": user}
-        send_generic_email(
-            subject=subject,
-            message_or_context=context,
-            recipient_list=[user.email],
-            from_email="MyFund <info@myfundmobile.com>",
-            use_celery_threshold=30,
-            template="email/email.html",
-        )
-        logger.info(f"OTP email sent to {user.email} for {purpose}")
+        # Send email
+        try:
+            send_generic_email(
+                subject=subject,
+                message=inner_html,  # pass HTML content directly
+                recipient_list=[user.email],
+                from_email="MyFund <info@myfundmobile.com>",
+                use_celery_threshold=30,
+                template="email/email.html",
+            )
+            logger.info(f"OTP email sent to {user.email} for {purpose}")
+        except Exception as e:
+            logger.error(f"Error sending OTP email to {user.email}: {e}")
 
         # Send SMS OTP if phone is available
         phone_number = getattr(user, "phone_number", None)
@@ -858,10 +842,13 @@ def _send_otp(user, otp, purpose="signup"):
                 f"{'signup' if purpose=='signup' else 'password reset'} is {otp}. "
                 "Valid for 20 minutes."
             )
-            if send_sms_via_payless(phone_number, sms_message):
-                logger.info(f"SMS OTP sent to {phone_number}")
-            else:
-                logger.warning(f"Failed to send SMS OTP to {phone_number}")
+            try:
+                if send_sms_via_payless(phone_number, sms_message):
+                    logger.info(f"SMS OTP sent to {phone_number}")
+                else:
+                    logger.warning(f"Failed to send SMS OTP to {phone_number}")
+            except Exception as sms_err:
+                logger.error(f"Error sending SMS OTP to {phone_number}: {sms_err}")
 
         return True
 
@@ -870,13 +857,43 @@ def _send_otp(user, otp, purpose="signup"):
         raise
 
 
+def send_password_change_confirmation(user):
+    """
+    Send confirmation email when password is changed successfully.
+    """
+    try:
+        subject = "Your MyFund Password Has Been Changed"
+        inner_html = f"""
+            <p>Hi {user.first_name},</p>
+            <p>This is a confirmation that your MyFund account password was successfully changed.</p>
+            <p>If you did not make this change, please contact our support team immediately.</p>
+            <p>Thanks, <br> MyFund Security Team</p>
+        """
+
+        try:
+            send_generic_email(
+                subject=subject,
+                message=inner_html,  # fixed from context dict to plain HTML
+                recipient_list=[user.email],
+                from_email="MyFund Security <info@myfundmobile.com>",
+                use_celery_threshold=30,
+                template="email/email.html",
+            )
+            logger.info(f"Password change confirmation sent to {user.email}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed sending password change confirmation to {user.email}: {e}")
+            return False
+
+    except Exception as e:
+        logger.error(f"Error preparing password change confirmation for {user.email}: {e}")
+        return False
+
+
 @api_view(["POST"])
 @csrf_exempt
 @permission_classes([AllowAny])
 def request_password_reset(request):
-    """
-    Send OTP for password reset via email and SMS.
-    """
     email = (request.data.get("email") or "").strip().lower()
     if not email:
         return Response({"detail": "Email is required."}, status=400)
@@ -901,8 +918,11 @@ def request_password_reset(request):
             )
         )
 
-        # Send OTP via email + SMS
-        _send_otp(user, otp, purpose="password_reset")
+        # Send OTP with try-except to avoid breaking UX
+        try:
+            threading.Thread(target=_send_otp, args=(user, otp, "password_reset")).start()
+        except Exception as e:
+            logger.error(f"Failed to send email/SMS for password reset to {user.email}: {e}")
 
         return Response({"detail": "Password reset OTP sent successfully."}, status=200)
 
@@ -916,9 +936,6 @@ def request_password_reset(request):
 @api_view(["POST"])
 @csrf_exempt
 def reset_password(request):
-    """
-    Complete password reset using email + OTP + new password.
-    """
     required_fields = ["email", "otp", "password", "confirm_password"]
     for field in required_fields:
         if field not in request.data:
@@ -942,6 +959,17 @@ def reset_password(request):
         user.otp = None
         user.save(update_fields=["otp", "updated_at"])
         logger.info(f"Password reset successful for user: {user.email}")
+
+        # Send confirmation email safely
+        try:
+            threading.Thread(
+                target=send_password_change_confirmation, 
+                args=(user,),
+                daemon=True  # optional, ensures thread dies with main process
+            ).start()
+        except Exception as e:
+            logger.warning(f"Could not send password change confirmation to {user.email}: {e}")
+
         return Response({"message": "Password reset successful."}, status=200)
 
     except CustomUser.DoesNotExist:
@@ -959,10 +987,6 @@ def reset_password(request):
 @csrf_exempt
 @permission_classes([AllowAny])
 def resend_password_otp(request):
-    """
-    Resend OTP for password reset to email + SMS.
-    Payload: { "email": "user@example.com" }
-    """
     email = (request.data.get("email") or "").strip().lower()
     if not email:
         return Response({"detail": "Email is required."}, status=400)
@@ -978,7 +1002,6 @@ def resend_password_otp(request):
                     {"detail": "Please wait before requesting another OTP."}, status=429
                 )
 
-        # Generate new OTP
         otp = generate_otp()
         PasswordReset.objects.filter(user=user).delete()
         PasswordReset.objects.create(user=user, otp=otp, created_at=timezone.now())
@@ -993,8 +1016,10 @@ def resend_password_otp(request):
             )
         )
 
-        # Send via email + SMS
-        _send_otp(user, otp, purpose="password_reset")
+        try:
+            threading.Thread(target=_send_otp, args=(user, otp, "password_reset")).start()
+        except Exception as e:
+            logger.error(f"Failed to resend email/SMS for password reset to {user.email}: {e}")
 
         return Response({"detail": "OTP resent successfully."}, status=200)
 
@@ -4734,6 +4759,8 @@ def create_notification(user, notification_type, title, message, data=None):
     return notification
 
 
+import threading
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def initiate_bank_transfer(request):
@@ -4809,20 +4836,24 @@ def initiate_bank_transfer(request):
         # ✅ Notify User via email
         user_subject = "QuickSave Pending..."
         user_message = f"Hi {user.first_name},<br><br>Your bank transfer request of ₦{amount} is pending approval. We'll notify you once it's processed.<br><br>Thank you for using MyFund. <br><br>"
-        send_generic_email(
-            user_subject, user_message, "MyFund <info@myfundmobile.com>", [user.email]
-        )
+        threading.Thread(
+            target=send_generic_email,
+            args=(user_subject, user_message, "info@myfundmobile.com", [user.email]),
+            kwargs={"use_celery_threshold": 30, "template": "email/email.html"},
+            daemon=True
+        ).start()
 
         # ✅ Notify Admin via Email
         subject = f"[CHECK] {user.first_name} Made A QuickSave Request"
         message = f"Hi Admin,<br><br>A bank transfer request of ₦{amount} has been initiated by {user.first_name} {user.last_name} ({user.email}).<br><br>Review here: https://myfundapi-myfund-07ce351a.koyeb.app/admin/<br><br>MyFund Team"
 
-        send_generic_email(
-            subject,
-            message,
-            "MyFund <info@myfundmobile.com>",
-            ["company@myfundmobile.com", "info@myfundmobile.com"],
-        )
+        threading.Thread(
+            target=send_generic_email,
+            args=(subject, message, "info@myfundmobile.com", ["company@myfundmobile.com", "info@myfundmobile.com"]),
+            kwargs={"use_celery_threshold": 30, "template": "email/email.html"},
+            daemon=True
+        ).start()
+
 
         # ✅ Notify Admin via Push Notification
         admin_emails = [
@@ -4875,6 +4906,18 @@ def initiate_bank_transfer(request):
         )
 
 
+import threading
+from decimal import Decimal, InvalidOperation
+from uuid import uuid4
+from django.utils import timezone
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+
+from .models import CustomUser, Transaction, InvestTransferRequest
+from .utils import send_push_notification, send_generic_email
+
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def initiate_invest_transfer(request):
@@ -4884,10 +4927,11 @@ def initiate_invest_transfer(request):
         user = request.user
         amount_raw = request.data.get("amount")
 
+        # Validate input
         if not amount_raw:
             return Response(
                 {"error": "Amount is required"},
-                status=status.HTTP_400_BAD_REQUEST,
+                status=400,
             )
 
         try:
@@ -4895,22 +4939,25 @@ def initiate_invest_transfer(request):
             if amount < 100000:
                 return Response(
                     {"error": "Amount must be greater than ₦100,000"},
-                    status=status.HTTP_400_BAD_REQUEST,
+                    status=400,
                 )
         except (InvalidOperation, ValueError, TypeError):
             return Response(
                 {"error": "Invalid amount format"},
-                status=status.HTTP_400_BAD_REQUEST,
+                status=400,
             )
 
-        transaction_id = str(uuid.uuid4())[:10]
+        # Generate transaction ID
+        transaction_id = str(uuid4())[:10]
 
+        # Create InvestTransferRequest
         InvestTransferRequest.objects.create(
             user=user,
             amount=amount,
             transaction_id=transaction_id,
         )
 
+        # Create Transaction record
         current_datetime = timezone.now()
         referral_email = user.referral.email if user.referral else None
 
@@ -4940,63 +4987,80 @@ def initiate_invest_transfer(request):
             notif_type="PENDING",
         )
 
-        # 📧 USER EMAIL
-        send_generic_email(
-            "QuickInvest Pending...",
+        # 📧 USER EMAIL — THREADING
+        user_subject = "QuickInvest Pending..."
+        user_message = (
             f"Hi {user.first_name},<br><br>"
             f"Your investment transfer of ₦{amount:,.2f} is pending approval.<br><br>"
-            "Thank you for using MyFund.",
-            "MyFund <info@myfundmobile.com>",
-            [user.email],
+            "Thank you for using MyFund."
         )
+        threading.Thread(
+            target=send_generic_email,
+            args=(user_subject, user_message, "info@myfundmobile.com", [user.email]),
+            kwargs={"use_celery_threshold": 30, "template": "email/email.html"},
+            daemon=True
+        ).start()
 
-        # 📧 ADMIN EMAIL
-        send_generic_email(
-            f"[CHECK] {user.first_name} Made A QuickInvest Request",
+        # 📧 ADMIN EMAIL — THREADING
+        admin_subject = f"[CHECK] {user.first_name} Made A QuickInvest Request"
+        admin_message = (
+            f"Hi Admin,<br><br>"
             f"{user.first_name} {user.last_name} ({user.email}) initiated "
-            f"₦{amount:,.2f} QuickInvest.",
-            "MyFund <info@myfundmobile.com>",
-            ["company@myfundmobile.com", "info@myfundmobile.com"],
+            f"₦{amount:,.2f} QuickInvest.<br><br>"
+            f"Review here: https://myfundapi-myfund-07ce351a.koyeb.app/admin/<br><br>"
+            "MyFund Team"
         )
+        threading.Thread(
+            target=send_generic_email,
+            args=(admin_subject, admin_message, "info@myfundmobile.com", ["company@myfundmobile.com", "info@myfundmobile.com"]),
+            kwargs={"use_celery_threshold": 30, "template": "email/email.html"},
+            daemon=True
+        ).start()
 
         # 🔔 ADMIN PUSH
-        admin_users = CustomUser.objects.filter(
-            email__in=[
-                "tolulopeahmed@gmail.com",
-                "ceo@myfundmobile.com",
-                "janet.adegbenro@gmail.com",
-            ]
-        )
+        admin_emails = [
+            "tolulopeahmed@gmail.com",
+            "ceo@myfundmobile.com",
+            "janet.adegbenro@gmail.com",
+        ]
+        admin_users = CustomUser.objects.filter(email__in=admin_emails)
 
         for admin in admin_users:
-            if admin.expo_push_tokens:
+            if hasattr(admin, "expo_push_tokens") and admin.expo_push_tokens:
+                admin_push_title = f"{user.first_name} initiated a New QuickInvest"
+                admin_push_message = (
+                    f"{user.first_name} {user.last_name} ({user.email}) initiated "
+                    f"₦{amount:,.2f} to Investment Account.\nPlease check to confirm."
+                )
                 send_push_notification(
                     user=admin,
-                    title=f"{user.first_name} initiated a New QuickInvest",
-                    message=f"{user.first_name} {user.last_name} ({user.email}) initiated ₦{amount:,.2f} to Investment Account.\nPlease check to confirm.",
+                    title=admin_push_title,
+                    message=admin_push_message,
                     data={
                         "transaction_id": transaction_id,
                         "user_email": user.email,
                         "type": "QuickInvest",
                         "status": "pending",
+                        "source": "admin_quickinvest_alert",
                     },
                     notif_type="ADMIN_ALERT",
                 )
 
-        # ✅ IMPORTANT — RETURN CONSISTENT PAYLOAD
+        # ✅ RETURN RESPONSE
         return Response(
             {
                 "message": "QuickInvest request created and pending approval",
                 "amount": str(amount),
             },
-            status=status.HTTP_201_CREATED,
+            status=201,
         )
 
     except Exception as e:
         return Response(
             {"error": str(e), "transaction_id": transaction_id},
-            status=status.HTTP_400_BAD_REQUEST,
+            status=400,
         )
+
 
 
 @api_view(["GET"])
@@ -6058,7 +6122,7 @@ def send_email(request):
         logger.info("📧 Calling send_generic_email...")
         result = send_generic_email(
             subject=subject,
-            message_or_context=body,  # CHANGED FROM 'message' TO 'message_or_context'
+            message=body,  # CHANGED FROM 'message' TO ''
             recipient_list=cleaned_recipients,
             from_email=sender,
             use_celery_threshold=30,
@@ -7643,7 +7707,7 @@ class TargetSavingsListCreate(ListCreateAPIView):
 
             send_generic_email(
                 subject=subject,
-                message_or_context=context,
+                message=context,
                 from_email=settings.DEFAULT_FROM_EMAIL,
                 recipient_list=[user.email],
                 template="email/email.html",
@@ -7809,7 +7873,7 @@ def cancel_target_saving(request, pk):
 
         send_generic_email(
             subject=subject,
-            message_or_context=context,
+            message=context,
             from_email=settings.DEFAULT_FROM_EMAIL,
             recipient_list=[user.email],
             template="email/email.html",
