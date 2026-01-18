@@ -870,16 +870,16 @@ class CustomUserAdmin(UserAdmin):
 
             send_generic_email(
                 subject="🎉 Your KYC Has Been Approved",
-                message="""
-    Hi {first_name},
+                message=f"""Hi {user.first_name},\n\n
 
-    Great news! Your KYC verification has been successfully approved.
+            Great news! Your KYC verification has been successfully approved.\n\n
 
-    You now have full access to all MyFund features.
+            You now have full access to all MyFund features.\n\n
 
-    Keep growing your funds 🚀
-    MyFund Team
-    """,
+            Keep growing your funds 🚀\n\n
+
+            MyFund Team
+            """,
                 recipient_list=[user.email],
             )
 
@@ -937,19 +937,18 @@ class CustomUserAdmin(UserAdmin):
             # ---- EMAIL (TEMPLATE-BASED) ----
             send_generic_email(
                 subject="KYC Verification Update – Action Required",
-                message="""
-    Hi {first_name},
+                message=f"""Hi {user.first_name},\n\n
 
-    We’ve reviewed your KYC submission and unfortunately couldn’t approve it at this time.
+            We’ve reviewed your KYC submission and unfortunately couldn’t approve it at this time\n\n.
 
-    Reason:
-    {kyc_rejection_reason}
+            Reason:\n
+            {rejection_reason}\n\n
 
-    Please log into your MyFund account, review the issue, and re-submit your KYC.
+            Please log into your MyFund account, review the issue, and re-submit your KYC.\n\n
 
-    MyFund Team
-    www.myfundmobile.com
-    """,
+            MyFund Team\n
+            www.myfundmobile.com
+            """,
                 recipient_list=[user.email],
             )
 
@@ -957,8 +956,11 @@ class CustomUserAdmin(UserAdmin):
             send_push_notification(
                 user=user,
                 title="KYC Needs Attention ❌",
-                message="Your KYC was rejected. Please review the reason and re-upload.",
-                data={"kyc_status": "rejected"},
+                message=f"Your KYC was rejected: {rejection_reason}. Please review and re-upload.",
+                data={
+                    "kyc_status": "rejected",
+                    "kyc_rejection_reason": rejection_reason,  # include reason in payload too
+                },
                 notif_type="ACCOUNT",
             )
 
@@ -1011,28 +1013,31 @@ class CustomUserAdmin(UserAdmin):
             # ---- EMAIL ----
             send_generic_email(
                 subject="KYC Verification Update – Action Required",
-                message="""
-    Hi {first_name},
+                message=f"""
+            Hi {obj.first_name},\n\n
 
-    We’ve reviewed your KYC submission and unfortunately couldn’t approve it at this time.
+            We’ve reviewed your KYC submission and unfortunately couldn’t approve it at this time.\n\n
 
-    Reason:
-    {kyc_rejection_reason}
+            Reason:\n
+            {rejection_reason}\n\n
 
-    Please log into your MyFund account, correct the issue, and re-submit your KYC.
+            Please log into your MyFund account, correct the issue, and re-submit your KYC.\n\n
 
-    MyFund Team
-    www.myfundmobile.com
-    """,
+            MyFund Team\n
+            www.myfundmobile.com
+            """,
                 recipient_list=[obj.email],
             )
 
-            # ---- PUSH ----
+            # PUSH
             send_push_notification(
                 user=obj,
                 title="KYC Needs Attention ❌",
-                message="Your KYC was rejected. Please review the reason and re-upload.",
-                data={"kyc_status": "rejected"},
+                message=f"Your KYC was rejected: {rejection_reason}. Please review and re-upload.",
+                data={
+                    "kyc_status": "rejected",
+                    "kyc_rejection_reason": rejection_reason,
+                },
                 notif_type="ACCOUNT",
             )
 
