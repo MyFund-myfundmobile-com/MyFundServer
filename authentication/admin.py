@@ -41,7 +41,7 @@ import csv
 from django.http import HttpResponse
 from django.utils.html import format_html
 from django.urls import reverse
-from .utils import send_push_notification
+from .utils import send_push_notification, send_generic_email
 from decimal import Decimal
 
 GOOGLE_FORM_TEMPLATE = (
@@ -243,6 +243,8 @@ class CustomUserAdmin(UserAdmin):
                     "next_of_kin_name",
                     "relationship_with_next_of_kin",
                     "next_of_kin_phone_number",
+                    "kyc_status",
+                    "kyc_rejection_reason",
                 ),
             },
         ),
@@ -846,82 +848,193 @@ class CustomUserAdmin(UserAdmin):
     deactivate_user.short_description = "Deactivate user"
 
     def approve_kyc(self, request, queryset):
-        updated_users = []
-        rejected_users = []
+        approved = 0
 
         for user in queryset:
-            if not user.kyc_updated:
-                user.kyc_updated = True
-                user.kyc_status = "approved"
-                user.save(update_fields=["kyc_status", "kyc_updated"])
+            if user.kyc_status != "submitted":
+                continue
 
-                updated_users.append(user)
+            user.kyc_status = "approved"
+            user.kyc_updated = True
+            user.kyc_rejection_reason = None
+            user.kyc_reviewed_at = timezone.now()
 
-                # Send an approval email to the user
-                subject = "KYC Update Approved!"
-                message = f"Hi {user.first_name}, \n\nThank you for updating your KYC information. Your KYC update has been approved.\n\nKeep growing your funds!🥂\n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-                from_email = "MyFund <info@myfundmobile.com>"
-                recipient_list = [user.email]
-
-                send_mail(
-                    subject, message, from_email, recipient_list, fail_silently=False
-                )
-
-                # Send push notification
-                send_push_notification(
-                    user=user,
-                    title="KYC Verified ✅",
-                    message=f"Hi {user.first_name}, your KYC has been verified. You can now enjoy full access.",
-                    data={"kyc_status": "verified"},
-                    notif_type="ACCOUNT",
-                )
-
-            else:
-                rejected_users.append(user)
-
-        if updated_users:
-            if len(updated_users) == 1:
-                message_bit = f"1 user ({updated_users[0]}) was"
-            else:
-                message_bit = f"{len(updated_users)} users were"
-            self.message_user(request, f"{message_bit} approved for KYC update.")
-
-        if rejected_users:
-            if len(rejected_users) == 1:
-                message_bit = f"1 user ({rejected_users[0]}) was"
-            else:
-                message_bit = f"{len(rejected_users)} users were"
-            self.message_user(
-                request, f"{message_bit} already approved for KYC update."
+            user.save(
+                update_fields=[
+                    "kyc_status",
+                    "kyc_updated",
+                    "kyc_rejection_reason",
+                    "kyc_reviewed_at",
+                ]
             )
 
-    approve_kyc.short_description = "Approve KYC Details"
+            send_generic_email(
+                subject="🎉 Your KYC Has Been Approved",
+                message="""
+    Hi {first_name},
+
+    Great news! Your KYC verification has been successfully approved.
+
+    You now have full access to all MyFund features.
+
+    Keep growing your funds 🚀
+    MyFund Team
+    """,
+                recipient_list=[user.email],
+            )
+
+            send_push_notification(
+                user=user,
+                title="KYC Approved ✅",
+                message="Your KYC has been approved. You now have full access. Enjoy!",
+                data={"kyc_status": "approved"},
+                notif_type="ACCOUNT",
+            )
+
+            approved += 1
+
+        self.message_user(request, f"KYC approved for {approved} user(s).")
 
     def reject_kyc(self, request, queryset):
-        for user in queryset:
-            if user.kyc_updated:
-                user.kyc_updated = False
-                user.kyc_status = "rejected"
-                user.save(update_fields=["kyc_status", "kyc_updated"])
+        rejected = 0
 
-                # Send a rejection email to the user
-                subject = "KYC Update Failed!"
-                message = f"Hi {user.first_name}, \n\nThank you for updating your KYC information. Unfortunately, we couldn't verify your information. Kindly check and try again.\n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-                from_email = "MyFund <info@myfundmobile.com>"
-                recipient_list = [user.email]
-
-                send_mail(
-                    subject, message, from_email, recipient_list, fail_silently=False
-                )
-
-        self.message_user(request, f"Rejected KYC for {queryset.count()} user(s).")
-
-        # Redirect to the changelist view after processing
-        return HttpResponseRedirect(
-            reverse("admin:authentication_customuser_changelist")
+        DEFAULT_REJECTION_REASON = (
+            "We were unable to verify the information provided. "
+            "Please review your details and re-upload clear and valid documents."
         )
 
+        for user in queryset:
+            # Only allow rejection if KYC was submitted
+            if user.kyc_status != "submitted":
+                self.message_user(
+                    request,
+                    f"{user.email} is not in submitted state.",
+                    level="warning",
+                )
+                continue
+
+            # Use admin-provided reason OR fallback to default
+            rejection_reason = (
+                user.kyc_rejection_reason.strip()
+                if user.kyc_rejection_reason
+                else DEFAULT_REJECTION_REASON
+            )
+
+            user.kyc_status = "rejected"
+            user.kyc_updated = False
+            user.kyc_rejection_reason = rejection_reason
+            user.kyc_reviewed_at = timezone.now()
+
+            user.save(
+                update_fields=[
+                    "kyc_status",
+                    "kyc_updated",
+                    "kyc_rejection_reason",
+                    "kyc_reviewed_at",
+                ]
+            )
+
+            # ---- EMAIL (TEMPLATE-BASED) ----
+            send_generic_email(
+                subject="KYC Verification Update – Action Required",
+                message="""
+    Hi {first_name},
+
+    We’ve reviewed your KYC submission and unfortunately couldn’t approve it at this time.
+
+    Reason:
+    {kyc_rejection_reason}
+
+    Please log into your MyFund account, review the issue, and re-submit your KYC.
+
+    MyFund Team
+    www.myfundmobile.com
+    """,
+                recipient_list=[user.email],
+            )
+
+            # ---- PUSH NOTIFICATION ----
+            send_push_notification(
+                user=user,
+                title="KYC Needs Attention ❌",
+                message="Your KYC was rejected. Please review the reason and re-upload.",
+                data={"kyc_status": "rejected"},
+                notif_type="ACCOUNT",
+            )
+
+            rejected += 1
+
+        self.message_user(request, f"KYC rejected for {rejected} user(s).")
+
     reject_kyc.short_description = "Reject KYC Details"
+
+    def save_model(self, request, obj, form, change):
+        """
+        Ensure KYC side-effects (email + push) run
+        when admin manually changes KYC status to rejected.
+        """
+        is_existing = obj.pk is not None
+        previous = None
+
+        if is_existing:
+            try:
+                previous = CustomUser.objects.get(pk=obj.pk)
+            except CustomUser.DoesNotExist:
+                previous = None
+
+        super().save_model(request, obj, form, change)
+
+        # ---- Detect SUBMITTED → REJECTED transition ----
+        if (
+            previous
+            and previous.kyc_status == "submitted"
+            and obj.kyc_status == "rejected"
+        ):
+            DEFAULT_REJECTION_REASON = (
+                "We were unable to verify the information provided. "
+                "Please review your details and re-upload clear and valid documents."
+            )
+
+            rejection_reason = (
+                obj.kyc_rejection_reason.strip()
+                if obj.kyc_rejection_reason
+                else DEFAULT_REJECTION_REASON
+            )
+
+            # Persist normalized rejection data
+            CustomUser.objects.filter(pk=obj.pk).update(
+                kyc_updated=False,
+                kyc_rejection_reason=rejection_reason,
+                kyc_reviewed_at=timezone.now(),
+            )
+
+            # ---- EMAIL ----
+            send_generic_email(
+                subject="KYC Verification Update – Action Required",
+                message="""
+    Hi {first_name},
+
+    We’ve reviewed your KYC submission and unfortunately couldn’t approve it at this time.
+
+    Reason:
+    {kyc_rejection_reason}
+
+    Please log into your MyFund account, correct the issue, and re-submit your KYC.
+
+    MyFund Team
+    www.myfundmobile.com
+    """,
+                recipient_list=[obj.email],
+            )
+
+            # ---- PUSH ----
+            send_push_notification(
+                user=obj,
+                title="KYC Needs Attention ❌",
+                message="Your KYC was rejected. Please review the reason and re-upload.",
+                data={"kyc_status": "rejected"},
+                notif_type="ACCOUNT",
+            )
 
     def total_savings_and_investments(self, obj):
         return obj.savings + obj.investment
