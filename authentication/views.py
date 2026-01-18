@@ -78,6 +78,7 @@ logger = logging.getLogger(__name__)
 
 from django.db import transaction
 
+
 @api_view(["POST"])
 @csrf_exempt
 @permission_classes([AllowAny])
@@ -133,25 +134,19 @@ def signup(request):
             try:
                 send_otp_email(user, otp)
             except Exception as exc:
-                logger.warning(
-                    f"OTP email failed for {user.email}: {exc}"
-                )
+                logger.warning(f"OTP email failed for {user.email}: {exc}")
 
             # SMS should still attempt even if email fails
             try:
                 if user.phone_number:
                     send_otp_sms(user, otp)
             except Exception as exc:
-                logger.warning(
-                    f"OTP SMS failed for {user.phone_number}: {exc}"
-                )
+                logger.warning(f"OTP SMS failed for {user.phone_number}: {exc}")
 
         transaction.on_commit(send_otp_async)
 
         response_data = serializer.data
-        response_data["referral_email"] = (
-            user.referral.email if user.referral else None
-        )
+        response_data["referral_email"] = user.referral.email if user.referral else None
         response_data["message"] = "OTP sent successfully"
 
         return Response(response_data, status=status.HTTP_201_CREATED)
@@ -160,8 +155,9 @@ def signup(request):
         logger.exception("Unexpected error during signup")
 
 
-
 import threading
+
+
 @api_view(["POST"])
 @csrf_exempt
 @permission_classes([AllowAny])
@@ -775,7 +771,6 @@ from .models import (
 )
 
 
-
 import logging
 import random
 from datetime import timedelta, datetime
@@ -793,6 +788,7 @@ from .models import CustomUser, PasswordReset
 from .utils import send_sms_via_payless, send_generic_email
 
 logger = logging.getLogger(__name__)
+
 
 def _send_otp(user, otp, purpose="signup"):
     """
@@ -882,11 +878,15 @@ def send_password_change_confirmation(user):
             logger.info(f"Password change confirmation sent to {user.email}")
             return True
         except Exception as e:
-            logger.error(f"Failed sending password change confirmation to {user.email}: {e}")
+            logger.error(
+                f"Failed sending password change confirmation to {user.email}: {e}"
+            )
             return False
 
     except Exception as e:
-        logger.error(f"Error preparing password change confirmation for {user.email}: {e}")
+        logger.error(
+            f"Error preparing password change confirmation for {user.email}: {e}"
+        )
         return False
 
 
@@ -920,9 +920,13 @@ def request_password_reset(request):
 
         # Send OTP with try-except to avoid breaking UX
         try:
-            threading.Thread(target=_send_otp, args=(user, otp, "password_reset")).start()
+            threading.Thread(
+                target=_send_otp, args=(user, otp, "password_reset")
+            ).start()
         except Exception as e:
-            logger.error(f"Failed to send email/SMS for password reset to {user.email}: {e}")
+            logger.error(
+                f"Failed to send email/SMS for password reset to {user.email}: {e}"
+            )
 
         return Response({"detail": "Password reset OTP sent successfully."}, status=200)
 
@@ -963,12 +967,14 @@ def reset_password(request):
         # Send confirmation email safely
         try:
             threading.Thread(
-                target=send_password_change_confirmation, 
+                target=send_password_change_confirmation,
                 args=(user,),
-                daemon=True  # optional, ensures thread dies with main process
+                daemon=True,  # optional, ensures thread dies with main process
             ).start()
         except Exception as e:
-            logger.warning(f"Could not send password change confirmation to {user.email}: {e}")
+            logger.warning(
+                f"Could not send password change confirmation to {user.email}: {e}"
+            )
 
         return Response({"message": "Password reset successful."}, status=200)
 
@@ -1017,9 +1023,13 @@ def resend_password_otp(request):
         )
 
         try:
-            threading.Thread(target=_send_otp, args=(user, otp, "password_reset")).start()
+            threading.Thread(
+                target=_send_otp, args=(user, otp, "password_reset")
+            ).start()
         except Exception as e:
-            logger.error(f"Failed to resend email/SMS for password reset to {user.email}: {e}")
+            logger.error(
+                f"Failed to resend email/SMS for password reset to {user.email}: {e}"
+            )
 
         return Response({"detail": "OTP resent successfully."}, status=200)
 
@@ -4610,6 +4620,7 @@ class GetKYCStatusView(APIView):
     def get(self, request):
         user = request.user
         kyc_status = user.kyc_status
+        kyc_reason = user.kyc_rejection_reason  # <-- include this
         message = ""
 
         if kyc_status is None:
@@ -4622,7 +4633,12 @@ class GetKYCStatusView(APIView):
             message = "Your KYC was rejected."
 
         return Response(
-            {"kycStatus": kyc_status, "message": message}, status=status.HTTP_200_OK
+            {
+                "kycStatus": kyc_status,
+                "message": message,
+                "kycRejectionReason": kyc_reason,  # <-- add here
+            },
+            status=status.HTTP_200_OK,
         )
 
 
@@ -4761,6 +4777,7 @@ def create_notification(user, notification_type, title, message, data=None):
 
 import threading
 
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def initiate_bank_transfer(request):
@@ -4840,7 +4857,7 @@ def initiate_bank_transfer(request):
             target=send_generic_email,
             args=(user_subject, user_message, "info@myfundmobile.com", [user.email]),
             kwargs={"use_celery_threshold": 30, "template": "email/email.html"},
-            daemon=True
+            daemon=True,
         ).start()
 
         # ✅ Notify Admin via Email
@@ -4849,11 +4866,15 @@ def initiate_bank_transfer(request):
 
         threading.Thread(
             target=send_generic_email,
-            args=(subject, message, "info@myfundmobile.com", ["company@myfundmobile.com", "info@myfundmobile.com"]),
+            args=(
+                subject,
+                message,
+                "info@myfundmobile.com",
+                ["company@myfundmobile.com", "info@myfundmobile.com"],
+            ),
             kwargs={"use_celery_threshold": 30, "template": "email/email.html"},
-            daemon=True
+            daemon=True,
         ).start()
-
 
         # ✅ Notify Admin via Push Notification
         admin_emails = [
@@ -4998,7 +5019,7 @@ def initiate_invest_transfer(request):
             target=send_generic_email,
             args=(user_subject, user_message, "info@myfundmobile.com", [user.email]),
             kwargs={"use_celery_threshold": 30, "template": "email/email.html"},
-            daemon=True
+            daemon=True,
         ).start()
 
         # 📧 ADMIN EMAIL — THREADING
@@ -5012,9 +5033,14 @@ def initiate_invest_transfer(request):
         )
         threading.Thread(
             target=send_generic_email,
-            args=(admin_subject, admin_message, "info@myfundmobile.com", ["company@myfundmobile.com", "info@myfundmobile.com"]),
+            args=(
+                admin_subject,
+                admin_message,
+                "info@myfundmobile.com",
+                ["company@myfundmobile.com", "info@myfundmobile.com"],
+            ),
             kwargs={"use_celery_threshold": 30, "template": "email/email.html"},
-            daemon=True
+            daemon=True,
         ).start()
 
         # 🔔 ADMIN PUSH
@@ -5060,7 +5086,6 @@ def initiate_invest_transfer(request):
             {"error": str(e), "transaction_id": transaction_id},
             status=400,
         )
-
 
 
 @api_view(["GET"])

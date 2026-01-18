@@ -513,6 +513,8 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     )
 
     kyc_updated = models.BooleanField(default=False)  # keep for backward compatibility
+    kyc_rejection_reason = models.TextField(blank=True, null=True)
+    kyc_reviewed_at = models.DateTimeField(null=True, blank=True)
 
     notification_preferences = models.JSONField(default=dict, null=True, blank=True)
 
