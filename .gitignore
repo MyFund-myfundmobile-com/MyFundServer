@@ -175,7 +175,6 @@ script.py
 
 
 newenv/
-media/
 *.sqlite3
 *.pyc
 __pycache__/
