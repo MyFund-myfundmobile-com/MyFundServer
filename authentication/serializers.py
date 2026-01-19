@@ -7,6 +7,8 @@ from .models import CustomUser, Message, UserPassword
 from django.db import transaction
 from django.contrib.auth.hashers import make_password
 import logging
+from django.db.models import Q
+
 
 logger = logging.getLogger(__name__)
 
@@ -61,29 +63,41 @@ class SignupSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"password": "Password is required."})
 
         with transaction.atomic():
-            # Create the user without password field
+            # Create the user normally
             user = CustomUser.objects.create(**validated_data)
 
-            # Save password in related UserPassword model
-            user_password, created = UserPassword.objects.get_or_create(
-                user=user, defaults={"password": make_password(password)}
-            )
+            # Save password in CustomUser so authenticate() works
+            user.set_password(password)  # <-- this hashes and stores it
             user.save()
 
+            # Also store in UserPassword if you still want legacy record
+            UserPassword.objects.get_or_create(
+                user=user, defaults={"password": make_password(password)}
+            )
+
         if referral_code:
-            try:
-                referrer = CustomUser.objects.get(email=referral_code)
+            referrer = CustomUser.objects.filter(
+                Q(email__iexact=referral_code) | Q(phone_number__iexact=referral_code)
+            ).first()
+            if referrer:
                 user.referral = referrer
                 user.save()
                 logger.info("Referral applied successfully")
-            except CustomUser.DoesNotExist:
+            else:
                 logger.warning(f"Invalid referral code: {referral_code}")
 
         return user
 
 
 class ConfirmOTPSerializer(serializers.Serializer):
-    otp = serializers.CharField(max_length=6)  # Assuming OTP is a 6-digit string
+    otp = serializers.CharField(max_length=6)
+
+    def validate_otp(self, value):
+        """
+        Ensure OTP is always a 6-character string, even if frontend sends an int.
+        """
+        value_str = str(value).zfill(6)  # pads numbers like 123 -> '000123'
+        return value_str
 
 
 from django.conf import settings  # Import settings to get the MEDIA_URL
@@ -97,6 +111,7 @@ class UserSerializer(serializers.ModelSerializer):
     is_subscribed = serializers.BooleanField(read_only=True)
     total_referrals = serializers.IntegerField(read_only=True)
     confirmed_referrals = serializers.IntegerField(read_only=True)
+    wealth_stage = serializers.SerializerMethodField()
 
     class Meta:
         model = CustomUser
@@ -143,6 +158,7 @@ class UserSerializer(serializers.ModelSerializer):
             # Add new referral fields
             "total_referrals",
             "confirmed_referrals",
+            "wealth_stage",
         ]
 
     def get_date_joined(self, obj):
@@ -161,20 +177,31 @@ class UserSerializer(serializers.ModelSerializer):
 
         return None
 
+    def get_wealth_stage(self, obj):
+        import math
+
+        total = obj.savings_and_investments
+        if total == 0:
+            stage = 1
+        else:
+            stage = min(int(math.log10(total + 1)) + 1, 9)
+        return stage
+
     def create(self, validated_data):
         password = validated_data.pop("password")
 
         # Create the user instance first
+        password = validated_data.pop("password")
         user = CustomUser.objects.create(**validated_data)
 
-        # Create the password record manually if it doesn't exist
-        if not hasattr(user, "password_record"):
-            password_record = UserPassword.objects.create(user=user, password=password)
-            user.password_record = password_record
-            user.save()
-        else:
-            user.password_record.set_password(password)
-            user.password_record.save()
+        # Set password on CustomUser for login
+        user.set_password(password)
+        user.save()
+
+        # Optionally keep UserPassword record if still needed
+        UserPassword.objects.get_or_create(
+            user=user, defaults={"password": make_password(password)}
+        )
 
         return user
 
@@ -326,13 +353,26 @@ class TargetSavingsSerializer(serializers.ModelSerializer):
         choices=[("SAVINGS", "SAVINGS"), ("INVESTMENT", "INVESTMENT")],
         required=True,
     )
-    
+
     frequency = serializers.ChoiceField(
         choices=[("DAILY", "Daily"), ("WEEKLY", "Weekly"), ("MONTHLY", "Monthly")],
         required=True,
     )
 
     def validate(self, data):
+        user = self.context["request"].user
+
+        # 🔴 CRITICAL SECURITY CHECK: Prevent banned/inactive users
+        if hasattr(user, "is_banned") and user.is_banned:
+            raise serializers.ValidationError(
+                {"detail": "Your account has been banned. Please contact support."}
+            )
+
+        if not user.is_active:
+            raise serializers.ValidationError(
+                {"detail": "Your account is inactive. Please contact support."}
+            )
+
         # Ensure end_date is in the future
         if data["end_date"] < timezone.now().date():
             raise serializers.ValidationError(
@@ -577,9 +617,33 @@ from .models import EmailTemplate
 
 
 class EmailTemplateSerializer(serializers.ModelSerializer):
+    design = serializers.SerializerMethodField()
+
     class Meta:
         model = EmailTemplate
-        fields = "__all__"
+        fields = [
+            "id",
+            "title",
+            "design",  # JSON (for Unlayer)
+            "design_html",  # HTML (for preview/send)
+            "last_update",
+        ]
+
+    def get_design(self, obj):
+        if not obj.design_body:
+            return {"body": {}, "counters": {}, "schemaVersion": 1}
+
+        if isinstance(obj.design_body, str):
+            try:
+                parsed = json.loads(obj.design_body)
+                return (
+                    parsed
+                    if parsed and isinstance(parsed, dict)
+                    else {"body": {}, "counters": {}, "schemaVersion": 1}
+                )
+            except Exception:
+                return {"body": {}, "counters": {}, "schemaVersion": 1}
+        return obj.design_body
 
 
 from rest_framework import serializers
@@ -750,3 +814,12 @@ class PushNotificationsSerializer(serializers.ModelSerializer):
     class Meta:
         model = PushNotifications
         fields = "__all__"
+
+
+from .models import DailyROIAccrual
+
+
+class DailyROISerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DailyROIAccrual
+        fields = ["date", "savings_roi", "investment_roi", "total_roi"]

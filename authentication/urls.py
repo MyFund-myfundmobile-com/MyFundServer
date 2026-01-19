@@ -36,6 +36,7 @@ from .views import (
     get_my_push_notifications,
     send_admin_push_notification,
     save_expo_push_token,
+    earnings_summary,
 )
 from django.views.decorators.csrf import csrf_exempt
 from authentication.views import CustomGraphQLView
@@ -160,6 +161,11 @@ urlpatterns = [
         name="process_withdrawal_to_local_bank",
     ),
     path(
+        "cancel-scheduled-withdrawal/",
+        views.cancel_scheduled_withdrawal,
+        name="cancel_scheduled_withdrawal",
+    ),
+    path(
         "wallet-transfer/",
         views.wallet_transfer_view,  # ✅ updated view name
         name="wallet_transfer",  # same name, no issue
@@ -253,7 +259,9 @@ urlpatterns = [
     ),
     path("groupbuy/join/<str:group_id>/", views.join_groupbuy, name="join_groupbuy"),
     path(
-        "groupbuy/invite/<str:group_id>/", views.invite_to_groupbuy, name="invite_to_groupbuy"
+        "groupbuy/invite/<str:group_id>/",
+        views.invite_to_groupbuy,
+        name="invite_to_groupbuy",
     ),
     path(
         "groupbuy/contribute/<str:group_id>/",
@@ -303,11 +311,13 @@ urlpatterns = [
     ),
     # MonthlyFinancial APIs
     path(
-        "current-month/",
+        "financials/current-month/",
         CurrentMonthFinancialView.as_view(),
         name="current-month-financial",
     ),
-    path("history/", FinancialHistoryView.as_view(), name="financial-history"),
+    path(
+        "financials/history/", FinancialHistoryView.as_view(), name="financial-history"
+    ),
     path("admin-totals/", AllUsersMonthlyTotalsView.as_view(), name="all-users-totals"),
     # Notification URLs
     path(
@@ -330,6 +340,9 @@ urlpatterns = [
         send_admin_notification,
         name="send-admin-notification",
     ),
+    # ROI & Earnings URLs
+    path("roi-summary/", views.get_roi_summary, name="roi-summary"),
+    path("earnings/", earnings_summary, name="earnings-summary"),
     # PushNotification URLs
     path(
         "push-notifications/", get_my_push_notifications, name="get_push_notifications"

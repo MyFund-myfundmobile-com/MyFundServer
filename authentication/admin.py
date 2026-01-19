@@ -14,6 +14,8 @@ from .models import (
     WithdrawalsRequestToAdmin,
     TargetSavings,
     TopSaverHistory,
+    DailyROIAccrual,
+    ROITransaction,
 )
 from django.core.mail import send_mail
 from django.urls import reverse
@@ -39,7 +41,13 @@ import csv
 from django.http import HttpResponse
 from django.utils.html import format_html
 from django.urls import reverse
-from .utils import send_push_notification
+from .utils import send_push_notification, send_generic_email
+from decimal import Decimal
+
+GOOGLE_FORM_TEMPLATE = (
+    "https://docs.google.com/forms/d/e/1FAIpQLSfHbVd5EtzSyJskgdvCRfGfYrdGaTw3RwCvnkk7pjl6LvS59A/"
+    "viewform?usp=pp_url&entry.1884265043={name}&entry.390969690={email}"
+)
 
 
 @admin.action(description="Say Hello")
@@ -68,13 +76,50 @@ class TransactionInline(admin.TabularInline):
     )
 
 
-class UserPasswordInline(admin.StackedInline):
-    model = UserPassword
+# class UserPasswordInline(admin.StackedInline):
+#     model = UserPassword
+#     can_delete = False
+#     verbose_name_plural = "Password"
+
+
+# admin.py - Add these BEFORE CustomUserAdmin class
+
+
+class DailyROIAccrualInline(admin.TabularInline):
+    model = DailyROIAccrual
+    extra = 0
+    readonly_fields = [
+        "date",
+        "savings_balance",
+        "investment_balance",
+        "savings_roi",
+        "investment_roi",
+        "total_roi",
+    ]
     can_delete = False
-    verbose_name_plural = "Password"
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+
+class ROITransactionInline(admin.TabularInline):
+    model = ROITransaction
+    extra = 0
+    readonly_fields = [
+        "accrued_date",
+        "amount",
+        "roi_type",
+        "is_paid_out",
+        "payout_date",
+    ]
+    can_delete = False
+
+    def has_add_permission(self, request, obj=None):
+        return False
 
 
 from .utils import send_push_notification  # assuming utils is in authentication
+from decimal import Decimal
 
 
 class CustomUserAdmin(UserAdmin):
@@ -97,15 +142,19 @@ class CustomUserAdmin(UserAdmin):
         "how_did_you_hear",
         "is_hired_referrer",
         "is_ambassador",
-        "kyc_updated",
+        "kyc_status",
         "is_staff",
         "is_active",
+        "is_banned",  # 👈 show banned status
         "profile_picture",
+        "pending_roi",  # 👈 add this
     )
     list_filter = (
         "is_staff",
         "is_active",
+        "is_banned",  # 👈 show banned status
         "kyc_updated",
+        "kyc_status",
         "how_did_you_hear",
         "date_joined",
         "is_hired_referrer",
@@ -114,6 +163,9 @@ class CustomUserAdmin(UserAdmin):
     readonly_fields = ("get_total_referrals", "get_confirmed_referrals", "date_joined")
 
     actions = [
+        "ban_user",
+        "unban_user",
+        "export_kyc_data",  # NEW: KYC-only export
         "export_to_csv",  # Add export action
         "send_custom_email",
         "view_kyc_details",
@@ -125,6 +177,11 @@ class CustomUserAdmin(UserAdmin):
         "delete_selected",
         "deactivate_user" "notify_outdated_users",
         "say_hello",
+        "simulate_quarterly_payout",
+        "test_daily_roi_calculation",  # ← Add this
+        "test_quarterly_payout",  # ← Add this
+        "view_roi_summary",  # ← Add this
+        "test_top_saver_reward",
     ]
 
     fieldsets = (
@@ -158,7 +215,15 @@ class CustomUserAdmin(UserAdmin):
         ),
         (
             "Account Balances",
-            {"fields": ("savings", "investment", "properties", "wallet")},
+            {
+                "fields": (
+                    "savings",
+                    "investment",
+                    "properties",
+                    "wallet",
+                    "pending_roi",
+                )
+            },
         ),  # Add account balances fields
         ("Referral", {"fields": ("pending_referral_reward",)}),
         # Add a fieldset for KYC fields
@@ -178,6 +243,8 @@ class CustomUserAdmin(UserAdmin):
                     "next_of_kin_name",
                     "relationship_with_next_of_kin",
                     "next_of_kin_phone_number",
+                    "kyc_status",
+                    "kyc_rejection_reason",
                 ),
             },
         ),
@@ -192,9 +259,20 @@ class CustomUserAdmin(UserAdmin):
             },
         ),
     )
-    search_fields = ("email", "first_name", "last_name")
+    search_fields = (
+        "email",
+        "first_name",
+        "last_name",
+        "how_did_you_hear",
+        "kyc_status",
+    )
     ordering = ("email", "date_joined")
-    inlines = [TransactionInline, UserPasswordInline]
+    inlines = [
+        TransactionInline,
+        # UserPasswordInline,
+        DailyROIAccrualInline,
+        ROITransactionInline,
+    ]
 
     def get_total_referrals(self, obj):
         return Transaction.objects.filter(referral_email=obj.email).count()
@@ -218,13 +296,61 @@ class CustomUserAdmin(UserAdmin):
             ),
         )
 
+    def get_daily_savings_roi_rate(self):
+        """Calculate daily savings ROI rate (13% per annum)"""
+        return Decimal("0.13") / Decimal("365")
+
+    def get_daily_investment_roi_rate(self):
+        """Calculate daily investment ROI rate (20% per annum)"""
+        return Decimal("0.20") / Decimal("365")
+
+    def calculate_daily_roi(self, date=None):
+        """Calculate ROI for a specific date based on current balances"""
+        if date is None:
+            date = timezone.now().date()
+
+        daily_savings_rate = self.get_daily_savings_roi_rate()
+        daily_investment_rate = self.get_daily_investment_roi_rate()
+
+        savings_roi = self.savings * daily_savings_rate
+        investment_roi = self.investment * daily_investment_rate
+        total_roi = savings_roi + investment_roi
+
+        return {
+            "savings_roi": round(savings_roi, 2),
+            "investment_roi": round(investment_roi, 2),
+            "total_roi": round(total_roi, 2),
+        }
+
+    @admin.action(description="🚫 Ban selected users (cannot reactivate)")
+    def ban_user(self, request, queryset):
+        queryset.update(is_banned=True, is_active=False)
+        self.message_user(request, f"{queryset.count()} user(s) banned successfully.")
+
+    @admin.action(description="✅ Unban selected users")
+    def unban_user(self, request, queryset):
+        queryset.update(is_banned=False)
+        self.message_user(request, f"{queryset.count()} user(s) unbanned successfully.")
+
+    @admin.action(description="Simulate Quarterly ROI Payout")
+    def simulate_quarterly_payout(self, request, queryset):
+        from .tasks import process_quarterly_payouts_task
+
+        result = process_quarterly_payouts_task()
+        self.message_user(request, f"Simulation completed: {result}")
+
+    @admin.action(description="Export selected users to CSV")
     def export_to_csv(self, request, queryset):
         # Create the response object and set the content type
         response = HttpResponse(content_type="text/csv")
-        response["Content-Disposition"] = 'attachment; filename="custom_users.csv"'
+        response["Content-Disposition"] = (
+            'attachment; filename="users_with_full_kyc.csv"'
+        )
 
-        # Create the CSV writer
+        # Create the CSV writer with UTF-8 encoding for special characters
         writer = csv.writer(response)
+
+        # Write comprehensive header with ALL KYC fields
         writer.writerow(
             [
                 "ID",
@@ -233,28 +359,207 @@ class CustomUserAdmin(UserAdmin):
                 "Last Name",
                 "Phone Number",
                 "Date Joined",
-                "Profile Picture",
+                "KYC Status",
                 "KYC Updated",
-                "Is Staff",
-                "Is Active",
-                "Preferred Asset",
-                "Savings Goal Amount",
-                "Time Period",
+                # Personal Information
+                "Gender",
+                "Date of Birth",
+                "Address",
+                "State of Residence",
+                "Country of Residence",
+                # Employment & Financial
+                "Employment Status",
+                "Yearly Income",
+                # Identification
+                "Identification Type",
+                "ID Upload URL",
+                # Family Information
+                "Mother's Maiden Name",
+                "Relationship Status",
+                # Next of Kin Information
+                "Next of Kin Name",
+                "Relationship with Next of Kin",
+                "Next of Kin Phone Number",
+                # Referral Source
+                "How Did You Hear",  # ADDED - Shows user acquisition source
+                # Account Information
+                "Is Hired Referrer",
+                "Is Ambassador",
+                # Account Balances
                 "Savings",
                 "Investment",
                 "Properties",
                 "Wallet",
                 "Total Savings and Investments",
                 "Total Savings and Investments This Month",
-                "User Percentage to Top Saver",
-                "How Did You Hear",
-                "Is Hired Referrer",
-                "Is Ambassador",
+                # Account Status
+                "Is Staff",
+                "Is Active",
+                "Is Banned",
+                "Profile Picture URL",
             ]
         )
 
         # Write user data rows
         for user in queryset:
+            # Format date of birth if it exists
+            dob = ""
+            if user.date_of_birth and user.date_of_birth.year > 1900:
+                dob = user.date_of_birth.strftime("%Y-%m-%d")
+
+            # Format date joined
+            date_joined = (
+                user.date_joined.strftime("%Y-%m-%d %H:%M:%S")
+                if user.date_joined
+                else ""
+            )
+
+            # Get profile picture URL
+            profile_pic_url = user.profile_picture.url if user.profile_picture else ""
+
+            # Get ID upload URL
+            id_upload_url = user.id_upload.url if user.id_upload else ""
+
+            # Format "How Did You Hear" for better readability
+            how_did_you_hear_display = dict(
+                user._meta.get_field("how_did_you_hear").choices
+            ).get(user.how_did_you_hear, user.how_did_you_hear)
+
+            writer.writerow(
+                [
+                    # Basic Info
+                    user.id,
+                    user.email,
+                    user.first_name,
+                    user.last_name,
+                    user.phone_number,
+                    date_joined,
+                    user.kyc_status,
+                    "Yes" if user.kyc_updated else "No",
+                    # Personal Information
+                    user.gender if user.gender != "Choose" else "",
+                    dob,
+                    user.address if user.address != "Enter Address" else "",
+                    user.state if user.state != "Choose" else "",
+                    user.country if user.country != "Nigeria" else "",
+                    # Employment & Financial
+                    (
+                        user.employment_status
+                        if user.employment_status != "Choose"
+                        else ""
+                    ),
+                    user.yearly_income if user.yearly_income != "Choose" else "",
+                    # Identification
+                    (
+                        user.identification_type
+                        if user.identification_type != "Choose"
+                        else ""
+                    ),
+                    request.build_absolute_uri(id_upload_url) if id_upload_url else "",
+                    # Family Information
+                    (
+                        user.mothers_maiden_name
+                        if user.mothers_maiden_name != "Enter Name"
+                        else ""
+                    ),
+                    (
+                        user.relationship_status
+                        if user.relationship_status != "Choose"
+                        else ""
+                    ),
+                    # Next of Kin Information
+                    (
+                        user.next_of_kin_name
+                        if user.next_of_kin_name != "Enter Name"
+                        else ""
+                    ),
+                    (
+                        user.relationship_with_next_of_kin
+                        if user.relationship_with_next_of_kin != "Choose"
+                        else ""
+                    ),
+                    (
+                        user.next_of_kin_phone_number
+                        if user.next_of_kin_phone_number != "Enter Number"
+                        else ""
+                    ),
+                    # Referral Source - ADDED
+                    how_did_you_hear_display,  # Shows the full readable value
+                    # Account Information
+                    "Yes" if user.is_hired_referrer else "No",
+                    "Yes" if user.is_ambassador else "No",
+                    # Account Balances
+                    str(user.savings),
+                    str(user.investment),
+                    str(user.properties),
+                    str(user.wallet),
+                    str(user.savings + user.investment),
+                    str(getattr(user, "total_savings_and_investments_this_month", 0)),
+                    # Account Status
+                    "Yes" if user.is_staff else "No",
+                    "Yes" if user.is_active else "No",
+                    "Yes" if user.is_banned else "No",
+                    (
+                        request.build_absolute_uri(profile_pic_url)
+                        if profile_pic_url
+                        else ""
+                    ),
+                ]
+            )
+
+        return response
+
+    export_to_csv.short_description = "Export selected users to CSV"
+
+    @admin.action(description="Export KYC data only")
+    def export_kyc_data(self, request, queryset):
+        """Export only KYC-related fields for compliance reporting"""
+        response = HttpResponse(content_type="text/csv")
+        response["Content-Disposition"] = (
+            'attachment; filename="kyc_compliance_data.csv"'
+        )
+
+        writer = csv.writer(response)
+
+        # KYC-specific headers
+        writer.writerow(
+            [
+                "ID",
+                "Email",
+                "First Name",
+                "Last Name",
+                "Phone Number",
+                "KYC Status",
+                "KYC Submission Date",
+                "Gender",
+                "Date of Birth",
+                "Address",
+                "State",
+                "Country",
+                "Employment Status",
+                "Yearly Income",
+                "Identification Type",
+                "ID Uploaded",
+                "Mother's Maiden Name",
+                "Relationship Status",
+                "Next of Kin Name",
+                "Next of Kin Relationship",
+                "Next of Kin Phone",
+            ]
+        )
+
+        for user in queryset:
+            # Format dates
+            dob = ""
+            if user.date_of_birth and user.date_of_birth.year > 1900:
+                dob = user.date_of_birth.strftime("%Y-%m-%d")
+
+            # Find when KYC was last updated
+            kyc_date = ""
+            if user.kyc_status and user.kyc_status != "Not yet started":
+                # Try to get from user's update time or use date_joined
+                kyc_date = user.date_joined.strftime("%Y-%m-%d")
+
             writer.writerow(
                 [
                     user.id,
@@ -262,28 +567,241 @@ class CustomUserAdmin(UserAdmin):
                     user.first_name,
                     user.last_name,
                     user.phone_number,
-                    user.date_joined,
-                    user.profile_picture,
-                    user.kyc_updated,
-                    user.is_staff,
-                    user.is_active,
-                    user.preferred_asset,
-                    user.savings_goal_amount,
-                    user.time_period,
-                    user.savings,
-                    user.investment,
-                    user.properties,
-                    user.wallet,
-                    user.total_savings_and_investments_this_month,
-                    user.how_did_you_hear,
-                    user.is_hired_referrer,
-                    user.is_ambassador,
+                    user.kyc_status,
+                    kyc_date,
+                    user.gender,
+                    dob,
+                    user.address,
+                    user.state,
+                    user.country,
+                    user.employment_status,
+                    user.yearly_income,
+                    user.identification_type,
+                    (
+                        "Yes"
+                        if user.id_upload
+                        and not user.id_upload.name.endswith("placeholder.png")
+                        else "No"
+                    ),
+                    user.mothers_maiden_name,
+                    user.relationship_status,
+                    user.next_of_kin_name,
+                    user.relationship_with_next_of_kin,
+                    user.next_of_kin_phone_number,
                 ]
             )
 
+        self.message_user(request, f"Exported KYC data for {queryset.count()} users.")
         return response
 
-    export_to_csv.short_description = "Export selected users to CSV"
+    @admin.action(description="🎯 Test Quarterly Payout")
+    def test_quarterly_payout(self, request, queryset):
+        from django.utils import timezone
+        from datetime import date
+        from django.db import transaction as db_transaction
+        from .models import ROITransaction, Transaction
+        from .utils import send_push_notification
+
+        for user in queryset:
+            try:
+                # Get wallet balance before
+                old_wallet = user.wallet
+
+                # Create some test ROI transactions if none exist
+                from .models import ROITransaction
+
+                # Check if user has any unpaid ROI transactions
+                unpaid_count = ROITransaction.objects.filter(
+                    user=user, is_paid_out=False
+                ).count()
+
+                if unpaid_count == 0:
+                    # Create test ROI transactions
+                    ROITransaction.objects.create(
+                        user=user,
+                        amount=150.75,
+                        roi_type="SAVINGS",
+                        accrued_date=date(2024, 1, 15),
+                        is_paid_out=False,
+                    )
+                    ROITransaction.objects.create(
+                        user=user,
+                        amount=89.25,
+                        roi_type="INVESTMENT",
+                        accrued_date=date(2024, 1, 20),
+                        is_paid_out=False,
+                    )
+                    self.message_user(
+                        request, f"📝 Created test ROI transactions for {user.email}"
+                    )
+
+                # Process payout SYNCHRONOUSLY
+                today = timezone.now().date()
+
+                # Get all unpaid ROI transactions for this user
+                unpaid_roi = ROITransaction.objects.filter(user=user, is_paid_out=False)
+
+                total_payout = sum(transaction.amount for transaction in unpaid_roi)
+
+                if total_payout > 0:
+                    with db_transaction.atomic():
+                        # Credit wallet
+                        user.wallet += total_payout
+                        user.save(update_fields=["wallet"])
+
+                        # Mark ROI transactions as paid
+                        unpaid_roi.update(is_paid_out=True, payout_date=today)
+
+                        # Calculate breakdown for description
+                        savings_roi_total = sum(
+                            t.amount for t in unpaid_roi if t.roi_type == "SAVINGS"
+                        )
+                        investment_roi_total = sum(
+                            t.amount for t in unpaid_roi if t.roi_type == "INVESTMENT"
+                        )
+
+                        # Create transaction record (WITHOUT metadata)
+                        Transaction.objects.create(
+                            user=user,
+                            transaction_type="CREDIT",
+                            source="QUARTERLY_ROI_PAYOUT",
+                            amount=total_payout,
+                            description=f"Quarterly ROI payout - Savings: ₦{savings_roi_total:,.2f}, Investments: ₦{investment_roi_total:,.2f}",
+                        )
+
+                        # Send notification
+                        send_push_notification(
+                            user,
+                            title="🎉 Test Quarterly ROI Payout!",
+                            message=f"₦{total_payout:,.2f} has been credited to your wallet",
+                            data={
+                                "type": "TEST_QUARTERLY_PAYOUT",
+                                "amount": float(total_payout),
+                                "period": "Test",
+                            },
+                        )
+
+                # Refresh user data
+                user.refresh_from_db()
+                new_wallet = user.wallet
+
+                self.message_user(
+                    request,
+                    f"✅ Payout test for {user.email}: Wallet ₦{old_wallet:,.2f} → ₦{new_wallet:,.2f}",
+                )
+
+            except Exception as e:
+                self.message_user(
+                    request,
+                    f"❌ Payout error for {user.email}: {str(e)}",
+                    level=messages.ERROR,
+                )
+
+    @admin.action(description="🧪 Test Daily ROI Calculation")
+    def test_daily_roi_calculation(self, request, queryset):
+        from .utils import calculate_daily_roi, send_push_notification
+
+        for user in queryset:
+            try:
+                # Calculate ROI for this user using the utils function
+                total_roi, savings_roi, investment_roi = calculate_daily_roi(user)
+
+                # Send notification
+                send_push_notification(
+                    user,
+                    title="💰 Test Daily ROI",
+                    message=f"Test: Savings: ₦{savings_roi:,.2f}, Investments: ₦{investment_roi:,.2f}",
+                    data={
+                        "type": "TEST_DAILY_ROI",
+                        "savings_roi": float(savings_roi),
+                        "investment_roi": float(investment_roi),
+                        "total_roi": float(total_roi),
+                    },
+                )
+
+                self.message_user(
+                    request,
+                    f"✅ Test ROI calculated for {user.email}: ₦{total_roi:,.2f} total",
+                )
+
+            except Exception as e:
+                self.message_user(
+                    request,
+                    f"❌ Error for {user.email}: {str(e)}",
+                    level=messages.ERROR,
+                )
+
+    @admin.action(description="🏆 Test Top Saver Notification (No Credit)")
+    def test_top_saver_reward(self, request, queryset):
+        from django.utils import timezone
+        from .utils import send_push_notification, send_generic_email
+        import datetime, logging
+
+        logger = logging.getLogger(__name__)
+
+        now = timezone.now()
+        prev_month = now.month - 1 or 12
+        year = now.year if now.month > 1 else now.year - 1
+        prev_month_name = datetime.date(year, prev_month, 1).strftime("%B")
+
+        for user in queryset:
+            try:
+                logger.info(f"[TEST_TOP_SAVER] Processing user: {user.email}")
+
+                pre_filled_link = GOOGLE_FORM_TEMPLATE.format(
+                    name=f"{user.first_name} {user.last_name}", email=user.email
+                )
+
+                has_been_top3_before = TopSaverHistory.objects.filter(
+                    user=user, rank__lte=3
+                ).exists()
+
+                send_push_notification(
+                    user,
+                    title=f"🎉 Test Top Saver Notification!",
+                    message=(
+                        f"Congrats {user.first_name}! You made the Top 3 for {prev_month_name} (test). "
+                        "Check your email for the simulated feedback form."
+                    ),
+                    data={"type": "TOP_SAVER_TEST"},
+                )
+
+                if not has_been_top3_before:
+                    email_message = f"""
+                    Hi {user.first_name or user.email},<br><br>
+                    🎉 This is a <b>test</b> Top Saver Notification for <b>{prev_month_name}</b>.<br><br>
+                    You’ve qualified for a <b>MyFund Branded T-Shirt</b> 👕 as a first-time Top Saver!<br><br>
+                    Please fill this test form so we can record your details:<br><br>
+                    <a href="{pre_filled_link}"><b>MyFund Top Saver Form (Test)</b></a><br><br>
+                    — The MyFund Team
+                    """
+                else:
+                    email_message = f"""
+                    Hi {user.first_name or user.email},<br><br>
+                    🎉 This is a <b>test</b> Top Saver Notification for <b>{prev_month_name}</b>.<br><br>
+                    You’ve made the Top 3 again — great consistency!<br>
+                    Please complete the feedback form:<br>
+                    <a href="{pre_filled_link}">MyFund Feedback Form (Test)</a><br><br>
+                    — The MyFund Team
+                    """
+
+                logger.info(f"[TEST_TOP_SAVER] Sending email to {user.email}")
+
+                send_generic_email(
+                    subject=f"[TEST] Top Saver Notification - {prev_month_name}",
+                    message=email_message,
+                    from_email="MyFund <info@myfundmobile.com>",
+                    recipient_list=[user.email],
+                )
+
+                logger.info(f"[TEST_TOP_SAVER] Email sent to {user.email}")
+                self.message_user(request, f"✅ Test notification sent to {user.email}")
+
+            except Exception as e:
+                logger.error(
+                    f"[TEST_TOP_SAVER] Error for {user.email}: {str(e)}", exc_info=True
+                )
+                self.message_user(request, f"❌ Error for {user.email}: {str(e)}")
 
     @admin.action(description="Notify users with outdated app versions")
     def notify_outdated_users(self, request, queryset):
@@ -330,86 +848,193 @@ class CustomUserAdmin(UserAdmin):
     deactivate_user.short_description = "Deactivate user"
 
     def approve_kyc(self, request, queryset):
-        updated_users = []
-        rejected_users = []
+        approved = 0
 
         for user in queryset:
-            if not user.kyc_updated:
-                user.kyc_updated = True
-                user.kyc_status = "Updated!"
-                user.admin_approval_status = "Approved!"
-                user.save()
-                updated_users.append(user)
+            if user.kyc_status != "submitted":
+                continue
 
-                # Send an approval email to the user
-                subject = "KYC Update Approved!"
-                message = f"Hi {user.first_name}, \n\nThank you for updating your KYC information. Your KYC update has been approved.\n\nKeep growing your funds!🥂\n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-                from_email = "MyFund <info@myfundmobile.com>"
-                recipient_list = [user.email]
+            user.kyc_status = "approved"
+            user.kyc_updated = True
+            user.kyc_rejection_reason = None
+            user.kyc_reviewed_at = timezone.now()
 
-                send_mail(
-                    subject, message, from_email, recipient_list, fail_silently=False
-                )
-
-                # Send push notification
-                send_push_notification(
-                    user=user,
-                    title="KYC Verified ✅",
-                    message="Hi {}, your KYC has been verified. You can now enjoy full access.".format(
-                        user.first_name
-                    ),
-                    data={"kyc_status": "verified"},
-                    notif_type="ACCOUNT",
-                )
-
-            else:
-                rejected_users.append(user)
-
-        if updated_users:
-            if len(updated_users) == 1:
-                message_bit = f"1 user ({updated_users[0]}) was"
-            else:
-                message_bit = f"{len(updated_users)} users were"
-            self.message_user(request, f"{message_bit} approved for KYC update.")
-
-        if rejected_users:
-            if len(rejected_users) == 1:
-                message_bit = f"1 user ({rejected_users[0]}) was"
-            else:
-                message_bit = f"{len(rejected_users)} users were"
-            self.message_user(
-                request, f"{message_bit} already approved for KYC update."
+            user.save(
+                update_fields=[
+                    "kyc_status",
+                    "kyc_updated",
+                    "kyc_rejection_reason",
+                    "kyc_reviewed_at",
+                ]
             )
 
-    approve_kyc.short_description = "Approve KYC Details"
+            send_generic_email(
+                subject="🎉 Your KYC Has Been Approved",
+                message="""
+    Hi {first_name},
+
+    Great news! Your KYC verification has been successfully approved.
+
+    You now have full access to all MyFund features.
+
+    Keep growing your funds 🚀
+    MyFund Team
+    """,
+                recipient_list=[user.email],
+            )
+
+            send_push_notification(
+                user=user,
+                title="KYC Approved ✅",
+                message="Your KYC has been approved. You now have full access. Enjoy!",
+                data={"kyc_status": "approved"},
+                notif_type="ACCOUNT",
+            )
+
+            approved += 1
+
+        self.message_user(request, f"KYC approved for {approved} user(s).")
 
     def reject_kyc(self, request, queryset):
-        for user in queryset:
-            if user.kyc_updated:
-                user.kyc_updated = False
-                user.kyc_status = "failed"
-                user.admin_approval_status = "rejected"  # Update admin approval status
+        rejected = 0
 
-                user.save()
-
-                # Send a rejection email to the user
-                subject = "KYC Update Failed!"
-                message = f"Hi {user.first_name}, \n\nThank you for updating your KYC information. Unfortunately, we couldn't verify your information. Kindly check and try again.\n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-                from_email = "MyFund <info@myfundmobile.com>"
-                recipient_list = [user.email]
-
-                send_mail(
-                    subject, message, from_email, recipient_list, fail_silently=False
-                )
-
-        self.message_user(request, f"Rejected KYC for {queryset.count()} user(s).")
-
-        # Redirect to the changelist view after processing
-        return HttpResponseRedirect(
-            reverse("admin:authentication_customuser_changelist")
+        DEFAULT_REJECTION_REASON = (
+            "We were unable to verify the information provided. "
+            "Please review your details and re-upload clear and valid documents."
         )
 
+        for user in queryset:
+            # Only allow rejection if KYC was submitted
+            if user.kyc_status != "submitted":
+                self.message_user(
+                    request,
+                    f"{user.email} is not in submitted state.",
+                    level="warning",
+                )
+                continue
+
+            # Use admin-provided reason OR fallback to default
+            rejection_reason = (
+                user.kyc_rejection_reason.strip()
+                if user.kyc_rejection_reason
+                else DEFAULT_REJECTION_REASON
+            )
+
+            user.kyc_status = "rejected"
+            user.kyc_updated = False
+            user.kyc_rejection_reason = rejection_reason
+            user.kyc_reviewed_at = timezone.now()
+
+            user.save(
+                update_fields=[
+                    "kyc_status",
+                    "kyc_updated",
+                    "kyc_rejection_reason",
+                    "kyc_reviewed_at",
+                ]
+            )
+
+            # ---- EMAIL (TEMPLATE-BASED) ----
+            send_generic_email(
+                subject="KYC Verification Update – Action Required",
+                message="""
+    Hi {first_name},
+
+    We’ve reviewed your KYC submission and unfortunately couldn’t approve it at this time.
+
+    Reason:
+    {kyc_rejection_reason}
+
+    Please log into your MyFund account, review the issue, and re-submit your KYC.
+
+    MyFund Team
+    www.myfundmobile.com
+    """,
+                recipient_list=[user.email],
+            )
+
+            # ---- PUSH NOTIFICATION ----
+            send_push_notification(
+                user=user,
+                title="KYC Needs Attention ❌",
+                message="Your KYC was rejected. Please review the reason and re-upload.",
+                data={"kyc_status": "rejected"},
+                notif_type="ACCOUNT",
+            )
+
+            rejected += 1
+
+        self.message_user(request, f"KYC rejected for {rejected} user(s).")
+
     reject_kyc.short_description = "Reject KYC Details"
+
+    def save_model(self, request, obj, form, change):
+        """
+        Ensure KYC side-effects (email + push) run
+        when admin manually changes KYC status to rejected.
+        """
+        is_existing = obj.pk is not None
+        previous = None
+
+        if is_existing:
+            try:
+                previous = CustomUser.objects.get(pk=obj.pk)
+            except CustomUser.DoesNotExist:
+                previous = None
+
+        super().save_model(request, obj, form, change)
+
+        # ---- Detect SUBMITTED → REJECTED transition ----
+        if (
+            previous
+            and previous.kyc_status == "submitted"
+            and obj.kyc_status == "rejected"
+        ):
+            DEFAULT_REJECTION_REASON = (
+                "We were unable to verify the information provided. "
+                "Please review your details and re-upload clear and valid documents."
+            )
+
+            rejection_reason = (
+                obj.kyc_rejection_reason.strip()
+                if obj.kyc_rejection_reason
+                else DEFAULT_REJECTION_REASON
+            )
+
+            # Persist normalized rejection data
+            CustomUser.objects.filter(pk=obj.pk).update(
+                kyc_updated=False,
+                kyc_rejection_reason=rejection_reason,
+                kyc_reviewed_at=timezone.now(),
+            )
+
+            # ---- EMAIL ----
+            send_generic_email(
+                subject="KYC Verification Update – Action Required",
+                message="""
+    Hi {first_name},
+
+    We’ve reviewed your KYC submission and unfortunately couldn’t approve it at this time.
+
+    Reason:
+    {kyc_rejection_reason}
+
+    Please log into your MyFund account, correct the issue, and re-submit your KYC.
+
+    MyFund Team
+    www.myfundmobile.com
+    """,
+                recipient_list=[obj.email],
+            )
+
+            # ---- PUSH ----
+            send_push_notification(
+                user=obj,
+                title="KYC Needs Attention ❌",
+                message="Your KYC was rejected. Please review the reason and re-upload.",
+                data={"kyc_status": "rejected"},
+                notif_type="ACCOUNT",
+            )
 
     def total_savings_and_investments(self, obj):
         return obj.savings + obj.investment
@@ -537,65 +1162,80 @@ import uuid
 
 @admin.register(BankTransferRequest)
 class BankTransferRequestAdmin(admin.ModelAdmin):
-    list_display = ("user", "amount", "is_approved", "created_at")
+    list_display = (
+        "user_full_name",
+        "is_approved",
+        "amount",
+        "user_email",
+        "created_at",
+    )
     list_filter = ("is_approved",)
-    search_fields = ("user__email", "transaction_id", "amount")
+    search_fields = (
+        "user__email",
+        "user__first_name",
+        "user__last_name",
+        "transaction_id",
+    )
     actions = ["approve_bank_transfer"]
 
+    # ✅ DISPLAY HELPERS (must be class-level)
+    def user_email(self, obj):
+        return obj.user.email
+
+    user_email.short_description = "Email"
+    user_email.admin_order_field = "user__email"
+
+    def user_full_name(self, obj):
+        return f"{obj.user.first_name} {obj.user.last_name}"
+
+    user_full_name.short_description = "Full Name"
+    user_full_name.admin_order_field = "user__first_name"
+
+    # ✅ ACTION
     def approve_bank_transfer(self, request, queryset):
         for transfer_request in queryset:
             user = transfer_request.user
             transaction_id = transfer_request.transaction_id
 
-            # ✅ Check for existing pending transaction using transaction_id
             transaction = Transaction.objects.filter(
                 user=user, transaction_id=transaction_id, status="pending"
             ).first()
 
-            if transaction:
-                # ✅ Update transaction status
-                transaction.status = "confirmed"
-                transaction.date = timezone.now()
-                transaction.description = "QuickSave (Transfer)"
-                transaction.save()
-            else:
-                # ❌ Log error if transaction is not found
-                print(
-                    f"❌ ERROR: Pending transaction {transaction_id} not found for {user.email}"
-                )
+            if not transaction:
                 self.message_user(
                     request,
                     f"Pending transaction {transaction_id} not found for {user.email}!",
                     level="error",
                 )
-                continue  # Skip processing this request
+                continue
 
-            # ✅ Approve the transfer request
+            transaction.status = "confirmed"
+            transaction.date = timezone.now()
+            transaction.description = "QuickSave (Transfer)"
+            transaction.save()
+
             transfer_request.is_approved = True
             transfer_request.save()
 
-            # ✅ Update user savings
-            user.savings += int(transfer_request.amount)
+            user.savings += transfer_request.amount
             user.save()
 
-            # Call the confirm_referral_rewards method here
-            is_referrer = True
-            user.confirm_referral_rewards(is_referrer=is_referrer)
+            if user.referral:
+                user.confirm_referral_rewards(is_referrer=False)
 
-            # After processing an investment transfer transaction
             user.update_total_savings_and_investment_this_month()
 
-            # ✅ Send Approval Email
-            subject = "QuickSave Updated! ✅"
-            message = f"Hi {user.first_name},\n\nYour bank transfer of ₦{transfer_request.amount} has been approved and added to your savings!\n\nKeep growing your funds! \n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-            send_mail(subject, message, "MyFund <info@myfundmobile.com>", [user.email])
+            send_mail(
+                "QuickSave Updated! ✅",
+                f"Hi {user.first_name},\n\nYour bank transfer of ₦{transfer_request.amount} has been proccessed successfully and added to your Savings account.",
+                "MyFund <info@myfundmobile.com>",
+                [user.email],
+            )
 
             send_push_notification(
                 user=user,
                 title="QuickSave Approved ✅",
-                message="Hi {}, your transfer of ₦{:,} has been added to your Savings account. Check to confirm.".format(
-                    user.first_name, int(transfer_request.amount)
-                ),
+                message=f"Hi {user.first_name}, your transfer of ₦{int(transfer_request.amount):,} has been added to your Savings account.",
                 data={
                     "amount": str(transfer_request.amount),
                     "transaction_id": transaction_id,
@@ -605,7 +1245,9 @@ class BankTransferRequestAdmin(admin.ModelAdmin):
             )
 
         self.message_user(
-            request, "Selected bank transfers approved successfully!", level="success"
+            request,
+            "Selected bank transfers approved successfully!",
+            level="success",
         )
 
     approve_bank_transfer.short_description = "Approve selected bank transfers"
@@ -662,7 +1304,7 @@ class InvestTransferRequestAdmin(admin.ModelAdmin):
 
             # ✅ Send Approval Email
             subject = "QuickInvest Updated! ✔"
-            message = f"Hi {user.first_name},\n\nYour investment transfer of ₦{transfer_request.amount} has been approved and added to your investments!\n\nKeep growing your funds! \n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+            message = f"Hi {user.first_name},\n\nYour investment transfer of ₦{transfer_request.amount} has been processed successfully and added to your investments!\n\nKeep growing your funds! \n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
             send_mail(subject, message, "MyFund <info@myfundmobile.com>", [user.email])
 
             send_push_notification(
@@ -701,18 +1343,23 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
         "user",
         "source_account",
         "withdrawal_type",
-        "amount",
+        "total_amount_display",  # Original requested amount
+        "charge_percentage_display",  # %
+        "charge_amount_display",  # ₦ charge
+        "net_amount_display",  # ₦ to send
         "target_bank",
         "target_account_number",
         "created_at",
         "scheduled_processing_date",
         "transaction_id",
     )
+
     list_filter = (
         "is_approved",
         "source_account",
-        "withdrawal_type",  # Good to filter by type
+        "withdrawal_type",
     )
+
     search_fields = (
         "user__email",
         "transaction_id",
@@ -720,125 +1367,116 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
         "source_account",
         "target_account_number",
     )
+
     actions = ["approve_withdrawal"]
+
+    # =========================
+    # DISPLAY HELPERS (READ-ONLY)
+    # =========================
+
+    def total_amount_display(self, obj):
+        """Original amount requested by user"""
+        return f"₦{obj.total_amount:,.2f}"
+
+    total_amount_display.short_description = "Requested"
+
+    def charge_percentage_display(self, obj):
+        """Stored charge percentage"""
+        if obj.withdrawal_type.lower() != "immediate":
+            return "0%"
+        return f"{obj.charge_percentage:.0f}%"
+
+    charge_percentage_display.short_description = "%"
+
+    def charge_amount_display(self, obj):
+        """Stored charge amount"""
+        return f"₦{obj.charge_amount:,.2f}"
+
+    charge_amount_display.short_description = "Charge"
+
+    def net_amount_display(self, obj):
+        """Amount admin should send"""
+        return f"₦{obj.amount:,.2f}"
+
+    net_amount_display.short_description = "To Send"
+
+    # =========================
+    # ADMIN ACTION
+    # =========================
 
     def approve_withdrawal(self, request, queryset):
         approved_count = 0
-        for withdrawal_request in queryset:
-            user = withdrawal_request.user
-            amount = withdrawal_request.amount
-            transaction_id = withdrawal_request.transaction_id
 
-            # Skip already approved requests
-            if withdrawal_request.is_approved:
+        for withdrawal in queryset:
+            if withdrawal.is_approved:
                 continue
 
-            with db_transaction.atomic():  # Ensure consistency
-                # --- REMOVED DEDUCTION LOGIC HERE ---
-                # The deduction now happens in the view when the request is initially made.
+            user = withdrawal.user
+            transaction_id = withdrawal.transaction_id
 
-                # Mark withdrawal as approved
-                withdrawal_request.is_approved = True
-                withdrawal_request.save()
+            try:
+                with db_transaction.atomic():
+                    withdrawal.is_approved = True
+                    withdrawal.save(update_fields=["is_approved"])
 
-                # Update the transaction record's status
-                try:
-                    transaction_record = Transaction.objects.get(
+                    transaction = Transaction.objects.get(
                         user=user, transaction_id=transaction_id
                     )
-                    transaction_record.status = (
-                        "confirmed"  # Update status to confirmed
+                    transaction.status = "confirmed"
+                    transaction.description = (
+                        f"Withdrawal: Sent ₦{withdrawal.amount:,.2f} "
+                        f"(Fee: ₦{withdrawal.charge_amount:,.2f})"
                     )
-                    transaction_record.description = f"{withdrawal_request.source_account.capitalize()} > Bank"  # Updated description
-                    transaction_record.save()  # Save changes
+                    transaction.save()
+
                     approved_count += 1
 
-                    # ✅ Send push notification
+                    # Push notification
                     send_push_notification(
                         user=user,
-                        title="Withdrawal Approved! ✅",
-                        message="Your withdrawal of ₦{:,} to your {} has been approved and processed. Thank you for using MyFund.".format(
-                            int(amount), withdrawal_request.target_bank
+                        title="Withdrawal Successful! ✅",
+                        message=(
+                            f"{user.first_name}, your withdrawal of ₦{withdrawal.amount:,.2f} "
+                            f"to your {withdrawal.target_bank} account has been processed successfully."
                         ),
                         data={
-                            "amount": str(amount),
+                            "amount": str(withdrawal.amount),
                             "transaction_id": transaction_id,
-                            "source_account": withdrawal_request.source_account,
-                            "type": "Withdrawal",
+                            "source_account": withdrawal.source_account,
                             "status": "confirmed",
                         },
-                        notif_type="DEBIT",  # Can use DEBIT or SYSTEM depending on your preference
+                        notif_type="DEBIT",
                     )
 
-                except Transaction.DoesNotExist:
-                    self.message_user(
-                        request,
-                        f"Warning: Corresponding transaction {transaction_id} not found for user {user.email}. Withdrawal request marked as approved.",
-                        level="warning",  # Changed to warning as it's not a critical failure if the request is approved
-                    )
-                    continue  # Continue processing other requests even if transaction record is missing (but ideally it should exist)
-
-                # Send email notification
-                subject = "Withdrawal Approved! ✔"
-                message = (
-                    f"Hi {user.first_name},\n\n"
-                    f"Good news! Your withdrawal of ₦{amount:,.2f} from your {withdrawal_request.source_account.capitalize()} account to {withdrawal_request.target_bank} "
-                    f"({withdrawal_request.target_account_number}) has been approved and processed successfully.\n\n"
-                    f"Transaction ID: {transaction_id}\n\n"
-                    f"Thank you for using MyFund.\n\n"
-                    f"MyFund\nSave, Buy Properties, Earn Rent\n"
-                    f"www.myfundmobile.com\n"
-                    f"13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-                )
-                try:
+                    # Email
                     send_mail(
-                        subject,
-                        message,
-                        "MyFund <info@myfundmobile.com>",  # Use info@myfundmobile.com for consistency
-                        [user.email],
+                        subject="Withdrawal Successful ✔",
+                        message=(
+                            f"Hi {user.first_name},\n\n"
+                            f"Your withdrawal of ₦{withdrawal.amount:,.2f} from your "
+                            f"{withdrawal.source_account.capitalize()} account "
+                            f"has been processed successfully.\n\n"
+                            f"Transaction ID: {transaction_id}\n\n"
+                            f"MyFund Team"
+                        ),
+                        from_email="MyFund <info@myfundmobile.com>",
+                        recipient_list=[user.email],
                         fail_silently=False,
                     )
-                except Exception as e:
-                    self.message_user(
-                        request,
-                        f"Error sending email for withdrawal {transaction_id}: {e}",
-                        level="error",
-                    )
 
-        if approved_count > 0:
+            except Exception as e:
+                self.message_user(
+                    request,
+                    f"Error approving {transaction_id}: {str(e)}",
+                    level="error",
+                )
+
+        if approved_count:
             self.message_user(
-                request,
-                f"{approved_count} selected withdrawal(s) have been approved and confirmed.",
+                request, f"{approved_count} withdrawal(s) approved successfully."
             )
         else:
-            self.message_user(
-                request,
-                "No new withdrawals were approved (they might have already been approved).",
-            )
-
-    approve_withdrawal.short_description = (
-        "Approve selected withdrawal requests (mark as paid)"
-    )
-
-
-@admin.register(Message)
-class MessageAdmin(admin.ModelAdmin):
-    list_display = ("sender", "recipient", "content", "timestamp")
-    list_filter = ("timestamp",)
-    search_fields = ("sender__email", "recipient__email", "content")
-
-    actions = ["reply_to_selected_messages"]  # Add a custom action
-
-
-def reply_to_messages(modeladmin, request, queryset):
-    for message in queryset:
-        # Implement your reply logic here, e.g., sending a notification to the user
-        # or performing any other actions needed to send a reply.
-        pass
-
-
-reply_to_messages.short_description = "Reply to selected messages"
-admin.site.add_action(reply_to_messages)
+            self.message_user(request, "No withdrawals were approved.")
 
 
 class BankAccountAdmin(admin.ModelAdmin):
@@ -955,78 +1593,125 @@ from django.utils import timezone
 import calendar
 
 
-# Action to export to CSV
-def export_to_csv(modeladmin, request, queryset):
+# Action to export selected entries to CSV
+def export_selected_to_csv(modeladmin, request, queryset):
     response = HttpResponse(content_type="text/csv")
-    response["Content-Disposition"] = "attachment; filename=top_savers.csv"
+    response["Content-Disposition"] = "attachment; filename=selected_top_savers.csv"
 
     writer = csv.writer(response)
-    writer.writerow(["Month", "Year", "Rank", "User", "Total Savings"])
+    writer.writerow(["Month", "Rank", "Full Name", "Phone Number", "Email"])
 
-    for obj in queryset:
-        month_name = calendar.month_name[
-            obj.month
-        ]  # Convert month number to month name
+    for obj in queryset.select_related("user"):
+        user = obj.user
+        if not user:
+            continue
+
+        full_name = f"{getattr(user, 'first_name', '')} {getattr(user, 'last_name', '')}".strip()
         writer.writerow(
             [
-                month_name,  # Month name instead of number
-                obj.year,
+                calendar.month_name[obj.month],
                 obj.rank,
-                obj.user.first_name + " " + obj.user.last_name,
-                obj.total_savings,
+                full_name,
+                getattr(user, "phone_number", ""),
+                getattr(user, "email", ""),
             ]
         )
 
     return response
 
 
-export_to_csv.short_description = "Export to CSV"
+export_selected_to_csv.short_description = "Export selected top savers to CSV"
+
+
+# Action to export all entries to CSV
+def export_all_to_csv(modeladmin, request, queryset):
+    response = HttpResponse(content_type="text/csv")
+    response["Content-Disposition"] = 'attachment; filename="top_saver_history.csv"'
+
+    writer = csv.writer(response)
+    writer.writerow(["Month", "Rank", "Full Name", "Phone Number", "Email"])
+
+    for obj in TopSaverHistory.objects.select_related("user").all():
+        user = obj.user
+        if not user:
+            continue
+
+        full_name = f"{getattr(user, 'first_name', '')} {getattr(user, 'last_name', '')}".strip()
+        writer.writerow(
+            [
+                calendar.month_name[obj.month],
+                obj.rank,
+                full_name,
+                getattr(user, "phone_number", ""),
+                getattr(user, "email", ""),
+            ]
+        )
+
+    return response
+
+
+export_all_to_csv.short_description = "Export ALL top savers to CSV"
 
 
 # Custom Admin for TopSaverHistory
 class TopSaverHistoryAdmin(admin.ModelAdmin):
     list_display = (
-        "get_month_name",  # Use custom method for month name
-        "year",
+        "get_month_name",
         "rank",
-        "user",
+        "get_full_name",
+        "get_phone_number",
+        "get_email",
         "total_savings",
         "is_current_month",
     )
-    search_fields = ("user__first_name", "user__last_name", "month", "year")
-    list_filter = ("month", "year")
-    ordering = ("-year", "-month", "rank")
+    search_fields = (
+        "user__first_name",
+        "user__last_name",
+        "user__email",
+        "user__phone_number",
+        "month",
+    )
+    list_filter = ("month",)
+    ordering = ("-month", "rank")
     list_per_page = 20
-    actions = [export_to_csv]
+    actions = [export_selected_to_csv, export_all_to_csv]
 
-    # Method to convert month number to month name
     def get_month_name(self, obj):
-        return calendar.month_name[obj.month]  # Convert month number to name
+        return calendar.month_name[obj.month]
 
     get_month_name.short_description = "Month"
 
-    # Custom queryset to highlight the current month's top savers
+    def get_full_name(self, obj):
+        user = obj.user
+        if not user:
+            return "—"
+        return f"{user.first_name} {user.last_name}".strip()
+
+    get_full_name.short_description = "Full Name"
+
+    def get_phone_number(self, obj):
+        return getattr(obj.user, "phone_number", "—")
+
+    get_phone_number.short_description = "Phone Number"
+
+    def get_email(self, obj):
+        return obj.user.email
+
+    get_email.short_description = "Email"
+
     def get_queryset(self, request):
         queryset = super().get_queryset(request)
+        return queryset.select_related("user").order_by("-month", "rank")
 
-        # Optionally, this filters to show the current month's data as well,
-        # you can customize this to suit your needs (e.g., current month vs historical).
-        now = timezone.now()
-        current_month = now.month
-        current_year = now.year
-
-        # Optionally, filter for current month only (if you want to show only current month by default)
-        # queryset = queryset.filter(month=current_month, year=current_year)
-
-        return queryset.order_by("-year", "-month", "rank")
-
-    # Optionally, add a method to highlight the current month in the admin list view
     def is_current_month(self, obj):
         now = timezone.now()
         return obj.month == now.month and obj.year == now.year
 
     is_current_month.boolean = True
     is_current_month.short_description = "Current Month"
+
+
+admin.site.register(TopSaverHistory, TopSaverHistoryAdmin)
 
 
 from django.contrib import admin
@@ -1395,8 +2080,46 @@ class PushNotificationsAdmin(admin.ModelAdmin):
         return ", ".join(platforms) if platforms else "Unknown"
 
 
-# Register TopSaverHistory with customized admin
-admin.site.register(TopSaverHistory, TopSaverHistoryAdmin)
+# admin.py - Add these admin classes
+class DailyROIAccrualAdmin(admin.ModelAdmin):
+    list_display = [
+        "user",
+        "date",
+        "savings_balance",
+        "investment_balance",
+        "savings_roi",
+        "investment_roi",
+        "total_roi",
+    ]
+    list_filter = ["date"]
+    search_fields = ["user__email", "user__first_name", "user__last_name"]
+    readonly_fields = [
+        "user",
+        "date",
+        "savings_balance",
+        "investment_balance",
+        "savings_roi",
+        "investment_roi",
+        "total_roi",
+    ]
+
+
+class ROITransactionAdmin(admin.ModelAdmin):
+    list_display = [
+        "user",
+        "amount",
+        "roi_type",
+        "accrued_date",
+        "payout_date",
+        "is_paid_out",
+    ]
+    list_filter = ["roi_type", "is_paid_out", "accrued_date", "payout_date"]
+    search_fields = ["user__email", "user__first_name", "user__last_name"]
+    readonly_fields = ["user", "amount", "roi_type", "accrued_date"]
+
+
+admin.site.register(DailyROIAccrual, DailyROIAccrualAdmin)
+admin.site.register(ROITransaction, ROITransactionAdmin)
 admin.site.register(Card, CardAdmin)
 admin.site.register(Transaction, TransactionAdmin)
 admin.site.register(AutoSave, AutoSaveAdmin)

@@ -170,3 +170,5 @@ db.sqlite3
 
 # Node.js dependencies
 node_modules/
+
+script.py
