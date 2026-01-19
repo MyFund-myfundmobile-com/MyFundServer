@@ -62,13 +62,14 @@ class CustomUserManager(BaseUserManager):
 import uuid
 from datetime import date
 from decimal import Decimal
+from django.core.exceptions import ValidationError
 
 
 class CustomUser(AbstractBaseUser, PermissionsMixin):
     first_name = models.CharField(max_length=30)
     last_name = models.CharField(max_length=30)
     email = models.EmailField(unique=True)
-    phone_number = models.CharField(max_length=15)
+    phone_number = models.CharField(max_length=15, unique=True)
     referral_reward_granted = models.BooleanField(default=False)
     otp = models.CharField(max_length=6, blank=True, null=True)
     reset_token = models.CharField(max_length=64, null=True, blank=True)
@@ -94,6 +95,9 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         max_digits=10, decimal_places=2, default=0
     )
     last_referral_rank = models.IntegerField(null=True, blank=True)
+    last_top_saver_rank = models.PositiveIntegerField(
+        null=True, blank=True, help_text="Previous Top Savers ranking position"
+    )
     updated_at = models.DateTimeField(auto_now=True)  # 👈 Add this here
 
     how_did_you_hear = models.CharField(
@@ -127,6 +131,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     investment = models.DecimalField(max_digits=11, decimal_places=2, default=0)
     properties = models.PositiveIntegerField(default=0)
     wallet = models.DecimalField(max_digits=11, decimal_places=2, default=0)
+    pending_roi = models.DecimalField(max_digits=11, decimal_places=2, default=0)
     savings_and_investments = models.DecimalField(
         max_digits=11, decimal_places=2, default=0
     )
@@ -144,6 +149,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     is_first_time_signup = models.BooleanField(default=True)
 
     is_active = models.BooleanField(default=True)
+    is_banned = models.BooleanField(default=False)
     is_staff = models.BooleanField(default=False)
     is_superuser = models.BooleanField(default=False)
 
@@ -493,9 +499,22 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     )
 
     # KYC status
-    kyc_updated = models.BooleanField(default=False)
-    kyc_status = models.CharField(max_length=20, default="Not yet started")
-    admin_approval_status = models.CharField(max_length=20, default="Not yet started")
+    KYC_STATUS_CHOICES = (
+        ("not_started", "Not Started"),
+        ("submitted", "Submitted (Pending Review)"),
+        ("approved", "Approved"),
+        ("rejected", "Rejected"),
+    )
+
+    kyc_status = models.CharField(
+        max_length=20,
+        choices=KYC_STATUS_CHOICES,
+        default="not_started",
+    )
+
+    kyc_updated = models.BooleanField(default=False)  # keep for backward compatibility
+    kyc_rejection_reason = models.TextField(blank=True, null=True)
+    kyc_reviewed_at = models.DateTimeField(null=True, blank=True)
 
     notification_preferences = models.JSONField(default=dict, null=True, blank=True)
 
@@ -523,6 +542,64 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
             )
 
         super().save(*args, **kwargs)
+
+    def clean(self):
+        super().clean()
+        if self.date_of_birth:
+            today = date.today()
+
+            # Prevent future dates
+            if self.date_of_birth > today:
+                raise ValidationError(
+                    {"date_of_birth": "Birth date cannot be in the future."}
+                )
+
+            # Check minimum age (13+)
+            age = (
+                today.year
+                - self.date_of_birth.year
+                - (
+                    (today.month, today.day)
+                    < (self.date_of_birth.month, self.date_of_birth.day)
+                )
+            )
+            if age < 13:
+                raise ValidationError(
+                    {"date_of_birth": "Users must be at least 13 years old."}
+                )
+
+    def get_daily_savings_roi_rate(self):
+        """Calculate daily savings ROI rate (13% per annum)"""
+        from decimal import Decimal
+
+        return Decimal("0.13") / Decimal("365")
+
+    def get_daily_investment_roi_rate(self):
+        """Calculate daily investment ROI rate (20% per annum)"""
+        from decimal import Decimal
+
+        return Decimal("0.20") / Decimal("365")
+
+    def calculate_daily_roi(self, date=None):
+        """Calculate ROI for a specific date based on current balances"""
+        from django.utils import timezone
+        from decimal import Decimal
+
+        if date is None:
+            date = timezone.now().date()
+
+        daily_savings_rate = self.get_daily_savings_roi_rate()
+        daily_investment_rate = self.get_daily_investment_roi_rate()
+
+        savings_roi = self.savings * daily_savings_rate
+        investment_roi = self.investment * daily_investment_rate
+        total_roi = savings_roi + investment_roi
+
+        return {
+            "savings_roi": round(savings_roi, 2),
+            "investment_roi": round(investment_roi, 2),
+            "total_roi": round(total_roi, 2),
+        }
 
     @property
     def myfund_pin_encrypted(self):
@@ -559,18 +636,174 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         msg.attach_alternative(html_message, "text/html")
         msg.send()
 
+    def send_welcome_email(self):
+        from authentication.utils import send_generic_email
+
+        """
+        Sends the Welcome email to this user.
+        Safe to call from confirm_otp background thread.
+        """
+        subject = f"{self.first_name}, WELCOME TO MyFund! 🥂🎊🔥"
+        savings_image_url = "https://drive.google.com/uc?export=view&id=1bOVTTicGZJgUKX2aTm2SAqyX-8qfH41Q"
+        logo_url = "https://drive.google.com/uc?export=view&id=1K7sBCm3mgW5jQ1Cfh73LQDZuvGuNFTKw"
+
+        message_html = f"""
+        <p>Hi {self.first_name},</p>
+        <p>I'm personally welcoming you to the MyFund family.</p>
+        <p>By signing up, you've entered the 4th step toward financial freedom,
+        <strong>SAVINGS</strong> (click WealthMap on the app for details).</p>
+        <p><img src="{savings_image_url}" alt="Savings Step Image" style="display: block; margin: 10px auto; max-width: 100%; height: auto;"></p>
+        <p>The app tracks your progress as you save towards buying properties for a lifetime rental (passive) income.</p>
+        <p>Once again, you're welcome!</p>
+        <br>
+    <p style="display: inline-flex; align-items: center; margin: 0;">
+        <img src="{logo_url}" alt="Dr Tee"
+            style="width: 50px; height: 50px; border-radius: 50%; margin-right: 10px;">
+        <span>
+            <strong style="font-size: 16px;">Tolulope Ahmed (Dr Tee)</strong><br>
+            <span style="font-size: 12px; font-style: italic; color: #555;">
+            CEO/Co-founder, MyFund
+            </span>
+        </span>
+        </p>
+        """
+
+        try:
+            send_generic_email(
+                subject=subject,
+                message=message_html,
+                recipient_list=[self.email],
+                from_email="MyFund <info@myfundmobile.com>",
+                template="email/email.html",  # <-- add this
+            )
+            logger.info(f"✅ Welcome email sent to {self.email}")
+        except Exception as e:
+            logger.warning(f"❌ Welcome email failed for {self.email}: {e}")
+
+    def create_pending_referral_reward(self):
+        """
+        Creates pending referral reward transactions for new signup,
+        sends referral emails and pushes.
+        """
+        from .utils import send_push_notification, send_generic_email
+
+        # Prevent duplicates
+        if Transaction.objects.filter(
+            user=self, description="Referral Reward"
+        ).exists():
+            logger.info(f"Pending referral reward already exists for {self.email}")
+            return
+
+        transaction_id = str(uuid.uuid4())[:10]
+
+        # Referred user reward (pending)
+        Transaction.objects.create(
+            user=self,
+            referral_email=self.referral.email if self.referral else None,
+            transaction_type="credit",
+            status="pending",
+            amount=500,
+            description="Referral Reward",
+            transaction_id=transaction_id,
+            total_amount=500,
+        )
+
+        self.pending_referral_reward = 500
+        self.save(update_fields=["pending_referral_reward"])
+
+        # Referrer reward (pending)
+        if not self.referral.is_hired_referrer:
+            transaction_id = str(uuid.uuid4())[:10]
+            Transaction.objects.create(
+                user=self.referral,
+                referral_email=self.email,
+                transaction_type="credit",
+                status="pending",
+                amount=500,
+                description="Referral Reward",
+                transaction_id=transaction_id,
+                total_amount=500,
+            )
+
+            self.referral.pending_referral_reward = F("pending_referral_reward") + 500
+            self.referral.save(update_fields=["pending_referral_reward"])
+
+            # Send email to referrer
+            subject = f"{self.referral.first_name}, Your Referral Reward is Pending..."
+            message = f"""
+            Hi {self.referral.first_name},<br><br>
+            Your referral reward of ₦500 is pending. When your friend ({self.email}) makes their first savings/investment, it will be confirmed in your wallet.<br><br>
+            Thank you for using MyFund!<br><br>
+            Keep growing your funds.🥂<br><br>
+            """
+            try:
+                send_generic_email(
+                    subject=subject,
+                    message=message,
+                    recipient_list=[self.referral.email],
+                    from_email="MyFund <info@myfundmobile.com>",
+                    template="email/email.html",
+                )
+            except Exception as e:
+                logger.warning(
+                    f"⚠️ Referral email to referrer failed for {self.referral.email}: {e}"
+                )
+
+        # Send email to referred user
+        subject = f"{self.first_name}, Your ₦500 Referral Reward is Pending"
+        message = f"""
+        Hi {self.first_name},<br><br>
+        You have received a welcome referral reward bonus of ₦500 for signing up with a referral email.
+        It will be confirmed in your Wallet when you make your first savings.<br><br>
+        Thank you for using MyFund!<br><br>
+        Keep growing your funds.🥂<br><br>
+        """
+        try:
+            send_generic_email(
+                subject=subject,
+                message=message,
+                recipient_list=[self.email],
+                from_email="MyFund <info@myfundmobile.com>",
+                template="email/email.html",
+            )
+        except Exception as e:
+            logger.warning(
+                f"⚠️ Referral email to referred user failed for {self.email}: {e}"
+            )
+
+        # Send push notifications
+        try:
+            send_push_notification(
+                user=self,
+                title="₦500 Referral Reward Pending 💰",
+                message=f"{self.first_name}, you’ve earned ₦500 referral reward. Complete your first savings to confirm it in your Wallet.",
+                data={"type": "referral_pending"},
+            )
+            send_push_notification(
+                user=self.referral,
+                title="₦500 Referral Reward Pending 💰",
+                message=f"{self.referral.first_name}, your friend, {self.first_name} signed up. ₦500 referral reward pending for you. It'll be confirmed when they make their first savings.",
+                data={"type": "referral_pending"},
+            )
+        except Exception as e:
+            logger.warning(f"Referral push failed: {e}")
+
     def confirm_referral_rewards(self, is_referrer):
         if self.referral and not self.referral_reward_granted:
-            # Check if current month is August 2025
+            # Check if current month is December 2024
             current_time = timezone.now()
-            is_august_2025 = current_time.month == 8 and current_time.year == 2025
+            # Check if it's December (any year)
+            is_december_promo = current_time.month == 12 and current_time.year == 2025
 
             # Set threshold based on month
-            savings_threshold = (
-                5000
-                if is_august_2025
-                else (10000 if self.referral.is_ambassador else 20000)
-            )
+            if is_december_promo:
+                savings_threshold = 5000
+            else:
+                if self.referral.is_ambassador:
+                    savings_threshold = 10000
+                else:
+                    savings_threshold = 20000
+
             investment_threshold = 100000
 
             qualifies_by_savings = self.savings >= savings_threshold
@@ -660,7 +893,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
 
     def send_confirmation_email(self, user, is_referrer):
         current_time = timezone.now()
-        is_august_2025 = current_time.month == 8 and current_time.year == 2025
+        is_december_promo = current_time.month == 12 and current_time.year == 2025
 
         if is_referrer:
             ambassador_note = (
@@ -669,9 +902,9 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                 else ""
             )
 
-            august_note = (
-                "\n\nP.S. For August Referral contest, for early referral rewards. Keep up the great work!"
-                if is_august_2025
+            december_note = (
+                "\n\nP.S. For December Savings Challenge, for early referral rewards. Keep up the great work!"
+                if is_december_promo
                 else ""
             )
 
@@ -680,15 +913,15 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                 f"Congratulations {user.first_name},\n\n"
                 f"You have received a referral reward of ₦500.00 in your wallet for referring {self.first_name}."
                 f"{ambassador_note}"
-                f"{august_note}"
+                f"{december_note}"
                 f"\n\nThank you for using MyFund and referring others!"
                 f"\n\nKeep growing your funds.🥂"
                 f"\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
             )
         else:
-            august_note = (
-                "\n\nP.S. For August Referral contest, for early referral rewards. Keep up the great work!"
-                if is_august_2025
+            december_note = (
+                "\n\nP.S. For December Savings Challenge, for early referral rewards. Keep up the great work!"
+                if is_december_promo
                 else ""
             )
 
@@ -696,16 +929,25 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
             message = (
                 f"Congratulations {self.first_name}, \n\n"
                 f"You have received a referral reward of ₦500.00 in your wallet thanks to your referral."
-                f"{august_note}"
+                f"{december_note}"
                 f"\n\nThank you for using MyFund!"
                 f"\n\nKeep growing your funds.🥂"
                 f"\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
             )
 
-        from_email = "MyFund <info@myfundmobile.com>"
-        recipient_list = [user.email]
+        from authentication.utils import send_generic_email
 
-        send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+        try:
+            send_generic_email(
+                subject=subject,
+                message=message,
+                recipient_list=[user.email],
+                from_email="MyFund <info@myfundmobile.com>",
+                template="email/email.html",  # <-- ensures your header/footer template is used
+            )
+            logger.info(f"✅ Confirmation email sent to {user.email}")
+        except Exception as e:
+            logger.warning(f"❌ Confirmation email failed for {user.email}: {e}")
 
     def calculate_user_percentage_to_top_saver(self):
         top_saver = (
@@ -766,6 +1008,10 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
 
     def set_password(self, raw_password):
         with transaction.atomic():
+            # Save the user first if it's new (no primary key yet)
+            if not self.pk:
+                super().save()
+
             if self.password_record:
                 self.password_record.password = make_password(raw_password)
                 self.password_record.save()
@@ -773,6 +1019,10 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                 self.password_record, created = UserPassword.objects.get_or_create(
                     user=self, defaults={"password": make_password(raw_password)}
                 )
+                # If it already existed, update the password
+                if not created:
+                    self.password_record.password = make_password(raw_password)
+                    self.password_record.save()
 
     def check_password(self, raw_password):
         """Check the provided password with stored password."""
@@ -795,7 +1045,36 @@ class MonthlySavings(models.Model):
         unique_together = ["user", "month", "year"]
 
 
-# models.py
+# models.py - Add these models
+class ROITransaction(models.Model):
+    user = models.ForeignKey(
+        CustomUser, on_delete=models.CASCADE, related_name="roi_transactions"
+    )
+    amount = models.DecimalField(max_digits=11, decimal_places=2)
+    roi_type = models.CharField(
+        max_length=10, choices=[("SAVINGS", "Savings"), ("INVESTMENT", "Investment")]
+    )
+    accrued_date = models.DateField()
+    payout_date = models.DateField(null=True, blank=True)
+    is_paid_out = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class DailyROIAccrual(models.Model):
+    user = models.ForeignKey(
+        CustomUser, on_delete=models.CASCADE, related_name="daily_roi_accruals"
+    )
+    date = models.DateField()
+    savings_balance = models.DecimalField(max_digits=11, decimal_places=2, default=0)
+    investment_balance = models.DecimalField(max_digits=11, decimal_places=2, default=0)
+    savings_roi = models.DecimalField(max_digits=11, decimal_places=2, default=0)
+    investment_roi = models.DecimalField(max_digits=11, decimal_places=2, default=0)
+    total_roi = models.DecimalField(max_digits=11, decimal_places=2, default=0)
+
+    class Meta:
+        unique_together = ["user", "date"]
+
+
 from django.db import models
 from django.utils import timezone
 
@@ -1103,10 +1382,20 @@ class TargetSavings(models.Model):
                 )
 
                 # Skip if no longer actionable
+                # Skip if no longer actionable
                 if target.is_completed or target.is_cancelled or not target.is_active:
                     logger.info(
                         f"Target {target.id} is completed/cancelled/inactive, skipping deduction"
                     )
+                    return False
+
+                # 🔴 ADDED: Check if user is banned or inactive
+                if user.is_banned or not user.is_active:
+                    logger.warning(
+                        f"User {user.email} (ID: {user.id}) is banned/inactive but target {target.id} still exists. Pausing target."
+                    )
+                    target.is_active = False
+                    target.save(update_fields=["is_active"])
                     return False
 
                 # Base amount (guard against None)
@@ -1163,7 +1452,13 @@ class TargetSavings(models.Model):
                         )
 
                         # Refund 99%
-                        refund_amount = target.current_amount * Decimal("0.99")
+                        # 🚫 BANNED USERS DO NOT GET REFUNDS
+                        if user.is_banned:
+                            logger.warning(
+                                f"Banned user {user.email} attempted refund on target {target.id}. Blocking refund."
+                            )
+                            refund_amount = Decimal("0")
+                            charge = target.current_amount
                         charge = target.current_amount - refund_amount
 
                         if refund_amount > 0:
@@ -1504,7 +1799,7 @@ class TargetSavings(models.Model):
                 )
                 return
 
-            subject = f"🎉 Congrats! {self.name} Target Plan Completed! ✅"
+            subject = f"🎉 Congrats! {self.name} Plan Completed! ✅"
             message = (
                 f"Hi {self.user.first_name},<br><br>"
                 f"Congratulations! You've successfully completed your {self.name} Target Savings plan.<br><br>"
@@ -1564,7 +1859,10 @@ class TargetSavingsCompletion(models.Model):
         )
 
 
-from decimal import Decimal, InvalidOperation
+# TRANSACTIONS MODEL
+from decimal import Decimal, InvalidOperation, DecimalException
+from django.utils import timezone
+import uuid
 
 
 class Transaction(models.Model):
@@ -1606,6 +1904,11 @@ class Transaction(models.Model):
         null=True,
         help_text="Where the transaction funds came from",
     )
+    scheduled_date = models.DateField(
+        null=True,
+        blank=True,
+        help_text="For scheduled withdrawals, the processing date.",
+    )
 
     transaction_type = models.CharField(max_length=20, choices=TRANSACTION_TYPES)
     status = models.CharField(
@@ -1624,20 +1927,17 @@ class Transaction(models.Model):
         editable=False,
         db_index=True,
     )
+
+    # ✅ FIXED: Remove duplicate paystack_auth_code and keep only one
     paystack_auth_code = models.CharField(
-        max_length=255,
-        editable=False,
-        default="",
-        blank=True,
+        max_length=255, null=True, blank=True, default="", editable=False
     )
     paystack_access_code = models.CharField(
         max_length=255,
         null=True,
+        blank=True,
         editable=False,
         db_index=True,
-    )
-    paystack_auth_code = models.CharField(
-        max_length=255, null=True, blank=True, default=None, editable=False
     )
 
     service_charge = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
@@ -1650,16 +1950,37 @@ class Transaction(models.Model):
     )
 
     def save(self, *args, **kwargs):
+        """
+        Calculate total_amount correctly based on transaction_type.
+        For withdrawals: total_amount = amount + service_charge (user sees total)
+        For deposits: total_amount = amount (no service charge)
+        """
         try:
-            if isinstance(self.service_charge, float):
+            # Ensure both are Decimal
+            if isinstance(self.amount, (int, float)):
+                self.amount = Decimal(str(self.amount))
+            if isinstance(self.service_charge, (int, float)):
                 self.service_charge = Decimal(str(self.service_charge))
-            self.total_amount = self.amount + self.service_charge
-        except (TypeError, InvalidOperation):
-            raise ValueError("Amount or service charge is not a valid Decimal.")
+
+            # For withdrawals (debits), total is amount + charge
+            if self.transaction_type == "debit":
+                self.total_amount = self.amount + self.service_charge
+            # For credits (deposits), total is just the amount (no charge)
+            else:
+                self.total_amount = self.amount
+
+        except (TypeError, InvalidOperation, DecimalException) as e:
+            raise ValueError(f"Invalid amount or service charge: {e}")
+
+        # Auto-set date/time if not provided
+        if not self.pk:  # New instance
+            self.date = timezone.now()
+            self.time = timezone.now().time()
+
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.transaction_type} - {self.amount} - {self.status} - {self.paystack_auth_code} - {self.date}"
+        return f"{self.transaction_type} - {self.amount} - {self.status} - {self.date}"
 
 
 class PushNotifications(models.Model):
@@ -1834,29 +2155,105 @@ class InvestTransferRequest(models.Model):
 
 class WithdrawalsRequestToAdmin(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
-    amount = models.DecimalField(max_digits=10, decimal_places=2)
+
+    # ✅ IMPORTANT: This 'amount' field now stores NET AMOUNT (what to send)
+    amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        help_text="Net amount to send to user (after charges)",
+    )
+
+    total_amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0,
+        help_text="Original amount requested by user (including charges)",
+    )
+
+    charge_percentage = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=0,
+        help_text="Percentage charge applied (e.g., 10.00 for 10%)",
+    )
+
+    charge_amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0,
+        help_text="Actual charge amount deducted",
+    )
+
     transaction_id = models.CharField(max_length=50, unique=False, default="")
     is_approved = models.BooleanField(default=False)
+    is_processed = models.BooleanField(
+        default=False,
+        help_text="Has scheduled withdrawal been credited to wallet?",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
-
-    # Add missing fields (from your previous code)
     source_account = models.CharField(max_length=255, default="savings")
-    target_bank = models.CharField(max_length=100, default="Palmpay")
-    target_account_number = models.CharField(max_length=50, default="8033924595")
+    target_bank = models.CharField(max_length=100, default="")
+    target_account_number = models.CharField(max_length=50, default="")
 
-    # >>> ADD THESE TWO NEW FIELDS <<<
+    # Withdrawal type fields
     withdrawal_type = models.CharField(
-        max_length=50, default="immediate"
-    )  # e.g., 'immediate' or 'scheduled'
+        max_length=50,
+        default="immediate",
+        choices=[("immediate", "Immediate"), ("scheduled", "Scheduled")],
+    )
+
     scheduled_processing_date = models.DateField(
-        null=True, blank=True
-    )  # Date when scheduled withdrawal should be processed
+        null=True,
+        blank=True,
+        help_text="Date when scheduled withdrawal should be processed",
+    )
+
+    # Add a method to calculate net amount if needed
+    @property
+    def net_amount(self):
+        """Property to get net amount (same as amount field)"""
+        return self.amount
+
+    @property
+    def display_total_amount(self):
+        """Property to display total amount with currency"""
+        return f"₦{self.total_amount:,.2f}"
+
+    @property
+    def display_charge_amount(self):
+        """Property to display charge amount with currency"""
+        return f"₦{self.charge_amount:,.2f}"
+
+    @property
+    def display_net_amount(self):
+        """Property to display net amount with currency"""
+        return f"₦{self.amount:,.2f}"
+
+    def save(self, *args, **kwargs):
+        """Ensure amounts are Decimal and calculate if needed"""
+        try:
+            # Convert to Decimal if needed
+            if isinstance(self.amount, (int, float)):
+                self.amount = Decimal(str(self.amount))
+            if isinstance(self.total_amount, (int, float)):
+                self.total_amount = Decimal(str(self.total_amount))
+            if isinstance(self.charge_amount, (int, float)):
+                self.charge_amount = Decimal(str(self.charge_amount))
+            if isinstance(self.charge_percentage, (int, float)):
+                self.charge_percentage = Decimal(str(self.charge_percentage))
+
+        except (TypeError, InvalidOperation, DecimalException) as e:
+            raise ValueError(f"Invalid amount format: {e}")
+
+        super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"Withdrawal request for {self.user.email} - {self.amount}"
+        return f"{self.user.email} - ₦{self.total_amount:,.2f} -> ₦{self.amount:,.2f} ({self.get_withdrawal_type_display()})"
 
     class Meta:
-        ordering = ["-created_at"]  # Optional: order by most recent first
+        ordering = ["-created_at"]
+        verbose_name = "Withdrawal Request"
+        verbose_name_plural = "Withdrawal Requests"
 
 
 class EmailTemplate(models.Model):
@@ -1978,11 +2375,42 @@ class Group(models.Model):
             f"Group {self.id} for Property {self.property.name} (Status: {self.status})"
         )
 
+
 class GroupOwnership(models.Model):
     group = models.ForeignKey(Group, on_delete=models.CASCADE)
     user = models.ForeignKey(User, on_delete=models.CASCADE)
     total_contributed = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    ownership_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    ownership_percentage = models.DecimalField(
+        max_digits=5, decimal_places=2, default=0
+    )
+
+
+class GroupDeparture(models.Model):
+    REASON_CHOICES = [
+        ("financial", "Financial constraints"),
+        ("timeline", "Timeline doesn't work for me"),
+        ("property", "Changed mind about the property"),
+        ("group", "Issues with group members"),
+        ("better_opportunity", "Found a better investment opportunity"),
+        ("personal", "Personal reasons"),
+        ("other", "Other"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    group = models.ForeignKey(
+        "Group", on_delete=models.CASCADE, related_name="departures"
+    )
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    reason = models.CharField(max_length=50, choices=REASON_CHOICES)
+    additional_details = models.TextField(blank=True, null=True)  # Optional free text
+    refunded_amount = models.DecimalField(max_digits=11, decimal_places=2, default=0)
+    left_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-left_at"]
+
+    def __str__(self):
+        return f"{self.user.email} left {self.group.id} - {self.reason}"
 
 
 class Contribution(models.Model):

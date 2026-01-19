@@ -14,6 +14,7 @@ from pathlib import Path
 from datetime import timedelta
 import os
 from dotenv import load_dotenv
+from decouple import config
 
 load_dotenv()
 
@@ -80,7 +81,9 @@ ALLOWED_HOSTS = [
     "10.10.10.27",
     "192.168.137.1",
     "10.0.0.140",
-    "192.168.20.122",
+    "10.182.118.111",
+    "192.168.1.148",
+    "10.0.0.37",
 ]
 
 SECURE_SSL_REDIRECT = False  # Disable forced HTTPS redirect
@@ -118,13 +121,16 @@ ASGI_APPLICATION = "myfundproject.routing.application"
 ADMIN_URL = "admin/"
 
 
-# Celery settings]
-# CELERY_BROKER_URL = 'redis://localhost:6379/0'  # Use the appropri\n.ate broker URL for your environment.
-888  # CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'  # Use the appropriate result backend URL for your environment.
+# Celery settings
+CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL")
+CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND")
+
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 
+CELERY_TASK_ALWAYS_EAGER = os.getenv("CELERY_TASK_ALWAYS_EAGER") == "True"
+CELERY_TASK_IGNORE_RESULT = os.getenv("CELERY_TASK_IGNORE_RESULT") == "True"
 
 # from celery.schedules import crontab
 
@@ -155,8 +161,8 @@ FILE_UPLOAD_MAX_MEMORY_SIZE = 10485760  # 10MB (default is 2.5MB)
 # Celery settings
 from celery.schedules import crontab
 
-CELERY_BROKER_URL = "redis://localhost:6379/0"
-CELERY_RESULT_BACKEND = "redis://localhost:6379/0"
+CELERY_BROKER_URL = os.environ.get("REDIS_URL")
+CELERY_RESULT_BACKEND = os.environ.get("REDIS_URL")
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
@@ -165,7 +171,7 @@ CELERY_TIMEZONE = "Africa/Lagos"  # Keep your preferred timezone
 # Additional Celery settings for better performance
 CELERY_TASK_ALWAYS_EAGER = False
 CELERY_TASK_EAGER_PROPAGATES = True
-CELERY_WORKER_CONCURRENCY = 4
+CELERY_WORKER_CONCURRENCY = 2
 CELERY_WORKER_PREFETCH_MULTIPLIER = 1
 CELERY_TASK_ACKS_LATE = True
 CELERY_TASK_TRACK_STARTED = True
@@ -357,20 +363,35 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 AUTH_USER_MODEL = "authentication.CustomUser"
 
 
-# EMAIL SETTINGS
+# PAYLESS SMS CONFIG
+PAYLESS_SMS_URL = config("PAYLESS_SMS_URL")
+PAYLESS_SMS_USERNAME = config("PAYLESS_SMS_USERNAME")
+PAYLESS_SMS_PASSWORD = config("PAYLESS_SMS_PASSWORD")
+PAYLESS_SMS_SENDER_ID = config("PAYLESS_SMS_SENDER_ID")
+
+
+# ===== EMAIL CONFIGURATION =====
 EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+DEFAULT_FROM_EMAIL = "MyFund <message@myfundmobile.com>"
+
+# SSL (Implicit SSL)
+# EMAIL_HOST = "myfundmobile.com"
+# EMAIL_PORT = 465
+# EMAIL_USE_SSL = True
+# EMAIL_USE_TLS = False
+# EMAIL_TIMEOUT = 20
+
+# # TLS (Explicit SSL)
 EMAIL_HOST = "myfundmobile.com"
-EMAIL_PORT = 465
-EMAIL_USE_SSL = True  # Use SSL for secure connection
+EMAIL_PORT = 587
+EMAIL_USE_SSL = False
+EMAIL_USE_TLS = True
+EMAIL_TIMEOUT = 20
 
 
-# SMTP Authentication
 EMAIL_HOST_USER = "message@myfundmobile.com"
 EMAIL_HOST_PASSWORD = "AdminSecure123..."
 
-# Other settings
-DEFAULT_FROM_EMAIL = "MyFund <message@myfundmobile.com>"
-PROTOCOL = "https"
 
 AUTHENTICATION_BACKENDS = [
     "authentication.auth_backends.CustomUserAdminAuthBackend",  # Custom admin authentication

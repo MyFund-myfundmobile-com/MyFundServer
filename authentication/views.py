@@ -53,187 +53,190 @@ from dotenv import load_dotenv
 import logging
 from django.db.models import Min
 from decimal import Decimal, ROUND_HALF_EVEN
-from .utils import generate_reference, get_user_balance, send_push_notification, set_user_balance
+from .utils import (
+    generate_reference,
+    get_user_balance,
+    send_push_notification,
+    set_user_balance,
+    update_top_savers,
+)
 from .utils import send_generic_email
 from django.db import transaction
-
+from .utils import (
+    send_sms_via_payless,
+    validate_phone_number,
+    send_bulk_sms,
+    send_admin_push_notification,
+)
+from rest_framework.exceptions import AuthenticationFailed
+import threading
 
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+from django.db import transaction
+
 
 @api_view(["POST"])
 @csrf_exempt
+@permission_classes([AllowAny])
 def signup(request):
-    def handle_referral_rewards(user):
-        try:
-            transaction_id = str(uuid.uuid4())[:10]
-            # Reward for referred user
-            Transaction.objects.create(
-                user=user,
-                referral_email=user.referral.email,
-                transaction_type="credit",
-                status="pending",
-                amount=500,
-                description="Referral Reward . . .",
-                transaction_id=transaction_id,
-                total_amount=500,
-            )
+    phone_number = request.data.get("phone_number")
+    if not phone_number:
+        return Response(
+            {"error": "Phone number is required"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
-            user.pending_referral_reward = 500  # Ensure only 500 is added
-            user.save(update_fields=["pending_referral_reward"])
+    phone_check = validate_phone_number(phone_number)
+    if not phone_check.get("valid"):
+        return Response(
+            {"error": phone_check.get("error")},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
-            # Reward for referrer
-            if not user.referral.is_hired_referrer:
-                transaction_id = str(uuid.uuid4())[:10]
-                Transaction.objects.create(
-                    user=user.referral,
-                    referral_email=user.email,
-                    transaction_type="credit",
-                    status="pending",
-                    amount=500,
-                    description="Referral Reward . . .",
-                    transaction_id=transaction_id,
-                    total_amount=500,
-                )
-
-                user.referral.pending_referral_reward = (
-                    F("pending_referral_reward") + 500
-                )
-                user.referral.save()
-                send_referrer_pending_reward_email(user.referral, user.email)
-
-            if user.referral.is_hired_referrer:
-                Referral.objects.create(user=user, referrer=user.referral)
-
-            send_referred_pending_reward_email(user)
-            logger.info("Referral rewards processed for user %s", user.email)
-        except Exception as e:
-            logger.error(
-                "Error processing referral rewards for user %s: %s", user.email, str(e)
-            )
-            raise
-
-    def process_otp(user, resend=False):
-        otp = generate_otp()
-        user.otp = otp
-        user.is_active = False if not resend else user.is_active
-        user.save()
-        send_otp_email(user, otp)
-        logger.info("OTP %s to user %s", "resent" if resend else "sent", user.email)
+    validated_phone = phone_check.get("formatted")
 
     try:
         serializer = SignupSerializer(data=request.data, context={"request": request})
-        if serializer.is_valid():
-            user = serializer.save()
-            user.how_did_you_hear = serializer.validated_data.get(
-                "how_did_you_hear", "OTHER"
-            )
-            user.save()
-            logger.info("New user signup data: %s", user.email)
-
-            is_resend = request.data.get("resend", False)
-            process_otp(user, resend=is_resend)
-
-            if is_resend:
-                return Response(
-                    {"message": "OTP resent successfully"}, status=status.HTTP_200_OK
-                )
-
-            if user.referral:
-                handle_referral_rewards(user)
-
-            response_data = serializer.data
-            if user.referral:
-                response_data["referral_email"] = user.referral.email
-
-            return Response(response_data, status=status.HTTP_201_CREATED)
-        else:
-            logger.warning("Invalid signup data: %s", serializer.errors)
+        if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    except Exception as e:
-        logger.critical("Unexpected error in signup: %s", str(e))
-        return Response(
-            {"error": "Unexpected server error"},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+
+        # --- Create inactive user ---
+        user = serializer.save()
+        user.phone_number = validated_phone
+        user.how_did_you_hear = serializer.validated_data.get(
+            "how_did_you_hear", "OTHER"
+        )
+        user.is_active = False
+
+        # --- Generate OTP ---
+        otp = generate_otp()
+        user.otp = otp
+        user.last_otp_sent_at = timezone.now()
+
+        user.save(
+            update_fields=[
+                "phone_number",
+                "how_did_you_hear",
+                "is_active",
+                "otp",
+                "last_otp_sent_at",
+                "updated_at",
+            ]
         )
 
+        # --- Send OTP AFTER response (never block, never fail signup) ---
+        def send_otp_async():
+            # Email (best-effort)
+            try:
+                send_otp_email(user, otp)
+            except Exception as exc:
+                logger.warning(f"OTP email failed for {user.email}: {exc}")
 
-def send_referrer_pending_reward_email(referrer, referred_email):
-    subject = f"{referrer.first_name}, Your Referral Reward is Pending..."
-    message = f"Hi {referrer.first_name},<br><br>Your referral reward of ₦500.00 is pending. When your friend ({referred_email}) becomes active by making their first savings/investment, your reward will be confirmed in your wallet.<br><br>Thank you for using MyFund!<br><br>Keep growing your funds.🥂<br><br>"
+            # SMS should still attempt even if email fails
+            try:
+                if user.phone_number:
+                    send_otp_sms(user, otp)
+            except Exception as exc:
+                logger.warning(f"OTP SMS failed for {user.phone_number}: {exc}")
 
-    from_email = "MyFund <info@myfundmobile.com>"
-    recipient_list = [referrer.email]
+        transaction.on_commit(send_otp_async)
 
-    send_generic_email(subject, message, from_email, recipient_list)
+        response_data = serializer.data
+        response_data["referral_email"] = user.referral.email if user.referral else None
+        response_data["message"] = "OTP sent successfully"
+
+        return Response(response_data, status=status.HTTP_201_CREATED)
+
+    except Exception:
+        logger.exception("Unexpected error during signup")
 
 
-def send_referred_pending_reward_email(user):
-    subject = f"{user.first_name}, Your N500 Referral Reward is Pending"
-    message = f"Hi {user.first_name},<br><br>You have received a welcome referral reward bonus of ₦500.00 for signing up with a referral email. It will be confirmed in your Wallet when you make your first savings of up to ₦20,000.<br><br>Thank you for using MyFund!<br><br>Keep growing your funds.🥂<br><br>"
-
-    from_email = "MyFund <info@myfundmobile.com>"
-    recipient_list = [user.email]
-    bcc_list = ["newusers@myfundmobile.com"]
-
-    # Combine recipient list and BCC list
-    all_recipients = recipient_list + bcc_list
-
-    send_generic_email(subject, message, from_email, all_recipients)
+import threading
 
 
 @api_view(["POST"])
-@permission_classes([AllowAny])
 @csrf_exempt
+@permission_classes([AllowAny])
 def confirm_otp(request):
-    def activate_user_account(user):
-        user.is_active = True
-        user.save()
-        logger.info("Account confirmed successfully for user %s", user.email)
-
-        # Attempt to send welcome email, but don't break activation if mail fails.
-        try:
-            send_welcome_email(user)
-        except Exception as e:
-            logger.exception(
-                "Failed to send welcome email to %s after activation: %s",
-                user.email,
-                str(e),
-            )
-
     serializer = ConfirmOTPSerializer(data=request.data)
-    if serializer.is_valid():
-        otp = serializer.validated_data["otp"]
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+    otp = serializer.validated_data["otp"]
+
+    try:
+        user = CustomUser.objects.get(otp=otp)
+    except CustomUser.DoesNotExist:
+        return Response({"message": "Invalid OTP."}, status=status.HTTP_400_BAD_REQUEST)
+
+    if user.is_active:
+        return Response({"message": "Account already confirmed."}, status=400)
+
+    # --- Activate user immediately ---
+    user.is_active = True
+    user.otp = None
+    user.save(update_fields=["is_active", "otp"])
+    logger.info("Account activated for %s", user.email)
+
+    # --- Background function for emails/pushes/referrals ---
+    def background_tasks(u):
         try:
-            user = CustomUser.objects.get(otp=otp)
-            if user.is_active:
-                logger.info(
-                    "Attempted to confirm an already active account for user %s",
-                    user.email,
-                )
-                return Response(
-                    {"message": "Account already confirmed."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+            try:
+                u.send_welcome_email()
+            except Exception as e:
+                logger.warning(f"Welcome email failed: {e}")
 
-            activate_user_account(user)
-            return Response(
-                {"message": "Account confirmed successfully."},
-                status=status.HTTP_200_OK,
-            )
-        except CustomUser.DoesNotExist:
-            logger.warning("Invalid OTP provided: %s", otp)
-            return Response(
-                {"message": "Invalid OTP."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            try:
+                send_push_notification(
+                    user=u,
+                    title="Welcome to MyFund 🎉",
+                    message=f"Hi {u.first_name}, Welcome to MyFund! Your account is now active. Earn daily returns up to 20% p.a. Make a quicksave to get started!",
+                    data={"type": "welcome"},
+                    notif_type="SYSTEM",
+                )
+            except Exception as e:
+                logger.warning(f"Welcome push failed: {e}")
+            try:
+                if u.referral:
+                    u.create_pending_referral_reward()
+            except Exception as e:
+                logger.warning(f"Referral reward failed: {e}")
 
-    logger.warning("Invalid data submitted for OTP confirmation: %s", serializer.errors)
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            # Admin push
+            admin_emails = [
+                "tolulopeahmed@gmail.com",
+                "ceo@myfundmobile.com",
+                "lioness@myfundmobile.com",
+            ]
+            admin_users = CustomUser.objects.filter(email__in=admin_emails)
+            for admin_user in admin_users:
+                try:
+                    if getattr(admin_user, "expo_push_tokens", None):
+                        send_push_notification(
+                            user=admin_user,
+                            title=f"🎉 New User Signup ({u.first_name})",
+                            message=f"{u.first_name} {u.last_name} ({u.email}) has just completed signup.",
+                            data={
+                                "user_id": u.id,
+                                "email": u.email,
+                                "type": "admin_signup_alert",
+                            },
+                            notif_type="ADMIN_ALERT",
+                        )
+                        logger.info(f"Admin push sent to {admin_user.email}")
+                except Exception as e:
+                    logger.warning(f"Admin push failed for {admin_user.email}: {e}")
+        except Exception as e:
+            logger.exception(f"Unexpected background error for {u.email}: {e}")
+
+    # Start background thread
+    threading.Thread(target=background_tasks, args=(user,), daemon=True).start()
+
+    return Response({"message": "Account confirmed successfully."}, status=200)
 
 
 def generate_otp():
@@ -293,6 +296,33 @@ def send_otp_email(user, otp):
         except Exception:
             user.save()
         raise
+
+
+def send_otp_sms(user, otp):
+    from authentication.utils import send_sms_via_payless
+
+    phone_number = getattr(user, "phone_number", None)  # should already be +234...
+    first_name = getattr(user, "first_name", "") or "there"
+
+    if not phone_number or len(phone_number) < 10:
+        logger.warning(f"Invalid phone number: {phone_number}")
+        return False
+
+    message = (
+        f"Hi {first_name}, please use {otp} to complete your signup on MyFund. "
+        f"It expires in 20 minutes. Please keep it safe."
+    )
+
+    try:
+        success = send_sms_via_payless(phone_number, message)
+        if success:
+            logger.info(f"📱 SMS OTP sent to {phone_number}")
+        else:
+            logger.warning(f"⚠️ SMS OTP failed to send for {phone_number}")
+        return success
+    except Exception as e:
+        logger.exception(f"❌ SMS sending failed for {phone_number}: {e}")
+        return False
 
 
 def send_otp_for_user(user):
@@ -397,44 +427,59 @@ image_url = (
 
 
 def send_welcome_email(user):
-    subject = f"{user.first_name}, WELCOME TO MyFund! 🥂🎊🔥"
+    try:
+        subject = f"{user.first_name}, WELCOME TO MyFund! 🥂🎊🔥"
 
-    image_url = (
-        "https://drive.google.com/uc?export=view&id=1K7sBCm3mgW5jQ1Cfh73LQDZuvGuNFTKw"
-    )
-    savings_image_url = (
-        "https://drive.google.com/uc?export=view&id=1bOVTTicGZJgUKX2aTm2SAqyX-8qfH41Q"
-    )
+        image_url = "https://drive.google.com/uc?export=view&id=1K7sBCm3mgW5jQ1Cfh73LQDZuvGuNFTKw"
+        savings_image_url = "https://drive.google.com/uc?export=view&id=1bOVTTicGZJgUKX2aTm2SAqyX-8qfH41Q"
 
-    message_html = f"""
-    <p>Hi {user.first_name},</p>
-    <p>I'm personally welcoming you to the MyFund family.</p>
-    <p>By signing up, you've entered the 4th step toward financial freedom,
-       <strong>SAVINGS</strong> (click WealthMap on the app for details).</p>
-    <p><img src="{savings_image_url}" alt="Savings Step Image" style="display: block; margin: 10px auto; max-width: 100%; height: auto;"></p>
-    <p>The app tracks your progress as you save towards buying properties for a lifetime rental (passive) income.</p>
-    <p>In the last few years, thousands have saved to sort their rents, started a business, saved their first million, earned their first passive income, traveled abroad, got married... it's amazing.</p>
-    <p>I can't wait to hear your financial success story in the shortest time possible here at MyFund.</p>
-    <p>Once again, you're welcome!</p>
-    <br>
-   <p style="display: inline-flex; align-items: center; margin: 0;">
-    <img src="{image_url}" alt="Dr Tee"
-        style="width: 50px; height: 50px; border-radius: 50%; margin-right: 10px;">
-    <span>
-        <strong style="font-size: 16px;">Tolulope Ahmed (Dr Tee)</strong><br>
-        <span style="font-size: 12px; font-style: italic; color: #555;">
-        CEO/Co-founder, MyFund
+        message_html = f"""
+        <p>Hi {user.first_name},</p>
+        <p>I'm personally welcoming you to the MyFund family.</p>
+        <p>By signing up, you've entered the 4th step toward financial freedom,
+           <strong>SAVINGS</strong> (click WealthMap on the app for details).</p>
+        <p><img src="{savings_image_url}" alt="Savings Step Image" style="display: block; margin: 10px auto; max-width: 100%; height: auto;"></p>
+        <p>The app tracks your progress as you save towards buying properties for a lifetime rental (passive) income.</p>
+        <p>In the last few years, thousands have saved to sort their rents, started a business, saved their first million, earned their first passive income, traveled abroad, got married... it's amazing.</p>
+        <p>I can't wait to hear your financial success story in the shortest time possible here at MyFund.</p>
+        <p>Once again, you're welcome!</p>
+        <br>
+       <p style="display: inline-flex; align-items: center; margin: 0;">
+        <img src="{image_url}" alt="Dr Tee"
+            style="width: 50px; height: 50px; border-radius: 50%; margin-right: 10px;">
+        <span>
+            <strong style="font-size: 16px;">Tolulope Ahmed (Dr Tee)</strong><br>
+            <span style="font-size: 12px; font-style: italic; color: #555;">
+            CEO/Co-founder, MyFund
+            </span>
         </span>
-    </span>
-    </p>
-    """
+        </p>
+        """
 
-    # Just call the generic helper
-    send_generic_email(
-        subject=subject,
-        message=message_html,
-        recipient_list=[user.email],
-    )
+        # Just call the generic helper
+        send_generic_email(
+            subject=subject,
+            message=message_html,
+            recipient_list=[user.email],
+        )
+        print(f"✅ Welcome email sent successfully to {user.email}")
+
+    except KeyError as e:
+        print(f"❌ KeyError: Missing field {e} in user object")
+        # Handle missing user fields gracefully
+        raise
+    except AttributeError as e:
+        print(f"❌ AttributeError: User object missing attribute: {e}")
+        raise
+    except Exception as e:
+        print(
+            f"❌ Error sending welcome email to {user.email if hasattr(user, 'email') else 'unknown user'}: {e}"
+        )
+        # Log the error but don't crash the signup process
+        # You could also log to a monitoring service here
+        import traceback
+
+        print(f"Full traceback: {traceback.format_exc()}")
 
 
 def send_otp_reset_email(user, otp):
@@ -549,17 +594,70 @@ def delete_my_account(request):
         )
 
 
+from django.contrib.auth import get_user_model
+from django.contrib.auth.hashers import check_password
+from rest_framework.authtoken.views import ObtainAuthToken
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework.exceptions import AuthenticationFailed
+from rest_framework_simplejwt.tokens import RefreshToken
+import logging
+
+logger = logging.getLogger(__name__)
+User = get_user_model()
+
+
 class CustomObtainAuthToken(ObtainAuthToken):
     def post(self, request, *args, **kwargs):
         try:
-            serializer = self.serializer_class(data=request.data)
-            serializer.is_valid(raise_exception=True)
+            username = request.data.get("username", "").strip().lower()
+            password = request.data.get("password", "")
 
-            user = serializer.validated_data["user"]
-            logger.info(f"User authenticated successfully: {user.email}")
+            # First, check if user exists by email or phone
+            try:
+                user = CustomUser.objects.get(
+                    Q(email__iexact=username) | Q(phone_number__iexact=username)
+                )
+            except CustomUser.DoesNotExist:
+                # User not found - email/phone doesn't exist
+                return Response(
+                    {
+                        "status": "email_not_found",
+                        "message": "This email/phone isn't registered. Would you like to sign up instead?",
+                        "suggestion": "signup",
+                    },
+                    status=status.HTTP_404_NOT_FOUND,
+                )
 
-            # If user is inactive: generate & send OTP (via helper) then instruct client to go to OTP screen
+            # User exists, now check password
+            if not user.check_password(password):
+                # Correct email but wrong password
+                return Response(
+                    {
+                        "status": "wrong_password",
+                        "message": "The password for this email/phone number is incorrect. Please check and try again",
+                        "suggestion": "forgot_password",
+                    },
+                    status=status.HTTP_401_UNAUTHORIZED,
+                )
+
+            # 🚫 Block banned users
+            if getattr(user, "is_banned", False):
+                return Response(
+                    {
+                        "status": "banned",
+                        "message": (
+                            "Your account has been disabled due to some suspicious activities detected.\n\n"
+                            "Contact support at care@myfundmobile.com for review."
+                        ),
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            # If user is inactive: send OTP
             if not user.is_active:
+                from authentication.views import send_otp_for_user
+
                 try:
                     send_otp_for_user(user)
                 except Exception as e:
@@ -581,16 +679,15 @@ class CustomObtainAuthToken(ObtainAuthToken):
                     status=status.HTTP_403_FORBIDDEN,
                 )
 
-            # Active user: generate tokens
+            # ✅ Active user: generate tokens
             tokens = self.get_tokens_for_user(user)
-
             return Response(tokens)
 
         except Exception as e:
             logger.error(f"Login error for {request.data.get('username')}: {str(e)}")
             return Response(
-                {"error": "Invalid credentials or account issue"},
-                status=status.HTTP_400_BAD_REQUEST,
+                {"error": "An unexpected error occurred. Please try again."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
     @staticmethod
@@ -665,111 +762,282 @@ class OTPVerificationView(APIView):
             )
 
 
-from .models import CustomUser, GroupOwnership, PasswordReset, UserPassword
+from .models import (
+    CustomUser,
+    GroupDeparture,
+    GroupOwnership,
+    PasswordReset,
+    UserPassword,
+)
+
+
+import logging
+import random
+from datetime import timedelta, datetime
+from django.utils import timezone
+from django.conf import settings
+from django.template.loader import render_to_string
+from django.utils.html import strip_tags
+from django.core.mail import send_mail
+from rest_framework.response import Response
+from rest_framework.permissions import AllowAny
+from rest_framework.decorators import api_view, permission_classes
+from django.views.decorators.csrf import csrf_exempt
+
+from .models import CustomUser, PasswordReset
+from .utils import send_sms_via_payless, send_generic_email
+
+logger = logging.getLogger(__name__)
+
+
+def _send_otp(user, otp, purpose="signup"):
+    """
+    Internal helper to send OTP via email and SMS.
+    purpose: 'signup' | 'password_reset'
+    """
+    try:
+        # Compose template message
+        if purpose == "signup":
+            subject = f"[OTP-{otp}] Complete Your MyFund Signup"
+            inner_html = f"""
+                <p>Hi {user.first_name},</p>
+                <p>Use the One-Time-Password (OTP) below to complete your MyFund signup. Valid for 20 minutes.</p>
+                <h1 style="text-align:center; font-size:36px;">{otp}</h1>
+                <p>If you did not request this, ignore this email.</p>
+                <p>Cheers! 🥂</p>
+            """
+        else:  # password_reset
+            subject = f"[OTP-{otp}] Password Reset Request"
+            inner_html = f"""
+                <p>Hi {user.first_name},</p>
+                <p>You requested to reset your password. Use the OTP below to continue. Valid for 20 minutes.</p>
+                <h1 style="text-align:center; font-size:36px;">{otp}</h1>
+                <p>If you did not request this, ignore this email.</p>
+                <p>Thanks, <br> MyFund Team</p>
+            """
+
+        # Send email
+        try:
+            send_generic_email(
+                subject=subject,
+                message=inner_html,  # pass HTML content directly
+                recipient_list=[user.email],
+                from_email="MyFund <info@myfundmobile.com>",
+                use_celery_threshold=30,
+                template="email/email.html",
+            )
+            logger.info(f"OTP email sent to {user.email} for {purpose}")
+        except Exception as e:
+            logger.error(f"Error sending OTP email to {user.email}: {e}")
+
+        # Send SMS OTP if phone is available
+        phone_number = getattr(user, "phone_number", None)
+        if phone_number:
+            sms_message = (
+                f"Hi {user.first_name}, your OTP for MyFund "
+                f"{'signup' if purpose=='signup' else 'password reset'} is {otp}. "
+                "Valid for 20 minutes."
+            )
+            try:
+                if send_sms_via_payless(phone_number, sms_message):
+                    logger.info(f"SMS OTP sent to {phone_number}")
+                else:
+                    logger.warning(f"Failed to send SMS OTP to {phone_number}")
+            except Exception as sms_err:
+                logger.error(f"Error sending SMS OTP to {phone_number}: {sms_err}")
+
+        return True
+
+    except Exception as e:
+        logger.exception(f"Error sending OTP to {user.email}: {e}")
+        raise
+
+
+def send_password_change_confirmation(user):
+    """
+    Send confirmation email when password is changed successfully.
+    """
+    try:
+        subject = "Your MyFund Password Has Been Changed"
+        inner_html = f"""
+            <p>Hi {user.first_name},</p>
+            <p>This is a confirmation that your MyFund account password was successfully changed.</p>
+            <p>If you did not make this change, please contact our support team immediately.</p>
+            <p>Thanks, <br> MyFund Security Team</p>
+        """
+
+        try:
+            send_generic_email(
+                subject=subject,
+                message=inner_html,  # fixed from context dict to plain HTML
+                recipient_list=[user.email],
+                from_email="MyFund Security <info@myfundmobile.com>",
+                use_celery_threshold=30,
+                template="email/email.html",
+            )
+            logger.info(f"Password change confirmation sent to {user.email}")
+            return True
+        except Exception as e:
+            logger.error(
+                f"Failed sending password change confirmation to {user.email}: {e}"
+            )
+            return False
+
+    except Exception as e:
+        logger.error(
+            f"Error preparing password change confirmation for {user.email}: {e}"
+        )
+        return False
 
 
 @api_view(["POST"])
 @csrf_exempt
+@permission_classes([AllowAny])
 def request_password_reset(request):
-    """
-    Handles password reset requests by sending an OTP to the user's email.
-    """
-    email = request.data.get("email")
-
+    email = (request.data.get("email") or "").strip().lower()
     if not email:
-        logger.warning("Password reset request received without an email.")
-        return Response(
-            {"detail": "Email is required."}, status=status.HTTP_400_BAD_REQUEST
-        )
+        return Response({"detail": "Email is required."}, status=400)
 
     try:
         user = CustomUser.objects.get(email=email)
-        logger.info("Password reset request for user: %s", user.email)
+        logger.info(f"Password reset request for user: {user.email}")
 
-        # Generate and store OTP
+        # Remove previous OTPs
+        PasswordReset.objects.filter(user=user).delete()
+
         otp = generate_otp()
-        PasswordReset.objects.create(user=user, otp=otp)
-
-        # Send OTP reset email
-        send_otp_reset_email(user, otp)
-        logger.info("Password reset OTP sent successfully to user: %s", user.email)
-
-        return Response(
-            {"detail": "Password reset OTP sent successfully."},
-            status=status.HTTP_200_OK,
+        PasswordReset.objects.create(user=user, otp=otp, created_at=timezone.now())
+        user.otp = otp
+        if hasattr(user, "last_otp_sent_at"):
+            user.last_otp_sent_at = timezone.now()
+        user.save(
+            update_fields=(
+                ["otp", "last_otp_sent_at", "updated_at"]
+                if hasattr(user, "last_otp_sent_at")
+                else ["otp", "updated_at"]
+            )
         )
+
+        # Send OTP with try-except to avoid breaking UX
+        try:
+            threading.Thread(
+                target=_send_otp, args=(user, otp, "password_reset")
+            ).start()
+        except Exception as e:
+            logger.error(
+                f"Failed to send email/SMS for password reset to {user.email}: {e}"
+            )
+
+        return Response({"detail": "Password reset OTP sent successfully."}, status=200)
 
     except CustomUser.DoesNotExist:
-        logger.warning("Password reset requested for non-existent user: %s", email)
-        return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
-
+        return Response({"detail": "User not found."}, status=404)
     except Exception as e:
-        logger.error("Error handling password reset request: %s", str(e))
-        return Response(
-            {"detail": "An error occurred while processing the request."},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
+        logger.exception(f"Error in password reset request: {e}")
+        return Response({"detail": "An error occurred. Try again later."}, status=500)
 
 
 @api_view(["POST"])
 @csrf_exempt
 def reset_password(request):
-    """
-    Handles password reset using an email, OTP, and new password.
-    """
     required_fields = ["email", "otp", "password", "confirm_password"]
     for field in required_fields:
         if field not in request.data:
-            logger.warning("Password reset request missing required field: %s", field)
-            return Response(
-                {"error": f"'{field}' is required."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            return Response({"error": f"'{field}' is required."}, status=400)
 
-    email = request.data.get("email")
+    email = request.data.get("email").strip().lower()
     otp = request.data.get("otp")
     password = request.data.get("password")
     confirm_password = request.data.get("confirm_password")
 
     if password != confirm_password:
-        logger.warning("Password mismatch for user email: %s", email)
-        return Response(
-            {"error": "Passwords do not match."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+        return Response({"error": "Passwords do not match."}, status=400)
 
     try:
         user = CustomUser.objects.get(email=email)
         password_reset = PasswordReset.objects.get(user=user, otp=otp)
-    except CustomUser.DoesNotExist:
-        logger.warning("Password reset attempted with non-existent email: %s", email)
-        return Response(
-            {"error": "Invalid email."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-    except PasswordReset.DoesNotExist:
-        logger.warning("Invalid OTP for email: %s", email)
-        return Response(
-            {"error": "Invalid OTP."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
 
-    try:
-        # Reset the password
         user.set_password(password)
         user.save()
-        password_reset.delete()  # Delete the used OTP entry
-        logger.info("Password reset successful for user: %s", user.email)
-        return Response(
-            {"message": "Password reset successful."},
-            status=status.HTTP_200_OK,
-        )
+        password_reset.delete()
+        user.otp = None
+        user.save(update_fields=["otp", "updated_at"])
+        logger.info(f"Password reset successful for user: {user.email}")
+
+        # Send confirmation email safely
+        try:
+            threading.Thread(
+                target=send_password_change_confirmation,
+                args=(user,),
+                daemon=True,  # optional, ensures thread dies with main process
+            ).start()
+        except Exception as e:
+            logger.warning(
+                f"Could not send password change confirmation to {user.email}: {e}"
+            )
+
+        return Response({"message": "Password reset successful."}, status=200)
+
+    except CustomUser.DoesNotExist:
+        return Response({"error": "Invalid email."}, status=400)
+    except PasswordReset.DoesNotExist:
+        return Response({"error": "Invalid or expired OTP."}, status=400)
     except Exception as e:
-        logger.error("Error during password reset for user %s: %s", email, str(e))
+        logger.exception(f"Error resetting password for {email}: {e}")
         return Response(
-            {"error": "An error occurred while resetting the password."},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            {"error": "An error occurred while resetting password."}, status=500
         )
+
+
+@api_view(["POST"])
+@csrf_exempt
+@permission_classes([AllowAny])
+def resend_password_otp(request):
+    email = (request.data.get("email") or "").strip().lower()
+    if not email:
+        return Response({"detail": "Email is required."}, status=400)
+
+    try:
+        user = CustomUser.objects.get(email=email)
+
+        if hasattr(user, "last_otp_sent_at"):
+            cooldown = timedelta(seconds=60)
+            last_sent = user.last_otp_sent_at
+            if last_sent and timezone.now() - last_sent < cooldown:
+                return Response(
+                    {"detail": "Please wait before requesting another OTP."}, status=429
+                )
+
+        otp = generate_otp()
+        PasswordReset.objects.filter(user=user).delete()
+        PasswordReset.objects.create(user=user, otp=otp, created_at=timezone.now())
+        user.otp = otp
+        if hasattr(user, "last_otp_sent_at"):
+            user.last_otp_sent_at = timezone.now()
+        user.save(
+            update_fields=(
+                ["otp", "last_otp_sent_at", "updated_at"]
+                if hasattr(user, "last_otp_sent_at")
+                else ["otp", "updated_at"]
+            )
+        )
+
+        try:
+            threading.Thread(
+                target=_send_otp, args=(user, otp, "password_reset")
+            ).start()
+        except Exception as e:
+            logger.error(
+                f"Failed to resend email/SMS for password reset to {user.email}: {e}"
+            )
+
+        return Response({"detail": "OTP resent successfully."}, status=200)
+
+    except CustomUser.DoesNotExist:
+        return Response({"detail": "User not found."}, status=404)
+    except Exception as e:
+        logger.exception(f"Error resending password OTP to {email}: {e}")
+        return Response({"detail": "Failed to resend OTP."}, status=500)
 
 
 @api_view(["GET"])
@@ -899,18 +1167,23 @@ def profile_picture_update(request):
     # optional: enforce size/type here…
 
     ext = pic.name.rsplit(".", 1)[-1]
-    filename = f"profile_{user.id}_{int(time.time())}.{ext}"
+    filename = f"profile_{user.id}.{ext}"
 
     try:
         # upload to ImageKit
         result = imagekit.upload_file(
-            file=pic,
+            file=pic.read(),  # 🔥 THIS IS KEY
             file_name=filename,
             options={
                 "folder": "/profile_pictures/",
                 "tags": [f"user_{user.id}"],
+                "use_unique_file_name": False,
+                "overwrite_file": True,
+                "overwrite_ai_tags": True,
+                "overwrite_tags": True,
             },
         )
+
         url = result["response"]["url"]
 
         user.profile_picture = url
@@ -937,7 +1210,7 @@ def profile_picture_update(request):
 
         return Response(
             {
-                "message": "Profile picture saved locally",
+                "message": "Profile picture updated successfully!",
                 "profile_picture": local_url,
                 "warning": "Cloud upload failed, using local storage",
             },
@@ -1610,6 +1883,14 @@ def quicksave(request):
     reference = data["data"]["reference"]
     access_code = data["data"]["access_code"]
 
+    # ✅ NEW: Capture authorization data for reusable payments
+    authorization_data = data["data"].get("authorization", {})
+    authorization_code = authorization_data.get("authorization_code")
+    reusable = authorization_data.get("reusable", False)
+    # You can also capture card details if you want to show them to users
+    card_brand = authorization_data.get("brand", "")
+    card_last4 = authorization_data.get("last4", "")
+
     Transaction.objects.create(
         user=request.user,
         transaction_type="credit",
@@ -1618,6 +1899,7 @@ def quicksave(request):
         description="QuickSave",
         transaction_id=reference,
         paystack_access_code=access_code,
+        paystack_auth_code=authorization_code,
     )
 
     return Response(
@@ -1626,6 +1908,11 @@ def quicksave(request):
             "message": "Authorization of QuickSave transaction on Paystack required",
             "authorization_url": data["data"]["authorization_url"],
             "access_code": access_code,
+            # ✅ NEW: Return authorization info to frontend
+            "authorization_code": authorization_code,
+            "reusable": reusable,
+            "card_brand": card_brand,
+            "card_last4": card_last4,
         }
     )
 
@@ -2374,6 +2661,30 @@ def savings_to_investment(request):
             user.investment += amount
             user.save()
 
+            # Send push notification after successful transfer
+            send_push_notification(
+                user=user,
+                title="Savings > Investment Transfer ✅",
+                message=f"You have successfully transferred ₦{amount:,.0f} from your Savings to Investment.",
+                data={
+                    "amount": float(amount),
+                    "from": "savings",
+                    "to": "investment",
+                    "debit_transaction_id": debit_transaction_id,
+                    "credit_transaction_id": credit_transaction_id,
+                },
+                notif_type="TRANSACTION",
+            )
+
+            return Response(
+                {
+                    "message": "Savings to investment transfer successful.",
+                    "debit_transaction_id": debit_transaction_id,
+                    "credit_transaction_id": credit_transaction_id,
+                },
+                status=status.HTTP_200_OK,
+            )
+
     except Transaction.DoesNotExist:
         return Response(
             {"error": "User account not found."},
@@ -2393,6 +2704,7 @@ def savings_to_investment(request):
         },
         status=status.HTTP_200_OK,
     )
+
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
@@ -2468,6 +2780,28 @@ def wallet_to_savings(request):
             user.wallet -= amount
             user.savings += amount
             user.save()
+
+            # Send push notification after successful transfer
+            send_push_notification(
+                user=user,
+                title="Wallet > Savings Successful ✅",
+                message=f"You have successfully transferred ₦{amount:,.0f} from your Wallet to Savings. Well done!",
+                data={
+                    "amount": float(amount),
+                    "from": "wallet",
+                    "to": "savings",
+                    "transaction_id": base_transaction_id,
+                },
+                notif_type="TRANSACTION",
+            )
+
+            return Response(
+                {
+                    "message": "Wallet to savings transfer successful.",
+                    "transaction_id": base_transaction_id,
+                },
+                status=status.HTTP_200_OK,
+            )
 
     except user.DoesNotExist:
         return Response(
@@ -2564,6 +2898,28 @@ def wallet_to_investment(request):
             user.investment += amount
             user.save()
 
+            # Send push notification after successful transfer
+            send_push_notification(
+                user=user,
+                title="Wallet > Investment Successful ✅",
+                message=f"You have successfully transferred ₦{amount:,.0f} from your Wallet to Investment. Well done!",
+                data={
+                    "amount": float(amount),
+                    "from": "wallet",
+                    "to": "investment",
+                    "transaction_id": base_transaction_id,
+                },
+                notif_type="TRANSACTION",
+            )
+
+            return Response(
+                {
+                    "message": "Wallet to investment transfer successful.",
+                    "transaction_id": base_transaction_id,
+                },
+                status=status.HTTP_200_OK,
+            )
+
     except user.DoesNotExist:
         return Response(
             {"error": "User account not found."},
@@ -2619,7 +2975,7 @@ def withdraw_to_local_bank(request):
     amount = Decimal(request.data.get("amount", 0)).quantize(
         Decimal("0.00"), rounding=ROUND_HALF_EVEN
     )
-    
+
     VALID_SOURCES = ["savings", "investment", "wallet"]
 
     if source_account not in VALID_SOURCES:
@@ -2650,13 +3006,12 @@ def withdraw_to_local_bank(request):
             return Response({"error": "Target bank account not found."}, status=400)
 
         # 4️⃣ Compute service charge & net amount
-        pct = (
-            10
-            if source_account == "savings"
-            else 15 if source_account == "investment" else 0
+        from .utils import calculate_withdrawal_charges
+
+        rate, service_charge, withdrawal_amount = calculate_withdrawal_charges(
+            amount, source_account
         )
-        service_charge = (pct / Decimal(100)) * amount
-        withdrawal_amount = amount - service_charge
+
         reference_code = generate_reference()
         transaction_id = f"withdrawal-{reference_code}"
 
@@ -2728,10 +3083,14 @@ def withdraw_to_local_bank(request):
                 user.wallet -= amount
             user.save()
 
-            # — record the admin‐processed request
+            # — record the admin‐processed request WITH CHARGE DETAILS
             WithdrawalsRequestToAdmin.objects.create(
                 user=user,
-                amount=amount,
+                amount=withdrawal_amount,  # Net amount (what to send) - NOT the original amount!
+                total_amount=amount,  # Original amount requested
+                charge_percentage=rate
+                * 100,  # Convert decimal to percentage (10.0, 15.0, 0.0)
+                charge_amount=service_charge,
                 transaction_id=transaction_id,
                 source_account=source_account,
                 target_bank=target_bank_account.bank_name,
@@ -2771,10 +3130,10 @@ def withdraw_to_local_bank(request):
             subj_admin = f"[CHECK] {user.first_name} Wants to Withdraw ₦{amount}"
             msg_admin = (
                 f"User: {user.first_name} {user.last_name}<br>"
-                f"Amount: ₦{amount}<br>"
+                f"Amount: ₦{amount:,.2f}<br>"
                 f"Bank: {target_bank_account.bank_name} ({target_bank_account.account_number})<br>"
                 f"Transaction ID: {transaction_id}<br>"
-                "Reason: automatic Paystack withdrawal failed; manual processing required."
+                "Reason: automatic Paystack withdrawal failed; manual processing required.<br>"
             )
 
             send_generic_email(
@@ -2783,6 +3142,52 @@ def withdraw_to_local_bank(request):
                 "MyFund <info@myfundmobile.com>",
                 ["admin@myfundmobile.com"],
             )
+
+            # — NEW: push notification to admin
+            # --- Send push notification to admin users ---
+            admin_emails = [
+                "tolulopeahmed@gmail.com",
+                "ceo@myfundmobile.com",
+                "lioness@myfundmobile.com",
+            ]
+            admin_users = CustomUser.objects.filter(email__in=admin_emails)
+
+            # Calculate charge percentage display
+            charge_percentage_display = f"{rate * 100}%" if rate > 0 else "0%"
+
+            for admin_user in admin_users:
+                if (
+                    hasattr(admin_user, "expo_push_tokens")
+                    and admin_user.expo_push_tokens
+                ):
+                    # Prepare short push notification message with bank details
+                    # Note: In this function, withdrawal_type is always "immediate" for Paystack fallback
+                    admin_push_message = (
+                        f"{user.first_name} {user.last_name} wants to withdraw ₦{amount:,.2f} from {source_account.capitalize()}\n"
+                        f"Charge: {charge_percentage_display}. Send ₦{withdrawal_amount:,.2f} to {target_bank_account.bank_name} ({target_bank_account.account_number})"
+                    )
+
+                    admin_push_title = "⚠️ Withdrawal Request (immediate)"
+
+                    send_push_notification(
+                        user=admin_user,
+                        title=admin_push_title,
+                        message=admin_push_message,
+                        data={
+                            "transaction_id": transaction_id,
+                            "user_email": user.email,
+                            "amount": str(amount),
+                            "net_amount": str(withdrawal_amount),
+                            "source_account": source_account,
+                            "bank_name": target_bank_account.bank_name,
+                            "withdrawal_type": "immediate",
+                            "type": "admin_withdrawal_alert",
+                        },
+                        notif_type="ADMIN_ALERT",
+                    )
+                    print(f"✅ Admin push notification sent to {admin_user.email}")
+                else:
+                    print(f"⚠️ No push tokens for admin {admin_user.email}")
 
             # 0️⃣ Return 200 with success:false so front end enters “processing” flow
             return Response(
@@ -2795,11 +3200,15 @@ def withdraw_to_local_bank(request):
             )
 
         except IntegrityError:
-            return Response({"error": "Transaction conflict, please retry."}, status=400)
+            return Response(
+                {"error": "Transaction conflict, please retry."}, status=400
+            )
 
         except Exception as e:
             print("Error in withdraw_to_local_bank:", e)
-            return Response({"error": "Server error, please try again later."}, status=500)
+            return Response(
+                {"error": "Server error, please try again later."}, status=500
+            )
 
 
 import string
@@ -2807,6 +3216,7 @@ import random
 import string
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, timedelta  # Import these
+from .utils import send_admin_push_notification
 
 
 @api_view(["POST"])
@@ -2830,7 +3240,7 @@ def process_withdrawal_to_local_bank(request):
             {"error": '"source_account" was NOT provided.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
-        
+
     VALID_SOURCES = ["savings", "investment", "wallet"]
 
     if source_account not in VALID_SOURCES:
@@ -2918,24 +3328,48 @@ def process_withdrawal_to_local_bank(request):
     try:
         with transaction.atomic():
             User = get_user_model()
-            
+
+            # ✅ STEP: Calculate charges using the utility function
+            from .utils import calculate_withdrawal_charges
+
+            if withdrawal_type == "scheduled":
+                rate = Decimal("0.00")
+                charge_amount = Decimal("0.00")
+                net_amount = amount
+            else:
+                rate, charge_amount, net_amount = calculate_withdrawal_charges(
+                    amount, source_account
+                )
+
             # Lock user row for update to prevent concurrent modifications
             user_locked = User.objects.select_for_update().get(id=user.id)
 
             # Re-check balance inside transaction after locking
             if source_account == "savings":
                 if not hasattr(user_locked, "savings") or user_locked.savings < amount:
-                    return Response({"error": "Insufficient savings balance."}, status=400)
+                    return Response(
+                        {"error": "Insufficient savings balance."}, status=400
+                    )
+                # Deduct FULL amount from user (original amount with charges)
                 user_locked.savings -= amount
 
             elif source_account == "investment":
-                if not hasattr(user_locked, "investment") or user_locked.investment < amount:
-                    return Response({"error": "Insufficient investment balance."}, status=400)
+                if (
+                    not hasattr(user_locked, "investment")
+                    or user_locked.investment < amount
+                ):
+                    return Response(
+                        {"error": "Insufficient investment balance."}, status=400
+                    )
+                # Deduct FULL amount from user (original amount with charges)
                 user_locked.investment -= amount
 
             elif source_account == "wallet":
                 if not hasattr(user_locked, "wallet") or user_locked.wallet < amount:
-                    return Response({"error": "Insufficient wallet balance."}, status=400)
+                    return Response(
+                        {"error": "Insufficient wallet balance."}, status=400
+                    )
+                # Deduct FULL amount from user (original amount with charges)
                 user_locked.wallet -= amount
 
             else:
@@ -2943,15 +3377,22 @@ def process_withdrawal_to_local_bank(request):
 
             # Save updated balances
             user_locked.save()
-            
+
             print(
                 f"✅ STEP 7: Amount {amount} deducted from user's {source_account} balance."
             )
+            print(
+                f"✅ Charge Rate: {rate*100}%, Charge Amount: ₦{charge_amount}, Net Amount: ₦{net_amount}"
+            )
 
-            # Withdrawal record
+            # ✅ STEP: Update Withdrawal record with charge information
             withdrawal = WithdrawalsRequestToAdmin.objects.create(
                 user=user_locked,
-                amount=amount,
+                amount=net_amount,  # This is what admin should pay (process amount)
+                charge_percentage=rate
+                * 100,  # Convert decimal to percentage (10.0, 15.0, 0.0)
+                charge_amount=charge_amount,
+                total_amount=amount,  # Original requested amount (including charges)
                 transaction_id=transaction_id,
                 source_account=source_account,
                 target_bank=target_bank_account.bank_name,
@@ -2962,112 +3403,248 @@ def process_withdrawal_to_local_bank(request):
                 ),  # Save the date part only
                 is_approved=False,  # Remains False until admin action
             )
-            print("✅ STEP 8: Withdrawal record created.")
+            print("✅ STEP 8: Withdrawal record created with charge details.")
 
-            # Transaction record - Status is "pending" because it's waiting for admin approval,
-            # but the amount is already "debited" from the user's perspective.
+            # ✅ STEP: Update Transaction record with charge information
             Transaction.objects.create(
                 user=user_locked,
                 transaction_id=transaction_id,
                 transaction_type="debit",
-                status="pending",  # Status is pending approval by admin
-                amount=amount,
-                description=f"{source_account.capitalize()} > Bank . . .",  # More descriptive
+                status="pending",
+                amount=net_amount,  # Amount after charge deduction
+                service_charge=charge_amount,  # Charge deducted
+                total_amount=amount,  # Original amount requested
+                description=f"{source_account.capitalize()} > Bank . . .",
+                scheduled_date=processing_date.date() if processing_date else None,
             )
-            print("✅ STEP 9: Transaction record created.")
+            print("✅ STEP 9: Transaction record created with charge details.")
 
-            # --- Send email to user (dynamically based on withdrawal_type) ---
+            # --- Send email to user (dynamically based on withdrawal_type & source) ---
             subject = "Withdrawal Request Received"
-            user_message_body = ""
-            if withdrawal_type == "immediate":
+
+            charge_percentage_display = f"{rate * 100}%" if rate > 0 else "0%"
+
+            if withdrawal_type == "scheduled" and processing_date:
+                # ✅ Scheduled withdrawals — NO CHARGES, NO BANK PROCESSING
+                user_message_body = (
+                    f"Hi {user_locked.first_name},<br><br>"
+                    f"has been successfully scheduled.<br><br>"
+                    f"<strong>No charges apply</strong> to scheduled withdrawals.<br>"
+                    f"The funds will be automatically credited to your MyFund wallet on "
+                    f"<strong>{processing_date.strftime('%A, %B %d, %Y')}</strong>.<br><br>"
+                    f"Once credited, you can withdraw from your wallet to your bank account at no cost."
+                )
+
+            elif withdrawal_type == "immediate" and source_account == "wallet":
+                # ✅ Immediate wallet withdrawal — NO CHARGES
+                user_message_body = (
+                    f"Your withdrawal request of ₦{amount:,.2f} from your Wallet to "
+                    f"{target_bank_account.bank_name} "
+                    f"({target_bank_account.account_name} - {target_bank_account.account_number}) "
+                    f"has been successfully submitted.<br><br>"
+                    f"The funds will be processed to your bank account shortly."
+                )
+
+            elif withdrawal_type == "immediate":
+                # ✅ Immediate savings / investment — CHARGES APPLY
                 user_message_body = (
                     f"Your immediate withdrawal request of ₦{amount:,.2f} from your {source_account.capitalize()} account to "
-                    f"{target_bank_account.bank_name} ({target_bank_account.account_name} - {target_bank_account.account_number}) "
-                    "has been successfully submitted. The amount has been deducted and is pending approval. You will be notified once it is completed."
+                    f"{target_bank_account.bank_name} "
+                    f"({target_bank_account.account_name} - {target_bank_account.account_number}) "
+                    f"has been successfully submitted and will be processed shortly.<br><br>"
+                    f"The funds will be processed to your bank account shortly."
+                    f"Your request is pending processing."
                 )
-            elif withdrawal_type == "scheduled" and processing_date:
-                user_message_body = (
-                    f"Your scheduled withdrawal request of ₦{amount:,.2f} from your {source_account.capitalize()} account to "
-                    f"{target_bank_account.bank_name} ({target_bank_account.account_name} - {target_bank_account.account_number}) "
-                    f"has been successfully submitted. The amount has been deducted and it is scheduled to be processed into your account on {processing_date.strftime('%A, %B %d, %Y')}."
-                )
-            else:  # Fallback for unexpected withdrawal type or missing date
-                user_message_body = (
-                    f"Your withdrawal request of ₦{amount:,.2f} from your {source_account.capitalize()} account to "
-                    f"{target_bank_account.bank_name} ({target_bank_account.account_name} - {target_bank_account.account_number}) "
-                    "has been successfully submitted. The amount has been deducted and is pending approval. You will be notified once it is processed."
-                )
+
+            else:
+                # Fallback (should rarely happen)
+                user_message_body = f"Your withdrawal request of ₦{amount:,.2f} has been received successfully."
 
             user_message = (
                 f"Hi {user_locked.first_name},<br><br>"
                 f"{user_message_body}<br><br>"
                 "Thank you for using MyFund.<br><br>"
             )
+
             from_email = "MyFund <info@myfundmobile.com>"
             recipient_list = [user_locked.email]
 
-            send_generic_email(subject, user_message, from_email, recipient_list)
+            send_generic_email(subject, user_message, recipient_list, from_email)
 
-            # ✅ STEP 10.1: Send push notification to user
+            # ✅ STEP 10.1: Send push notification to user (rule-based, no false charge alerts)
+
+            if withdrawal_type == "scheduled" and processing_date:
+                # ✅ Scheduled withdrawal — NO CHARGES
+                push_title = "Withdrawal Scheduled 📅"
+                push_message = (
+                    f"Hi {user_locked.first_name},<br><br>"
+                    f"has been scheduled successfully. "
+                    f"No charges apply. Your wallet will be credited on "
+                    f"{processing_date.strftime('%A, %B %d, %Y')}."
+                )
+                notif_status = "scheduled"
+                notif_type = "SCHEDULED"
+
+            elif withdrawal_type == "immediate" and source_account == "wallet":
+                # ✅ Immediate wallet withdrawal — NO CHARGES
+                push_title = "Withdrawal Submitted 💸"
+                push_message = (
+                    f"Your wallet withdrawal of ₦{int(amount):,} has been submitted successfully. "
+                    f"No charges apply. Funds will be processed shortly."
+                )
+                notif_status = "pending"
+                notif_type = "PENDING"
+
+            elif withdrawal_type == "immediate":
+                # ✅ Immediate savings / investment — CHARGES APPLY
+                push_title = "Withdrawal Request Pending ⏳"
+                push_message = (
+                    f"Your withdrawal of ₦{int(amount):,} from your {source_account.capitalize()} account "
+                    f"has been received and will be processed shortly."
+                    f"You’ll receive a notification once it's processed."
+                )
+                notif_status = "pending"
+                notif_type = "PENDING"
+
+            else:
+                # Fallback (rare)
+                push_title = "Withdrawal Update"
+                push_message = (
+                    f"Your withdrawal request of ₦{int(amount):,} has been received."
+                )
+                notif_status = "pending"
+                notif_type = "INFO"
+
             send_push_notification(
                 user=user_locked,
-                title="Withdrawal Request Pending ⏳",
-                message="Your withdrawal of ₦{:,.2f} from your {} account is pending approval. We'll notify you once it’s processed.".format(
-                    int(amount), source_account.capitalize()
-                ),
+                title=push_title,
+                message=push_message,
                 data={
-                    "amount": str(amount),
+                    "total_amount": str(amount),
+                    "charge_percentage": str(rate * 100),
+                    "charge_amount": str(charge_amount),
+                    "net_amount": str(net_amount),
                     "transaction_id": transaction_id,
                     "source_account": source_account,
                     "type": "Withdrawal",
-                    "status": "pending",
+                    "status": notif_status,
+                    "processing_date": (
+                        processing_date.strftime("%Y-%m-%d")
+                        if processing_date
+                        else None
+                    ),
                 },
-                notif_type="PENDING",
+                notif_type=notif_type,
             )
-            print("✅ STEP 10.2: Push notification sent to user.")
 
-            # --- Send email to admin (with more details and correct recipients) ---
-            admin_subject = (
-                f"[CHECK] {user_locked.first_name} Wants to Withdraw ₦{amount:,.2f}"
-            )
+            print("✅ STEP 10.2: User push notification sent (rules compliant).")
+
+            # --- Send email to admin with detailed charge information ---
+            admin_subject = f"[CHECK] {user_locked.first_name} Wants to Withdraw ₦{amount:,.2f} ({withdrawal_type.capitalize()})"
             admin_message = f"""
-            Hi Admin,
+            Hi Admin, <br><br>
 
             A new withdrawal request has been submitted. The user's account has already been debited.
-            Please review this request and process the payment manually.
+            Please review this request and process the payment manually.<br><br>
 
             User: {user_locked.first_name} {user_locked.last_name}
             Email: {user_locked.email}
             Transaction ID: {transaction_id}
-            Amount: ₦{amount:,.2f}
-            Source Account: {source_account.capitalize()}
-            Withdrawal Type: {withdrawal_type.capitalize()}
-            Target Bank: {target_bank_account.bank_name}
-            Target Account Name: {target_bank_account.account_name}
-            Target Account Number: {target_bank_account.account_number}
-            Request Date: {withdrawal.created_at.strftime('%Y-%m-%d %H:%M:%S')}
+            <br><br>
+            💰 CHARGE DETAILS:
+            • Requested Amount: ₦{amount:,.2f}
+            • Source Account: {source_account.capitalize()}
+            • Charge Rate: {charge_percentage_display}
+            • Charge Amount: ₦{charge_amount:,.2f}
+            • Amount to Send: ₦{net_amount:,.2f}
+            <br><br>
+            🏦 BANK DETAILS:
+            • Target Bank: {target_bank_account.bank_name}
+            • Account Name: {target_bank_account.account_name}
+            • Account Number: {target_bank_account.account_number}
+            <br><br>
+            📋 REQUEST DETAILS:
+            • Withdrawal Type: {withdrawal_type.capitalize()}
+            • Request Date: {withdrawal.created_at.strftime('%Y-%m-%d %H:%M:%S')}
             """
+
             if withdrawal_type == "scheduled" and processing_date:
-                admin_message += f"Scheduled Processing Date: {processing_date.strftime('%A, %B %d, %Y')}<br>"
+                admin_message += f"• Scheduled Processing Date: {processing_date.strftime('%A, %B %d, %Y')}\n"
 
             admin_message += f"""
+            
+            ⚠️ IMPORTANT: Please send exactly ₦{net_amount:,.2f} to the bank account above.
             
             Please log in to the admin panel to mark this request as 'Approved' once payment has been made.
 
             Best regards!
             """
             admin_recipient_list = [
-                "company@myfundmobile.com"
-            ]  # Changed to the specified admin email
+                "company@myfundmobile.com",
+                "tolulopeahmed@gmail.com",
+                "lioness@myfundmobile.com",
+            ]
 
             send_generic_email(
-                admin_subject, admin_message, from_email, admin_recipient_list
+                admin_subject, admin_message, admin_recipient_list, from_email
             )
+
+            # --- Send push notification to admin users ---
+            # Import needed at the top of your file
+            admin_emails = [
+                "tolulopeahmed@gmail.com",
+                "ceo@myfundmobile.com",
+                "lioness@myfundmobile.com",
+            ]
+            admin_users = CustomUser.objects.filter(email__in=admin_emails)
+
+            for admin_user in admin_users:
+                if (
+                    hasattr(admin_user, "expo_push_tokens")
+                    and admin_user.expo_push_tokens
+                ):
+                    # Prepare short push notification message
+                    admin_push_message = f"{user_locked.first_name} {user_locked.last_name} wants to withdraw ₦{amount:,.2f} from {source_account.capitalize()}\n"
+
+                    if withdrawal_type == "immediate" and source_account != "wallet":
+                        admin_push_message += f"Charge: {charge_percentage_display}. Send ₦{net_amount:,.2f} to {target_bank_account.account_name} ({target_bank_account.account_number})."
+
+                    admin_push_title = (
+                        f"⚠️ Withdrawal Request ({withdrawal_type})"
+                        if withdrawal_type == "immediate"
+                        else "📅 Scheduled Withdrawal"
+                    )
+
+                    send_push_notification(
+                        user=admin_user,
+                        title=admin_push_title,
+                        message=admin_push_message,
+                        data={
+                            "transaction_id": transaction_id,
+                            "user_email": user_locked.email,
+                            "amount": str(amount),
+                            "net_amount": str(net_amount),
+                            "source_account": source_account,
+                            "bank_name": target_bank_account.bank_name,
+                            "withdrawal_type": withdrawal_type,
+                            "type": "admin_withdrawal_alert",
+                        },
+                        notif_type="ADMIN_ALERT",
+                    )
+                    print(f"✅ Admin push notification sent to {admin_user.email}")
+                else:
+                    print(f"⚠️ No push tokens for admin {admin_user.email}")
 
         return Response(
             {
-                "message": "Withdrawal request created and pending approval. Amount deducted from your account.",
+                "message": f"Withdrawal request has been received and will be processed shortly. ₦{net_amount:,.2f} will be processed to your bank account.",
                 "transaction_id": transaction_id,
+                "charge_details": {
+                    "charge_percentage": f"{rate * 100}%",
+                    "charge_amount": float(charge_amount),
+                    "net_amount": float(net_amount),
+                    "total_amount": float(amount),
+                },
             },
             status=status.HTTP_201_CREATED,
         )
@@ -3081,6 +3658,173 @@ def process_withdrawal_to_local_bank(request):
         return Response(
             {
                 "error": "An error occurred while processing your request. Please try again."
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def cancel_scheduled_withdrawal(request):
+    user = request.user
+    data = request.data
+
+    print("✅ STEP 1: Received cancel scheduled withdrawal request:", data)
+
+    transaction_id = data.get("transaction_id")
+
+    if not transaction_id:
+        print("❌ transaction_id not provided.")
+        return Response(
+            {"error": "Transaction ID is required."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        with transaction.atomic():
+            # Lock the withdrawal request and user for update
+            withdrawal_request = WithdrawalsRequestToAdmin.objects.select_for_update().get(
+                transaction_id=transaction_id,
+                user=user,
+                withdrawal_type="scheduled",  # Only allow canceling scheduled withdrawals
+                is_approved=False,  # Only allow canceling pending withdrawals
+            )
+
+            # Lock the user row
+            user_locked = User.objects.select_for_update().get(id=user.id)
+
+            print(
+                f"✅ STEP 2: Found scheduled withdrawal request for transaction {transaction_id}"
+            )
+
+            # Calculate refund amount (99% of original amount)
+            refund_amount = withdrawal_request.amount * Decimal("0.99")
+            service_charge = withdrawal_request.amount * Decimal("0.01")
+
+            print(
+                f"✅ STEP 3: Refund amount: {refund_amount}, Service charge: {service_charge}"
+            )
+
+            # Credit the user's savings account with 99% of the amount
+            if hasattr(user_locked, "savings"):
+                user_locked.savings += refund_amount
+                user_locked.save()
+                print(f"✅ STEP 4: Credited {refund_amount} to user's savings account")
+            else:
+                return Response(
+                    {"error": "User savings account not found."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            # Update the withdrawal request to mark it as cancelled
+            withdrawal_request.is_approved = (
+                True  # Mark as "processed" but in cancelled state
+            )
+            withdrawal_request.save()
+            print("✅ STEP 5: Updated withdrawal request status")
+
+            # ✅ STEP 6: DELETE the original pending transaction instead of updating it
+            try:
+                original_transaction = Transaction.objects.get(
+                    transaction_id=transaction_id, user=user, status="pending"
+                )
+                original_transaction.delete()  # Remove the pending transaction
+                print("✅ STEP 6: Deleted original pending transaction")
+            except Transaction.DoesNotExist:
+                print("⚠️ Original transaction not found, continuing...")
+
+            # ✅ STEP 7: Create a new credit transaction for the 99% refund to savings
+            refund_transaction_id = "".join(
+                random.choices(string.ascii_uppercase + string.digits, k=20)
+            )
+
+            Transaction.objects.create(
+                user=user_locked,
+                transaction_id=refund_transaction_id,
+                transaction_type="credit",
+                status="confirmed",
+                amount=refund_amount,
+                description=f"[Refund] Cancelled Withdrawal",
+                source="SAVINGS",
+            )
+            print("✅ STEP 7: Created refund transaction record")
+
+            # ✅ STEP 8: Create a debit transaction for the 1% service charge
+            if service_charge > 0:
+                service_charge_transaction_id = "".join(
+                    random.choices(string.ascii_uppercase + string.digits, k=20)
+                )
+
+                Transaction.objects.create(
+                    user=user_locked,
+                    transaction_id=service_charge_transaction_id,
+                    transaction_type="debit",
+                    status="confirmed",
+                    amount=service_charge,
+                    description=f"[Charge] Cancelled Withdrawal",
+                    source="SAVINGS",
+                )
+                print("✅ STEP 8: Created service charge transaction record")
+
+            # --- Send email to user ---
+            subject = "Scheduled Withdrawal Cancelled"
+            user_message = (
+                f"Hi {user_locked.first_name},<br><br>"
+                f"Your scheduled withdrawal of ₦{withdrawal_request.amount:,.2f} has been successfully cancelled. "
+                f"₦{refund_amount:,.2f} has been refunded to your Savings account (1% service charge of ₦{service_charge:,.2f} applied).<br><br>"
+                "Thank you for using MyFund.<br><br>"
+            )
+            from_email = "MyFund <info@myfundmobile.com>"
+            recipient_list = [user_locked.email]
+
+            send_generic_email(subject, user_message, from_email, recipient_list)
+            print("✅ STEP 9: Sent cancellation email to user")
+
+            # --- Send push notification to user ---
+            send_push_notification(
+                user=user_locked,
+                title="Withdrawal Cancelled ✅",
+                message="Hi {user_locked.first_name}, your scheduled withdrawal has been cancelled. ₦{:,.2f} has been refunded to your Savings account.".format(
+                    float(refund_amount)
+                ),
+                data={
+                    "refund_amount": str(refund_amount),
+                    "original_amount": str(withdrawal_request.amount),
+                    "service_charge": str(service_charge),
+                    "transaction_id": transaction_id,
+                    "type": "Withdrawal_Cancellation",
+                    "status": "completed",
+                },
+                notif_type="SUCCESS",
+            )
+            print("✅ STEP 10: Sent push notification to user")
+
+        return Response(
+            {
+                "message": "Scheduled withdrawal cancelled successfully.",
+                "refund_amount": float(refund_amount),
+                "service_charge": float(service_charge),
+                "original_amount": float(withdrawal_request.amount),
+                "new_savings_balance": float(user_locked.savings),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    except WithdrawalsRequestToAdmin.DoesNotExist:
+        print("❌ Withdrawal request not found or already processed")
+        return Response(
+            {"error": "Scheduled withdrawal not found or already processed."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+    except Exception as e:
+        print("❌ Exception occurred during cancellation:")
+        print(f"❌ ERROR: {str(e)}")
+        import traceback
+
+        traceback.print_exc()
+        return Response(
+            {
+                "error": "An error occurred while cancelling the scheduled withdrawal. Please try again."
             },
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
@@ -3118,6 +3862,7 @@ def create_paystack_recipient(bank_name, account_number, bank_code):
         error_message = f"An error occurred while creating Paystack recipient: {str(e)}"
         logger.error(error_message)
         return None
+
 
 def make_withdrawal_through_paystack(user, target_bank_account, amount, reference):
     """
@@ -3548,14 +4293,120 @@ def get_all_property_details(request):
         )
 
 
-from .serializers import CustomUserSerializer
-from django.db.models.functions import Coalesce  # Add this import
-from django.db.models import OuterRef, Subquery, DecimalField  # Add this line
-from django.db.models import Sum
-from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
-from django.db.models import Q  # Make sure to import Q
-from .models import TopSaverHistory
+from rest_framework.permissions import IsAuthenticated
+from django.db import transaction
+from django.db.models import Q, OuterRef, Subquery, Sum, DecimalField
+from django.db.models.functions import Coalesce
+from django.utils import timezone
+from rest_framework.response import Response
+from rest_framework import status
+from .models import CustomUser, Transaction, TopSaverHistory
+from .utils import send_push_notification, send_generic_email
+import traceback
+
+from datetime import datetime
+
+
+def get_ordinal_suffix(position):
+    """Returns the ordinal suffix for a given position number"""
+    if 10 <= position % 100 <= 20:
+        return "th"
+    else:
+        return {1: "st", 2: "nd", 3: "rd"}.get(position % 10, "th")
+
+
+def send_top_saver_notification(user, old_rank, new_rank):
+    """
+    Sends tailored push and (optionally) email notifications when a user's Top Saver position changes.
+    Rules:
+      1. Email notifications only for users in the top 10.
+      2. Personalized body (calls user by first name).
+      3. Congratulates when moving up or maintaining top position.
+      4. Encourages when dropping position.
+      5. Includes current month in the message.
+    """
+    month_name = datetime.now().strftime("%B")  # e.g. "October"
+    in_top_3_now = new_rank <= 3
+
+    # Get ordinal suffixes
+    new_rank_str = f"{new_rank}{get_ordinal_suffix(new_rank)}"
+    old_rank_str = f"{old_rank}{get_ordinal_suffix(old_rank)}" if old_rank else None
+
+    # Build dynamic messages
+    if old_rank == 0:
+        # first time getting a position
+        subject = f"Congratulations, You're Now the {new_rank_str} Top Saver! 🎉"
+        push_title = f"You're Now the {new_rank_str} Top Saver! 🎉"
+        push_message = (
+            f"🎉 Congrats {user.first_name}, You're now the {new_rank_str} Top Saver for {month_name} (was {old_rank_str})! "
+            f"Keep growing your funds to move up and earn more as a top saver this {month_name}. Well done! 🚀"
+        )
+        email_message = (
+            f"Hi {user.first_name},<br><br>"
+            f"You're now the {new_rank_str} Top Saver for {month_name} (was {old_rank_str})!<br>"
+            f"Keep growing your funds to move up and earn more as a top saver this {month_name}. Well done!<br><br>"
+            "— The MyFund Team"
+        )
+
+    elif new_rank < old_rank:
+        # Improved position - Always congratulate for moving up
+        subject = f"🎉 Congratulations, You're Now the {new_rank_str} Top Saver! 🎉"
+        push_title = f"You're Now the {new_rank_str} Top Saver! 🎉"
+        push_message = (
+            f"🎉 Congrats {user.first_name}, You're now the {new_rank_str} Top Saver for {month_name} (was {old_rank_str})! "
+            f"Keep growing your funds to move up and earn more as a top saver this {month_name}. Well done! 🚀"
+        )
+        email_message = (
+            f"Hi {user.first_name},<br><br>"
+            f"You're now the {new_rank_str} Top Saver for {month_name} (was {old_rank_str})!<br>"
+            f"Keep growing your funds to move up and earn more as a top saver this {month_name}. Well done! 💫<br><br>"
+            "— The MyFund Team"
+        )
+
+    elif new_rank > old_rank:
+        # Dropped position - No congrats, just notification
+        subject = f"You're Now the {new_rank_str} Top Saver"
+        push_title = f"You're Now the {new_rank_str} Top Saver"
+        push_message = (
+            f"Hi {user.first_name}, You're now the {new_rank_str} Top Saver for {month_name} (was {old_rank_str}). "
+            f"Keep saving to earn more as a top saver this {month_name}. Well done! 💫"
+        )
+        email_message = (
+            f"Hi {user.first_name},<br><br>"
+            f"You're now the {new_rank_str} Top Saver for {month_name} (was {old_rank_str}).<br>"
+            f"Keep saving to earn more as a top saver this {month_name}. Well done! 💫<br><br>"
+            "— The MyFund Team"
+        )
+
+    else:
+        # same rank, no change
+        return
+
+    # Send push notification to everyone whose position changed
+    send_push_notification(
+        user=user,
+        title=push_title,
+        message=push_message,
+        data={"old_position": old_rank, "new_position": new_rank, "type": "TopSaver"},
+        notif_type="SYSTEM",
+    )
+
+    # Only email if user is currently in Top 10
+    if in_top_3_now:
+        send_generic_email(
+            subject,
+            email_message,
+            "MyFund <info@myfundmobile.com>",
+            [user.email],
+        )
+
+
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from django.utils import timezone
+from django.core.cache import cache
 
 
 @api_view(["GET"])
@@ -3565,98 +4416,85 @@ def get_top_savers(request):
     current_month = now.month
     current_year = now.year
 
-    with transaction.atomic():
-        # Delete existing top savers for the current month/year
-        TopSaverHistory.objects.filter(month=current_month, year=current_year).delete()
+    # Use cache lock to ensure only one update runs at a time
+    cache_key = f"top_savers_update_{current_year}_{current_month}"
+    lock_key = f"top_savers_lock_{current_year}_{current_month}"
 
-        # 1. Update user savings totals for current month
-        CustomUser.objects.all().update(
-            total_savings_and_investments_this_month=Coalesce(
-                Subquery(
-                    Transaction.objects.filter(
-                        user=OuterRef("pk"),
-                        date__month=current_month,
-                        date__year=current_year,
-                    )
-                    .filter(
-                        Q(status="confirmed", transaction_type="credit")
-                        | Q(
-                            description__in=[
-                                "AutoSave (Confirmed)",
-                                "AutoInvest (Confirmed)",
-                            ]
-                        )
-                    )
-                    .values("user")
-                    .annotate(total=Sum("amount"))
-                    .values("total"),
-                    output_field=DecimalField(),
-                ),
-                0,
-            )
+    # Check if update is already running
+    is_updating = cache.get(lock_key)
+
+    # Check if we have recent data (updated in last 5 minutes)
+    last_update = cache.get(cache_key)
+
+    if not last_update and not is_updating:
+        # Set lock to prevent multiple simultaneous updates
+        cache.set(lock_key, True, timeout=60)  # Lock for 60 seconds max
+
+        # Start background update but don't wait
+        update_top_savers()
+
+        # Mark update time
+        cache.set(cache_key, now.isoformat(), timeout=180)  # Cache for 5 minutes
+
+        logger.info("Started background top savers update")
+
+    # Fetch precomputed top savers (even if stale)
+    top_savers = (
+        TopSaverHistory.objects.filter(month=current_month, year=current_year)
+        .select_related("user")
+        .order_by("rank")[:50]
+    )
+
+    if not top_savers:
+        return Response(
+            {
+                "top_savers": [],
+                "current_user": {},
+                "updating": bool(
+                    is_updating
+                ),  # Let frontend know data is being updated
+            }
         )
 
-        # 2. Get top savers
-        users = CustomUser.objects.filter(
-            total_savings_and_investments_this_month__gt=0
-        ).order_by("-total_savings_and_investments_this_month")
+    top_amount = top_savers[0].total_savings or 1
+    current_user_history = next(
+        (tsh for tsh in top_savers if tsh.user_id == request.user.id), None
+    )
 
-        top_amount = (
-            users.first().total_savings_and_investments_this_month
-            if users.exists()
-            else 1
-        )
-
-        # 3. Build TopSaverHistory records
-        top_savers = []
-        top_history_entries = []
-        rank = 1
-
-        for user in users:
-            amount = user.total_savings_and_investments_this_month
-            percentage = round((amount / top_amount) * 100, 1) if top_amount > 0 else 0
-
-            top_history_entries.append(
-                TopSaverHistory(
-                    month=current_month,
-                    year=current_year,
-                    user=user,
-                    total_savings=amount,
-                    rank=rank,
-                )
-            )
-
-            top_savers.append(
-                {
-                    "id": user.id,
-                    "first_name": user.first_name,
-                    "profile_picture": user.profile_picture,
-                    "email": user.email,
-                    "amount": float(amount),
-                    "percentage": percentage,
-                }
-            )
-
-            rank += 1
-
-        # 4. Bulk insert TopSaverHistory
-        TopSaverHistory.objects.bulk_create(top_history_entries)
-
-    # 5. Prepare response for current user
-    current_user = request.user
-    current_user_amount = current_user.total_savings_and_investments_this_month
-    current_user_percentage = (
-        round((current_user_amount / top_amount) * 100, 1) if top_amount > 0 else 0
+    current_percentage = (
+        round((current_user_history.total_savings / top_amount) * 100, 1)
+        if current_user_history
+        else 0
     )
 
     return Response(
         {
-            "top_savers": top_savers,
+            "top_savers": [
+                {
+                    "id": tsh.user.id,
+                    "first_name": tsh.user.first_name or "",
+                    "email": tsh.user.email or "",
+                    "profile_picture": tsh.user.profile_picture or "",
+                    "amount": float(tsh.total_savings),
+                    "percentage": (
+                        round((tsh.total_savings / top_amount) * 100, 1)
+                        if top_amount > 0
+                        else 0
+                    ),
+                    "rank": tsh.rank,
+                }
+                for tsh in top_savers
+            ],
             "current_user": {
-                "email": current_user.email,
-                "percentage": current_user_percentage,
-                "amount": float(current_user_amount),
+                "id": request.user.id,
+                "first_name": request.user.first_name,
+                "last_name": request.user.last_name,
+                "email": request.user.email,
+                "profile_picture": getattr(request.user.profile_picture, "url", ""),
+                "percentage": current_percentage,
             },
+            "updating": bool(is_updating),  # Indicate if fresh data is being computed
+            "last_update": last_update,  # When data was last refreshed
         }
     )
 
@@ -3703,9 +4541,11 @@ class KYCUpdateView(generics.UpdateAPIView):
         self.perform_update(serializer)
 
         # If not yet approved, mark as pending and notify user by email
-        if user.kyc_status != "Updated!":
-            user.kyc_status = "Pending..."
-            user.save()
+        # Mark KYC as submitted (pending review)
+        if user.kyc_status != "approved":
+            user.kyc_status = "submitted"
+            user.kyc_updated = False
+            user.save(update_fields=["kyc_status", "kyc_updated"])
 
             # 1️⃣ Email to user
             user_subject = "KYC Update Received... 🕒"
@@ -3742,6 +4582,32 @@ class KYCUpdateView(generics.UpdateAPIView):
             admin_subject, admin_message, "MyFund <info@myfundmobile.com>", admin_email
         )
 
+        # 4️⃣ Push notification to admin (KYC alert)
+        admin_emails = [
+            "tolulopeahmed@gmail.com",
+            "ceo@myfundmobile.com",
+            "lioness@myfundmobile.com",
+        ]
+
+        admin_users = CustomUser.objects.filter(email__in=admin_emails)
+
+        for admin_user in admin_users:
+            if hasattr(admin_user, "expo_push_tokens") and admin_user.expo_push_tokens:
+                send_push_notification(
+                    user=admin_user,
+                    title=f"🪪 {user.first_name} Submitted KYC",
+                    message=(
+                        f"{user.first_name} {user.last_name} has submitted KYC details.\n"
+                        f"Please check Django admin to review."
+                    ),
+                    data={
+                        "user_email": user.email,
+                        "kyc_status": "pending",
+                        "type": "admin_kyc_alert",
+                    },
+                    notif_type="ADMIN_ALERT",
+                )
+
         return Response(serializer.data)
 
 
@@ -3754,19 +4620,25 @@ class GetKYCStatusView(APIView):
     def get(self, request):
         user = request.user
         kyc_status = user.kyc_status
+        kyc_reason = user.kyc_rejection_reason  # <-- include this
         message = ""
 
         if kyc_status is None:
             message = "You haven't started your KYC process."
-        elif kyc_status == "Pending...":
-            message = "KYC status is pending approval."
-        elif kyc_status == "Updated!":
-            message = "KYC status has been updated."
-        elif kyc_status == "Failed":
-            message = "KYC update has been rejected."
+        elif kyc_status == "submitted":
+            message = "Your KYC is pending review."
+        elif kyc_status == "approved":
+            message = "Your KYC has been approved."
+        elif kyc_status == "rejected":
+            message = "Your KYC was rejected."
 
         return Response(
-            {"kycStatus": kyc_status, "message": message}, status=status.HTTP_200_OK
+            {
+                "kycStatus": kyc_status,
+                "message": message,
+                "kycRejectionReason": kyc_reason,  # <-- add here
+            },
+            status=status.HTTP_200_OK,
         )
 
 
@@ -3903,12 +4775,39 @@ def create_notification(user, notification_type, title, message, data=None):
     return notification
 
 
+import threading
+
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def initiate_bank_transfer(request):
+    transaction_id = None  # ✅ Initialize to avoid UnboundLocalError
+
     try:
         user = request.user
-        amount = request.data.get("amount")
+        amount_raw = request.data.get("amount")
+
+        # ✅ Validate and convert amount to Decimal
+        if not amount_raw:
+            return Response(
+                {"error": "Amount is required"}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            # ✅ Convert to Decimal properly
+            amount = Decimal(str(amount_raw))
+
+            # Validate amount is positive
+            if amount < 100:
+                return Response(
+                    {"error": "Amount must be greater than #100"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        except (InvalidOperation, ValueError, TypeError):
+            return Response(
+                {"error": "Invalid amount format. Please enter a valid number."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         # ✅ Generate a unique transaction ID
         transaction_id = str(uuid.uuid4())[:10]
@@ -3926,21 +4825,21 @@ def initiate_bank_transfer(request):
         transaction = Transaction.objects.create(
             user=user,
             referral_email=referral_email,
-            transaction_type="credit",  # Mark as credit since it's a deposit
+            transaction_type="credit",
             status="pending",
             amount=amount,
             date=current_datetime.date(),
             time=current_datetime.time(),
             description="QuickSave . . .",
-            transaction_id=transaction_id,  # ✅ Ensure both records share the same transaction_id
+            transaction_id=transaction_id,
         )
-        transaction.save()
+        # ✅ No need to call save() after objects.create()
 
         send_push_notification(
             user=user,
             title="QuickSave Pending ⏳",
-            message="Your transfer of ₦{:,.2f} is pending approval. We'll notify you once it’s confirmed. Thank you for using MyFund.".format(
-                int(amount)
+            message="Your transfer of ₦{:,.2f} is pending approval. We'll notify you once it's confirmed. Thank you for using MyFund.".format(
+                float(amount)  # ✅ Convert Decimal to float for formatting
             ),
             data={
                 "amount": str(amount),
@@ -3951,91 +4850,139 @@ def initiate_bank_transfer(request):
             notif_type="PENDING",
         )
 
-        # ✅ Notify Admin
+        # ✅ Notify User via email
+        user_subject = "QuickSave Pending..."
+        user_message = f"Hi {user.first_name},<br><br>Your bank transfer request of ₦{amount} is pending approval. We'll notify you once it's processed.<br><br>Thank you for using MyFund. <br><br>"
+        threading.Thread(
+            target=send_generic_email,
+            args=(user_subject, user_message, "info@myfundmobile.com", [user.email]),
+            kwargs={"use_celery_threshold": 30, "template": "email/email.html"},
+            daemon=True,
+        ).start()
+
+        # ✅ Notify Admin via Email
         subject = f"[CHECK] {user.first_name} Made A QuickSave Request"
         message = f"Hi Admin,<br><br>A bank transfer request of ₦{amount} has been initiated by {user.first_name} {user.last_name} ({user.email}).<br><br>Review here: https://myfundapi-myfund-07ce351a.koyeb.app/admin/<br><br>MyFund Team"
 
-        send_generic_email(
-            subject,
-            message,
-            "MyFund <info@myfundmobile.com>",
-            ["company@myfundmobile.com", "info@myfundmobile.com"],
-        )
+        threading.Thread(
+            target=send_generic_email,
+            args=(
+                subject,
+                message,
+                "info@myfundmobile.com",
+                ["company@myfundmobile.com", "info@myfundmobile.com"],
+            ),
+            kwargs={"use_celery_threshold": 30, "template": "email/email.html"},
+            daemon=True,
+        ).start()
 
-        # ✅ Notify User
-        user_subject = "QuickSave Pending..."
-        user_message = f"Hi {user.first_name},<br><br>Your bank transfer request of ₦{amount} is pending approval. We'll notify you once it's processed.<br><br>Thank you for using MyFund. <br><br>"
-        send_generic_email(
-            user_subject, user_message, "MyFund <info@myfundmobile.com>", [user.email]
-        )
+        # ✅ Notify Admin via Push Notification
+        admin_emails = [
+            "tolulopeahmed@gmail.com",
+            "ceo@myfundmobile.com",
+            "lioness@myfundmobile.com",
+        ]
+        admin_users = CustomUser.objects.filter(email__in=admin_emails)
+
+        for admin_user in admin_users:
+            if hasattr(admin_user, "expo_push_tokens") and admin_user.expo_push_tokens:
+                admin_push_title = f"{user.first_name} initiated a New QuickSave"
+                admin_push_message = (
+                    f"{user.first_name} {user.last_name} ({user.email}) has initiated ₦{amount:,.2f} to Savings Account.\n"
+                    f"Please check to confirm."
+                )
+
+                send_push_notification(
+                    user=admin_user,
+                    title=admin_push_title,
+                    message=admin_push_message,
+                    data={
+                        "transaction_id": transaction_id,
+                        "user_email": user.email,
+                        "amount": str(amount),
+                        "type": "QuickSave",
+                        "status": "pending",
+                        "source": "admin_quicksave_alert",
+                    },
+                    notif_type="ADMIN_ALERT",
+                )
+                print(
+                    f"✅ Admin QuickSave push notification sent to {admin_user.email}"
+                )
+            else:
+                print(f"⚠️ No push tokens for admin {admin_user.email}")
 
         return Response(
-            {"message": "Bank transfer request created and pending admin approval"},
+            {
+                "message": "Bank transfer request created and pending admin approval",
+                "amount": str(amount),
+            },
             status=status.HTTP_201_CREATED,
         )
 
     except Exception as e:
-        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            {"error": str(e), "transaction_id": transaction_id},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+
+import threading
+from decimal import Decimal, InvalidOperation
+from uuid import uuid4
+from django.utils import timezone
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+
+from .models import CustomUser, Transaction, InvestTransferRequest
+from .utils import send_push_notification, send_generic_email
 
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def initiate_invest_transfer(request):
+    transaction_id = None
+
     try:
         user = request.user
-        amount = request.data.get("amount")
+        amount_raw = request.data.get("amount")
 
-        # Send an email to admin
-        subject = f"[CHECK] {user.first_name} Made A QuickInvest Request"
-        message = f"Hi Admin, <br><br>An investment transfer request of ₦{amount} has just been initiated by {user.first_name} ({user.email}).<br><br>Please log in to the admin panel for review.<br><br>"
-        from_email = "MyFund <info@myfundmobile.com>"
-        recipient_list = [
-            "company@myfundmobile.com",
-            "info@myfundmobile.com",
-        ]  # Replace with the admin's email address
+        # Validate input
+        if not amount_raw:
+            return Response(
+                {"error": "Amount is required"},
+                status=400,
+            )
 
-        send_generic_email(subject, message, from_email, recipient_list)
+        try:
+            amount = Decimal(str(amount_raw))
+            if amount < 100000:
+                return Response(
+                    {"error": "Amount must be greater than ₦100,000"},
+                    status=400,
+                )
+        except (InvalidOperation, ValueError, TypeError):
+            return Response(
+                {"error": "Invalid amount format"},
+                status=400,
+            )
 
-        # Send a pending invest email to the user
-        user_subject = "QuickInvest Pending..."
-        user_message = f"Hi {user.first_name},<br><br>Your investment transfer request of ₦{amount} is pending approval. We will notify you once it's processed. <br><br>Thank you for using MyFund. <br><br>"
-        user_email = user.email
+        # Generate transaction ID
+        transaction_id = str(uuid4())[:10]
 
-        send_generic_email(user_subject, user_message, from_email, [user_email])
-
-        send_push_notification(
+        # Create InvestTransferRequest
+        InvestTransferRequest.objects.create(
             user=user,
-            title="QuickInvest Pending ⏳",
-            message="Your transfer of ₦{:,.2f} is pending approval. We'll notify you once it’s confirmed.".format(
-                int(amount)
-            ),
-            data={
-                "amount": str(amount),
-                "transaction_id": transaction_id,
-                "type": "QuickInvest",
-                "status": "pending",
-            },
-            notif_type="PENDING",
+            amount=amount,
+            transaction_id=transaction_id,
         )
 
-        # Create a pending transaction for the user with date and time
+        # Create Transaction record
         current_datetime = timezone.now()
         referral_email = user.referral.email if user.referral else None
 
-        # ✅ Generate a unique transaction ID
-        transaction_id = str(uuid.uuid4())[:10]
-
-        # ✅ Create an InvestTransferRequest record with transaction_id
-        invest_transfer_request = InvestTransferRequest(
-            user=user, amount=amount, transaction_id=transaction_id
-        )
-        invest_transfer_request.save()
-
-        # ✅ Create a pending transaction for the user
-        current_datetime = timezone.now()
-        referral_email = user.referral.email if user.referral else None
-
-        transaction = Transaction.objects.create(
+        Transaction.objects.create(
             user=user,
             referral_email=referral_email,
             transaction_type="credit",
@@ -4044,18 +4991,101 @@ def initiate_invest_transfer(request):
             date=current_datetime.date(),
             time=current_datetime.time(),
             description="QuickInvest . . .",
-            transaction_id=transaction_id,  # ✅ Ensure both records share the same transaction_id
+            transaction_id=transaction_id,
         )
-        transaction.save()
 
+        # 🔔 USER PUSH
+        send_push_notification(
+            user=user,
+            title="QuickInvest Pending ⏳",
+            message=f"Your investment of ₦{amount:,.2f} is pending approval.",
+            data={
+                "transaction_id": transaction_id,
+                "amount": str(amount),
+                "type": "QuickInvest",
+                "status": "pending",
+            },
+            notif_type="PENDING",
+        )
+
+        # 📧 USER EMAIL — THREADING
+        user_subject = "QuickInvest Pending..."
+        user_message = (
+            f"Hi {user.first_name},<br><br>"
+            f"Your investment transfer of ₦{amount:,.2f} is pending approval.<br><br>"
+            "Thank you for using MyFund."
+        )
+        threading.Thread(
+            target=send_generic_email,
+            args=(user_subject, user_message, "info@myfundmobile.com", [user.email]),
+            kwargs={"use_celery_threshold": 30, "template": "email/email.html"},
+            daemon=True,
+        ).start()
+
+        # 📧 ADMIN EMAIL — THREADING
+        admin_subject = f"[CHECK] {user.first_name} Made A QuickInvest Request"
+        admin_message = (
+            f"Hi Admin,<br><br>"
+            f"{user.first_name} {user.last_name} ({user.email}) initiated "
+            f"₦{amount:,.2f} QuickInvest.<br><br>"
+            f"Review here: https://myfundapi-myfund-07ce351a.koyeb.app/admin/<br><br>"
+            "MyFund Team"
+        )
+        threading.Thread(
+            target=send_generic_email,
+            args=(
+                admin_subject,
+                admin_message,
+                "info@myfundmobile.com",
+                ["company@myfundmobile.com", "info@myfundmobile.com"],
+            ),
+            kwargs={"use_celery_threshold": 30, "template": "email/email.html"},
+            daemon=True,
+        ).start()
+
+        # 🔔 ADMIN PUSH
+        admin_emails = [
+            "tolulopeahmed@gmail.com",
+            "ceo@myfundmobile.com",
+            "janet.adegbenro@gmail.com",
+        ]
+        admin_users = CustomUser.objects.filter(email__in=admin_emails)
+
+        for admin in admin_users:
+            if hasattr(admin, "expo_push_tokens") and admin.expo_push_tokens:
+                admin_push_title = f"{user.first_name} initiated a New QuickInvest"
+                admin_push_message = (
+                    f"{user.first_name} {user.last_name} ({user.email}) initiated "
+                    f"₦{amount:,.2f} to Investment Account.\nPlease check to confirm."
+                )
+                send_push_notification(
+                    user=admin,
+                    title=admin_push_title,
+                    message=admin_push_message,
+                    data={
+                        "transaction_id": transaction_id,
+                        "user_email": user.email,
+                        "type": "QuickInvest",
+                        "status": "pending",
+                        "source": "admin_quickinvest_alert",
+                    },
+                    notif_type="ADMIN_ALERT",
+                )
+
+        # ✅ RETURN RESPONSE
         return Response(
             {
-                "message": "Investment transfer request created and pending admin approval"
+                "message": "QuickInvest request created and pending approval",
+                "amount": str(amount),
             },
-            status=status.HTTP_201_CREATED,
+            status=201,
         )
+
     except Exception as e:
-        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            {"error": str(e), "transaction_id": transaction_id},
+            status=400,
+        )
 
 
 @api_view(["GET"])
@@ -4423,7 +5453,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
         )
 
         from_email = "MyFund <info@myfundmobile.com>"
-        recipient_list = ["care@myfundmobile.com", "sammy@myfundmobile.com"]
+        recipient_list = ["webhook@myfundmobile.com", "sammy@myfundmobile.com"]
 
         send_generic_email(subject, message, from_email, recipient_list)
 
@@ -4544,7 +5574,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             user=user,
                             title="AutoSave Successful! ✅",
                             message=(
-                                f"Your scheduled AutoSave of ₦{Decimal(amount):,.2f} "
+                                f"Hi {user.first_name}, your scheduled AutoSave of ₦{Decimal(amount):,.2f} "
                                 f"({autosave.frequency.capitalize()}) has just been deposited into your savings."
                             ),
                             data={
@@ -5052,21 +6082,13 @@ def resubscribe_user(request):
     return Response({"error": "Email not provided"}, status=status.HTTP_400_BAD_REQUEST)
 
 
-import logging
-import time
-from smtplib import SMTPException
-from django.core.mail import EmailMultiAlternatives, get_connection
-from django.core.exceptions import ObjectDoesNotExist
-from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
 from rest_framework import status
-from .models import CustomUser  # Adjust import based on your project structure
-
-# Email batching settings
-BATCH_SIZE = 15  # Lower batch size for stability
-EMAILS_PER_HOUR_LIMIT = 200  # Adjust based on SMTP limits
-TIME_BETWEEN_BATCHES = 3600 / EMAILS_PER_HOUR_LIMIT  # Approx. 18s per batch
+from django.conf import settings
+from .utils import send_generic_email
+import logging
 
 logger = logging.getLogger(__name__)
 
@@ -5074,114 +6096,140 @@ logger = logging.getLogger(__name__)
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def send_email(request):
-    sender = settings.DEFAULT_FROM_EMAIL
-    subject = request.data.get("subject")
-    body = request.data.get("body")
-    recipients = request.data.get("recipients", [])
+    """
+    Admin sends email via Unlayer modal.
+    """
+    logger.info(f"📧 API send_email called by user: {request.user.email}")
 
-    if not all([sender, subject, body, recipients]):
-        return Response(
-            {"message": "All fields are required."}, status=status.HTTP_400_BAD_REQUEST
-        )
+    try:
+        sender = settings.DEFAULT_FROM_EMAIL
+        subject = request.data.get("subject", "").strip()
+        body = request.data.get("body", "").strip()  # This is the HTML content
+        recipients = request.data.get("recipients", [])
 
-    failed_recipients = []
-    total_recipients = len(recipients)
-    logger.info(f"Total recipients: {total_recipients}")
-
-    # Reuse SMTP connection for performance
-    connection = get_connection()
-    connection.open()
-
-    for i in range(0, total_recipients, BATCH_SIZE):
-        batch_recipients = recipients[i : i + BATCH_SIZE]
         logger.info(
-            f"Processing batch {i // BATCH_SIZE + 1} with {len(batch_recipients)} recipients"
+            f"📧 Request data - Subject: '{subject}', Body length: {len(body)}, Recipients: {len(recipients)}"
         )
 
-        email_objects = []
-        for recipient_email in batch_recipients:
-            try:
-                recipient_user = CustomUser.objects.filter(
-                    email=recipient_email
-                ).first()
+        # Validation
+        if not subject or not body:
+            logger.warning("Validation failed: Subject or body missing")
+            return Response(
+                {"message": "Subject and body are required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-                # Personalization placeholders
-                placeholder_map = {
-                    "{first_name}": (
-                        recipient_user.first_name if recipient_user else "User"
-                    ),
-                    "{last_name}": recipient_user.last_name if recipient_user else "",
-                    "{email}": recipient_email,
-                    "{wallet}": str(recipient_user.wallet) if recipient_user else "0",
-                    "{savings}": str(recipient_user.savings) if recipient_user else "0",
-                    "{investment}": (
-                        str(recipient_user.investment) if recipient_user else "0"
-                    ),
-                    "{properties}": (
-                        str(recipient_user.properties) if recipient_user else "0"
-                    ),
-                    "{full_name}": (
-                        recipient_user.full_name if recipient_user else "User"
-                    ),
-                    "{total_savings_and_investments_this_month}": (
-                        str(recipient_user.total_savings_and_investments_this_month)
-                        if recipient_user
-                        else "0"
-                    ),
-                    "{top_saver_percentage}": (
-                        str(recipient_user.top_saver_percentage)
-                        if recipient_user
-                        else "0"
-                    ),
-                }
+        if not recipients or not isinstance(recipients, list):
+            logger.warning("Validation failed: Recipients not a list or empty")
+            return Response(
+                {"message": "Recipients must be a non-empty list."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-                personalized_subject = subject
-                personalized_body = body
-                for placeholder, value in placeholder_map.items():
-                    personalized_subject = personalized_subject.replace(
-                        placeholder, value
-                    )
-                    personalized_body = personalized_body.replace(placeholder, value)
+        # Clean recipients
+        cleaned_recipients = []
+        for email in recipients:
+            if isinstance(email, str):
+                email = email.strip().lower()
+                if email:
+                    cleaned_recipients.append(email)
 
-                # Create Email Object (Batched BCC Sending)
-                email = EmailMultiAlternatives(
-                    subject=personalized_subject,
-                    body=personalized_body,
-                    from_email=settings.DEFAULT_FROM_EMAIL,
-                    bcc=[recipient_email],  # Use BCC to reduce load
-                    connection=connection,  # Use the same connection for all emails
-                )
-                email.attach_alternative(personalized_body, "text/html")
-                email_objects.append(email)
+        if not cleaned_recipients:
+            logger.warning("Validation failed: No valid recipients after cleaning")
+            return Response(
+                {"message": "No valid recipients provided."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-            except Exception as e:
-                logger.error(f"Error preparing email for {recipient_email}: {str(e)}")
-                failed_recipients.append(recipient_email)
+        logger.info(f"📧 Cleaned recipients: {cleaned_recipients}")
 
-        # Send batched emails together
-        try:
-            if email_objects:
-                connection.send_messages(email_objects)
-                logger.info(f"Batch {i // BATCH_SIZE + 1} sent successfully")
-        except SMTPException as e:
-            logger.error(f"SMTP error sending batch {i // BATCH_SIZE + 1}: {str(e)}")
-            failed_recipients.extend(batch_recipients)
+        # Use the smart email sender - FIXED PARAMETER NAME
+        logger.info("📧 Calling send_generic_email...")
+        result = send_generic_email(
+            subject=subject,
+            message=body,  # CHANGED FROM 'message' TO ''
+            recipient_list=cleaned_recipients,
+            from_email=sender,
+            use_celery_threshold=30,
+        )
 
-        time.sleep(TIME_BETWEEN_BATCHES)  # Controlled delay between batches
+        logger.info(f"📧 send_generic_email result: {result}")
 
-    connection.close()  # Close SMTP connection
+        # Handle the result based on status
+        if result["status"] == "completed":
+            logger.info(f"✅ Email send completed: {result['sent']} sent")
+            return Response(
+                {
+                    "status": "success",
+                    "message": f"Email sent successfully to {result['sent']} recipients!",
+                    "sent": result["sent"],
+                    "total": len(cleaned_recipients),
+                    "method": "inline",
+                },
+                status=status.HTTP_200_OK,
+            )
 
-    if failed_recipients:
+        elif result["status"] == "partial":
+            logger.warning(
+                f"⚠️ Partial email send: {result['sent']} sent, {result['failed']} failed"
+            )
+            return Response(
+                {
+                    "status": "partial",
+                    "message": f"Email sent to {result['sent']} recipients, {result['failed']} failed.",
+                    "sent": result["sent"],
+                    "failed": result["failed"],
+                    "total": len(cleaned_recipients),
+                    "failed_emails": result.get("failed_emails", []),
+                    "method": "inline",
+                },
+                status=status.HTTP_207_MULTI_STATUS,
+            )
+
+        elif result["status"] == "queued":
+            logger.info(f"📦 Email queued to Celery: {result['total']} recipients")
+            return Response(
+                {
+                    "status": "queued",
+                    "message": f"Emails queued for {result['total']} recipients. Processing in background.",
+                    "total": result["total"],
+                    "method": "celery_batch",
+                },
+                status=status.HTTP_202_ACCEPTED,
+            )
+
+        elif result["status"] == "error":
+            logger.error(
+                f"❌ Email send error: {result.get('reason', 'Unknown error')}"
+            )
+            return Response(
+                {
+                    "status": "error",
+                    "message": result.get("reason", "Failed to process email request"),
+                    "details": result,
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        else:
+            logger.error(f"❌ Unknown status from send_generic_email: {result}")
+            return Response(
+                {
+                    "status": "error",
+                    "message": "Unexpected response from email service",
+                    "details": result,
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    except Exception as e:
+        logger.error(f"❌ UNHANDLED EXCEPTION in send_email API: {e}", exc_info=True)
         return Response(
             {
-                "message": "Emails sent with some failures.",
-                "failed_recipients": failed_recipients,
+                "status": "error",
+                "message": f"Internal server error: {str(e)}",
             },
-            status=status.HTTP_207_MULTI_STATUS,
-        )
-    else:
-        return Response(
-            {"message": "All emails sent successfully!"}, status=status.HTTP_200_OK
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
 
@@ -5202,13 +6250,11 @@ def save_template(request):
         last_update = data.get("lastUpdate")
 
         # Create or update template
-        template, created = EmailTemplate.objects.update_or_create(
+        template = EmailTemplate.objects.create(
             title=title,
-            defaults={
-                "design_body": design_body,
-                "design_html": design_html,
-                "last_update": last_update,
-            },
+            design_body=design_body,
+            design_html=design_html,
+            last_update=last_update,
         )
 
         serializer = EmailTemplateSerializer(template)
@@ -5252,39 +6298,38 @@ def delete_template(request, template_id):
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
-@require_http_methods(["GET"])
+@api_view(["GET"])
 def get_template(request, template_id):
     try:
         template = EmailTemplate.objects.get(id=template_id)
-        return JsonResponse(
-            {
-                "id": template.id,
-                "title": template.title,
-                "design": template.design_body,  # JSON version
-                "design_html": template.design_html,  # HTML version
-            },
-            safe=False,
-        )
+        serializer = EmailTemplateSerializer(template)
+        return Response(serializer.data, status=status.HTTP_200_OK)
     except EmailTemplate.DoesNotExist:
-        return JsonResponse({"error": "Template not found"}, status=404)
+        return Response(
+            {"error": "Template not found"}, status=status.HTTP_404_NOT_FOUND
+        )
 
 
 @csrf_exempt
-@require_http_methods(["POST"])
+@api_view(["PUT"])
 def update_template(request, template_id):
     try:
         template = EmailTemplate.objects.get(id=template_id)
-        data = json.loads(request.body)
-        template.title = data.get("title", template.title)
-        template.design_body = data.get(
-            "design", template.design_body
-        )  # Update this field
+
+        template.title = request.data.get("title", template.title)
+        template.design_body = request.data.get("designBody", template.design_body)
+        template.design_html = request.data.get("designHTML", template.design_html)
+        template.last_update = request.data.get("lastUpdate", template.last_update)
+
         template.save()
-        return JsonResponse({"message": "Template updated successfully"})
+
+        return Response(
+            EmailTemplateSerializer(template).data,
+            status=status.HTTP_200_OK,
+        )
+
     except EmailTemplate.DoesNotExist:
-        return JsonResponse({"error": "Template not found"}, status=404)
-    except json.JSONDecodeError:
-        return JsonResponse({"error": "Invalid JSON"}, status=400)
+        return Response({"error": "Template not found"}, status=404)
 
 
 @api_view(["GET"])
@@ -5324,6 +6369,7 @@ from .serializers import GroupSerializer
 from .serializers import ContributionSerializer
 from django.utils import timezone
 from django.core.exceptions import ValidationError
+from dateutil.relativedelta import relativedelta
 
 # Group Related APIs
 
@@ -5350,8 +6396,10 @@ def create_groupbuy(request):
         group_type = data["group_type"].lower()
         if group_type not in allowed_group_types:
             return JsonResponse(
-                {"error": f'Invalid groupType. Must be one of: {", ".join(allowed_group_types)}'},
-                status=400
+                {
+                    "error": f'Invalid groupType. Must be one of: {", ".join(allowed_group_types)}'
+                },
+                status=400,
             )
 
         # Step 3: Ensure the property exists
@@ -5360,21 +6408,49 @@ def create_groupbuy(request):
         except Property.DoesNotExist:
             return JsonResponse({"error": "Invalid Property ID"}, status=400)
 
-        # Step 4: Check property availability
+        # Step 4: Validate minimum_contribution against property price
+        try:
+            minimum_contribution = float(data["minimum_contribution"])
+        except (ValueError, TypeError):
+            return JsonResponse(
+                {"error": "Invalid minimum_contribution. Must be a valid number."},
+                status=400,
+            )
+
+        if minimum_contribution > property_obj.price:
+            return JsonResponse(
+                {
+                    "error": f"Minimum contribution (₦{minimum_contribution:,.2f}) cannot exceed the property price (₦{property_obj.price:,.2f})."
+                },
+                status=400,
+            )
+
+        if minimum_contribution <= 0:
+            return JsonResponse(
+                {"error": "Minimum contribution must be greater than zero."},
+                status=400,
+            )
+
+        # Step 5: Check property availability
         if property_obj.units_available < 1:
             return JsonResponse(
                 {"error": "The group limit for this property has already been reached"},
                 status=400,
             )
 
-        # Step 5: Handle deadline logic
+        # Step 6: Handle deadline logic
         now = timezone.now()
-        max_deadline = now + timedelta(days=90)
 
+        # Max deadline: exactly 3 months from now
+        max_deadline = now + relativedelta(months=3)
+
+        # Parse user-provided deadline (if any)
         if "deadline" in data and data["deadline"]:
             try:
-                deadline = datetime.strptime(data["deadline"], "%Y-%m-%d")
-                deadline = timezone.make_aware(deadline)
+                # Parse string to naive datetime first
+                deadline_naive = datetime.strptime(data["deadline"], "%Y-%m-%d")
+                # Make it timezone-aware
+                deadline = timezone.make_aware(deadline_naive)
             except ValueError:
                 return JsonResponse(
                     {"error": "Invalid deadline format. Use YYYY-MM-DD."}, status=400
@@ -5382,19 +6458,19 @@ def create_groupbuy(request):
 
             if deadline < now:
                 return JsonResponse(
-                    {"error": "Deadline cannot be in the past."},
-                    status=400
+                    {"error": "Deadline cannot be in the past."}, status=400
                 )
 
-            if deadline > max_deadline:
+            if deadline.date() < max_deadline.date():
                 return JsonResponse(
-                    {"error": "Deadline cannot be more than 3 months from today."},
-                    status=400
+                    {"error": "Deadline must be at least 3 months from today."},
+                    status=400,
                 )
         else:
-            deadline = max_deadline  # Default deadline to 3 months from now
+            # Default deadline to exactly 3 months from now
+            deadline = max_deadline
 
-        # Step 6: Create the group
+        # Step 7: Create the group
         group = Group.objects.create(
             property_id=data["property_id"],
             created_by=request.user,
@@ -5405,12 +6481,12 @@ def create_groupbuy(request):
             group_type=group_type,
             deadline=deadline,
         )
-        
+
         # Reserve a unit
         property_obj.units_available -= 1
         property_obj.save()
 
-        # Step 7: Handle invited users (if group is private)
+        # Step 8: Handle invited users (if group is private)
         warning_message = None
         if group_type == "private":
             invited_emails = data.get("invited_users", [])
@@ -5429,15 +6505,21 @@ def create_groupbuy(request):
                         invalid_emails.append(email)
 
                 if cleaned_emails:
-                    invited_users = get_user_model().objects.filter(email__in=cleaned_emails)
+                    invited_users = get_user_model().objects.filter(
+                        email__in=cleaned_emails
+                    )
 
                     if invited_users.exists():
                         # Add users to group
                         group.invited_users.add(*invited_users)
 
                         # Send invitation emails
-                        subject = "You're Invited to Join a GroupBuy Investment Opportunity"
-                        join_link = f"https://myfundmobile.com/groupbuy-invite/{group.id}"
+                        subject = (
+                            "You're Invited to Join a GroupBuy Investment Opportunity"
+                        )
+                        join_link = (
+                            f"https://myfundmobile.com/groupbuy-invite/{group.id}"
+                        )
 
                         message = (
                             f"Hello,<br><br>"
@@ -5456,7 +6538,9 @@ def create_groupbuy(request):
                         recipient_list = [user.email for user in invited_users]
 
                         try:
-                            send_generic_email(subject, message, from_email, recipient_list)
+                            send_generic_email(
+                                subject, message, from_email, recipient_list
+                            )
                         except Exception as e:
                             return Response(
                                 {"error": f"Failed to send email: {str(e)}"},
@@ -5464,19 +6548,21 @@ def create_groupbuy(request):
                             )
 
                     else:
-                        warning_message = "No registered users found for the provided emails."
+                        warning_message = (
+                            "No registered users found for the provided emails."
+                        )
 
                 if invalid_emails:
                     warning_message = f"Some emails were invalid and skipped: {', '.join(invalid_emails)}"
 
-        # Step 8: Return the serialized group
+        # Step 9: Return the serialized group
         serializer = GroupSerializer(group)
         response_data = serializer.data
         response_data = dict(serializer.data)
         if warning_message:
             response_data["warning"] = warning_message
         return Response(response_data, status=status.HTTP_201_CREATED)
-    
+
 
 # GET /groups/:propertyId - Retrieve group buy details for a specific property
 @api_view(["GET"])
@@ -5495,15 +6581,15 @@ def get_groupbuy_by_property(request, property_id):
         return Response(
             {"message": "Group not found."}, status=status.HTTP_404_NOT_FOUND
         )
-        
+
+
 # GET /groupbuys/ - Retrieve group buy details for a specific property
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_active_public_groupbuys(request):
     try:
         groups = Group.objects.filter(
-            status__in=["Active", "active"],
-            group_type="public"
+            status__in=["Active", "active"], group_type="public"
         )
         if groups.exists():
             serializer = GroupSerializer(groups, many=True)
@@ -5515,7 +6601,7 @@ def get_active_public_groupbuys(request):
     except Exception as e:
         return Response(
             {"message": f"An error occurred: {str(e)}"},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
 
@@ -5523,16 +6609,16 @@ def get_active_public_groupbuys(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def join_groupbuy(request, group_id):
-    try:    
+    try:
         user = request.user
-        
+
         # Validate group_id is a valid UUID
         try:
             group_uuid = uuid.UUID(str(group_id))
         except ValueError:
             return Response(
                 {"message": "Invalid group ID. It must be a valid UUID."},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         # Attempt to retrieve the group
@@ -5540,29 +6626,28 @@ def join_groupbuy(request, group_id):
             group = Group.objects.get(id=group_uuid)
         except Group.DoesNotExist:
             return Response(
-                {"message": "Group not found."},
-                status=status.HTTP_404_NOT_FOUND
+                {"message": "Group not found."}, status=status.HTTP_404_NOT_FOUND
             )
 
         # ✅ Ensure group status is Active
         if group.status.lower() != "active":
             return Response(
                 {"message": "You can only join groups that are currently active."},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         # Optional: Deadline check
         if group.deadline < timezone.now():
             return Response(
                 {"message": "You cannot join this group. The deadline has passed."},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         # Check if user already joined
         if group.contributors.filter(id=user.id).exists():
             return Response(
                 {"message": "You have already joined this group."},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         # Check access for private groups
@@ -5570,18 +6655,18 @@ def join_groupbuy(request, group_id):
             if not group.invited_users.filter(id=user.id).exists():
                 return Response(
                     {"message": "You are not invited to join this private group."},
-                    status=status.HTTP_403_FORBIDDEN
+                    status=status.HTTP_403_FORBIDDEN,
                 )
 
         # Proceed to contribution logic
         return contribute_to_groupbuy(request._request, group_id)
-        
+
     except Exception as e:
         logger.error(f"Unexpected error in join_group: {e}")
 
         return Response(
             {"message": "An unexpected error occurred. Please try again later."},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
 
@@ -5631,21 +6716,28 @@ def invite_to_groupbuy(request, group_id):
 
             if not cleaned_emails:
                 return Response(
-                    {"message": "All provided emails are invalid.", "invalidEmails": invalid_emails},
+                    {
+                        "message": "All provided emails are invalid.",
+                        "invalidEmails": invalid_emails,
+                    },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
             if invalid_emails:
                 # Continue but warn about invalids
-                warning_message = f"Some emails were invalid and skipped: {', '.join(invalid_emails)}"
+                warning_message = (
+                    f"Some emails were invalid and skipped: {', '.join(invalid_emails)}"
+                )
             else:
                 warning_message = None
-            
+
             # Step 5: Fetch users with those emails
             invited_users = get_user_model().objects.filter(email__in=cleaned_emails)
             if not invited_users.exists():
                 return Response(
-                    {"message": "No registered users found for the provided email addresses."},
+                    {
+                        "message": "No registered users found for the provided email addresses."
+                    },
                     status=status.HTTP_404_NOT_FOUND,
                 )
 
@@ -5693,7 +6785,7 @@ def invite_to_groupbuy(request, group_id):
 
     except Group.DoesNotExist:
         return Response(
-            {"message": "Group not found."}, status=status.HTTP_404_NOT_FOUND
+            {"message": "GroupBuy not found."}, status=status.HTTP_404_NOT_FOUND
         )
 
 
@@ -5719,7 +6811,22 @@ def leave_groupbuy(request, group_id):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # 3. Get all confirmed contributions
+        # 3. Get reason from request data
+        reason = request.data.get("reason")
+        additional_details = request.data.get("additional_details", "")
+
+        # Validate reason
+        valid_reasons = [choice[0] for choice in GroupDeparture.REASON_CHOICES]
+        if not reason or reason not in valid_reasons:
+            return Response(
+                {
+                    "message": "Please provide a valid reason for leaving.",
+                    "valid_reasons": valid_reasons,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # 4. Get all confirmed contributions
         contributions = Contribution.objects.filter(
             group=group, user=user, payment_status="Confirmed"
         )
@@ -5746,15 +6853,24 @@ def leave_groupbuy(request, group_id):
 
         user.save()
 
-        # 4. Update group total_raised
+        # 5. Update group total_raised
         group.total_raised -= total_refund
         group.save()
 
-        # 5. Remove user from contributors list
+        # 6. Remove user from contributors list
         group.contributors.remove(user)
 
-        # 6. Remove or update GroupOwnership
+        # 7. Remove or update GroupOwnership
         GroupOwnership.objects.filter(group=group, user=user).delete()
+
+        # 8. Record the departure with reason
+        GroupDeparture.objects.create(
+            group=group,
+            user=user,
+            reason=reason,
+            additional_details=additional_details,
+            refunded_amount=total_refund,
+        )
 
         return Response(
             {
@@ -5766,7 +6882,7 @@ def leave_groupbuy(request, group_id):
 
     except Group.DoesNotExist:
         return Response(
-            {"message": "Group not found."},
+            {"message": "GroupBuy not found."},
             status=status.HTTP_404_NOT_FOUND,
         )
 
@@ -5783,7 +6899,7 @@ def get_user_groupbuys(request):
         groups = Group.objects.filter(
             Q(created_by=user) | Q(contributors=user)
         ).distinct()
-        
+
         groups_list = list(groups)
 
         # Serialize the group data
@@ -5794,8 +6910,7 @@ def get_user_groupbuys(request):
 
     except get_user_model().DoesNotExist:
         return Response(
-            {"message": "User not found."},
-            status=status.HTTP_404_NOT_FOUND
+            {"message": "User not found."}, status=status.HTTP_404_NOT_FOUND
         )
 
 
@@ -5825,7 +6940,10 @@ def contribute_to_groupbuy(request, group_id):
             )
 
         # 4. Check private group invitation
-        if group.group_type == "private" and not group.invited_users.filter(id=request.user.id).exists():
+        if (
+            group.group_type == "private"
+            and not group.invited_users.filter(id=request.user.id).exists()
+        ):
             return Response(
                 {"message": "You are not an invited contributor to this group."},
                 status=status.HTTP_403_FORBIDDEN,
@@ -5837,26 +6955,38 @@ def contribute_to_groupbuy(request, group_id):
         try:
             amount = Decimal(request.data.get("amount"))
         except (TypeError, InvalidOperation):
-            return Response({"message": "Invalid or missing amount."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"message": "Invalid or missing amount."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         if amount <= 0:
-            return Response({"message": "Amount must be greater than zero."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"message": "Amount must be greater than zero."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         source = request.data.get("source")
         if not source:
-            return Response({"message": "Source is required."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"message": "Source is required."}, status=status.HTTP_400_BAD_REQUEST
+            )
 
         source = source.capitalize()
         accepted_sources = ["Savings", "Investment", "Wallet"]
         if source not in accepted_sources:
             return Response(
-                {"message": f"Invalid source. Accepted values are: {', '.join(accepted_sources)}."},
+                {
+                    "message": f"Invalid source. Accepted values are: {', '.join(accepted_sources)}."
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
         if amount < group.minimum_contribution:
             return Response(
-                {"message": f"The minimum contribution for this group is {group.minimum_contribution}."},
+                {
+                    "message": f"The minimum contribution for this group is {group.minimum_contribution}."
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -5905,17 +7035,23 @@ def contribute_to_groupbuy(request, group_id):
         # 12. Ownership calculation
         ownership_obj, _ = GroupOwnership.objects.get_or_create(group=group, user=user)
         ownership_obj.total_contributed += amount
-        ownership_obj.ownership_percentage = (ownership_obj.total_contributed / group.goal_amount) * 100
+        ownership_obj.ownership_percentage = (
+            ownership_obj.total_contributed / group.goal_amount
+        ) * 100
         ownership_obj.save()
 
         # 13. Add user to contributors
         if not group.contributors.filter(id=user.id).exists():
             group.contributors.add(user)
 
-        return Response({"message": "Contribution successful."}, status=status.HTTP_201_CREATED)
+        return Response(
+            {"message": "Contribution successful."}, status=status.HTTP_201_CREATED
+        )
 
     except Group.DoesNotExist:
-        return Response({"message": "Group not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(
+            {"message": "Group not found."}, status=status.HTTP_404_NOT_FOUND
+        )
 
 
 # GET /groups/:groupId/contributions - Fetch all contributions for a group
@@ -5926,25 +7062,28 @@ def get_groupbuy_contributions(request, group_id):
         group = Group.objects.get(id=group_id)
 
         # Get all ownership records for this group
-        ownerships = GroupOwnership.objects.filter(group=group).select_related('user')
+        ownerships = GroupOwnership.objects.filter(group=group).select_related("user")
 
         contributions_list = []
 
         for ownership in ownerships:
             user = ownership.user
-            contributions_list.append({
-                "user_id": user.id,
-                "email": user.email,
-                "total_contributed": float(ownership.total_contributed),
-                "ownership_percentage": round(float(ownership.ownership_percentage), 2),
-            })
+            contributions_list.append(
+                {
+                    "user_id": user.id,
+                    "email": user.email,
+                    "total_contributed": float(ownership.total_contributed),
+                    "ownership_percentage": round(
+                        float(ownership.ownership_percentage), 2
+                    ),
+                }
+            )
 
         return Response(contributions_list, status=status.HTTP_200_OK)
 
     except Group.DoesNotExist:
         return Response(
-            {"message": "Group not found."},
-            status=status.HTTP_404_NOT_FOUND
+            {"message": "Group not found."}, status=status.HTTP_404_NOT_FOUND
         )
 
 
@@ -6487,115 +7626,131 @@ def delete_savings_goal(request, id):
         )
 
 
-from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIView
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIView
+from rest_framework.exceptions import ValidationError
 from django.shortcuts import get_object_or_404
-from .serializers import TargetSavingsSerializer
-from .models import TargetSavings, Transaction
 from django.utils import timezone
+from django.conf import settings
+from django.db.models import Sum
 from decimal import Decimal
 import uuid
-from django.conf import settings
-from rest_framework.exceptions import ValidationError
-from django.db.models import Sum
+from .models import TargetSavings, Transaction, TargetSavingsCompletion
+from .serializers import TargetSavingsSerializer
 from .utils import send_generic_email, send_push_notification
-from .models import TargetSavingsCompletion
+from .permissions import IsNotBannedUser  # Add this import
 
 
 class TargetSavingsListCreate(ListCreateAPIView):
     serializer_class = TargetSavingsSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsNotBannedUser]
 
     def perform_create(self, serializer):
-        user = self.request.user
-        data = serializer.validated_data
+        logger = logging.getLogger(__name__)
 
-        frequency = data.get("frequency", "").upper()
-        if frequency not in dict(TargetSavings.FREQUENCY_CHOICES):
-            raise ValidationError({"detail": "Invalid frequency"})
+        with transaction.atomic():
 
-        amount = Decimal(str(data.get("monthly_payment", 0)))
-        if amount <= 0:
-            raise ValidationError({"monthly_payment": "Monthly payment must be positive"})
+            user = CustomUser.objects.select_for_update().get(id=self.request.user.id)
 
-        # ✅ Safely get funding_source
-        funding_source = data.get("funding_source")
-        if not funding_source:
-            raise ValidationError({"funding_source": "This field is required."})
+            if user.is_banned:
+                raise ValidationError(
+                    {"detail": "Account is banned. Cannot create target savings."}
+                )
 
-        if funding_source not in ("SAVINGS", "INVESTMENT"):
-            raise ValidationError({"funding_source": "Invalid funding source"})
+            if not user.is_active:
+                raise ValidationError(
+                    {"detail": "Account is inactive. Cannot create target savings."}
+                )
 
-        if funding_source == "SAVINGS" and user.savings < amount:
-            raise ValidationError({"detail": "Insufficient savings balance"})
-        if funding_source == "INVESTMENT" and user.investment < amount:
-            raise ValidationError({"detail": "Insufficient investment balance"})
+            data = serializer.validated_data
+            frequency = data["frequency"].upper()
+
+            if frequency not in dict(TargetSavings.FREQUENCY_CHOICES):
+                raise ValidationError({"detail": "Invalid frequency"})
+
+            amount = Decimal(str(data["monthly_payment"]))
+            funding_source = data["funding_source"]
+
+            balance = getattr(user, funding_source.lower())
+
+            if balance < amount:
+                raise ValidationError(
+                    {"detail": "Insufficient confirmed balance to create target"}
+                )
+
+            setattr(user, funding_source.lower(), balance - amount)
+            user.save(update_fields=[funding_source.lower()])
+
+            instance = serializer.save(
+                user=user,
+                current_amount=amount,
+                start_date=timezone.now().date(),
+            )
+
+            instance.next_deduction = instance.calculate_next_deduction_time()
+            instance.save(update_fields=["next_deduction"])
+
+            Transaction.objects.create(
+                user=user,
+                transaction_type="credit",
+                status="confirmed",
+                amount=amount,
+                description=f"{instance.name}",
+                service_charge=0,
+                total_amount=amount,
+                target_savings=instance,
+                source=funding_source,
+                transaction_id=f"[{instance.id}]-{uuid.uuid4().hex[:12]}_INITIAL",
+            )
+
+        # 🔔 OUTSIDE TRANSACTION
+        progress = (instance.current_amount / instance.target_amount) * 100
+        progress_str = f"{progress:.1f}%"
 
         try:
-            with transaction.atomic():
-                locked_user = get_object_or_404(
-                    get_user_model().objects.select_for_update(), pk=user.pk
-                )
+            subject = f"{instance.name} Target Savings is LIVE! 🚀"
 
-                source_field = funding_source.lower()
-                current_balance = getattr(locked_user, source_field)
+            message = (
+                f"Hi {user.first_name},\n\n"
+                f'Your target savings plan "{instance.name}" has been successfully created.\n\n'
+                f"Initial Amount: ₦{amount:,.2f}\n"
+                f"Funding Frequency: {frequency.lower()}\n"
+                f"Progress: {progress_str}\n\n"
+                f"Consistency is key — you’re on the right path 💪"
+            )
 
-                if current_balance < amount:
-                    raise ValidationError({"detail": f"Insufficient {source_field} balance"})
+            context = {
+                "user": user,
+                "message": message,
+                "plan_name": instance.name,
+                "amount": f"₦{amount:,.2f}",
+                "frequency": frequency.lower(),
+                "progress": progress_str,
+            }
 
-                get_user_model().objects.filter(pk=locked_user.pk).update(
-                    **{source_field: F(source_field) - amount}
-                )
+            send_generic_email(
+                subject=subject,
+                message=context,
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[user.email],
+                template="email/email.html",
+            )
 
-                locked_user.refresh_from_db()
-
-                instance = serializer.save(
-                    user=locked_user,
-                    current_amount=amount,
-                    start_date=timezone.now().date(),
-                )
-                instance.next_deduction = instance.calculate_next_deduction_time()
-                instance.save()
-
-                Transaction.objects.create(
-                    user=user,
-                    transaction_type="credit",
-                    status="confirmed",
-                    amount=amount,
-                    description=f"{instance.name}",
-                    service_charge=0,
-                    total_amount=amount,
-                    target_savings=instance,
-                    source=funding_source,
-                    transaction_id=f"[{instance.id}]-{uuid.uuid4().hex[:12]}_INITIAL",
-                )
-
-                subject = f"Target Savings '{instance.name}' is Live!"
-                message = (
-                    f"Hi {user.first_name},<br><br>"
-                    f"Well done! Your new Target Savings plan '{instance.name}' has been set up "
-                    f"with a ₦{amount:,} initial deposit. Automatic {frequency.lower()} deductions "
-                    f"will begin according to your schedule.<br><br>"
-                    "Keep an eye on your progress and watch your savings grow! 🥂<br><br>"
-                    "Thanks for choosing MyFund!<br>"
-                )
-                from_email = settings.DEFAULT_FROM_EMAIL
-                recipient_list = [user.email]
-                send_generic_email(subject, message, from_email, recipient_list)
-
-                send_push_notification(
-                    user,
-                    title="🎉 New Target Savings Plan Created",
-                    message=f"Your plan '{instance.name}' has been activated with ₦{amount:,}!",
-                    data={"target_savings_id": instance.id},
-                    notif_type="TARGET_SAVINGS",
-                )
-        except ValidationError:
-            raise
         except Exception as e:
-            logger.exception("Error creating target savings plan")
+            logger.error(f"Target savings email failed for {user.email}: {str(e)}")
+
+        send_push_notification(
+            user,
+            title=f"🎉 {instance.name} Plan Created!",
+            message=(
+                f"Your {instance.name} Target Savings plan is live with ₦{amount:,.2f}. "
+                f"You're {progress_str} closer to your goal 🚀"
+            ),
+            data={"target_savings_id": instance.id},
+            notif_type="TARGET_SAVINGS",
+        )
 
     def get_queryset(self):
         return (
@@ -6615,10 +7770,8 @@ def target_savings_total(request):
         TargetSavings.objects.filter(
             user=request.user,
             is_cancelled=False,
-            is_active=True  # Only count active targets
-        ).aggregate(
-            total=Sum("current_amount")
-        )["total"]
+            is_active=True,  # Only count active targets
+        ).aggregate(total=Sum("current_amount"))["total"]
         or 0
     )
     return Response({"total_target_savings": float(total)})
@@ -6630,26 +7783,30 @@ def completed_target_savings(request):
     """Get user's completed or failed target savings"""
     from .models import TargetSavingsCompletion
 
-    completed = TargetSavingsCompletion.objects.filter(
-        user=request.user
-    ).select_related("target_savings").order_by("-completed_date")
+    completed = (
+        TargetSavingsCompletion.objects.filter(user=request.user)
+        .select_related("target_savings")
+        .order_by("-completed_date")
+    )
 
     data = []
     for completion in completed:
-        data.append({
-            "id": completion.id,
-            "name": completion.target_savings.name,
-            "target_amount": completion.target_savings.target_amount,
-            "completed_amount": completion.completed_amount,
-            "bonus_amount": completion.bonus_amount,
-            "total_amount": completion.total_amount,
-            "completed_date": completion.completed_date,
-            "was_on_time": completion.was_on_time,
-            "category": completion.target_savings.category,
-            "start_date": completion.target_savings.start_date,
-            "end_date": completion.target_savings.end_date,
-            "status": completion.status,  # NEW FIELD in response
-        })
+        data.append(
+            {
+                "id": completion.id,
+                "name": completion.target_savings.name,
+                "target_amount": completion.target_savings.target_amount,
+                "completed_amount": completion.completed_amount,
+                "bonus_amount": completion.bonus_amount,
+                "total_amount": completion.total_amount,
+                "completed_date": completion.completed_date,
+                "was_on_time": completion.was_on_time,
+                "category": completion.target_savings.category,
+                "start_date": completion.target_savings.start_date,
+                "end_date": completion.target_savings.end_date,
+                "status": completion.status,  # NEW FIELD in response
+            }
+        )
 
     return Response({"completed_targets": data})
 
@@ -6688,8 +7845,6 @@ class TargetSavingsRetrieveUpdateDestroy(RetrieveUpdateDestroyAPIView):
         )
 
 
-# In your cancel_target_saving view, update the refund logic to respect funding_source:
-
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def cancel_target_saving(request, pk):
@@ -6698,19 +7853,18 @@ def cancel_target_saving(request, pk):
     if target.is_cancelled:
         return Response({"detail": "Plan already cancelled"}, status=400)
 
-    # Calculate return amount with 1% charge
     return_amount = target.current_amount * Decimal("0.99")
     charge = target.current_amount - return_amount
 
-    # Update user balance based on funding source
     user = request.user
+
     if target.funding_source == "SAVINGS":
         user.savings += return_amount
     elif target.funding_source == "INVESTMENT":
         user.investment += return_amount
+
     user.save()
 
-    # Create transaction
     Transaction.objects.create(
         user=user,
         transaction_type="debit",
@@ -6723,15 +7877,52 @@ def cancel_target_saving(request, pk):
         transaction_id=f"[{target.id}]-{uuid.uuid4().hex[:12]}_CANCELLED",
     )
 
-    # Notifications (email + push) remain the same
+    try:
+        subject = f"{target.name} Target Savings Cancelled ❌"
 
-    # Update target savings
+        message = (
+            f"Hi {user.first_name},\n\n"
+            f'Your target savings plan "{target.name}" has been cancelled.\n\n'
+            f"Refunded Amount: ₦{return_amount:,.2f}\n"
+            f"Cancellation Charge: ₦{charge:,.2f}\n\n"
+            f"The funds have been returned to your {target.funding_source.lower()} balance."
+        )
+
+        context = {
+            "user": user,
+            "message": message,
+            "plan_name": target.name,
+            "refunded_amount": f"₦{return_amount:,.2f}",
+            "cancellation_charge": f"₦{charge:,.2f}",
+        }
+
+        send_generic_email(
+            subject=subject,
+            message=context,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[user.email],
+            template="email/email.html",
+        )
+
+    except Exception as e:
+        logger.error(f"Target savings cancel email failed for {user.email}: {str(e)}")
+
+    send_push_notification(
+        user,
+        title=f"❌ {target.name} Plan Cancelled",
+        message=(
+            f"Your {target.name} Target Savings plan has been cancelled. "
+            f"₦{return_amount:,.2f} has been refunded."
+        ),
+        data={"target_savings_id": target.id},
+        notif_type="TARGET_SAVINGS",
+    )
+
     target.is_active = False
     target.is_cancelled = True
     target.cancellation_charge = charge
     target.save()
 
-    # 🔴 Create CANCELLED completion record
     TargetSavingsCompletion.objects.create(
         user=user,
         target_savings=target,
@@ -6743,12 +7934,16 @@ def cancel_target_saving(request, pk):
         status="CANCELLED",
     )
 
-    return Response({
-        "status": "cancelled",
-        "returned_amount": float(return_amount),
-        "charge": float(charge),
-        "new_balance": float(user.savings if target.funding_source == 'SAVINGS' else user.investment),
-    })
+    return Response(
+        {
+            "status": "cancelled",
+            "returned_amount": float(return_amount),
+            "charge": float(charge),
+            "new_balance": float(
+                user.savings if target.funding_source == "SAVINGS" else user.investment
+            ),
+        }
+    )
 
 
 from rest_framework import generics
@@ -6915,27 +8110,25 @@ class TopReferralsAPIView(APIView):
                 f"Great news! Your referral rank improved from #{old_rank} to #{new_rank}. "
                 "Keep referring friends to climb higher!<br><br>"
                 "Thank you for using MyFund.<br><br>"
-                "MyFund\nSave, Buy Properties, Earn Rent<br>"
-                "www.myfundmobile.com<br>"
-                "13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+                "MyFund"
             )
             push_title = f"🎉 Rank Improved! Now #{new_rank}"
             push_message = (
                 f"Hi {user.first_name}, you moved up to #{new_rank} (from #{old_rank}). "
-                "Keep referring to earn more rewards!"
+                "Keep referring to earn more referral rewards!"
             )
         else:
             subject = f"📉 Your MyFund Rank Changed to #{new_rank}"
             message = (
                 f"Hi {user.first_name},<br><br>"
                 f"Your referral rank changed from #{old_rank} to #{new_rank}. "
-                "Share your referral link to move back up!<br><br>"
+                "Share your referral link to move back up and earn more referral bonus!<br><br>"
                 "Thank you for using MyFund.<br><br>"
             )
-            push_title = f"📉 Rank Changed to #{new_rank}"
+            push_title = f"📉 Referral Rank Changed to #{new_rank}"
             push_message = (
                 f"Hi {user.first_name}, your rank is now #{new_rank} (was #{old_rank}). "
-                "Refer more friends to climb higher!"
+                "Refer more friends to climb higher and earn more referral bonus!"
             )
 
         # Send email
@@ -7047,3 +8240,100 @@ class TopReferralsAPIView(APIView):
                 "current_user": current_user_stats,
             }
         )
+
+
+# views.py - Add this view
+from django.utils import timezone
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+from .utils import get_user_roi_summary  # Add this import
+
+
+@api_view(["GET"])
+def get_roi_summary(request):
+    """Get ROI summary for current month"""
+    today = timezone.now().date()
+    month_start = today.replace(day=1)
+
+    summary = get_user_roi_summary(request.user, month_start, today)
+
+    return Response(
+        {
+            "success": True,
+            "data": {
+                "period": f"{month_start.strftime('%B %Y')}",
+                "savings_roi": summary["savings_roi"],
+                "investment_roi": summary["investment_roi"],
+                "total_roi": summary["total_roi"],
+                "days_count": summary["days_count"],
+            },
+        }
+    )
+
+
+# views.py
+from datetime import date
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from django.utils import timezone
+from django.db.models import Sum
+from .models import DailyROIAccrual
+from .serializers import DailyROISerializer
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def earnings_summary(request):
+    """Return user's total earnings, current quarter ROI, and next payout date"""
+    user = request.user
+    today = timezone.now().date()
+
+    # Determine current quarter
+    if today.month in [1, 2, 3]:
+        quarter_start = date(today.year, 1, 1)
+        quarter_end = date(today.year, 3, 31)
+        next_payout = date(today.year, 4, 1)
+    elif today.month in [4, 5, 6]:
+        quarter_start = date(today.year, 4, 1)
+        quarter_end = date(today.year, 6, 30)
+        next_payout = date(today.year, 7, 1)
+    elif today.month in [7, 8, 9]:
+        quarter_start = date(today.year, 7, 1)
+        quarter_end = date(today.year, 9, 30)
+        next_payout = date(today.year, 10, 1)
+    else:
+        quarter_start = date(today.year, 10, 1)
+        quarter_end = date(today.year, 12, 31)
+        next_payout = date(today.year + 1, 1, 1)
+
+    # Total all-time ROI
+    total_earnings = (
+        DailyROIAccrual.objects.filter(user=user)
+        .aggregate(total=Sum("total_roi"))
+        .get("total")
+        or 0
+    )
+
+    # ROI for current quarter
+    quarterly_earnings = (
+        DailyROIAccrual.objects.filter(
+            user=user, date__range=[quarter_start, quarter_end]
+        )
+        .aggregate(total=Sum("total_roi"))
+        .get("total")
+        or 0
+    )
+
+    # Recent 30 daily ROI records
+    recent_roi = DailyROIAccrual.objects.filter(user=user).order_by("-date")[:30]
+    roi_data = DailyROISerializer(recent_roi, many=True).data
+
+    data = {
+        "total_earnings": float(total_earnings),
+        "quarterly_earnings": float(quarterly_earnings),
+        "next_payout_date": next_payout.isoformat(),
+        "daily_records": roi_data,
+    }
+
+    return Response(data)
