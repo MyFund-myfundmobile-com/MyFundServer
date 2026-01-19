@@ -2,13 +2,71 @@
 
 from django.urls import path
 from . import admin_views
+
 urlpatterns = [
+    # ========================================================================
     # PRIORITY 1: Critical Dashboard Data
+    # ========================================================================
     path('dashboard/summary', 
          admin_views.dashboard_summary, 
          name='admin_dashboard_summary'),
     
+    # ========================================================================
+    # GROWTH METRICS
+    # ========================================================================
+    path('metrics/monthly-active-savers', 
+         admin_views.monthly_active_savers, 
+         name='admin_monthly_active_savers'),
+    
+    path('metrics/activated-users', 
+         admin_views.activated_users_percentage, 
+         name='admin_activated_users'),
+    
+    path('metrics/retention-rate', 
+         admin_views.retention_rate, 
+         name='admin_retention_rate'),
+    
+    path('metrics/investors-vs-savers', 
+         admin_views.active_investors_vs_savers, 
+         name='admin_investors_vs_savers'),
+    
+    path('metrics/transaction-success-rate', 
+         admin_views.transaction_success_rate, 
+         name='admin_transaction_success_rate'),
+    
+    # ========================================================================
+    # GROWTH MULTIPLIERS
+    # ========================================================================
+    path('multipliers/top-referrals', 
+         admin_views.top_referrals, 
+         name='admin_top_referrals'),
+    
+    path('multipliers/top-influencers', 
+         admin_views.top_influencers, 
+         name='admin_top_influencers'),
+    
+    path('multipliers/groupbuys', 
+         admin_views.groupbuy_metrics, 
+         name='admin_groupbuy_metrics'),
+    
+    # ========================================================================
+    # FINANCIAL STRENGTH & MOMENTUM
+    # ========================================================================
+    path('financial/fum', 
+         admin_views.funds_under_management, 
+         name='admin_funds_under_management'),
+    
+    path('financial/net-fum-change', 
+         admin_views.net_fum_change, 
+         name='admin_net_fum_change'),
+    
+    path('financial/churn-rate', 
+         admin_views.churn_rate, 
+         name='admin_churn_rate'),
+    
+    # ========================================================================
     # PRIORITY 2: Chart Data
+    # ========================================================================
     path('charts/user-growth', 
          admin_views.user_growth_chart, 
          name='admin_user_growth_chart'),
@@ -29,7 +87,9 @@ urlpatterns = [
          admin_views.financial_history_chart, 
          name='admin_financial_history_chart'),
     
+    # ========================================================================
     # PRIORITY 3: List Data (Paginated)
+    # ========================================================================
     path('users/recent', 
          admin_views.recent_signups, 
          name='admin_recent_signups'),
