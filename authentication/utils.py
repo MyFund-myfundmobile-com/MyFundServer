@@ -800,7 +800,7 @@ def process_scheduled_withdrawal(withdrawal):
             status="confirmed",
             amount=amount,
             source="WALLET",
-            description="Scheduled withdrawal completed – wallet credited",
+            description="Scheduled withdrawal ✅",
         )
 
         # 3️⃣ Mark withdrawal processed
