@@ -1940,6 +1940,10 @@ class Transaction(models.Model):
         db_index=True,
     )
 
+    idempotency_key = models.CharField(
+        max_length=64, unique=True, null=True, blank=True, db_index=True
+    )
+
     service_charge = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
     total_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
     referral_email = models.EmailField(
