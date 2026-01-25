@@ -7905,9 +7905,11 @@ def cancel_target_saving(request, pk):
             status="confirmed",
             amount=refund_amount,
             service_charge=charge,
+            total_amount=refund_amount,  # optional, save() calculates anyway
             target_savings=target,
             source="SAVINGS",
-            idempotency_key=idempotency_key,  # ✅ HERE
+            transaction_id=idempotency_key,  # <-- add this line
+            idempotency_key=idempotency_key,
             description=f"{target.name} Cancelled",
         )
 
