@@ -8202,7 +8202,7 @@ class TargetSavingsListCreate(ListCreateAPIView):
 
             send_generic_email(
                 subject=subject,
-                message=context,
+                message=message,  # ✅ STRING
                 from_email=settings.DEFAULT_FROM_EMAIL,
                 recipient_list=[user.email],
                 template="email/email.html",
