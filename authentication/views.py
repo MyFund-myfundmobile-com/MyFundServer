@@ -8181,104 +8181,95 @@ class TargetSavingsRetrieveUpdateDestroy(RetrieveUpdateDestroyAPIView):
         )
 
 
+from django.db import transaction
+from decimal import Decimal
+
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def cancel_target_saving(request, pk):
-    target = get_object_or_404(TargetSavings, pk=pk, user=request.user)
+    idempotency_key = request.headers.get("X-Idempotency-Key")
 
-    if target.is_cancelled:
-        return Response({"detail": "Plan already cancelled"}, status=400)
+    if not idempotency_key:
+        return Response({"detail": "Missing Idempotency Key"}, status=400)
 
-    return_amount = target.current_amount * Decimal("0.99")
-    charge = target.current_amount - return_amount
+    with transaction.atomic():
 
-    user = request.user
+        # 1️⃣ Lock the target row
+        target = TargetSavings.objects.select_for_update().get(pk=pk, user=request.user)
+        user = CustomUser.objects.select_for_update().get(id=request.user.id)
 
-    if target.funding_source == "SAVINGS":
-        user.savings += return_amount
-    elif target.funding_source == "INVESTMENT":
-        user.investment += return_amount
+        # 2️⃣ Idempotency check (HARD STOP)
+        if Transaction.objects.filter(idempotency_key=idempotency_key).exists():
+            return Response({"detail": "Cancellation already processed"}, status=200)
 
-    user.save()
+        # 3️⃣ State check
+        if target.is_cancelled or not target.is_active:
+            return Response({"detail": "Target already cancelled"}, status=400)
 
-    Transaction.objects.create(
-        user=user,
-        transaction_type="debit",
-        status="confirmed",
-        amount=return_amount,
-        description=f"{target.name} - Cancelled",
-        service_charge=charge,
-        total_amount=return_amount,
-        target_savings=target,
-        transaction_id=f"[{target.id}]-{uuid.uuid4().hex[:12]}_CANCELLED",
-    )
+        refund_amount = (target.current_amount * Decimal("0.99")).quantize(
+            Decimal("0.01")
+        )
+        charge = target.current_amount - refund_amount
 
-    try:
-        subject = f"{target.name} Target Savings Cancelled ❌"
-
-        message = (
-            f"Hi {user.first_name},\n\n"
-            f'Your target savings plan "{target.name}" has been cancelled.\n\n'
-            f"Refunded Amount: ₦{return_amount:,.2f}\n"
-            f"Cancellation Charge: ₦{charge:,.2f}\n\n"
-            f"The funds have been returned to your {target.funding_source.lower()} balance."
+        # 4️⃣ ZERO FIRST (THIS KILLS THE EXPLOIT)
+        target.current_amount = Decimal("0")
+        target.is_active = False
+        target.is_cancelled = True
+        target.cancellation_charge = charge
+        target.save(
+            update_fields=[
+                "current_amount",
+                "is_active",
+                "is_cancelled",
+                "cancellation_charge",
+            ]
         )
 
-        context = {
-            "user": user,
-            "message": message,
-            "plan_name": target.name,
-            "refunded_amount": f"₦{return_amount:,.2f}",
-            "cancellation_charge": f"₦{charge:,.2f}",
-        }
+        # 5️⃣ Credit user AFTER state is locked
+        if target.funding_source == "SAVINGS":
+            user.savings += refund_amount
+            user.save(update_fields=["savings"])
+        else:
+            user.investment += refund_amount
+            user.save(update_fields=["investment"])
 
-        send_generic_email(
-            subject=subject,
-            message=context,
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[user.email],
-            template="email/email.html",
+        # 6️⃣ Ledger entry (CREDIT, not debit)
+        Transaction.objects.create(
+            user=user,
+            transaction_type="credit",
+            status="confirmed",
+            amount=refund_amount,
+            service_charge=charge,
+            total_amount=refund_amount,  # optional, save() calculates anyway
+            target_savings=target,
+            source="SAVINGS",
+            transaction_id=idempotency_key,  # <-- add this line
+            idempotency_key=idempotency_key,
+            description=f"{target.name} Cancelled",
         )
 
-    except Exception as e:
-        logger.error(f"Target savings cancel email failed for {user.email}: {str(e)}")
-
-    send_push_notification(
-        user,
-        title=f"❌ {target.name} Plan Cancelled",
-        message=(
-            f"Your {target.name} Target Savings plan has been cancelled. "
-            f"₦{return_amount:,.2f} has been refunded."
-        ),
-        data={"target_savings_id": target.id},
-        notif_type="TARGET_SAVINGS",
-    )
-
-    target.is_active = False
-    target.is_cancelled = True
-    target.cancellation_charge = charge
-    target.save()
-
-    TargetSavingsCompletion.objects.create(
-        user=user,
-        target_savings=target,
-        completed_amount=return_amount,
-        bonus_amount=0,
-        total_amount=return_amount,
-        completed_date=timezone.now().date(),
-        was_on_time=False,
-        status="CANCELLED",
-    )
+        # 7️⃣ Completion record (safe now)
+        TargetSavingsCompletion.objects.update_or_create(
+            user=user,
+            target_savings=target,
+            defaults={
+                "completed_amount": refund_amount,
+                "bonus_amount": 0,
+                "total_amount": refund_amount,
+                "completed_date": timezone.now().date(),
+                "was_on_time": False,
+                "status": "CANCELLED",
+            },
+        )
 
     return Response(
         {
             "status": "cancelled",
-            "returned_amount": float(return_amount),
+            "refunded": float(refund_amount),
             "charge": float(charge),
-            "new_balance": float(
-                user.savings if target.funding_source == "SAVINGS" else user.investment
-            ),
-        }
+        },
+        status=200,
     )
 
 
