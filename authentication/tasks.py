@@ -206,13 +206,11 @@ from .utils import get_next_payout_date, calculate_daily_roi, send_push_notifica
 from django.db import transaction as db_transaction
 
 
-# tasks.py - Replace the ROI tasks
 @shared_task
 def calculate_daily_roi_task():
     today = timezone.now().date()
 
-    # Prevent duplicates for the day
-    from .models import ROITransaction  # ← ADD THIS IMPORT
+    from .models import ROITransaction
 
     if ROITransaction.objects.filter(accrued_date=today).exists():
         return "✅ ROI already calculated for today."
