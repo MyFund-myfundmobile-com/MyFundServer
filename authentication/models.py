@@ -1176,22 +1176,89 @@ class BankAccount(models.Model):
         return f"{self.user} - {self.user.email} - {self.bank_name} ({self.account_number})"
 
 
+class CardManager(models.Manager):
+    """Custom manager to exclude cards without valid authorization codes"""
+    
+    def get_queryset(self):
+        """Override to exclude cards without authorization_code"""
+        return super().get_queryset().exclude(
+            models.Q(authorization_code='') | models.Q(authorization_code__isnull=True)
+        )
+    
+    def all_including_invalid(self):
+        """Get all cards including those without authorization codes"""
+        return super().get_queryset()
+
 class Card(models.Model):
     user = models.ForeignKey(
         get_user_model(), on_delete=models.CASCADE, related_name="owned_cards"
     )
-    bank_name = models.CharField(max_length=100)
-    card_number = models.CharField(max_length=19)
-    expiry_date = models.CharField(max_length=5)
-    cvv = models.CharField(max_length=4)
-    pin = models.CharField(max_length=4, default="0000")  # Add the PIN field
+    
+    # Paystack authorization details
+    authorization_code = models.CharField(max_length=255, default="")
+    signature = models.CharField(max_length=255, unique=True, null=True, blank=True)
+    
+    # Card metadata (safe to store)
+    card_type = models.CharField(max_length=50, default="")  # visa, mastercard, verve
+    card_first6_digits = models.CharField(max_length=10, default="")  # First 6 digits
+    card_last4_digits = models.CharField(max_length=4, default="")
+    expiry_month = models.CharField(max_length=2, default="")
+    expiry_year = models.CharField(max_length=4, default="")
+    bank_name = models.CharField(max_length=100, default="")
+    card_brand = models.CharField(max_length=50, default="")  # visa, mastercard, etc.
+    country_code = models.CharField(max_length=10, default="")  # e.g., NG
+    card_owner_name = models.CharField(max_length=255, default="")  # Name on card
+    
+    # Flags
+    reusable = models.BooleanField(default=True)
     is_default = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+    
+    # Timestamps
+    created_at = models.DateTimeField(default=timezone.now)
+
+    # Custom manager
+    objects = CardManager()
+
+    class Meta:
+        ordering = ['-is_default', '-created_at']
+        indexes = [
+            models.Index(fields=['user', 'is_active']),
+            models.Index(fields=['authorization_code']),
+        ]
 
     def __str__(self):
-        card_last_digits = self.card_number[-4:]
-        return (
-            f"{self.user.email}'s Card ending in {card_last_digits} ({self.bank_name})"
-        )
+        return f"{self.user.email}'s {self.card_brand.upper()} •••• {self.card_last4_digits} ({self.bank_name})"
+
+    def save(self, *args, **kwargs):
+        # If this is the first valid card for the user, make it default
+        if not self.pk and self.authorization_code:
+            # Only check for valid cards (with authorization_code)
+            has_valid_cards = Card.objects.filter(user=self.user).exists()
+            if not has_valid_cards:
+                self.is_default = True
+        
+        # If this card is being set as default, unset other defaults
+        if self.is_default and self.authorization_code:
+            Card.objects.filter(user=self.user, is_default=True).exclude(
+                pk=self.pk
+            ).update(is_default=False)
+        
+        super().save(*args, **kwargs)
+    
+    @property
+    def is_valid_for_payment(self):
+        """Check if card has valid authorization code and can be used for payments"""
+        return bool(self.authorization_code and self.authorization_code.strip())
+    
+    def clean(self):
+        """Validate that cards marked as default have authorization codes"""
+        from django.core.exceptions import ValidationError
+        
+        if self.is_default and not self.authorization_code:
+            raise ValidationError(
+                "Cards without authorization codes cannot be set as default"
+            )
 
 
 # Update the models to use settings.AUTH_USER_MODEL

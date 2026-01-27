@@ -433,98 +433,104 @@ from django.core.mail import send_mail
 
 
 class CardSerializer(serializers.ModelSerializer):
-    expiry_date = serializers.CharField(
-        max_length=5
-    )  # Update the field to a CharField for MM/YY input
-
     class Meta:
         model = Card
         fields = (
             "id",
+            "authorization_code",
             "bank_name",
-            "card_number",
-            "expiry_date",
-            "cvv",
-            "pin",
+            "card_type",
+            "card_first6_digits",
+            "card_last4_digits",
+            "card_owner_name",
+            "expiry_month",
+            "expiry_year",
             "is_default",
         )
         read_only_fields = ("id", "is_default")
+        
+    def to_representation(self, instance):
+        """Return None for cards without valid authorization_code so they can be filtered out"""
+        if not instance.authorization_code or instance.authorization_code == "":
+            return None
+        
+        return super().to_representation(instance)
 
-    def create(self, validated_data):
-        unique_reference = str(uuid.uuid4())
-        user = self.context["request"].user
-        pin = validated_data.pop("pin")
-        expiry_date = validated_data.pop(
-            "expiry_date"
-        )  # Get the expiry_date as a string
-        # Parse the expiry_date in MM/YY format
-        expiry_month, expiry_year = expiry_date.split("/")
-        expiry_date = f"{expiry_month}/{expiry_year}"  # Convert to a valid date format
+    # def create(self, validated_data):
+    #     unique_reference = str(uuid.uuid4())
+    #     user = self.context["request"].user
+    #     pin = validated_data.pop("pin")
+    #     expiry_date = validated_data.pop(
+    #         "expiry_date"
+    #     )  # Get the expiry_date as a string
+    #     # Parse the expiry_date in MM/YY format
+    #     expiry_month, expiry_year = expiry_date.split("/")
+    #     expiry_date = f"{expiry_month}/{expiry_year}"  # Convert to a valid date format
 
-        # Verify the card with Paystack
-        paystack_secret_key = os.environ.get(
-            "PAYSTACK_KEY_LIVE",
-            default="  ",
-        )
-        card_number = validated_data["card_number"]
-        cvv = validated_data["cvv"]
-        validated_data["expiry_date"] = expiry_date  # Add this line
-        validated_data["pin"] = pin
+    #     # Verify the card with Paystack
+    #     paystack_secret_key = os.environ.get(
+    #         "PAYSTACK_KEY_LIVE",
+    #         default="  ",
+    #     )
+    #     card_number = validated_data["card_number"]
+    #     cvv = validated_data["cvv"]
+    #     validated_data["expiry_date"] = expiry_date  # Add this line
+    #     validated_data["pin"] = pin
 
-        paystack_url = "https://api.paystack.co/charge"
-        payload = {
-            "card": {
-                "number": card_number,
-                "cvv": cvv,
-                "expiry_month": expiry_month,
-                "expiry_year": expiry_year,
-            },
-            "email": user.email,
-            "amount": 50 * 100,  # Amount in kobo (N50)
-            "reference": unique_reference,  # You need to generate a unique reference
-        }
-        headers = {
-            "Authorization": f"Bearer {paystack_secret_key}",
-            "Content-Type": "application/json",
-        }
+    #     paystack_url = "https://api.paystack.co/charge"
+    #     payload = {
+    #         "card": {
+    #             "number": card_number,
+    #             "cvv": cvv,
+    #             "expiry_month": expiry_month,
+    #             "expiry_year": expiry_year,
+    #         },
+    #         "email": user.email,
+    #         "amount": 50 * 100,  # Amount in kobo (N50)
+    #         "reference": unique_reference,  # You need to generate a unique reference
+    #     }
+    #     headers = {
+    #         "Authorization": f"Bearer {paystack_secret_key}",
+    #         "Content-Type": "application/json",
+    #     }
 
-        print("Payload:", payload)
-        print("Headers:", headers)
-        print("User email:", user.email)
+    #     print("Payload:", payload)
+    #     print("Headers:", headers)
+    #     print("User email:", user.email)
 
-        response = requests.post(paystack_url, json=payload, headers=headers)
-        paystack_response = response.json()
-        print(paystack_response)
+    #     response = requests.post(paystack_url, json=payload, headers=headers)
+    #     paystack_response = response.json()
+    #     print(paystack_response)
 
-        if paystack_response.get("status"):
-            validated_data["user"] = user
-            card = Card.objects.create(**validated_data)
+    #     if paystack_response.get("status"):
+    #         validated_data["user"] = user
+    #         card = Card.objects.create(**validated_data)
 
-            subject = "New Card Added Successfully"
-            message = f"Well done {user.first_name},\n\nYour card has been successfully added to your account. \n\nKeep growing your funds.🥂\n\nMyFund"
-            from_email = "MyFund <info@myfundmobile.com>"
-            recipient_list = [user.email]
+    #         subject = "New Card Added Successfully"
+    #         message = f"Well done {user.first_name},\n\nYour card has been successfully added to your account. \n\nKeep growing your funds.🥂\n\nMyFund"
+    #         from_email = "MyFund <info@myfundmobile.com>"
+    #         recipient_list = [user.email]
 
-            send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+    #         send_mail(subject, message, from_email, recipient_list, fail_silently=False)
 
-            return {
-                "id": card.id,
-                "bank_name": card.bank_name,
-                "card_number": card.card_number,
-                "expiry_date": expiry_date,  # Return the parsed expiry_date
-                "cvv": card.cvv,
-                "pin": card.pin,
-                "is_default": card.is_default,
-                "reference": paystack_response.get("data", {}).get("reference"),
-            }
+    #         return {
+    #             "id": card.id,
+    #             "bank_name": card.bank_name,
+    #             "card_number": card.card_number,
+    #             "expiry_date": expiry_date,  # Return the parsed expiry_date
+    #             "cvv": card.cvv,
+    #             "pin": card.pin,
+    #             "is_default": card.is_default,
+    #             "reference": paystack_response.get("data", {}).get("reference"),
+    #         }
 
-        else:
-            print(
-                "Paystack API Error Response:", paystack_response
-            )  # Add this line for debugging
-            raise serializers.ValidationError(
-                "Failed to verify card and process the payment."
-            )
+    #     else:
+    #         print(
+    #             "Paystack API Error Response:", paystack_response
+    #         )  # Add this line for debugging
+    #         raise serializers.ValidationError(
+    #             "Failed to verify card and process the payment."
+    #         )
 
 
 from .models import Transaction

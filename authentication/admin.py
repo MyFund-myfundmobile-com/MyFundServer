@@ -1441,13 +1441,16 @@ class CardAdmin(admin.ModelAdmin):
         "id",
         "user",
         "bank_name",
-        "card_number",
-        "expiry_date",
-        "cvv",
+        "card_type",
+        "card_first6_digits",
+        "card_last4_digits",
+        "card_brand",
+        "expiry_month",
+        "expiry_year",
         "is_default",
     )
     list_filter = ("is_default",)
-    search_fields = ("user__email", "bank_name", "card_number")  # Add search options
+    search_fields = ("user__email", "bank_name", "card_first6_digits")  # Add search options
 
 
 class AutoSaveAdmin(admin.ModelAdmin):
