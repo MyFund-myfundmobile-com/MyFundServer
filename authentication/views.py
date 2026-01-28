@@ -5823,372 +5823,372 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         except:
                             pass
 
-                # try:
-                #     transaction = Transaction.objects.get(
-                #         transaction_id=reference, amount=amount
-                #     )
-                # except Transaction.DoesNotExist:
-                #     transaction = None
+                try:
+                    transaction = Transaction.objects.get(
+                        transaction_id=reference, amount=amount
+                    )
+                except Transaction.DoesNotExist:
+                    transaction = None
 
-                #     # Send an email of the error that ocurred
-                #     subject = "[Webhook Error] Referrence ID NOT Found in DB"
-                #     message = f"No Transaction found with reference {reference} and amount {amount}."
+                    # Send an email of the error that ocurred
+                    subject = "[Webhook Error] Referrence ID NOT Found in DB"
+                    message = f"No Transaction found with reference {reference} and amount {amount}."
 
-                #     from_email = "MyFund <info@myfundmobile.com>"
-                #     recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
+                    from_email = "MyFund <info@myfundmobile.com>"
+                    recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
 
-                #     pass
+                    pass
 
-                # # Determine if this is an AutoSave/AutoInvest (has plan_code) or QuickSave/QuickInvest (no plan_code)
-                # if plan_code:
-                #     # AutoSave or AutoInvest flow
-                #     autosave = AutoSave.objects.filter(
-                #         user=user, paystack_plan_code=plan_code, active=True
-                #     ).first()
-                #     autoinvest = None
-                #     if not autosave:
-                #         autoinvest = AutoInvest.objects.filter(
-                #             user=user, paystack_plan_code=plan_code, active=True
-                #         ).first()
+                # Determine if this is an AutoSave/AutoInvest (has plan_code) or QuickSave/QuickInvest (no plan_code)
+                if plan_code:
+                    # AutoSave or AutoInvest flow
+                    autosave = AutoSave.objects.filter(
+                        user=user, paystack_plan_code=plan_code, active=True
+                    ).first()
+                    autoinvest = None
+                    if not autosave:
+                        autoinvest = AutoInvest.objects.filter(
+                            user=user, paystack_plan_code=plan_code, active=True
+                        ).first()
 
-                #     target = autosave if autosave else autoinvest
+                    target = autosave if autosave else autoinvest
 
-                #     if not target:
-                #         # Send an email of the error that ocurred
-                #         subject = "[Webhook Error] Referrence ID NOT Found in DB"
-                #         message = f"No Transaction found with reference {reference} and amount {amount}."
+                    if not target:
+                        # Send an email of the error that ocurred
+                        subject = "[Webhook Error] Referrence ID NOT Found in DB"
+                        message = f"No Transaction found with reference {reference} and amount {amount}."
 
-                #         from_email = "MyFund <info@myfundmobile.com>"
-                #         recipient_list = [
-                #             "info@myfundmobile.com",
-                #             "sammy@myfundmobile.com",
-                #         ]
+                        from_email = "MyFund <info@myfundmobile.com>"
+                        recipient_list = [
+                            "info@myfundmobile.com",
+                            "sammy@myfundmobile.com",
+                        ]
 
-                #         return
+                        return
 
-                #     # Create a new confirmed Transaction for this autosave/autoinvest payment
-                #     if autosave:
-                #         # Create transaction if it doesn't exist
-                #         if not transaction:
-                #             transaction = Transaction.objects.create(
-                #                 user=user,
-                #                 transaction_type="credit",
-                #                 status="confirmed",
-                #                 amount=Decimal(amount),
-                #                 description=f"AutoSave ({autosave.frequency.capitalize()})",
-                #                 transaction_id=reference,
-                #                 paystack_auth_code=paystack_auth_code,
-                #             )
+                    # Create a new confirmed Transaction for this autosave/autoinvest payment
+                    if autosave:
+                        # Create transaction if it doesn't exist
+                        if not transaction:
+                            transaction = Transaction.objects.create(
+                                user=user,
+                                transaction_type="credit",
+                                status="confirmed",
+                                amount=Decimal(amount),
+                                description=f"AutoSave ({autosave.frequency.capitalize()})",
+                                transaction_id=reference,
+                                paystack_auth_code=paystack_auth_code,
+                            )
 
-                #         # Atomically update user's savings
-                #         transaction.status = "confirmed"
-                #         transaction.paystack_auth_code = paystack_auth_code
-                #         transaction.save()
+                        # Atomically update user's savings
+                        transaction.status = "confirmed"
+                        transaction.paystack_auth_code = paystack_auth_code
+                        transaction.save()
 
-                #         user.savings += int(amount)
-                #         user.update_total_savings_and_investment_this_month()
-                #         user.save()
+                        user.savings += int(amount)
+                        user.update_total_savings_and_investment_this_month()
+                        user.save()
 
-                #         # Send success email
-                #         subject = f"AutoSave ({autosave.frequency.capitalize()}) Successful! ✅"
-                #         message = (
-                #             f"Well done {user.first_name},<br><br>"
-                #             f"Your AutoSave was successful and ₦{Decimal(amount):,.2f} has been added to your SAVINGS account."
-                #         )
-                #         from_email = "MyFund <info@myfundmobile.com>"
-                #         recipient_list = [user.email]
-                #         send_generic_email(
-                #             subject=subject,
-                #             message=message,
-                #             from_email=from_email,
-                #             recipient_list=recipient_list,
-                #         )
+                        # Send success email
+                        subject = f"AutoSave ({autosave.frequency.capitalize()}) Successful! ✅"
+                        message = (
+                            f"Well done {user.first_name},<br><br>"
+                            f"Your AutoSave was successful and ₦{Decimal(amount):,.2f} has been added to your SAVINGS account."
+                        )
+                        from_email = "MyFund <info@myfundmobile.com>"
+                        recipient_list = [user.email]
+                        send_generic_email(
+                            subject=subject,
+                            message=message,
+                            from_email=from_email,
+                            recipient_list=recipient_list,
+                        )
 
-                #         # Send push notification
-                #         send_push_notification(
-                #             user=user,
-                #             title="AutoSave Successful! ✅",
-                #             message=(
-                #                 f"Hi {user.first_name}, your scheduled AutoSave of ₦{Decimal(amount):,.2f} "
-                #                 f"({autosave.frequency.capitalize()}) has just been deposited into your savings."
-                #             ),
-                #             data={
-                #                 "amount": str(amount),
-                #                 "frequency": autosave.frequency,
-                #                 "transaction_id": reference,
-                #                 "type": "AutoSave",
-                #                 "status": "confirmed",
-                #             },
-                #             notif_type="CREDIT",
-                #         )
+                        # Send push notification
+                        send_push_notification(
+                            user=user,
+                            title="AutoSave Successful! ✅",
+                            message=(
+                                f"Hi {user.first_name}, your scheduled AutoSave of ₦{Decimal(amount):,.2f} "
+                                f"({autosave.frequency.capitalize()}) has just been deposited into your savings."
+                            ),
+                            data={
+                                "amount": str(amount),
+                                "frequency": autosave.frequency,
+                                "transaction_id": reference,
+                                "type": "AutoSave",
+                                "status": "confirmed",
+                            },
+                            notif_type="CREDIT",
+                        )
 
-                #         print("AutoSave Successfully Credited your Account.")
+                        print("AutoSave Successfully Credited your Account.")
 
-                #         return JsonResponse({"status": True}, status=status.HTTP_200_OK)
+                        return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
-                #     elif autoinvest:
-                #         # Create transaction if it doesn't exist
-                #         if not transaction:
-                #             transaction = Transaction.objects.create(
-                #                 user=user,
-                #                 transaction_type="credit",
-                #                 status="confirmed",
-                #                 amount=Decimal(amount),
-                #                 description=f"AutoInvest ({autoinvest.frequency.capitalize()})",
-                #                 transaction_id=reference,
-                #                 paystack_auth_code=paystack_auth_code,
-                #             )
+                    elif autoinvest:
+                        # Create transaction if it doesn't exist
+                        if not transaction:
+                            transaction = Transaction.objects.create(
+                                user=user,
+                                transaction_type="credit",
+                                status="confirmed",
+                                amount=Decimal(amount),
+                                description=f"AutoInvest ({autoinvest.frequency.capitalize()})",
+                                transaction_id=reference,
+                                paystack_auth_code=paystack_auth_code,
+                            )
 
-                #         transaction.status = "confirmed"
-                #         transaction.paystack_auth_code = paystack_auth_code
-                #         transaction.save()
+                        transaction.status = "confirmed"
+                        transaction.paystack_auth_code = paystack_auth_code
+                        transaction.save()
 
-                #         user.investment += int(amount)
-                #         user.update_total_savings_and_investment_this_month()
-                #         user.save()
+                        user.investment += int(amount)
+                        user.update_total_savings_and_investment_this_month()
+                        user.save()
 
-                #         # Send success email
-                #         subject = f"AutoInvest ({autoinvest.frequency.capitalize()}) Successful! 🎉"
-                #         message = (
-                #             f"Well done {user.first_name},<br><br>"
-                #             f"Your AutoInvest was successful and ₦{Decimal(amount):,.2f} "
-                #             f"has been added to your INVESTMENT account."
-                #         )
-                #         from_email = "MyFund <info@myfundmobile.com>"
-                #         recipient_list = [user.email]
-                #         send_generic_email(
-                #             subject=subject,
-                #             message=message,
-                #             from_email=from_email,
-                #             recipient_list=recipient_list,
-                #         )
+                        # Send success email
+                        subject = f"AutoInvest ({autoinvest.frequency.capitalize()}) Successful! 🎉"
+                        message = (
+                            f"Well done {user.first_name},<br><br>"
+                            f"Your AutoInvest was successful and ₦{Decimal(amount):,.2f} "
+                            f"has been added to your INVESTMENT account."
+                        )
+                        from_email = "MyFund <info@myfundmobile.com>"
+                        recipient_list = [user.email]
+                        send_generic_email(
+                            subject=subject,
+                            message=message,
+                            from_email=from_email,
+                            recipient_list=recipient_list,
+                        )
 
-                #         # Send push notification
-                #         send_push_notification(
-                #             user=user,
-                #             title="AutoInvest Successful! 🎉",
-                #             message=(
-                #                 f"Your scheduled AutoInvest of ₦{Decimal(amount):,.2f} "
-                #                 f"({autoinvest.frequency.capitalize()}) has just been deposited into your investments."
-                #             ),
-                #             data={
-                #                 "amount": str(amount),
-                #                 "frequency": autoinvest.frequency,
-                #                 "transaction_id": reference,
-                #                 "type": "AutoInvest",
-                #                 "status": "confirmed",
-                #             },
-                #             notif_type="CREDIT",
-                #         )
+                        # Send push notification
+                        send_push_notification(
+                            user=user,
+                            title="AutoInvest Successful! 🎉",
+                            message=(
+                                f"Your scheduled AutoInvest of ₦{Decimal(amount):,.2f} "
+                                f"({autoinvest.frequency.capitalize()}) has just been deposited into your investments."
+                            ),
+                            data={
+                                "amount": str(amount),
+                                "frequency": autoinvest.frequency,
+                                "transaction_id": reference,
+                                "type": "AutoInvest",
+                                "status": "confirmed",
+                            },
+                            notif_type="CREDIT",
+                        )
 
-                #         print("AutoInvest Successfully Credited your Account.")
+                        print("AutoInvest Successfully Credited your Account.")
 
-                #         return JsonResponse({"status": True}, status=status.HTTP_200_OK)
+                        return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
-                # elif transaction and transaction.description.lower().startswith(
-                #     "quicksave"
-                # ):
+                elif transaction and transaction.description.lower().startswith(
+                    "quicksave"
+                ):
 
-                #     # print("\n====QuickSave Webhook Processing ====\n")
-                #     transaction.description = f"QuickSave ({payment_channel})"
-                #     transaction.status = "confirmed"
-                #     transaction.paystack_auth_code = paystack_auth_code
-                #     transaction.save()
+                    # print("\n====QuickSave Webhook Processing ====\n")
+                    transaction.description = f"QuickSave ({payment_channel})"
+                    transaction.status = "confirmed"
+                    transaction.paystack_auth_code = paystack_auth_code
+                    transaction.save()
 
-                #     user.savings += int(amount)
-                #     # user.confirm_referral_rewards(is_referrer=True)
-                #     user.update_total_savings_and_investment_this_month()
-                #     user.save()
+                    user.savings += int(amount)
+                    # user.confirm_referral_rewards(is_referrer=True)
+                    user.update_total_savings_and_investment_this_month()
+                    user.save()
 
-                #     subject = "QuickSave Successful!"
-                #     message = f"Well done {user.first_name},<br><br>Your <b>QuickSave</b> was successful and <b>₦{amount}</b> has been successfully added to your SAVINGS account. <br><br>Keep growing your funds.🥂<br><br>"
-                #     from_email = "MyFund <info@myfundmobile.com>"
-                #     recipient_list = [user.email]
+                    subject = "QuickSave Successful!"
+                    message = f"Well done {user.first_name},<br><br>Your <b>QuickSave</b> was successful and <b>₦{amount}</b> has been successfully added to your SAVINGS account. <br><br>Keep growing your funds.🥂<br><br>"
+                    from_email = "MyFund <info@myfundmobile.com>"
+                    recipient_list = [user.email]
 
-                #     send_generic_email(
-                #         subject=subject,
-                #         message=message,
-                #         from_email=from_email,
-                #         recipient_list=recipient_list,
-                #     )
+                    send_generic_email(
+                        subject=subject,
+                        message=message,
+                        from_email=from_email,
+                        recipient_list=recipient_list,
+                    )
 
-                #     return JsonResponse(
-                #         {"status": True}, status=status.HTTP_200_OK
-                #     )  # Prevent double processing
+                    return JsonResponse(
+                        {"status": True}, status=status.HTTP_200_OK
+                    )  # Prevent double processing
 
-                # elif transaction and transaction.description.lower().startswith(
-                #     "quickinvest"
-                # ):
-                #     transaction.description = f"QuickInvest ({payment_channel})"
-                #     transaction.status = "confirmed"
-                #     transaction.paystack_auth_code = paystack_auth_code
-                #     transaction.save()
+                elif transaction and transaction.description.lower().startswith(
+                    "quickinvest"
+                ):
+                    transaction.description = f"QuickInvest ({payment_channel})"
+                    transaction.status = "confirmed"
+                    transaction.paystack_auth_code = paystack_auth_code
+                    transaction.save()
 
-                #     user.investment += int(amount)
-                #     # user.confirm_referral_rewards(is_referrer=True)
-                #     user.update_total_savings_and_investment_this_month()
-                #     user.save()
+                    user.investment += int(amount)
+                    # user.confirm_referral_rewards(is_referrer=True)
+                    user.update_total_savings_and_investment_this_month()
+                    user.save()
 
-                #     subject = "QuickInvest Successful!"
-                #     message = f"Well done {user.first_name},<br><br>Your QuickInvest was successful and ₦{amount} has been successfully added to your INVESTMENTS account. <br><br>Keep growing your funds.🥂<br><br>"
-                #     from_email = "MyFund <info@myfundmobile.com>"
-                #     recipient_list = [user.email]
+                    subject = "QuickInvest Successful!"
+                    message = f"Well done {user.first_name},<br><br>Your QuickInvest was successful and ₦{amount} has been successfully added to your INVESTMENTS account. <br><br>Keep growing your funds.🥂<br><br>"
+                    from_email = "MyFund <info@myfundmobile.com>"
+                    recipient_list = [user.email]
 
-                #     send_generic_email(
-                #         subject=subject,
-                #         message=message,
-                #         from_email=from_email,
-                #         recipient_list=recipient_list,
-                #     )
+                    send_generic_email(
+                        subject=subject,
+                        message=message,
+                        from_email=from_email,
+                        recipient_list=recipient_list,
+                    )
 
-                #     print("QuickInvest Successfully Credited your Account.")
+                    print("QuickInvest Successfully Credited your Account.")
 
-                #     return JsonResponse(
-                #         {"status": True}, status=status.HTTP_200_OK
-                #     )  # Prevent double processing
+                    return JsonResponse(
+                        {"status": True}, status=status.HTTP_200_OK
+                    )  # Prevent double processing
 
-                # else:
-                #     # Handle regular transactions
-                #     trans_description = []  # <-- Initialize with a default value
+                else:
+                    # Handle regular transactions
+                    trans_description = []  # <-- Initialize with a default value
 
-                #     if transaction is None:
-                #         trans_description = event["data"]["plan"]["name"].split(" ")
-                #         amount = event["data"]["amount"] / 100
+                    if transaction is None:
+                        trans_description = event["data"]["plan"]["name"].split(" ")
+                        amount = event["data"]["amount"] / 100
 
-                #         Transaction.objects.create(
-                #             user=user,
-                #             transaction_type="credit",
-                #             status="confirmed",
-                #             amount=int(amount),
-                #             description=f"{trans_description[1]}",
-                #             transaction_id=reference,
-                #         )
+                        Transaction.objects.create(
+                            user=user,
+                            transaction_type="credit",
+                            status="confirmed",
+                            amount=int(amount),
+                            description=f"{trans_description[1]}",
+                            transaction_id=reference,
+                        )
 
-                #     # Handle AutoInvest case
-                #     # Safely access trans_description[1] if it's defined and has enough elements
-                #     trans_type = (
-                #         trans_description[1] if len(trans_description) > 1 else ""
-                #     )
+                    # Handle AutoInvest case
+                    # Safely access trans_description[1] if it's defined and has enough elements
+                    trans_type = (
+                        trans_description[1] if len(trans_description) > 1 else ""
+                    )
 
-                #     if (
-                #         trans_type == "AutoInvest"
-                #         or AutoInvest.objects.filter(
-                #             paystack_trans_ref=reference
-                #         ).first()
-                #     ):
-                #         transaction = Transaction.objects.create(
-                #             user=user,
-                #             transaction_type="credit",
-                #             status=(
-                #                 "confirmed"
-                #                 if event["data"]["status"] == "success"
-                #                 else "confirmed"
-                #             ),
-                #             amount=int(amount),
-                #             description=f"{trans_type}",
-                #             transaction_id=event["data"]["reference"],
-                #         )
+                    if (
+                        trans_type == "AutoInvest"
+                        or AutoInvest.objects.filter(
+                            paystack_trans_ref=reference
+                        ).first()
+                    ):
+                        transaction = Transaction.objects.create(
+                            user=user,
+                            transaction_type="credit",
+                            status=(
+                                "confirmed"
+                                if event["data"]["status"] == "success"
+                                else "confirmed"
+                            ),
+                            amount=int(amount),
+                            description=f"{trans_type}",
+                            transaction_id=event["data"]["reference"],
+                        )
 
-                #         user.investment += int(amount)
-                #         # user.confirm_referral_rewards(is_referrer=True)
-                #         user.update_total_savings_and_investment_this_month()
-                #         user.save()
+                        user.investment += int(amount)
+                        # user.confirm_referral_rewards(is_referrer=True)
+                        user.update_total_savings_and_investment_this_month()
+                        user.save()
 
-                # print(f"transaction before update: {transaction}")
+                print(f"transaction before update: {transaction}")
 
-                # # Only update AutoSave transactions if they are not already confirmed
-                # if transaction and transaction.description.lower().startswith(
-                #     "autosave"
-                # ):
-                #     # If already confirmed, do nothing.
-                #     if transaction.status != "confirmed":
-                #         autosave_rec = AutoSave.objects.filter(
-                #             paystack_trans_ref=reference
-                #         ).first()
-                #         # Use the frequency from autosave_rec; if not available, fall back to the frequency sent in the event
-                #         freq = (
-                #             autosave_rec.frequency.capitalize()
-                #             if autosave_rec and autosave_rec.frequency
-                #             else event["data"].get("frequency", "").capitalize()
-                #         )
-                #         transaction.transaction_type = "credit"
-                #         transaction.status = "confirmed"
-                #         transaction.description = f"AutoSave ({freq})"
-                #         transaction.save(
-                #             update_fields=["transaction_type", "status", "description"]
-                #         )
+                # Only update AutoSave transactions if they are not already confirmed
+                if transaction and transaction.description.lower().startswith(
+                    "autosave"
+                ):
+                    # If already confirmed, do nothing.
+                    if transaction.status != "confirmed":
+                        autosave_rec = AutoSave.objects.filter(
+                            paystack_trans_ref=reference
+                        ).first()
+                        # Use the frequency from autosave_rec; if not available, fall back to the frequency sent in the event
+                        freq = (
+                            autosave_rec.frequency.capitalize()
+                            if autosave_rec and autosave_rec.frequency
+                            else event["data"].get("frequency", "").capitalize()
+                        )
+                        transaction.transaction_type = "credit"
+                        transaction.status = "confirmed"
+                        transaction.description = f"AutoSave ({freq})"
+                        transaction.save(
+                            update_fields=["transaction_type", "status", "description"]
+                        )
 
-                #         user.savings += int(amount)
-                #         # user.confirm_referral_rewards(is_referrer=True)
-                #         user.update_total_savings_and_investment_this_month()
-                #         user.save()
-                #     else:
-                #         # Already confirmed: ensure description includes the frequency.
-                #         autosave_rec = AutoSave.objects.filter(
-                #             paystack_trans_ref=reference
-                #         ).first()
-                #         freq = (
-                #             autosave_rec.frequency.capitalize()
-                #             if autosave_rec and autosave_rec.frequency
-                #             else "Confirmed"
-                #         )
-                #         # Force-update description even if status is already confirmed
-                #         transaction.description = f"AutoSave ({freq})"
-                #         transaction.save(update_fields=["description"])
-                # else:
-                #     # For non-AutoSave transactions, follow your existing logic:
-                #     if event["data"]["status"] != "success":
-                #         base_desc = transaction.description.split(" ")[0]
-                #         transaction.status = "failed"
-                #         transaction.description = f"{base_desc} (Failed)"
-                #         transaction.save(update_fields=["status", "description"])
-                #     elif event["data"]["status"] == "success":
-                #         base_desc = transaction.description.split(" ")[0]
-                #         transaction.transaction_type = "credit"
-                #         transaction.status = "confirmed"
-                #         transaction.description = f"{base_desc} (Card)"
-                #         transaction.save(
-                #             update_fields=["transaction_type", "status", "description"]
-                #         )
+                        user.savings += int(amount)
+                        # user.confirm_referral_rewards(is_referrer=True)
+                        user.update_total_savings_and_investment_this_month()
+                        user.save()
+                    else:
+                        # Already confirmed: ensure description includes the frequency.
+                        autosave_rec = AutoSave.objects.filter(
+                            paystack_trans_ref=reference
+                        ).first()
+                        freq = (
+                            autosave_rec.frequency.capitalize()
+                            if autosave_rec and autosave_rec.frequency
+                            else "Confirmed"
+                        )
+                        # Force-update description even if status is already confirmed
+                        transaction.description = f"AutoSave ({freq})"
+                        transaction.save(update_fields=["description"])
+                else:
+                    # For non-AutoSave transactions, follow your existing logic:
+                    if event["data"]["status"] != "success":
+                        base_desc = transaction.description.split(" ")[0]
+                        transaction.status = "failed"
+                        transaction.description = f"{base_desc} (Failed)"
+                        transaction.save(update_fields=["status", "description"])
+                    elif event["data"]["status"] == "success":
+                        base_desc = transaction.description.split(" ")[0]
+                        transaction.transaction_type = "credit"
+                        transaction.status = "confirmed"
+                        transaction.description = f"{base_desc} (Card)"
+                        transaction.save(
+                            update_fields=["transaction_type", "status", "description"]
+                        )
 
-                #     amount = transaction.amount
-                #     description = transaction.description
+                    amount = transaction.amount
+                    description = transaction.description
 
-                #     if description[0] == "AutoSave":
-                #         user.savings += int(amount)
+                    if description[0] == "AutoSave":
+                        user.savings += int(amount)
 
-                #         subject = f"{description[0]} Successful!"
-                #         message = f"Well done {user.first_name},<br><br>Your {description[0]} was successful and ₦{amount} has been successfully added to your SAVINGS account. <br><br>Keep growing your funds.🥂"
-                #         from_email = "MyFund <info@myfundmobile.com>"
-                #         recipient_list = [user.email]
+                        subject = f"{description[0]} Successful!"
+                        message = f"Well done {user.first_name},<br><br>Your {description[0]} was successful and ₦{amount} has been successfully added to your SAVINGS account. <br><br>Keep growing your funds.🥂"
+                        from_email = "MyFund <info@myfundmobile.com>"
+                        recipient_list = [user.email]
 
-                #         send_generic_email(
-                #             subject=subject,
-                #             message=message,
-                #             from_email=from_email,
-                #             recipient_list=recipient_list,
-                #         )
+                        send_generic_email(
+                            subject=subject,
+                            message=message,
+                            from_email=from_email,
+                            recipient_list=recipient_list,
+                        )
 
-                #     if description[0] == "AutoInvest":
-                #         user.investment += int(amount)
+                    if description[0] == "AutoInvest":
+                        user.investment += int(amount)
 
-                #         subject = f"{description[0]} Successful!"
-                #         message = f"Well done {user.first_name},<br><br>Your {description[0]} was successful and ₦{amount} has been successfully added to your INVESTMENT account. <br><br>Keep growing your funds.🥂<br><br>"
-                #         from_email = "MyFund <info@myfundmobile.com>"
-                #         recipient_list = [user.email]
+                        subject = f"{description[0]} Successful!"
+                        message = f"Well done {user.first_name},<br><br>Your {description[0]} was successful and ₦{amount} has been successfully added to your INVESTMENT account. <br><br>Keep growing your funds.🥂<br><br>"
+                        from_email = "MyFund <info@myfundmobile.com>"
+                        recipient_list = [user.email]
 
-                #         send_generic_email(
-                #             subject=subject,
-                #             message=message,
-                #             from_email=from_email,
-                #             recipient_list=recipient_list,
-                #         )
+                        send_generic_email(
+                            subject=subject,
+                            message=message,
+                            from_email=from_email,
+                            recipient_list=recipient_list,
+                        )
 
-                #     user.confirm_referral_rewards(is_referrer=True)
-                #     user.update_total_savings_and_investment_this_month()
-                #     user.save()
+                    user.confirm_referral_rewards(is_referrer=True)
+                    user.update_total_savings_and_investment_this_month()
+                    user.save()
 
-                # print(f"transaction after update: {transaction}")
+                print(f"transaction after update: {transaction}")
 
                 return
             case "invoice.create":
