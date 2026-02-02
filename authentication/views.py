@@ -5784,7 +5784,6 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                                     bank_name=authorization.get("bank", ""),
                                     card_brand=authorization.get("brand", authorization.get("card_type", "")),
                                     country_code=authorization.get("country_code", "NG"),
-                                    card_owner_name=authorization.get("account_name"),
                                     reusable=True,
                                     is_default=is_first_card,
                                     is_active=True,
