@@ -2413,7 +2413,7 @@ def quickinvest(request):
             "metadata": {
                 "user_id": request.user.id,
                 "transaction_type": "quickinvest",
-                "card_id": saved_card.id,
+                # "card_id": saved_card.id,
             }
         }
 
