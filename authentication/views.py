@@ -8516,6 +8516,7 @@ class TopReferralsAPIView(APIView):
                     "profile_picture": self.get_profile_pic_url(ref_user),
                     "monthly_signups": stat["monthly_signups"],
                     "monthly_confirmed": stat["monthly_confirmed"],
+                    "is_hired_referrer": ref_user.is_hired_referrer
                 }
             )
 
