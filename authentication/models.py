@@ -1029,6 +1029,14 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         if self.password_record:
             return self.password_record.check_password(raw_password)
         return False
+    
+    class Meta:
+        indexes = [
+            models.Index(fields=['is_deleted', 'date_joined']),  # ✅ Critical for user queries
+            models.Index(fields=['is_deleted', 'savings', 'investment']),  # ✅ For FUM calculations
+            models.Index(fields=['referral_id']),  # ✅ For referral stats
+            models.Index(fields=['is_ambassador']),  # ✅ For influencer stats
+        ]
 
 
 class MonthlySavings(models.Model):
@@ -2052,6 +2060,13 @@ class Transaction(models.Model):
 
     def __str__(self):
         return f"{self.transaction_type} - {self.amount} - {self.status} - {self.date}"
+    
+    class Meta:
+        indexes = [
+            models.Index(fields=['date', 'status', 'transaction_type']),  # ✅ Critical
+            models.Index(fields=['user', 'date', 'status']),  # ✅ For user-specific queries
+            models.Index(fields=['source', 'transaction_type', 'status', 'date']),  # ✅ For MAS
+        ]
 
 
 class PushNotifications(models.Model):

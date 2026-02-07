@@ -54,6 +54,7 @@ urlpatterns = [
     path("confirm-otp/", views.confirm_otp, name="confirm-otp"),
     path("resend-otp/", views.resend_otp, name="resend-otp"),
     path("login/", views.CustomObtainAuthToken.as_view(), name="login"),
+    path("admin/login/", views.CustomObtainAuthToken.as_view(), name="admin-login"),
     path("logout/", views.LogoutView.as_view(), name="logout"),
     path(
         "test-email/", views.test_email, name="test-email"
