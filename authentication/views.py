@@ -616,6 +616,9 @@ class CustomObtainAuthToken(ObtainAuthToken):
         try:
             username = request.data.get("username", "").strip().lower()
             password = request.data.get("password", "")
+            
+            # Check if this is an admin login request
+            is_admin_endpoint = request.path.startswith("/api/admin/login/")
 
             # First, check if user exists by email or phone
             try:
@@ -645,6 +648,17 @@ class CustomObtainAuthToken(ObtainAuthToken):
                     status=status.HTTP_401_UNAUTHORIZED,
                 )
 
+            # 🔒 Admin endpoint: verify user has admin privileges
+            if is_admin_endpoint:
+                if not (user.is_staff or user.is_superuser):
+                    return Response(
+                        {
+                            "status": "forbidden",
+                            "message": "You do not have permission to access the admin portal.",
+                        },
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+
             # 🚫 Block banned users
             if getattr(user, "is_banned", False):
                 return Response(
@@ -658,8 +672,19 @@ class CustomObtainAuthToken(ObtainAuthToken):
                     status=status.HTTP_403_FORBIDDEN,
                 )
 
-            # If user is inactive: send OTP
+            # If user is inactive: send OTP (skip for admin endpoint)
             if not user.is_active:
+                # For admin endpoint, don't allow inactive accounts at all
+                if is_admin_endpoint:
+                    return Response(
+                        {
+                            "status": "inactive",
+                            "message": "Your admin account is inactive. Please contact support.",
+                        },
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+                
+                # For regular users, send OTP
                 from authentication.views import send_otp_for_user
 
                 try:
@@ -5788,8 +5813,6 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                                     is_default=is_first_card,
                                     is_active=True,
                                 )
-                                
-                                print(f"✅ Card saved: {card.card_brand.upper()} •••• {card.card_last4_digits} for {user.email}")
                                 
                                 # Optional: Send notification to user about saved card
                                 try:
