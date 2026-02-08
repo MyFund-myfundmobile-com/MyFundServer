@@ -876,3 +876,78 @@ def get_next_payout_date(today: date) -> date:
 
     # If we've passed Oct 1, next payout is Jan 1 of next year
     return date(year + 1, 1, 1)
+
+
+from django.db.models.functions import TruncMonth
+from django.db.models import Sum, Count, F, ExpressionWrapper, DecimalField
+from dateutil.relativedelta import relativedelta
+
+
+def get_monthly_metrics(months=12):
+    now = timezone.now()
+    start_date = now - relativedelta(months=months)
+
+    # USERS PER MONTH
+    users_per_month = (
+        CustomUser.objects.filter(is_deleted=False, date_joined__gte=start_date)
+        .annotate(month=TruncMonth("date_joined"))
+        .values("month")
+        .annotate(
+            users=Count("id"),
+            savings=Coalesce(Sum("savings"), Value(0), output_field=DecimalField()),
+            investments=Coalesce(Sum("investment"), Value(0), output_field=DecimalField()),
+            fum=Coalesce(
+                Sum(
+                    ExpressionWrapper(
+                        F("savings") + F("investment"),
+                        output_field=DecimalField(max_digits=15, decimal_places=2),
+                    )
+                ),
+                Value(0),
+                output_field=DecimalField(),
+            ),
+        )
+        .order_by("month")
+    )
+
+    # TRANSACTIONS PER MONTH
+    transactions_per_month = (
+        Transaction.objects.filter(date__gte=start_date)
+        .annotate(month=TruncMonth("date"))
+        .values("month")
+        .annotate(
+            transactions=Count("id"),
+            mas_users=Count(
+                "user",
+                distinct=True,
+                filter=Q(
+                    source__in=["SAVINGS", "INVESTMENT"],
+                    transaction_type="credit",
+                    status="confirmed",
+                ),
+            ),
+        )
+    )
+
+    # Merge user + transaction metrics
+    tx_map = {t["month"]: t for t in transactions_per_month}
+
+    monthly_reports = []
+    for u in users_per_month:
+        month = u["month"]
+        tx = tx_map.get(month, {})
+
+        monthly_reports.append(
+            {
+                "month": month.strftime("%Y-%m"),
+                "label": month.strftime("%b %Y"),
+                "users": u["users"],
+                "savings": float(u["savings"]),
+                "investments": float(u["investments"]),
+                "fum": float(u["fum"]),
+                "transactions": tx.get("transactions", 0),
+                "mas_users": tx.get("mas_users", 0),
+            }
+        )
+
+    return monthly_reports
