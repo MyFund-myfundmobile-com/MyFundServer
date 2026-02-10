@@ -2084,11 +2084,18 @@ def autosave(request):
     user = request.user
     amount = request.data.get("amount")
     frequency = request.data.get("frequency")
+    card_id = request.data.get("card_id")  # Get card_id from request
 
     # Validate request data
     if not amount or not frequency:
         return Response(
-            {"error": "Missing required fields: card_id, amount, and frequency."},
+            {"error": "Missing required fields: amount and frequency."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if not card_id:
+        return Response(
+            {"error": "card_id is required to activate AutoSave."},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
@@ -2096,7 +2103,7 @@ def autosave(request):
         amount = int(amount)
         if amount < 100:
             return Response(
-                {"error": "Amount cannot be less that N100"},
+                {"error": "Amount cannot be less than ₦100"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
     except ValueError:
@@ -2130,20 +2137,26 @@ def autosave(request):
     except ObjectDoesNotExist:
         pass
 
-    # Check if user has a transaction with a paystack_auth_code
-    has_paystack_auth = (
-        Transaction.objects.filter(user=user, paystack_auth_code__isnull=False)
-        .exclude(paystack_auth_code="")
-        .exists()
-    )
-
-    # print(f"has_paystack_auth:  {has_paystack_auth}")
-
-    if not has_paystack_auth:
+    # Get the selected card
+    try:
+        card = Card.objects.get(
+            id=card_id,
+            user=user,
+            is_active=True,
+            reusable=True
+        )
+    except Card.DoesNotExist:
         return Response(
-            {
-                "error": "You need to do a QuickSave/QuickInvest before you can activate AutoSave"
-            },
+            {"error": "Selected card not found or not available for AutoSave."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    # Get authorization code from the card
+    authorization_code = card.authorization_code
+    
+    if not authorization_code:
+        return Response(
+            {"error": "This card does not have a valid authorization code."},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
@@ -2181,8 +2194,12 @@ def autosave(request):
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
-    # Step 2: Subscribe user to the plan
-    subscription_payload = {"customer": user.email, "plan": plan_code}
+    # Step 2: Subscribe user to the plan using the card's authorization code
+    subscription_payload = {
+        "customer": user.email,
+        "plan": plan_code,
+        "authorization": authorization_code  # Use authorization code from selected card
+    }
 
     try:
         subscription_response = requests.post(
@@ -2194,8 +2211,9 @@ def autosave(request):
         subscription_data = subscription_response.json()
 
         if not subscription_data.get("status"):
+            error_message = subscription_data.get("message", "Subscription failed.")
             return Response(
-                {"error": "Subscription failed."},
+                {"error": error_message},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
@@ -2220,12 +2238,19 @@ def autosave(request):
         paystack_sub_token=subscription_token,
         paystack_plan_code=plan_code,
         paystack_trans_ref=transaction_reference,
+        card=card,
         active=True,
     )
 
     # Send success notification email
     subject = "AutoSave Activated!"
-    message = f"Hi {user.first_name},<br><br>Your AutoSave have been activated. You are now saving ₦{amount} {frequency}.<br><br>Keep growing your funds.🥂"
+    message = (
+        f"Hi {user.first_name},<br><br>"
+        f"Your AutoSave has been activated. You are now saving ₦{amount:,} {frequency}.<br><br>"
+        f"Payment Method: {card.card_brand.upper()} •••• {card.card_last4_digits}<br>"
+        f"Bank: {card.bank_name}<br><br>"
+        f"Keep growing your funds.🥂"
+    )
     from_email = "MyFund <info@myfundmobile.com>"
     recipient_list = [user.email]
 
@@ -2235,21 +2260,35 @@ def autosave(request):
     user.autosave_enabled = True
     user.save()
 
-    # After user.autosave_enabled = True and user.save()
+    # Send push notification
     send_push_notification(
         user=user,
         title="AutoSave Activated! ✅",
-        message=f"Well done {user.first_name}! You're now saving ₦{amount} {frequency}. Keep growing your funds.",
+        message=f"Well done {user.first_name}! You're now saving ₦{amount:,} {frequency} using your {card.card_brand.upper()} card. Keep growing your funds.",
         data={
             "amount": str(amount),
             "frequency": frequency,
+            "card_brand": card.card_brand,
+            "card_last4": card.card_last4_digits,
             "type": "AutoSave",
             "status": "activated",
         },
         notif_type="SYSTEM",
     )
 
-    return Response({"message": "AutoSave activated"}, status=status.HTTP_200_OK)
+    return Response({
+        "message": "AutoSave activated successfully",
+        "autosave": {
+            "amount": amount,
+            "frequency": frequency,
+            # "card_used": {
+            #     "brand": card.card_brand,
+            #     "last4": card.card_last4_digits,
+            #     "bank": card.bank_name,
+            # },
+            # "subscription_code": subscription_code,
+        }
+    }, status=status.HTTP_200_OK)
 
 
 @api_view(["POST"])
@@ -2601,11 +2640,18 @@ def autoinvest(request):
     user = request.user
     amount = request.data.get("amount")
     frequency = request.data.get("frequency")
+    card_id = request.data.get("card_id")  # Get card_id from request
 
     # Validate request data
-    if not all([amount, frequency]):
+    if not amount or not frequency:
         return Response(
-            {"error": "Missing required fields: card_id, amount, and frequency."},
+            {"error": "Missing required fields: amount and frequency."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if not card_id:
+        return Response(
+            {"error": "card_id is required to activate AutoInvest."},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
@@ -2613,7 +2659,7 @@ def autoinvest(request):
         amount = int(amount)
         if amount < 100000:
             return Response(
-                {"error": "Amount cannot be less than N100,000."},
+                {"error": "Amount cannot be less than ₦100,000."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
     except ValueError:
@@ -2625,7 +2671,7 @@ def autoinvest(request):
     valid_frequencies = ["hourly", "daily", "weekly", "monthly"]
     if frequency not in valid_frequencies:
         return Response(
-            {"error": "Invalid frequency. Choose 'daily', 'weekly', or 'monthly'."},
+            {"error": "Invalid frequency. Choose 'hourly', 'daily', 'weekly', or 'monthly'."},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
@@ -2638,18 +2684,26 @@ def autoinvest(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    # Check if user has a transaction with a paystack_auth_code
-    has_paystack_auth = (
-        Transaction.objects.filter(user=user, paystack_auth_code__isnull=False)
-        .exclude(paystack_auth_code="")
-        .exists()
-    )
-
-    if not has_paystack_auth:
+    # Get the selected card
+    try:
+        card = Card.objects.get(
+            id=card_id,
+            user=user,
+            is_active=True,
+            reusable=True
+        )
+    except Card.DoesNotExist:
         return Response(
-            {
-                "error": "You need to do a QuickSave/QuickInvest before you can activate AutoInvest"
-            },
+            {"error": "Selected card not found or not available for AutoInvest."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    # Get authorization code from the card
+    authorization_code = card.authorization_code
+    
+    if not authorization_code:
+        return Response(
+            {"error": "This card does not have a valid authorization code."},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
@@ -2672,16 +2726,27 @@ def autoinvest(request):
         )
         plan_response.raise_for_status()
         plan_data = plan_response.json()
+        
+        if not plan_data.get("status"):
+            return Response(
+                {"error": "Failed to create plan on Paystack."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+        
         plan_code = plan_data["data"]["plan_code"]
     except requests.RequestException as e:
         logger.error(f"Paystack plan creation failed: {e}")
         return Response(
-            {"error": "Failed to create plan on Paystack."},
+            {"error": f"Failed to create plan on Paystack: {str(e)}"},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
-    # Step 2: Subscribe user to the plan
-    subscription_payload = {"customer": user.email, "plan": plan_code}
+    # Step 2: Subscribe user to the plan using the card's authorization code
+    subscription_payload = {
+        "customer": user.email,
+        "plan": plan_code,
+        "authorization": authorization_code  # Use authorization code from selected card
+    }
 
     try:
         subscription_response = requests.post(
@@ -2691,6 +2756,14 @@ def autoinvest(request):
         )
         subscription_response.raise_for_status()
         subscription_data = subscription_response.json()
+        
+        if not subscription_data.get("status"):
+            error_message = subscription_data.get("message", "Subscription failed.")
+            return Response(
+                {"error": error_message},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+        
         subscription_id = subscription_data.get("data", {}).get("id")
         subscription_code = subscription_data.get("data", {}).get("subscription_code")
         subscription_token = subscription_data.get("data", {}).get("email_token")
@@ -2698,13 +2771,13 @@ def autoinvest(request):
     except requests.RequestException as e:
         logger.error(f"Subscription failed: {e}")
         return Response(
-            {"error": "Subscription failed."},
+            {"error": f"Subscription failed: {str(e)}"},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
     # Step 3: Save AutoInvest record to the database
     with transaction.atomic():
-        AutoInvest.objects.create(
+        autoinvest_record = AutoInvest.objects.create(
             user=user,
             frequency=frequency,
             amount=amount,
@@ -2713,18 +2786,57 @@ def autoinvest(request):
             paystack_sub_token=subscription_token,
             paystack_plan_code=plan_code,
             paystack_trans_ref=transaction_reference,
+            card=card,
             active=True,
         )
 
     # Send success notification email
     subject = "AutoInvest Activated!"
-    message = f"Hi {user.first_name},<br><br>Your AutoInvest have been activated. You are now saving ₦{amount} {frequency}.<br><br>Keep growing your funds.🥂"
+    message = (
+        f"Hi {user.first_name},<br><br>"
+        f"Your AutoInvest has been activated. You are now investing ₦{amount:,} {frequency}.<br><br>"
+        f"Payment Method: {card.card_brand.upper()} •••• {card.card_last4_digits}<br>"
+        f"Bank: {card.bank_name}<br><br>"
+        f"Keep growing your funds.🥂"
+    )
     from_email = "MyFund <info@myfundmobile.com>"
     recipient_list = [user.email]
 
     send_generic_email(subject=subject, message=message, from_email=from_email, recipient_list=recipient_list)
 
-    return Response({"message": "AutoInvest activated"}, status=status.HTTP_200_OK)
+    # Optional: Send push notification
+    try:
+        send_push_notification(
+            user=user,
+            title="AutoInvest Activated! 🎉",
+            message=f"Well done {user.first_name}! You're now investing ₦{amount:,} {frequency} using your {card.card_brand.upper()} card. Keep growing your funds.",
+            data={
+                "amount": str(amount),
+                "frequency": frequency,
+                "card_brand": card.card_brand,
+                "card_last4": card.card_last4_digits,
+                "type": "AutoInvest",
+                "status": "activated",
+            },
+            notif_type="SYSTEM",
+        )
+    except Exception as e:
+        logger.error(f"Push notification failed: {e}")
+
+    return Response({
+        "message": "AutoInvest activated successfully",
+        "autoinvest": {
+            "id": autoinvest_record.id,
+            "amount": amount,
+            "frequency": frequency,
+            "card_used": {
+                "brand": card.card_brand,
+                "last4": card.card_last4_digits,
+                "bank": card.bank_name,
+            },
+            "subscription_code": subscription_code,
+        }
+    }, status=status.HTTP_200_OK)
 
 
 @api_view(["POST"])
