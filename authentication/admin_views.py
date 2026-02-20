@@ -21,12 +21,180 @@ from django.db.models.functions import ExtractMonth, ExtractYear, Coalesce, Cast
 # ============================================================================
 
 
+from dateutil.relativedelta import relativedelta
+from django.db.models import Sum, Count, Q, F, Value, DecimalField
+from django.db.models.functions import Coalesce
+
+
+def get_monthly_advanced_metrics(months=12):
+    now = timezone.now()
+    results = []
+
+    for i in range(months):
+        target_month = now - relativedelta(months=i)
+        month_start = target_month.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        month_end = month_start + relativedelta(months=1)
+
+        # ================= USERS IN MONTH =================
+        users_qs = CustomUser.objects.filter(
+            is_deleted=False,
+            date_joined__lt=month_end,
+        )
+
+        total_users = users_qs.count()
+
+        new_users_qs = CustomUser.objects.filter(
+            is_deleted=False,
+            date_joined__gte=month_start,
+            date_joined__lt=month_end,
+        )
+
+        new_users_count = new_users_qs.count()
+
+        # ================= INVESTORS VS SAVERS =================
+        investor_heavy = users_qs.filter(
+            savings__gt=0,
+            investment__gt=F("savings")
+        ).count()
+
+        savings_heavy = users_qs.filter(
+            savings__gt=0,
+            investment__lte=F("savings")
+        ).count()
+
+        # ================= FUM =================
+        fum = users_qs.aggregate(
+            fum=Coalesce(
+                Sum(F("savings") + F("investment")),
+                Value(0),
+                output_field=DecimalField()
+            )
+        )["fum"]
+
+        # ================= TRANSACTIONS =================
+        tx_qs = Transaction.objects.filter(
+            date__gte=month_start,
+            date__lt=month_end,
+        )
+
+        total_tx = tx_qs.count()
+        failed_tx = tx_qs.filter(status="failed").count()
+
+        transaction_failure_rate = (
+            failed_tx / total_tx * 100 if total_tx else 0
+        )
+
+        # ================= MONTHLY ACTIVE SAVERS (MAS) =================
+        mas_users = tx_qs.filter(
+            source__in=["SAVINGS", "INVESTMENT"],
+            transaction_type="credit",
+            status="confirmed",
+        ).values("user").distinct().count()
+
+        mas_amount = tx_qs.filter(
+            source__in=["SAVINGS", "INVESTMENT"],
+            transaction_type="credit",
+            status="confirmed",
+        ).aggregate(
+            total=Coalesce(Sum("amount"), Value(0), output_field=DecimalField())
+        )["total"]
+
+        # ================= ACTIVATION RATE =================
+        if new_users_count > 0:
+            activated_users = Transaction.objects.filter(
+                user__in=new_users_qs,
+                transaction_type="credit",
+                status="confirmed",
+                source__in=["SAVINGS", "INVESTMENT"],
+            ).values("user").distinct().count()
+
+            activation_rate = activated_users / new_users_count * 100
+        else:
+            activation_rate = 0
+
+        # ================= RETENTION (30D) =================
+        cohort_start = month_start - relativedelta(days=30)
+        cohort_end = month_start
+
+        cohort_users = CustomUser.objects.filter(
+            date_joined__gte=cohort_start,
+            date_joined__lt=cohort_end,
+            is_deleted=False,
+        )
+
+        cohort_count = cohort_users.count()
+
+        if cohort_count > 0:
+            retained_users = Transaction.objects.filter(
+                user__in=cohort_users,
+                date__gte=month_start,
+                date__lt=month_end,
+                transaction_type="credit",
+                status="confirmed",
+            ).values("user").distinct().count()
+
+            retention_rate = retained_users / cohort_count * 100
+        else:
+            retention_rate = 0
+
+        # ================= CHURN RATE =================
+        active_users = Transaction.objects.filter(
+            date__gte=month_start - relativedelta(days=30),
+            date__lt=month_end,
+        ).values("user").distinct().count()
+
+        churn_rate = (
+            (total_users - active_users) / total_users * 100
+            if total_users else 0
+        )
+
+        # ================= GROWTH MULTIPLIERS =================
+        referrals = users_qs.filter(referral_id__isnull=False).count()
+        influencers = users_qs.filter(is_ambassador=True).count()
+
+        referrals_pct = (referrals / total_users * 100) if total_users else 0
+        influencers_pct = (influencers / total_users * 100) if total_users else 0
+
+        results.append({
+            "month": month_start.strftime("%Y-%m"),
+            "label": month_start.strftime("%b %Y"),
+
+            "monthly_active_savers": {
+                "users": mas_users,
+                "total_amount": float(mas_amount),
+            },
+            "activation_rate": round(activation_rate, 2),
+            "retention_30d": round(retention_rate, 2),
+
+            "investors_vs_savers": {
+                "investor_heavy": investor_heavy,
+                "savings_heavy": savings_heavy,
+            },
+
+            "transaction_failure_rate": round(transaction_failure_rate, 2),
+
+            "growth_multipliers": {
+                "referrals_pct": round(referrals_pct, 2),
+                "influencers_pct": round(influencers_pct, 2),
+            },
+
+            "financial_health": {
+                "fum": float(fum),
+                "churn_rate": round(churn_rate, 2),
+            },
+        })
+
+    return list(reversed(results))
+
+
 @api_view(['GET'])
 @permission_classes([IsAdminUser])
 def dashboard_summary(request):
     """
     Optimized dashboard endpoint - Target: 2-5 seconds
     """
+    advanced_metrics_monthly = get_monthly_advanced_metrics(12)
+
     cache_key = f"dashboard:summary:{timezone.now().strftime('%Y-%m-%d:%H:%M')}"
     cached_data = cache.get(cache_key)
     if cached_data:
@@ -274,7 +442,8 @@ def dashboard_summary(request):
                     "fum": float(user_aggregation['fum'] or 0),
                     "churn_rate": round(churn_rate, 2)
                 }
-            }
+            },
+            "advanced_metrics_monthly": advanced_metrics_monthly,
         }
 
         # ✅ Cache for 2 minutes
