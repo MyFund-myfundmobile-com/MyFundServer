@@ -89,7 +89,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         return f"{self.first_name} {self.last_name}".strip()
 
     referral = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, db_index=True
     )
     pending_referral_reward = models.DecimalField(
         max_digits=10, decimal_places=2, default=0
@@ -148,8 +148,8 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
 
     is_first_time_signup = models.BooleanField(default=True)
 
-    is_active = models.BooleanField(default=True)
-    is_banned = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True, db_index=True)
+    is_banned = models.BooleanField(default=False, db_index=True)
     is_staff = models.BooleanField(default=False)
     is_superuser = models.BooleanField(default=False)
 
@@ -1036,6 +1036,9 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
             models.Index(fields=['is_deleted', 'savings', 'investment']),  # ✅ For FUM calculations
             models.Index(fields=['referral_id']),  # ✅ For referral stats
             models.Index(fields=['is_ambassador']),  # ✅ For influencer stats
+            models.Index(fields=['is_active', 'is_banned']),  # ✅ ADDED: Critical for ROI & admin filters
+            models.Index(fields=['date_joined', 'is_deleted']),  # ✅ ADDED: For admin list queries
+            models.Index(fields=['referral_id', 'date_joined']),  # ✅ ADDED: For referral queries
         ]
 
 

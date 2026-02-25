@@ -226,6 +226,7 @@ CORS_ALLOW_HEADERS = [
     "content-type",
     "authorization",
     "x-requested-with",
+    "x-idempotency-key",
     "accept",
     "origin",
     "user-agent",
