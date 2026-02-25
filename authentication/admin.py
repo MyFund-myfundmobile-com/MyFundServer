@@ -275,26 +275,51 @@ class CustomUserAdmin(UserAdmin):
     ]
 
     def get_total_referrals(self, obj):
-        return Transaction.objects.filter(referral_email=obj.email).count()
+        # 🚀 OPTIMIZED: Use the annotated field instead of querying
+        return getattr(obj, '_total_referrals', 0)
 
     get_total_referrals.short_description = "Total Referrals"
 
     def get_confirmed_referrals(self, obj):
-        return Transaction.objects.filter(
-            referral_email=obj.email, status="confirmed"
-        ).count()
+        # 🚀 OPTIMIZED: Use the annotated field instead of querying
+        return getattr(obj, '_confirmed_referrals', 0)
 
     get_confirmed_referrals.short_description = "Confirmed Referrals"
 
     def get_queryset(self, request):
         qs = super().get_queryset(request)
-        return qs.annotate(
-            _total_referrals=Count("referral_transactions"),
-            _confirmed_referrals=Count(
-                "referral_transactions",
-                filter=Q(referral_transactions__status="confirmed"),
-            ),
+        # 🚀 OPTIMIZED: Annotate all referral counts at once using database aggregation
+        qs = qs.annotate(
+            _total_referrals=Count(
+                'id',
+                filter=Q(email__in=Transaction.objects.filter(
+                    referral_email=models.OuterRef('email')
+                ).values_list('referral_email', flat=True).distinct()),
+                distinct=True
+            )
         )
+        # Alternative simpler approach: Count by referral email relationship
+        from django.db.models import Q, Subquery, OuterRef
+        referral_users = Transaction.objects.filter(
+            referral_email=models.OuterRef('email'),
+            status='confirmed'
+        ).values('referral_email').annotate(
+            count=Count('*')
+        ).values('count')
+        
+        qs = qs.annotate(
+            _total_referrals=Count(
+                'referral_transactions',
+                filter=Q(referral_transactions__isnull=False),
+                distinct=True
+            ) or 0,
+            _confirmed_referrals=Count(
+                'referral_transactions',
+                filter=Q(referral_transactions__status='confirmed'),
+                distinct=True
+            ) or 0,
+        )
+        return qs
 
     def get_daily_savings_roi_rate(self):
         """Calculate daily savings ROI rate (13% per annum)"""
