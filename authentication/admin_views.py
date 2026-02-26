@@ -29,13 +29,12 @@ from django.db.models.functions import Coalesce
 def get_monthly_advanced_metrics(months=12):
     """
     🚀 OPTIMIZED: Uses database aggregation instead of loop queries.
-    Was: 60+ queries per call
-    Now: 3-4 queries total
+    3–4 queries total
     """
-    from django.db.models import TruncMonth, Q, Value
-    from django.db.models.functions import Coalesce
+    from django.db.models import Q, F, Value, Count, Sum, DecimalField
+    from django.db.models.functions import Coalesce, TruncMonth
     from decimal import Decimal
-    
+
     now = timezone.now()
     cutoff_date = now - relativedelta(months=months)
     results = []
@@ -48,12 +47,31 @@ def get_monthly_advanced_metrics(months=12):
         month=TruncMonth('date_joined')
     ).values('month').annotate(
         total_users=Count('id'),
-        new_users=Count('id', filter=Q(date_joined__gte=models.OuterRef('month'))),
-        investor_heavy=Count('id', filter=Q(savings__gt=0, investment__gt=models.F('savings'))),
-        savings_heavy=Count('id', filter=Q(savings__gt=0, investment__lte=models.F('savings'))),
-        fum=Coalesce(Sum(models.F('savings') + models.F('investment')), Value(0), output_field=DecimalField()),
-        referrals_count=Count('id', filter=Q(referral_id__isnull=False)),
-        influencers_count=Count('id', filter=Q(is_ambassador=True)),
+
+        # ✅ FIXED: removed OuterRef
+        new_users=Count('id'),
+
+        investor_heavy=Count(
+            'id',
+            filter=Q(savings__gt=0, investment__gt=F('savings'))
+        ),
+        savings_heavy=Count(
+            'id',
+            filter=Q(savings__gt=0, investment__lte=F('savings'))
+        ),
+        fum=Coalesce(
+            Sum(F('savings') + F('investment')),
+            Value(0),
+            output_field=DecimalField()
+        ),
+        referrals_count=Count(
+            'id',
+            filter=Q(referral_id__isnull=False)
+        ),
+        influencers_count=Count(
+            'id',
+            filter=Q(is_ambassador=True)
+        ),
     ).order_by('-month')[:months]
 
     # ==================== QUERY 2: Transaction Metrics by Month ====================
@@ -66,28 +84,37 @@ def get_monthly_advanced_metrics(months=12):
         failed_tx=Count('id', filter=Q(status='failed')),
         mas_users=Count(
             'user_id',
-            filter=Q(source__in=['SAVINGS', 'INVESTMENT'], transaction_type='credit', status='confirmed'),
+            filter=Q(
+                source__in=['SAVINGS', 'INVESTMENT'],
+                transaction_type='credit',
+                status='confirmed'
+            ),
             distinct=True
         ),
         mas_amount=Coalesce(
-            Sum('amount', filter=Q(source__in=['SAVINGS', 'INVESTMENT'], transaction_type='credit', status='confirmed')),
+            Sum(
+                'amount',
+                filter=Q(
+                    source__in=['SAVINGS', 'INVESTMENT'],
+                    transaction_type='credit',
+                    status='confirmed'
+                )
+            ),
             Value(0),
             output_field=DecimalField()
         ),
     ).order_by('-month')[:months]
 
     # ==================== Convert to Dict for Fast Lookup ====================
-    user_metrics_dict = {str(m['month']): m for m in user_metrics}
-    tx_metrics_dict = {str(m['month']): m for m in transaction_metrics}
+    user_metrics_dict = {str(m['month'].date()): m for m in user_metrics}
+    tx_metrics_dict = {str(m['month'].date()): m for m in transaction_metrics}
 
-    # ==================== Loop Only for Formatting (No DB Queries) ====================
+    # ==================== Loop Only for Formatting ====================
     for i in range(months):
         target_month = now - relativedelta(months=i)
         month_start = target_month.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        month_end = month_start + relativedelta(months=1)
         month_key = str(month_start.date())
 
-        # Get pre-fetched data
         user_data = user_metrics_dict.get(month_key, {})
         tx_data = tx_metrics_dict.get(month_key, {})
 
@@ -104,24 +131,10 @@ def get_monthly_advanced_metrics(months=12):
         mas_users = tx_data.get('mas_users', 0)
         mas_amount = tx_data.get('mas_amount', Decimal('0'))
 
-        # ========== CALCULATED METRICS (No DB Queries) ==========
-        transaction_failure_rate = (
-            (failed_tx / total_tx * 100) if total_tx else 0
-        )
-
-        activation_rate = (
-            (mas_users / new_users_count * 100) if new_users_count > 0 else 0
-        )
-
-        # 🚀 Quick retention calc: users with transactions in period
-        retention_rate = (mas_users / total_users * 100) if total_users > 0 else 0
-
-        # 🚀 Simplified churn: inverse of transaction activity
-        churn_rate = (
-            ((total_users - mas_users) / total_users * 100)
-            if total_users > 0 else 0
-        )
-
+        transaction_failure_rate = (failed_tx / total_tx * 100) if total_tx else 0
+        activation_rate = (mas_users / new_users_count * 100) if new_users_count else 0
+        retention_rate = (mas_users / total_users * 100) if total_users else 0
+        churn_rate = ((total_users - mas_users) / total_users * 100) if total_users else 0
         referrals_pct = (referrals / total_users * 100) if total_users else 0
         influencers_pct = (influencers / total_users * 100) if total_users else 0
 
