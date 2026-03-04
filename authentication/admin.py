@@ -120,6 +120,8 @@ class ROITransactionInline(admin.TabularInline):
 
 from .utils import send_push_notification  # assuming utils is in authentication
 from decimal import Decimal
+from django.db.models import OuterRef, Subquery, Count, IntegerField
+from django.db.models.functions import Coalesce
 
 
 class CustomUserAdmin(UserAdmin):
@@ -288,38 +290,24 @@ class CustomUserAdmin(UserAdmin):
 
     def get_queryset(self, request):
         qs = super().get_queryset(request)
-        # 🚀 OPTIMIZED: Annotate all referral counts at once using database aggregation
-        qs = qs.annotate(
-            _total_referrals=Count(
-                'id',
-                filter=Q(email__in=Transaction.objects.filter(
-                    referral_email=models.OuterRef('email')
-                ).values_list('referral_email', flat=True).distinct()),
-                distinct=True
-            )
-        )
-        # Alternative simpler approach: Count by referral email relationship
-        from django.db.models import Subquery, OuterRef
-        referral_users = Transaction.objects.filter(
-            referral_email=models.OuterRef('email'),
+
+        total_referrals = Transaction.objects.filter(
+            referral_email=OuterRef('email')
+        ).values('referral_email').annotate(
+            count=Count('id')
+        ).values('count')
+
+        confirmed_referrals = Transaction.objects.filter(
+            referral_email=OuterRef('email'),
             status='confirmed'
         ).values('referral_email').annotate(
-            count=Count('*')
+            count=Count('id')
         ).values('count')
-        
-        qs = qs.annotate(
-            _total_referrals=Count(
-                'referral_transactions',
-                filter=Q(referral_transactions__isnull=False),
-                distinct=True
-            ) or 0,
-            _confirmed_referrals=Count(
-                'referral_transactions',
-                filter=Q(referral_transactions__status='confirmed'),
-                distinct=True
-            ) or 0,
+
+        return qs.annotate(
+            _total_referrals=Coalesce(Subquery(total_referrals, output_field=IntegerField()), 0),
+            _confirmed_referrals=Coalesce(Subquery(confirmed_referrals, output_field=IntegerField()), 0),
         )
-        return qs
 
     def get_daily_savings_roi_rate(self):
         """Calculate daily savings ROI rate (13% per annum)"""
