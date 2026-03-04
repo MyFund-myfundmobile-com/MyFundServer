@@ -299,7 +299,7 @@ class CustomUserAdmin(UserAdmin):
             )
         )
         # Alternative simpler approach: Count by referral email relationship
-        from django.db.models import Q, Subquery, OuterRef
+        from django.db.models import Subquery, OuterRef
         referral_users = Transaction.objects.filter(
             referral_email=models.OuterRef('email'),
             status='confirmed'
