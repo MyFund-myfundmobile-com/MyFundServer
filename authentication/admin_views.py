@@ -24,60 +24,38 @@ from django.db.models.functions import ExtractMonth, ExtractYear, Coalesce, Cast
 from dateutil.relativedelta import relativedelta
 from django.db.models import Sum, Count, Q, F, Value, DecimalField
 from django.db.models.functions import Coalesce
-
+from django.db.models import OuterRef, Subquery, IntegerField
+from django.db.models.functions import TruncMonth
 
 def get_monthly_advanced_metrics(months=12):
     """
-    🚀 OPTIMIZED: Uses database aggregation instead of loop queries.
-    3–4 queries total
+    Fully optimized monthly metrics with accurate Total & Confirmed Referrals
+    and precise 30-day cohort-based retention.
     """
-    from django.db.models import Q, F, Value, Count, Sum, DecimalField
-    from django.db.models.functions import Coalesce, TruncMonth
-    from decimal import Decimal
-
     now = timezone.now()
-    cutoff_date = now - relativedelta(months=months)
     results = []
 
-    # ==================== QUERY 1: User Metrics by Month ====================
-    user_metrics = CustomUser.objects.filter(
-        date_joined__gte=cutoff_date,
-        is_deleted=False,
-    ).annotate(
+    # Determine start date for metrics
+    cutoff_date = now - relativedelta(months=months)
+
+    # ------------------- USER METRICS -------------------
+    users_qs = CustomUser.objects.filter(is_deleted=False, date_joined__lt=now)
+    users_by_month = users_qs.annotate(
         month=TruncMonth('date_joined')
     ).values('month').annotate(
         total_users=Count('id'),
+        new_users=Count('id', filter=Q(date_joined__gte=cutoff_date)),
+        investor_heavy=Count('id', filter=Q(savings__gt=0, investment__gt=F('savings'))),
+        savings_heavy=Count('id', filter=Q(savings__gt=0, investment__lte=F('savings'))),
+        referrals_count=Count('id', filter=Q(referral_id__isnull=False)),
+        influencers_count=Count('id', filter=Q(is_ambassador=True)),
+        fum=Coalesce(Sum(F('savings') + F('investment')), Value(0), output_field=DecimalField()),
+    ).order_by('month')
+    user_metrics_dict = {m['month'].date(): m for m in users_by_month}
 
-        # ✅ FIXED: removed OuterRef
-        new_users=Count('id'),
-
-        investor_heavy=Count(
-            'id',
-            filter=Q(savings__gt=0, investment__gt=F('savings'))
-        ),
-        savings_heavy=Count(
-            'id',
-            filter=Q(savings__gt=0, investment__lte=F('savings'))
-        ),
-        fum=Coalesce(
-            Sum(F('savings') + F('investment')),
-            Value(0),
-            output_field=DecimalField()
-        ),
-        referrals_count=Count(
-            'id',
-            filter=Q(referral_id__isnull=False)
-        ),
-        influencers_count=Count(
-            'id',
-            filter=Q(is_ambassador=True)
-        ),
-    ).order_by('-month')[:months]
-
-    # ==================== QUERY 2: Transaction Metrics by Month ====================
-    transaction_metrics = Transaction.objects.filter(
-        date__gte=cutoff_date,
-    ).annotate(
+    # ------------------- TRANSACTION METRICS -------------------
+    tx_qs = Transaction.objects.filter(date__lt=now)
+    tx_by_month = tx_qs.annotate(
         month=TruncMonth('date')
     ).values('month').annotate(
         total_tx=Count('id'),
@@ -92,34 +70,44 @@ def get_monthly_advanced_metrics(months=12):
             distinct=True
         ),
         mas_amount=Coalesce(
-            Sum(
-                'amount',
-                filter=Q(
-                    source__in=['SAVINGS', 'INVESTMENT'],
-                    transaction_type='credit',
-                    status='confirmed'
-                )
-            ),
+            Sum('amount', filter=Q(
+                source__in=['SAVINGS', 'INVESTMENT'],
+                transaction_type='credit',
+                status='confirmed'
+            )),
             Value(0),
             output_field=DecimalField()
         ),
-    ).order_by('-month')[:months]
+        total_referrals=Count('id', filter=Q(referral_email__isnull=False)),
+        confirmed_referrals=Count('id', filter=Q(status='confirmed', referral_email__isnull=False)),
+    ).order_by('month')
+    tx_metrics_dict = {m['month'].date(): m for m in tx_by_month}
 
-    # ==================== Convert to Dict for Fast Lookup ====================
-    user_metrics_dict = {str(m['month'].date()): m for m in user_metrics}
-    tx_metrics_dict = {str(m['month'].date()): m for m in transaction_metrics}
+    # ------------------- COHORT RETENTION SUBQUERY -------------------
+    # We want users who joined 30 days before the month and had a confirmed transaction in the month
+    cohort_subquery = Transaction.objects.filter(
+        user=OuterRef('pk'),
+        transaction_type='credit',
+        status='confirmed',
+        source__in=['SAVINGS', 'INVESTMENT'],
+        date__gte=OuterRef('cohort_start'),
+        date__lt=OuterRef('cohort_end')
+    ).values('user').distinct().values('pk')
 
-    # ==================== Loop Only for Formatting ====================
+    # ------------------- LOOP PER MONTH -------------------
     for i in range(months):
         target_month = now - relativedelta(months=i)
         month_start = target_month.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        month_key = str(month_start.date())
+        month_end = month_start + relativedelta(months=1)
+        cohort_start = month_start - relativedelta(days=30)
+        cohort_end = month_start
 
+        month_key = month_start.date()
         user_data = user_metrics_dict.get(month_key, {})
         tx_data = tx_metrics_dict.get(month_key, {})
 
         total_users = user_data.get('total_users', 0)
-        new_users_count = user_data.get('new_users', 0)
+        new_users = user_data.get('new_users', 0)
         investor_heavy = user_data.get('investor_heavy', 0)
         savings_heavy = user_data.get('savings_heavy', 0)
         fum = user_data.get('fum', Decimal('0'))
@@ -130,13 +118,37 @@ def get_monthly_advanced_metrics(months=12):
         failed_tx = tx_data.get('failed_tx', 0)
         mas_users = tx_data.get('mas_users', 0)
         mas_amount = tx_data.get('mas_amount', Decimal('0'))
+        total_referrals = tx_data.get('total_referrals', 0)
+        confirmed_referrals = tx_data.get('confirmed_referrals', 0)
 
+        # ------------------- CALCULATED METRICS -------------------
         transaction_failure_rate = (failed_tx / total_tx * 100) if total_tx else 0
-        activation_rate = (mas_users / new_users_count * 100) if new_users_count else 0
-        retention_rate = (mas_users / total_users * 100) if total_users else 0
+        activation_rate = (mas_users / new_users * 100) if new_users else 0
         churn_rate = ((total_users - mas_users) / total_users * 100) if total_users else 0
         referrals_pct = (referrals / total_users * 100) if total_users else 0
         influencers_pct = (influencers / total_users * 100) if total_users else 0
+        investor_pct = investor_heavy
+        saver_pct = savings_heavy
+
+        # ------------------- RETENTION (30D COHORT) -------------------
+        cohort_users = CustomUser.objects.filter(
+            date_joined__gte=cohort_start,
+            date_joined__lt=cohort_end,
+            is_deleted=False
+        )
+        cohort_count = cohort_users.count()
+        if cohort_count > 0:
+            retained_users = Transaction.objects.filter(
+                user__in=cohort_users,
+                transaction_type='credit',
+                status='confirmed',
+                source__in=['SAVINGS', 'INVESTMENT'],
+                date__gte=month_start,
+                date__lt=month_end
+            ).values('user').distinct().count()
+            retention_rate = retained_users / cohort_count * 100
+        else:
+            retention_rate = 0
 
         results.append({
             "month": month_start.strftime("%Y-%m"),
@@ -159,10 +171,12 @@ def get_monthly_advanced_metrics(months=12):
             "financial_health": {
                 "fum": float(fum),
                 "churn_rate": round(churn_rate, 2),
-            },
+                "total_referrals": total_referrals,
+                "confirmed_referrals": confirmed_referrals,
+            }
         })
 
-    return list(reversed(results))
+    return results
 
 
 @api_view(['GET'])
