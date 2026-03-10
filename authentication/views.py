@@ -5189,7 +5189,7 @@ import threading
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def initiate_bank_transfer(request):
-    transaction_id = None  # ✅ Initialize to avoid UnboundLocalError
+    transaction_id = None
 
     try:
         user = request.user
@@ -5202,10 +5202,7 @@ def initiate_bank_transfer(request):
             )
 
         try:
-            # ✅ Convert to Decimal properly
             amount = Decimal(str(amount_raw))
-
-            # Validate amount is positive
             if amount < 100:
                 return Response(
                     {"error": "Amount must be greater than #100"},
@@ -5241,22 +5238,34 @@ def initiate_bank_transfer(request):
             description="QuickSave . . .",
             transaction_id=transaction_id,
         )
-        # ✅ No need to call save() after objects.create()
 
-        send_push_notification(
-            user=user,
-            title="QuickSave Pending ⏳",
-            message="Your transfer of ₦{:,.2f} is pending approval. We'll notify you once it's confirmed. Thank you for using MyFund.".format(
-                float(amount)  # ✅ Convert Decimal to float for formatting
-            ),
-            data={
+        # ✅ Return IMMEDIATELY after DB saves
+        response = Response(
+            {
+                "message": "Bank transfer request created and pending admin approval",
                 "amount": str(amount),
-                "transaction_id": transaction_id,
-                "type": "QuickSave",
-                "status": "pending",
             },
-            notif_type="PENDING",
+            status=status.HTTP_201_CREATED,
         )
+
+        # ✅ DO ALL NOTIFICATIONS IN BACKGROUND THREAD (including push)
+        def background_tasks():
+            try:
+                # 1. Send push notification to user (MOVED HERE)
+                send_push_notification(
+                    user=user,
+                    title="QuickSave Pending ⏳",
+                    message="Your transfer of ₦{:,.2f} is pending approval. We'll notify you once it's confirmed. Thank you for using MyFund.".format(
+                        float(amount)
+                    ),
+                    data={
+                        "amount": str(amount),
+                        "transaction_id": transaction_id,
+                        "type": "QuickSave",
+                        "status": "pending",
+                    },
+                    notif_type="PENDING",
+                )
 
         # ✅ Notify User via email
         user_subject = "QuickSave Pending..."
@@ -5268,9 +5277,9 @@ def initiate_bank_transfer(request):
             daemon=True
         ).start()
 
-        # ✅ Notify Admin via Email
-        subject = f"[CHECK] {user.first_name} Made A QuickSave Request"
-        message = f"Hi Admin,<br><br>A bank transfer request of ₦{amount} has been initiated by {user.first_name} {user.last_name} ({user.email}).<br><br>Review here: https://myfundapi-myfund-07ce351a.koyeb.app/admin/<br><br>MyFund Team"
+                # 3. Notify Admin via Email
+                subject = f"[CHECK] {user.first_name} Made A QuickSave Request"
+                message = f"Hi Admin,<br><br>A bank transfer request of ₦{amount} has been initiated by {user.first_name} {user.last_name} ({user.email}).<br><br>Review here: https://myfundapi-myfund-07ce351a.koyeb.app/admin/<br><br>MyFund Team"
 
         threading.Thread(
             target=send_generic_email,
@@ -5280,49 +5289,55 @@ def initiate_bank_transfer(request):
         ).start()
 
 
-        # ✅ Notify Admin via Push Notification
-        admin_emails = [
-            "tolulopeahmed@gmail.com",
-            "ceo@myfundmobile.com",
-            "lioness@myfundmobile.com",
-        ]
-        admin_users = CustomUser.objects.filter(email__in=admin_emails)
+                # 4. Notify Admin via Push Notification
+                admin_emails = [
+                    "tolulopeahmed@gmail.com",
+                    "ceo@myfundmobile.com",
+                    "lioness@myfundmobile.com",
+                ]
+                admin_users = CustomUser.objects.filter(email__in=admin_emails)
 
-        for admin_user in admin_users:
-            if hasattr(admin_user, "expo_push_tokens") and admin_user.expo_push_tokens:
-                admin_push_title = f"{user.first_name} initiated a New QuickSave"
-                admin_push_message = (
-                    f"{user.first_name} {user.last_name} ({user.email}) has initiated ₦{amount:,.2f} to Savings Account.\n"
-                    f"Please check to confirm."
-                )
+                for admin_user in admin_users:
+                    if (
+                        hasattr(admin_user, "expo_push_tokens")
+                        and admin_user.expo_push_tokens
+                    ):
+                        admin_push_title = (
+                            f"{user.first_name} initiated a New QuickSave"
+                        )
+                        admin_push_message = (
+                            f"{user.first_name} {user.last_name} ({user.email}) has initiated ₦{amount:,.2f} to Savings Account.\n"
+                            f"Please check to confirm."
+                        )
 
-                send_push_notification(
-                    user=admin_user,
-                    title=admin_push_title,
-                    message=admin_push_message,
-                    data={
-                        "transaction_id": transaction_id,
-                        "user_email": user.email,
-                        "amount": str(amount),
-                        "type": "QuickSave",
-                        "status": "pending",
-                        "source": "admin_quicksave_alert",
-                    },
-                    notif_type="ADMIN_ALERT",
-                )
-                print(
-                    f"✅ Admin QuickSave push notification sent to {admin_user.email}"
-                )
-            else:
-                print(f"⚠️ No push tokens for admin {admin_user.email}")
+                        send_push_notification(
+                            user=admin_user,
+                            title=admin_push_title,
+                            message=admin_push_message,
+                            data={
+                                "transaction_id": transaction_id,
+                                "user_email": user.email,
+                                "amount": str(amount),
+                                "type": "QuickSave",
+                                "status": "pending",
+                                "source": "admin_quicksave_alert",
+                            },
+                            notif_type="ADMIN_ALERT",
+                        )
+                        print(
+                            f"✅ Admin QuickSave push notification sent to {admin_user.email}"
+                        )
+                    else:
+                        print(f"⚠️ No push tokens for admin {admin_user.email}")
 
-        return Response(
-            {
-                "message": "Bank transfer request created and pending admin approval",
-                "amount": str(amount),
-            },
-            status=status.HTTP_201_CREATED,
-        )
+            except Exception as e:
+                print(f"Background task error: {e}")
+
+        # Start background thread
+        thread = threading.Thread(target=background_tasks, daemon=True)
+        thread.start()
+
+        return response
 
     except Exception as e:
         return Response(

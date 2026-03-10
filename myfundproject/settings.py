@@ -375,6 +375,13 @@ PAYLESS_SMS_USERNAME = config("PAYLESS_SMS_USERNAME")
 PAYLESS_SMS_PASSWORD = config("PAYLESS_SMS_PASSWORD")
 PAYLESS_SMS_SENDER_ID = config("PAYLESS_SMS_SENDER_ID")
 
+CELERY_TASK_ROUTES = {
+    "authentication.tasks.send_namecheap_safe_email_task": {"queue": "emails"},
+    "authentication.tasks.send_bulk_email_task": {"queue": "emails"},
+    "authentication.tasks.calculate_daily_roi_task": {"queue": "critical"},
+    "authentication.tasks.process_target_savings_deductions": {"queue": "critical"},
+    "authentication.tasks.process_due_scheduled_withdrawals": {"queue": "critical"},
+}
 
 # ===== EMAIL CONFIGURATION =====
 EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
