@@ -277,36 +277,25 @@ class CustomUserAdmin(UserAdmin):
     ]
 
     def get_total_referrals(self, obj):
-        # 🚀 OPTIMIZED: Use the annotated field instead of querying
-        return getattr(obj, '_total_referrals', 0)
+        return Transaction.objects.filter(referral_email=obj.email).count()
 
     get_total_referrals.short_description = "Total Referrals"
 
     def get_confirmed_referrals(self, obj):
-        # 🚀 OPTIMIZED: Use the annotated field instead of querying
-        return getattr(obj, '_confirmed_referrals', 0)
+        return Transaction.objects.filter(
+            referral_email=obj.email, status="confirmed"
+        ).count()
 
     get_confirmed_referrals.short_description = "Confirmed Referrals"
 
     def get_queryset(self, request):
         qs = super().get_queryset(request)
-
-        total_referrals = Transaction.objects.filter(
-            referral_email=OuterRef('email')
-        ).values('referral_email').annotate(
-            count=Count('id')
-        ).values('count')
-
-        confirmed_referrals = Transaction.objects.filter(
-            referral_email=OuterRef('email'),
-            status='confirmed'
-        ).values('referral_email').annotate(
-            count=Count('id')
-        ).values('count')
-
         return qs.annotate(
-            _total_referrals=Coalesce(Subquery(total_referrals, output_field=IntegerField()), 0),
-            _confirmed_referrals=Coalesce(Subquery(confirmed_referrals, output_field=IntegerField()), 0),
+            _total_referrals=Count("referral_transactions"),
+            _confirmed_referrals=Count(
+                "referral_transactions",
+                filter=Q(referral_transactions__status="confirmed"),
+            ),
         )
 
     def get_daily_savings_roi_rate(self):
@@ -1454,16 +1443,10 @@ class CardAdmin(admin.ModelAdmin):
         "id",
         "user",
         "bank_name",
-        "card_type",
-        "card_first6_digits",
-        "card_last4_digits",
-        "card_brand",
-        "expiry_month",
-        "expiry_year",
         "is_default",
     )
     list_filter = ("is_default",)
-    search_fields = ("user__email", "bank_name", "card_first6_digits")  # Add search options
+    search_fields = ("user__email", "bank_name", "card_number")  # Add search options
 
 
 class AutoSaveAdmin(admin.ModelAdmin):
@@ -1486,6 +1469,12 @@ from django.contrib import admin
 from .models import Transaction
 
 
+from django.contrib import admin
+from django.utils import timezone
+from .models import Transaction
+from .utils import send_generic_email, send_push_notification
+
+
 class TransactionAdmin(admin.ModelAdmin):
     list_display = (
         "user",
@@ -1503,30 +1492,117 @@ class TransactionAdmin(admin.ModelAdmin):
         "status",
         ("date", admin.DateFieldListFilter),
     )
-    # error comes
     search_fields = (
         "user__email",
         "user__first_name",
         "user__last_name",
         "description",
         "transaction_id",
-        "status",
-        "amount",
-        # "referral__user__email",
         "referral_email",
     )
+
+    actions = ["force_confirm_transactions"]
+
+    # --- 1. THE DROPDOWN ACTION ---
+    @admin.action(description="Force Confirm Selected Pending Transactions")
+    def force_confirm_transactions(self, request, queryset):
+        count = 0
+        # Only process transactions that are currently pending
+        for txn in queryset.filter(status="pending"):
+            self._confirm_transaction_logic(txn)
+            count += 1
+
+        if count > 0:
+            self.message_user(
+                request,
+                f"Successfully confirmed {count} transactions, updated balances, and sent notifications.",
+            )
+        else:
+            self.message_user(
+                request, "No pending transactions were selected.", level="warning"
+            )
+
+    # --- 2. THE MANUAL SAVE LOGIC ---
+    def save_model(self, request, obj, form, change):
+        # If an existing transaction is changed to 'confirmed' manually in the edit form
+        if change and "status" in form.changed_data and obj.status == "confirmed":
+            self._confirm_transaction_logic(obj)
+        else:
+            super().save_model(request, obj, form, change)
+
+    # --- 3. THE CENTRAL BRAIN (Handles Balances, Referrals, and Notifications) ---
+    def _confirm_transaction_logic(self, txn):
+        """Processes the entire confirmation workflow."""
+        user = txn.user
+
+        # Double-check protection: don't process if already confirmed in DB
+        txn_in_db = Transaction.objects.filter(id=txn.id).first()
+        if txn_in_db and txn_in_db.status == "confirmed":
+            return
+
+        # A. Update Transaction Status
+        txn.status = "confirmed"
+        txn.date = timezone.now()
+        # Keep original description but append (Manual Approval) if you want to track it
+        txn.save()
+
+        # B. Update User Balances
+        amount = txn.amount
+        is_investment = (
+            "invest" in txn.description.lower()
+            or txn.transaction_type.lower() == "investment"
+        )
+
+        if is_investment:
+            user.investment += int(amount)
+            folder_name = "Investment"
+            notif_title = "QuickInvest Approved ✅"
+        else:
+            user.savings += int(amount)
+            folder_name = "Savings"
+            notif_title = "QuickSave Approved ✅"
+
+        user.update_total_savings_and_investment_this_month()
+        user.save()
+
+        # C. Trigger Referral Rewards (If applicable)
+        # This checks if the user has a referrer and grants bonuses for the first deposit
+        if hasattr(user, "confirm_referral_rewards"):
+            user.confirm_referral_rewards(is_referrer=False)
+
+        # D. Send Email Notification (Using your Generic Email Utility)
+        email_subject = f"{folder_name} Updated! ✅"
+        email_body = (
+            f"Hi {{first_name}},\n\n"
+            f"Your transfer of ₦{int(amount):,} has been processed successfully "
+            f"and added to your {folder_name} account.\n\n"
+            f"Keep growing your funds!\n\nMyFund Team"
+        )
+        send_generic_email(email_subject, email_body, [user.email])
+
+        # E. Send Push Notification
+        try:
+            from .utils import send_push_notification  # Adjust import path
+
+            send_push_notification(
+                user=user,
+                title=notif_title,
+                message=f"Hi {user.first_name}, your transfer of ₦{int(amount):,} has been added to your {folder_name} account.",
+                data={
+                    "amount": str(amount),
+                    "transaction_id": txn.transaction_id,
+                    "type": folder_name,
+                },
+                notif_type="CREDIT",
+            )
+        except Exception as e:
+            print(f"Push notification failed: {e}")
 
     def is_referral_transaction(self, obj):
         return bool(obj.referral_email)
 
     is_referral_transaction.boolean = True
     is_referral_transaction.short_description = "Is Referral?"
-
-    def save_model(self, request, obj, form, change):
-        print(
-            f"DEBUG: Saving transaction: {obj.transaction_type} (Length: {len(obj.transaction_type)})"
-        )
-        super().save_model(request, obj, form, change)
 
 
 class PropertyAdmin(admin.ModelAdmin):

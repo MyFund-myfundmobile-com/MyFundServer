@@ -89,7 +89,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         return f"{self.first_name} {self.last_name}".strip()
 
     referral = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, db_index=True
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True
     )
     pending_referral_reward = models.DecimalField(
         max_digits=10, decimal_places=2, default=0
@@ -1029,16 +1029,26 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         if self.password_record:
             return self.password_record.check_password(raw_password)
         return False
-    
+
     class Meta:
         indexes = [
-            models.Index(fields=['is_deleted', 'date_joined']),  # ✅ Critical for user queries
-            models.Index(fields=['is_deleted', 'savings', 'investment']),  # ✅ For FUM calculations
-            models.Index(fields=['referral_id']),  # ✅ For referral stats
-            models.Index(fields=['is_ambassador']),  # ✅ For influencer stats
-            models.Index(fields=['is_active', 'is_banned']),  # ✅ ADDED: Critical for ROI & admin filters
-            models.Index(fields=['date_joined', 'is_deleted']),  # ✅ ADDED: For admin list queries
-            models.Index(fields=['referral_id', 'date_joined']),  # ✅ ADDED: For referral queries
+            models.Index(
+                fields=["is_deleted", "date_joined"]
+            ),  # ✅ Critical for user queries
+            models.Index(
+                fields=["is_deleted", "savings", "investment"]
+            ),  # ✅ For FUM calculations
+            models.Index(fields=["referral_id"]),  # ✅ For referral stats
+            models.Index(fields=["is_ambassador"]),  # ✅ For influencer stats
+            models.Index(
+                fields=["is_active", "is_banned"]
+            ),  # ✅ ADDED: Critical for ROI & admin filters
+            models.Index(
+                fields=["date_joined", "is_deleted"]
+            ),  # ✅ ADDED: For admin list queries
+            models.Index(
+                fields=["referral_id", "date_joined"]
+            ),  # ✅ ADDED: For referral queries
         ]
 
 
@@ -1189,87 +1199,35 @@ class BankAccount(models.Model):
 
 class CardManager(models.Manager):
     """Custom manager to exclude cards without valid authorization codes"""
-    
+
     def get_queryset(self):
         """Override to exclude cards without authorization_code"""
-        return super().get_queryset().exclude(
-            models.Q(authorization_code='') | models.Q(authorization_code__isnull=True)
+        return (
+            super()
+            .get_queryset()
+            .exclude(
+                models.Q(authorization_code="")
+                | models.Q(authorization_code__isnull=True)
+            )
         )
-    
+
     def all_including_invalid(self):
         """Get all cards including those without authorization codes"""
         return super().get_queryset()
+
 
 class Card(models.Model):
     user = models.ForeignKey(
         get_user_model(), on_delete=models.CASCADE, related_name="owned_cards"
     )
-    
-    # Paystack authorization details
-    authorization_code = models.CharField(max_length=255, default="")
-    signature = models.CharField(max_length=255, unique=True, null=True, blank=True)
-    
-    # Card metadata (safe to store)
-    card_type = models.CharField(max_length=50, default="")  # visa, mastercard, verve
-    card_first6_digits = models.CharField(max_length=10, default="")  # First 6 digits
-    card_last4_digits = models.CharField(max_length=4, default="")
-    expiry_month = models.CharField(max_length=2, default="")
-    expiry_year = models.CharField(max_length=4, default="")
-    bank_name = models.CharField(max_length=100, default="")
-    card_brand = models.CharField(max_length=50, default="")  # visa, mastercard, etc.
-    country_code = models.CharField(max_length=10, default="")  # e.g., NG
-    card_owner_name = models.CharField(max_length=255, default="")  # Name on card
-    
-    # Flags
-    reusable = models.BooleanField(default=True)
+    bank_name = models.CharField(max_length=100)
     is_default = models.BooleanField(default=False)
-    is_active = models.BooleanField(default=True)
-    
-    # Timestamps
-    created_at = models.DateTimeField(default=timezone.now)
-
-    # Custom manager
-    objects = CardManager()
-
-    class Meta:
-        ordering = ['-is_default', '-created_at']
-        indexes = [
-            models.Index(fields=['user', 'is_active']),
-            models.Index(fields=['authorization_code']),
-        ]
 
     def __str__(self):
-        return f"{self.user.email}'s {self.card_brand.upper()} •••• {self.card_last4_digits} ({self.bank_name})"
-
-    def save(self, *args, **kwargs):
-        # If this is the first valid card for the user, make it default
-        if not self.pk and self.authorization_code:
-            # Only check for valid cards (with authorization_code)
-            has_valid_cards = Card.objects.filter(user=self.user).exists()
-            if not has_valid_cards:
-                self.is_default = True
-        
-        # If this card is being set as default, unset other defaults
-        if self.is_default and self.authorization_code:
-            Card.objects.filter(user=self.user, is_default=True).exclude(
-                pk=self.pk
-            ).update(is_default=False)
-        
-        super().save(*args, **kwargs)
-    
-    @property
-    def is_valid_for_payment(self):
-        """Check if card has valid authorization code and can be used for payments"""
-        return bool(self.authorization_code and self.authorization_code.strip())
-    
-    def clean(self):
-        """Validate that cards marked as default have authorization codes"""
-        from django.core.exceptions import ValidationError
-        
-        if self.is_default and not self.authorization_code:
-            raise ValidationError(
-                "Cards without authorization codes cannot be set as default"
-            )
+        card_last_digits = self.card_number[-4:]
+        return (
+            f"{self.user.email}'s Card ending in {card_last_digits} ({self.bank_name})"
+        )
 
 
 # Update the models to use settings.AUTH_USER_MODEL
@@ -1937,7 +1895,7 @@ class TargetSavingsCompletion(models.Model):
         )
 
 
-# TRANSACTIONS MODEL
+# TRANSACTIONS MODEL # TRANSACTION MODEL
 from decimal import Decimal, InvalidOperation, DecimalException
 from django.utils import timezone
 import uuid
@@ -2063,12 +2021,16 @@ class Transaction(models.Model):
 
     def __str__(self):
         return f"{self.transaction_type} - {self.amount} - {self.status} - {self.date}"
-    
+
     class Meta:
         indexes = [
-            models.Index(fields=['date', 'status', 'transaction_type']),  # ✅ Critical
-            models.Index(fields=['user', 'date', 'status']),  # ✅ For user-specific queries
-            models.Index(fields=['source', 'transaction_type', 'status', 'date']),  # ✅ For MAS
+            models.Index(fields=["date", "status", "transaction_type"]),  # ✅ Critical
+            models.Index(
+                fields=["user", "date", "status"]
+            ),  # ✅ For user-specific queries
+            models.Index(
+                fields=["source", "transaction_type", "status", "date"]
+            ),  # ✅ For MAS
         ]
 
 

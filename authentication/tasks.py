@@ -942,15 +942,21 @@ from django.template.loader import render_to_string
 from django.utils.html import strip_tags
 
 logger = logging.getLogger(__name__)
+from celery import shared_task
+from django.core.mail import send_mail, get_connection
+from django.conf import settings
+import time
+import logging
+
+logger = logging.getLogger(__name__)
 
 
-@shared_task(bind=True, max_retries=3, rate_limit="45/h")  # ← RATE LIMIT ADDED HERE
+@shared_task(bind=True, max_retries=3)
 def send_namecheap_safe_email_task(
-    self, emails, from_email, batch_size=15, delay_seconds=2
+    self, emails, from_email, reuse_connection=False, batch_size=15, delay_seconds=2
 ):
     """
-    Namecheap-safe email sending: MAX 45 emails per hour
-    For 3000 users: Will take ~67 hours (2.8 days)
+    Namecheap-safe email sending with single SMTP connection per batch.
     """
     total_emails = len(emails)
     sent_count = 0
@@ -960,55 +966,64 @@ def send_namecheap_safe_email_task(
         f"🛡️ Namecheap-safe: Processing {total_emails} emails in ultra-safe mode"
     )
 
-    # Process emails one by one with delays
-    for i, email_data in enumerate(emails):
-        try:
-            # Extract email data
-            to_email = email_data.get("to", "")
-            subject = email_data.get("subject", "")
-            plain_message = email_data.get("plain_message", "")
-            html_message = email_data.get("html_message", "")
+    # Open SMTP connection if reuse_connection is True
+    connection = None
+    if reuse_connection:
+        connection = get_connection(
+            username=from_email,
+            password=settings.EMAIL_HOST_PASSWORD,
+            fail_silently=False,
+        )
+        connection.open()
 
-            if not to_email:
-                logger.warning("Skipping email with no recipient")
-                continue
+    try:
+        for i, email_data in enumerate(emails):
+            try:
+                to_email = email_data.get("to", "")
+                subject = email_data.get("subject", "")
+                plain_message = email_data.get("plain_message", "")
+                html_message = email_data.get("html_message", "")
 
-            # Send email
-            send_mail(
-                subject=subject,
-                message=plain_message,
-                from_email=from_email,
-                recipient_list=[to_email],
-                html_message=html_message,
-                fail_silently=False,
-            )
-
-            sent_count += 1
-
-            # Log progress every 5 emails
-            if (i + 1) % 5 == 0:
-                logger.info(f"✅ Sent {i+1}/{total_emails} emails in this batch")
-
-            # Critical: Delay between emails to stay under Namecheap limit
-            # 2 seconds between emails = 30 emails/minute max = safe
-            time.sleep(delay_seconds)
-
-        except Exception as e:
-            error_info = {"email": to_email, "error": str(e)}
-            failed_emails.append(error_info)
-            logger.error(f"❌ Email failed for {to_email}: {e}")
-
-            # If it's a rate limit error, wait longer and retry
-            if "rate limit" in str(e).lower() or "quota" in str(e).lower():
-                logger.warning(f"⚠️ Rate limit detected, waiting 5 minutes...")
-                time.sleep(300)  # Wait 5 minutes
-
-                try:
-                    # Retry this specific email
-                    self.retry(countdown=300, max_retries=2)
-                except self.MaxRetriesExceededError:
-                    logger.error(f"Max retries exceeded for {to_email}")
+                if not to_email:
+                    logger.warning("Skipping email with no recipient")
                     continue
+
+                send_mail(
+                    subject=subject,
+                    message=plain_message,
+                    from_email=from_email,
+                    recipient_list=[to_email],
+                    html_message=html_message,
+                    fail_silently=False,
+                    connection=connection,  # <-- USE the connection here
+                    timeout=30,  # optional, prevents hanging
+                )
+
+                sent_count += 1
+
+                if (i + 1) % 5 == 0:
+                    logger.info(f"✅ Sent {i+1}/{total_emails} emails in this batch")
+
+                time.sleep(delay_seconds)
+
+            except Exception as e:
+                error_info = {"email": to_email, "error": str(e)}
+                failed_emails.append(error_info)
+                logger.error(f"❌ Email failed for {to_email}: {e}")
+
+                # Retry if rate limit
+                if "rate limit" in str(e).lower() or "quota" in str(e).lower():
+                    logger.warning(f"⚠️ Rate limit detected, waiting 5 minutes...")
+                    time.sleep(300)
+                    try:
+                        self.retry(countdown=300, max_retries=2)
+                    except self.MaxRetriesExceededError:
+                        logger.error(f"Max retries exceeded for {to_email}")
+                        continue
+
+    finally:
+        if connection:
+            connection.close()  # <-- close connection at the end
 
     logger.info(f"📊 Namecheap-safe batch complete: {sent_count}/{total_emails} sent")
 
@@ -1022,82 +1037,48 @@ def send_namecheap_safe_email_task(
     }
 
 
-@shared_task(bind=True, max_retries=3, rate_limit="100/h")  # For small batches
-def send_bulk_email_task(self, emails, from_email, batch_size=30, delay_seconds=60):
-    """
-    For smaller batches (<100): Faster but still Namecheap-safe
-    """
-    total_emails = len(emails)
-    sent_count = 0
-    failed_emails = []
+from celery import shared_task
+import time
+import logging
+from django.core.mail import send_mail
 
-    logger.info(f"📦 Processing {total_emails} emails (small batch mode)")
+logger = logging.getLogger(__name__)
 
-    # Process in very small batches for Namecheap
-    for i in range(0, total_emails, batch_size):
+
+@shared_task(bind=True, max_retries=3, queue="email_queue")
+def send_bulk_email_task(self, emails, from_email, batch_size=45, delay_seconds=300):
+    total = len(emails)
+    sent = 0
+    failed = []
+
+    logger.info(f"📦 Sending {total} emails in batches of {batch_size}")
+
+    for i in range(0, total, batch_size):
         batch = emails[i : i + batch_size]
-        batch_number = (i // batch_size) + 1
-        total_batches = (total_emails - 1) // batch_size + 1
 
-        logger.info(
-            f"📬 Processing batch {batch_number}/{total_batches} ({len(batch)} emails)"
-        )
+        logger.info(f"🚀 Processing batch {i//batch_size + 1}")
 
-        batch_sent = 0
-        batch_failed = []
-
-        for email_data in batch:
+        for e in batch:
             try:
-                to_email = email_data.get("to", "")
-                subject = email_data.get("subject", "")
-                plain_message = email_data.get("plain_message", "")
-                html_message = email_data.get("html_message", "")
-
-                if not to_email:
-                    continue
-
                 send_mail(
-                    subject=subject,
-                    message=plain_message,
+                    subject=e["subject"],
+                    message=e["plain_message"],
                     from_email=from_email,
-                    recipient_list=[to_email],
-                    html_message=html_message,
+                    recipient_list=[e["to"]],
+                    html_message=e["html_message"],
                     fail_silently=False,
                 )
+                sent += 1
+            except Exception as ex:
+                failed.append({"email": e["to"], "error": str(ex)})
+                logger.error(f"❌ Failed {e['to']}: {ex}")
 
-                sent_count += 1
-                batch_sent += 1
-
-                # Delay between emails within batch
-                time.sleep(2)  # 2 seconds between emails
-
-            except Exception as e:
-                error_info = {"email": to_email, "error": str(e)}
-                failed_emails.append(error_info)
-                batch_failed.append(error_info)
-                logger.error(f"❌ Email failed for {to_email}: {e}")
-
-        logger.info(f"✅ Batch {batch_number} complete: {batch_sent}/{len(batch)} sent")
-
-        # Long delay between batches for Namecheap safety
-        if i + batch_size < total_emails:
-            logger.info(f"⏳ Waiting {delay_seconds}s before next batch...")
+        if i + batch_size < total:
+            logger.info(f"⏳ Sleeping {delay_seconds}s before next batch")
             time.sleep(delay_seconds)
 
-    logger.info(f"📊 Bulk email complete: {sent_count}/{total_emails} sent")
-
-    result = {
-        "sent": sent_count,
-        "failed": len(failed_emails),
-        "total": total_emails,
-        "batch_size": batch_size,
-        "delay_seconds": delay_seconds,
-    }
-
-    if failed_emails:
-        result["failed_emails"] = failed_emails
-
-    return result
+    logger.info(f"📊 Done: {sent}/{total} sent")
+    return {"sent": sent, "failed": len(failed)}
 
 
 from datetime import date
@@ -1293,73 +1274,94 @@ def backfill_q3_2025_roi_from_transactions(self, email=None, test_only=False):
 
 from celery import shared_task
 from django.conf import settings
-from django.utils import timezone
 from .models import CustomUser
-from .utils import send_generic_email  # adjust import if needed
+from .utils import send_generic_email
 import logging
 
 logger = logging.getLogger(__name__)
 
 
-@shared_task(bind=True, max_retries=3, rate_limit="45/h")
-def send_feedback_email_task(self, test_emails=None):
+@shared_task
+def send_namecheap_safe_email_task_v2(test_mode=False, from_email=None):
     """
-    Send MyFund feedback email safely via Namecheap.
-    - If test_emails is provided -> sends ONLY to those
-    - Else -> sends to all active users
+    Send MyFund email safely via Namecheap.
+    Usage:
+      - test_mode=True to send only to exec emails
+      - test_mode=False (or omitted) to send to all active users
     """
 
-    SUBJECT = "📬 {first_name}, YOUR DIVIDENDS FEEDBACK"
+    from_email = from_email or settings.DEFAULT_FROM_EMAIL
+
+    SUBJECT = (
+        "NEW TAX GUIDELINES for Savings/Investment Earnings (Starting Feb 1st, 2026)"
+    )
 
     MESSAGE = """
-<!-- Header Image -->
-<p style="text-align:center; margin-bottom:24px;">
-  <img src="https://i.imgur.com/Tu5r2bh.png" alt="Testimonial" style="max-width:100%; height:auto; border-radius:8px;">
-</p>
+<p>Dear {first_name},</p>
 
-<p>Hi {first_name},</p>
+<p>We would like to inform you of an important update regarding your savings and investment payouts on MyFund.</p>
 
-<p>We’d love to hear about your experience with MyFund, especially regarding recent dividends paid.</p>
+<p>In line with current Nigerian Tax Laws, all financial platforms are required to apply statutory taxes on earnings and service charges.
+To comply with these regulations, MyFund will be updating its transaction system to reflect these taxes.</p>
 
-<p>Please take a minute to fill out this short feedback form:</p>
+<p>Although the regulatory deadline for this update was January 19, 2026, implementation on MyFund will now take effect from:</p>
+
+<p><strong>📅 February 1st, 2026</strong></p>
+
+<hr>
+
+<p><strong>What This Means for You</strong></p>
+
+<ul>
+  <li>VAT on Service Charges – <strong>7.5%</strong></li>
+  <li>Withholding Tax on Interest (Dividends) – <strong>10%</strong></li>
+</ul>
+
+<p>These charges are mandated by Nigerian tax authorities and are not MyFund charges.</p>
+
+<p><strong>Simple Illustration</strong></p>
+
+<p>If your dividend or interest payout is ₦10,000:</p>
+
+<ul>
+  <li>10% Withholding Tax = ₦1,000</li>
+  <li>7.5% VAT on applicable service charges</li>
+</ul>
+
+<p>Your final payout will be after these statutory charges.</p>
+
+<p><strong>Important to Note</strong></p>
+
+<ul>
+  <li>These charges apply to transactions from February 1st, 2026</li>
+  <li>Your next dividends payout in April will reflect this updates</li>
+  <li>This ensures MyFund remains compliant with Nigerian regulations</li>
+</ul>
+
+<p>If you need clarification, our support team is available via email at care@myfundmobile.com.</p>
+
+
 
 <p>
-<a href="https://docs.google.com/forms/d/e/1FAIpQLSdqbbvW6xIlSkkPMXmSzsUYKHhroqktMgBzVtCY9p905SRK6Q/viewform?usp=header"
-   style="
-     display:block;
-     width:100%;
-     max-width:100%;
-     background-color:#4c28BC;
-     color:#ffffff;
-     text-align:center;
-     padding:16px;
-     font-weight:bold;
-     text-decoration:none;
-     border-radius:6px;
-     margin:24px 0;
-     letter-spacing:1px;
-   ">
-   FEEDBACK FORM
-</a>
+Warm regards,<br>
+<strong>Chubi</strong><br>
+DME, MyFund
 </p>
-
-<p>You may also share your testimonial on social media and tag us:</p>
-
-<p>@myfundmobile (all platforms)<br>
-@myfundmobile1 (Instagram)</p>
-
-<p>Thank you for your support.</p>
-
-<p>Best regards,<br>
-Deola</p>
 """
 
-    # --------------------------------------------------
-    # Decide who to send to
-    # --------------------------------------------------
-    if test_emails:
-        recipients = test_emails
-        logger.info(f"🧪 TEST MODE: Sending to {len(recipients)} emails")
+    # Recipient selection
+    TEST_EXEC_EMAILS = [
+        "dme@myfundmobile.com",
+        "janet.adegbenro@gmail.com",
+        "patrickmundi1@myfundmobile.com",
+        "valueplusrecords@gmail.com",
+    ]
+
+    if test_mode:
+        recipients = TEST_EXEC_EMAILS
+        logger.warning(
+            "🧪 TEST MODE ENABLED — sending tax update email ONLY to exec team"
+        )
     else:
         recipients = list(
             CustomUser.objects.filter(is_active=True)
@@ -1367,17 +1369,225 @@ Deola</p>
             .exclude(email__exact="")
             .values_list("email", flat=True)
         )
-        logger.info(f"🚀 LIVE MODE: Sending to {len(recipients)} active users")
+        logger.warning(
+            f"🚀 LIVE MODE ENABLED — sending tax update email to {len(recipients)} users"
+        )
 
-    # --------------------------------------------------
-    # Send using your existing safe logic
-    # --------------------------------------------------
+    # Send via Namecheap-safe utility
     result = send_generic_email(
         subject=SUBJECT,
-        message_or_context=MESSAGE,
+        message=MESSAGE,
         recipient_list=recipients,
-        from_email=settings.DEFAULT_FROM_EMAIL,
+        from_email=from_email,
     )
 
-    logger.info(f"📊 Feedback email task result: {result}")
+    logger.info(f"📊 Tax update email task result: {result}")
     return result
+
+
+from decimal import Decimal
+from celery import shared_task
+from django.utils import timezone
+from django.conf import settings
+import logging
+
+from authentication.models import CustomUser, Transaction
+from authentication.utils import send_generic_email, send_push_notification
+
+logger = logging.getLogger(__name__)
+
+
+@shared_task
+def credit_january_ambassadors(test_mode=True):
+    """
+    Ambassador payout task.
+
+    TEST MODE:
+        - Credits ADMIN users only
+        - Creates transactions
+        - Sends push + email
+        - Does NOT touch ambassadors
+
+    LIVE MODE:
+        - Credits ambassadors
+        - Creates transactions
+        - Sends push + email
+    """
+
+    ADMIN_TEST_EMAILS = [
+        "tolulopeahmed@gmail.com",
+        # "company@myfundmobile.com",
+        # "valueplusrecords@gmail.com",
+    ]
+
+    ambassadors = {
+        "ofeimunjudith@gmail.com": 40,
+        "iyinoluwaadedoyin@gmail.com": 39,
+        "olorunfemiprecious2109@gmail.com": 35,
+        "vancedmist@gmail.com": 27,
+        "oyelakinakolade52@gmail.com": 20,
+        "aregold44@gmail.com": 16,
+        "simysola22@gmail.com": 11,
+        "anniejhnson45@gmail.com": 7,
+        "danzydavid44@gmail.com": 7,
+        "adequateugbong@gmail.com": 5,
+        "godwinpraise372@gmail.com": 0,
+        "martolu2006@gmail.com": 0,
+        "okechukwusimone@gmail.com": 0,
+        "dikaiosunemay@gmail.com": 0,
+        "nyiyaanabariagara@gmail.com": 0,
+        "okohfaithehikis@gmail.com": 0,
+        "kamsiprince8@gmail.com": 0,
+        "tochirex7@gmail.com": 0,
+        "igbegbegracious6@gmail.com": 0,
+    }
+
+    # 🔥 In test mode — map ambassador rewards onto admins
+    if test_mode:
+
+        logger.warning("🧪 TEST MODE ACTIVE — CREDITING ADMINS ONLY")
+
+        admin_users = list(CustomUser.objects.filter(email__in=ADMIN_TEST_EMAILS))
+
+        if not admin_users:
+            logger.error("❌ No admin users found for test payout")
+            return "No admins found"
+
+        ambassador_values = list(ambassadors.values())
+
+        # Rotate values if fewer ambassadors than admins
+        while len(ambassador_values) < len(admin_users):
+            ambassador_values.extend(ambassador_values)
+
+        payout_map = {
+            admin_users[i]: ambassador_values[i] for i in range(len(admin_users))
+        }
+
+    else:
+        logger.warning("🚀 LIVE MODE — CREDITING AMBASSADORS")
+
+        payout_map = {}
+
+        for email, points in ambassadors.items():
+            user = CustomUser.objects.filter(email=email).first()
+
+            if not user:
+                logger.error(f"User not found: {email}")
+                continue
+
+            payout_map[user] = points
+
+    processed = 0
+
+    for user, points in payout_map.items():
+
+        try:
+            amount = Decimal(points * 100)
+
+            # ---------- EMAIL / PUSH CONTENT ---------- #
+
+            if points > 0:
+
+                subject = "🎉 January Ambassador Reward!"
+
+                message = f"""
+                Hi {{first_name}},<br><br>
+
+                Well done in January! Your commitment to expanding the MyFund community truly stands out.<br><br>
+
+                <strong>₦{amount:,.2f}</strong> has been credited to your wallet.<br><br>
+
+                🔥 <strong>Let’s make February even stronger especially for confirmed referrals.</strong>
+
+                <ul>
+                    <li>Follow up with your referrals</li>
+                    <li>Help them complete registration</li>
+                    <li>Drive confirmed referrals</li>
+                </ul>
+
+                Consistency is what separates top ambassadors.<br><br>
+
+                Keep winning 🚀<br><br>
+
+                <strong>— MyFund Team</strong>
+                """
+
+                push_title = "January Reward Credited 🎉"
+                push_body = f"₦{amount:,.0f} has been added to your wallet as part of your efforts as an ambassador in January. Let’s do better in February especially for confirmed referrals!"
+
+            else:
+
+                subject = "Your Ambassador Performance"
+
+                message = """
+                Hi {first_name},<br><br>
+
+                You had no confirmed referrals records in January.<br><br>
+
+                Please note that the ambassador program is performance-driven, and continued inactivity may lead to removal.<br><br>
+
+                <strong>February is your opportunity to bounce back.</strong>
+
+                <ul>
+                    <li>Reconnect with referrals</li>
+                    <li>Encourage completed signups</li>
+                    <li>Drive confirmations</li>
+                </ul>
+
+                We believe you can turn this around — but action is required.<br><br>
+
+                <strong>— MyFund Team</strong>
+                """
+
+                push_title = "⚠️ Ambassador Performance"
+                push_body = "There were no confirmed referrals recorded for you in January. Step up in February to remain eligible for the MyFund Ambassadorship programme."
+
+            # ---------- CREDIT WALLET ---------- #
+
+            if amount > 0:
+
+                user.wallet += amount
+                user.save(update_fields=["wallet"])
+
+                Transaction.objects.create(
+                    user=user,
+                    transaction_type="credit",
+                    status="confirmed",
+                    amount=amount,
+                    description="January Reward 🎉",
+                    service_charge=0,
+                    total_amount=amount,
+                    source="AMBASSADOR_REWARD",
+                    transaction_id=f"AMB-{timezone.now().strftime('%Y%m%d%H%M%S')}-{user.id}",
+                )
+
+            # ---------- EMAIL ---------- #
+
+            send_generic_email(
+                subject=subject,
+                message=message,
+                recipient_list=[user.email],
+                from_email=settings.DEFAULT_FROM_EMAIL,
+            )
+
+            # ---------- PUSH ---------- #
+
+            send_push_notification(
+                user=user,
+                title=push_title,
+                message=push_body,
+                data={
+                    "type": "AMBASSADOR_REWARD",
+                    "points": points,
+                    "amount": float(amount),
+                },
+                notif_type="AMBASSADOR",
+            )
+
+            processed += 1
+            logger.info(f"✅ Processed {user.email}")
+
+        except Exception as e:
+            logger.error(f"❌ Failed for {user.email}: {str(e)}")
+
+    return f"✅ Payout completed. Total processed: {processed}"
