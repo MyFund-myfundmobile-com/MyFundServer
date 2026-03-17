@@ -1386,7 +1386,6 @@ DME, MyFund
 
 
 from decimal import Decimal
-from celery import shared_task
 from django.utils import timezone
 from django.conf import settings
 import logging
@@ -1397,10 +1396,9 @@ from authentication.utils import send_generic_email, send_push_notification
 logger = logging.getLogger(__name__)
 
 
-@shared_task
-def credit_january_ambassadors(test_mode=True):
+def credit_february_ambassadors(test_mode=True):
     """
-    Ambassador payout task.
+    Ambassador payout function.
 
     TEST MODE:
         - Credits ADMIN users only
@@ -1415,34 +1413,24 @@ def credit_january_ambassadors(test_mode=True):
     """
 
     ADMIN_TEST_EMAILS = [
-        "tolulopeahmed@gmail.com",
-        # "company@myfundmobile.com",
-        # "valueplusrecords@gmail.com",
+        "valueplusrecords@gmail.com",
     ]
 
     ambassadors = {
-        "ofeimunjudith@gmail.com": 40,
-        "iyinoluwaadedoyin@gmail.com": 39,
-        "olorunfemiprecious2109@gmail.com": 35,
-        "vancedmist@gmail.com": 27,
-        "oyelakinakolade52@gmail.com": 20,
-        "aregold44@gmail.com": 16,
-        "simysola22@gmail.com": 11,
-        "anniejhnson45@gmail.com": 7,
+        "ofeimunjudith@gmail.com": 44,
+        "iyinoluwaadedoyin@gmail.com": 25,
+        "olorunfemiprecious2109@gmail.com": 25,
+        "vancedmist@gmail.com": 36,
+        "oyelakinakolade52@gmail.com": 68,
+        "aregold44@gmail.com": 24,
+        "simysola22@gmail.com": 15,
+        "anniejhnson45@gmail.com": 20,
         "danzydavid44@gmail.com": 7,
-        "adequateugbong@gmail.com": 5,
-        "godwinpraise372@gmail.com": 0,
-        "martolu2006@gmail.com": 0,
-        "okechukwusimone@gmail.com": 0,
-        "dikaiosunemay@gmail.com": 0,
-        "nyiyaanabariagara@gmail.com": 0,
-        "okohfaithehikis@gmail.com": 0,
-        "kamsiprince8@gmail.com": 0,
-        "tochirex7@gmail.com": 0,
-        "igbegbegracious6@gmail.com": 0,
+        "adequateugbong@gmail.com": 7,
     }
 
-    # 🔥 In test mode — map ambassador rewards onto admins
+    # ---------- TEST MODE ---------- #
+
     if test_mode:
 
         logger.warning("🧪 TEST MODE ACTIVE — CREDITING ADMINS ONLY")
@@ -1455,7 +1443,6 @@ def credit_january_ambassadors(test_mode=True):
 
         ambassador_values = list(ambassadors.values())
 
-        # Rotate values if fewer ambassadors than admins
         while len(ambassador_values) < len(admin_users):
             ambassador_values.extend(ambassador_values)
 
@@ -1463,12 +1450,16 @@ def credit_january_ambassadors(test_mode=True):
             admin_users[i]: ambassador_values[i] for i in range(len(admin_users))
         }
 
+    # ---------- LIVE MODE ---------- #
+
     else:
+
         logger.warning("🚀 LIVE MODE — CREDITING AMBASSADORS")
 
         payout_map = {}
 
         for email, points in ambassadors.items():
+
             user = CustomUser.objects.filter(email=email).first()
 
             if not user:
@@ -1482,27 +1473,29 @@ def credit_january_ambassadors(test_mode=True):
     for user, points in payout_map.items():
 
         try:
+
             amount = Decimal(points * 100)
 
             # ---------- EMAIL / PUSH CONTENT ---------- #
 
             if points > 0:
 
-                subject = "🎉 January Ambassador Reward!"
+                subject = "🎉 February Ambassador Reward!"
 
                 message = f"""
                 Hi {{first_name}},<br><br>
 
-                Well done in January! Your commitment to expanding the MyFund community truly stands out.<br><br>
+                Well done in February! Your commitment to expanding the MyFund community truly stands out.<br><br>
 
                 <strong>₦{amount:,.2f}</strong> has been credited to your wallet.<br><br>
 
-                🔥 <strong>Let’s make February even stronger especially for confirmed referrals.</strong>
+                🔥 <strong>Let’s make March even stronger especially for confirmed referrals.</strong>
 
                 <ul>
                     <li>Follow up with your referrals</li>
-                    <li>Help them complete registration</li>
-                    <li>Drive confirmed referrals</li>
+                    <li>Help them complete the registration</li>
+                    <li>Guide them to make their first savings and earn their first ROI</li>
+                    <li>Add them to your growing community</li>
                 </ul>
 
                 Consistency is what separates top ambassadors.<br><br>
@@ -1512,8 +1505,9 @@ def credit_january_ambassadors(test_mode=True):
                 <strong>— MyFund Team</strong>
                 """
 
-                push_title = "January Reward Credited 🎉"
-                push_body = f"₦{amount:,.0f} has been added to your wallet as part of your efforts as an ambassador in January. Let’s do better in February especially for confirmed referrals!"
+                push_title = "February Reward Credited 🎉"
+
+                push_body = f"₦{amount:,.0f} has been added to your wallet as part of your efforts as an ambassador in February. Let’s do better in March especially for confirmed referrals!"
 
             else:
 
@@ -1522,11 +1516,11 @@ def credit_january_ambassadors(test_mode=True):
                 message = """
                 Hi {first_name},<br><br>
 
-                You had no confirmed referrals records in January.<br><br>
+                You had no confirmed referrals records in February.<br><br>
 
                 Please note that the ambassador program is performance-driven, and continued inactivity may lead to removal.<br><br>
 
-                <strong>February is your opportunity to bounce back.</strong>
+                <strong>March is your opportunity to bounce back.</strong>
 
                 <ul>
                     <li>Reconnect with referrals</li>
@@ -1540,7 +1534,8 @@ def credit_january_ambassadors(test_mode=True):
                 """
 
                 push_title = "⚠️ Ambassador Performance"
-                push_body = "There were no confirmed referrals recorded for you in January. Step up in February to remain eligible for the MyFund Ambassadorship programme."
+
+                push_body = "There were no confirmed referrals recorded for you in February. Step up in March to remain eligible for the MyFund Ambassadorship programme."
 
             # ---------- CREDIT WALLET ---------- #
 
@@ -1554,7 +1549,7 @@ def credit_january_ambassadors(test_mode=True):
                     transaction_type="credit",
                     status="confirmed",
                     amount=amount,
-                    description="January Reward 🎉",
+                    description="February Ambassador Reward 🎉",
                     service_charge=0,
                     total_amount=amount,
                     source="AMBASSADOR_REWARD",
@@ -1588,6 +1583,56 @@ def credit_january_ambassadors(test_mode=True):
             logger.info(f"✅ Processed {user.email}")
 
         except Exception as e:
+
             logger.error(f"❌ Failed for {user.email}: {str(e)}")
 
     return f"✅ Payout completed. Total processed: {processed}"
+
+
+# tasks.py
+from celery import shared_task
+from authentication.models import CustomUser
+from authentication.utils import create_dedicated_account
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+@shared_task
+def backfill_dvas_for_old_users(test_only=True):
+    """
+    Populate DVA for old users who don't have one.
+    If test_only=True, only process two test accounts.
+    """
+    if test_only:
+        users = CustomUser.objects.filter(
+            email__in=["tolulopeahmed@gmail.com", "company@myfundmobile.com"]
+        )
+        logger.info("🧪 TEST MODE: Processing only 2 users")
+    else:
+        users = CustomUser.objects.filter(dva_account_number__isnull=True)
+        logger.info(f"🚀 LIVE MODE: Processing {users.count()} users")
+
+    created_count = 0
+    failed_users = []
+
+    for user in users:
+        try:
+            success = create_dedicated_account(user)
+            if success:
+                created_count += 1
+                logger.info(
+                    f"✅ DVA created for {user.email} -> {user.dva_account_number}"
+                )
+            else:
+                failed_users.append(user.email)
+                logger.warning(f"⚠️ Failed to create DVA for {user.email}")
+        except Exception as e:
+            failed_users.append(user.email)
+            logger.error(f"❌ Exception creating DVA for {user.email}: {str(e)}")
+
+    return {
+        "created": created_count,
+        "failed": failed_users,
+        "total_processed": users.count(),
+    }
