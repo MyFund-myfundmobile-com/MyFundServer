@@ -155,6 +155,15 @@ class UserSerializer(serializers.ModelSerializer):
             "next_of_kin_phone_number",
             "state",
             "country",
+            # DVA / Paystack fields
+            "dva_account_number",
+            "dva_account_name",
+            "dva_bank_name",
+            "dva_assigned_at",
+            "dva_account_id",
+            "paystack_identified",
+            "paystack_identification_status",
+            "paystack_identification_reason",
             # Add new referral fields
             "total_referrals",
             "confirmed_referrals",

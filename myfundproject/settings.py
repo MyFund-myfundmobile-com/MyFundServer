@@ -83,12 +83,13 @@ ALLOWED_HOSTS = [
     "10.0.0.140",
     "10.182.118.111",
     "192.168.1.148",
+    "lipopectic-nonopinionatively-woodrow.ngrok-free.dev",
     "10.0.0.37",
     "10.5.8.33",
     "192.168.137.1",
     "172.24.144.1",
     "192.168.20.99",
-    "192.168.20.159"
+    "192.168.20.159",
 ]
 
 SECURE_SSL_REDIRECT = False  # Disable forced HTTPS redirect
@@ -388,22 +389,22 @@ EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
 DEFAULT_FROM_EMAIL = "MyFund <message@myfundmobile.com>"
 
 # SSL (Implicit SSL)
-EMAIL_HOST = "myfundmobile.com"
-EMAIL_PORT = 465
-EMAIL_USE_SSL = True
-EMAIL_USE_TLS = False
-EMAIL_TIMEOUT = 20
-
-# # TLS (Explicit SSL)
 # EMAIL_HOST = "myfundmobile.com"
-# EMAIL_PORT = 587
-# EMAIL_USE_SSL = False
-# EMAIL_USE_TLS = True
+# EMAIL_PORT = 465
+# EMAIL_USE_SSL = True
+# EMAIL_USE_TLS = False
 # EMAIL_TIMEOUT = 20
 
+# # TLS (Explicit SSL)
+EMAIL_HOST = "myfundmobile.com"
+EMAIL_PORT = 587
+EMAIL_USE_SSL = False
+EMAIL_USE_TLS = True
+EMAIL_TIMEOUT = 20
 
-EMAIL_HOST_USER = "message@myfundmobile.com"
-EMAIL_HOST_PASSWORD = "AdminSecure123..."
+
+EMAIL_HOST_USER = "info@myfundmobile.com"
+EMAIL_HOST_PASSWORD = "Reproduction1..."
 
 
 AUTHENTICATION_BACKENDS = [
@@ -428,4 +429,10 @@ AUTHENTICATION_BACKENDS = [
 # SECURE_HSTS_PRELOAD = True
 # SECURE_HSTS_INCLUDE_SUBDOMAINS = True
 
-PAYSTACK_SECRET_KEY = os.getenv("PAYSTACK_KEY_LIVE")
+# settings.py
+import os
+
+if os.getenv("DJANGO_ENV") == "production":
+    PAYSTACK_SECRET_KEY = os.getenv("PAYSTACK_KEY_LIVE")
+else:
+    PAYSTACK_SECRET_KEY = os.getenv("PAYSTACK_KEY_TEST")

@@ -131,6 +131,21 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     investment = models.DecimalField(max_digits=11, decimal_places=2, default=0)
     properties = models.PositiveIntegerField(default=0)
     wallet = models.DecimalField(max_digits=11, decimal_places=2, default=0)
+
+    # PAYSTACK DVA
+    paystack_customer_code = models.CharField(max_length=255, null=True, blank=True)
+    dva_account_number = models.CharField(max_length=20, null=True, blank=True)
+    dva_account_name = models.CharField(max_length=255, null=True, blank=True)
+    dva_bank_name = models.CharField(max_length=100, null=True, blank=True)
+    dva_assigned_at = models.DateTimeField(null=True, blank=True)
+    dva_account_id = models.CharField(max_length=50, null=True, blank=True)
+    paystack_identified = models.BooleanField(default=False)
+    paystack_identification_status = models.CharField(
+        max_length=30, null=True, blank=True
+    )
+    paystack_identification_reason = models.TextField(null=True, blank=True)
+
+    # DIVIDENDS
     pending_roi = models.DecimalField(max_digits=11, decimal_places=2, default=0)
     savings_and_investments = models.DecimalField(
         max_digits=11, decimal_places=2, default=0
@@ -1241,6 +1256,44 @@ class AccountBalance(models.Model):
 
 from django.db import models
 from django.conf import settings
+
+
+class DvaDepositIntent(models.Model):
+    PURPOSE_CHOICES = (
+        ("SAVINGS", "Savings"),
+        ("INVESTMENT", "Investment"),
+    )
+
+    STATUS_CHOICES = (
+        ("pending", "Pending"),
+        ("confirmed", "Confirmed"),
+        ("expired", "Expired"),
+        ("failed", "Failed"),
+    )
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="dva_deposit_intents",
+    )
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    purpose = models.CharField(max_length=20, choices=PURPOSE_CHOICES)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
+    transaction_id = models.CharField(max_length=50, unique=True)
+    paystack_reference = models.CharField(max_length=100, null=True, blank=True)
+    matched_account_number = models.CharField(max_length=20, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.user.email} - {self.purpose} - {self.amount} - {self.status}"
+
+
+from django.db import models
+from django.conf import settings
 from django.core.validators import RegexValidator
 from decimal import Decimal, InvalidOperation
 import uuid
@@ -1950,7 +2003,7 @@ class Transaction(models.Model):
     status = models.CharField(
         max_length=20, choices=STATUS_TYPES, default="pending", db_index=True
     )
-    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
     date = models.DateTimeField(auto_now_add=True)
     time = models.TimeField(auto_now_add=True)
     description = models.CharField(
@@ -1975,13 +2028,18 @@ class Transaction(models.Model):
         editable=False,
         db_index=True,
     )
-
+    paystack_reference = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        db_index=True,
+    )
     idempotency_key = models.CharField(
         max_length=64, unique=True, null=True, blank=True, db_index=True
     )
 
-    service_charge = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
-    total_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
+    service_charge = models.DecimalField(max_digits=14, decimal_places=2, default=0.0)
+    total_amount = models.DecimalField(max_digits=14, decimal_places=2, default=0.0)
     referral_email = models.EmailField(
         max_length=255, blank=True, null=True, db_index=True
     )
@@ -2245,7 +2303,7 @@ class WithdrawalsRequestToAdmin(models.Model):
     source_account = models.CharField(max_length=255, default="savings")
     target_bank = models.CharField(max_length=100, default="")
     target_account_number = models.CharField(max_length=50, default="")
-
+    target_account_name = models.CharField(max_length=255, blank=True, null=True)
     # Withdrawal type fields
     withdrawal_type = models.CharField(
         max_length=50,

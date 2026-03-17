@@ -41,7 +41,18 @@ import csv
 from django.http import HttpResponse
 from django.utils.html import format_html
 from django.urls import reverse
-from .utils import send_push_notification, send_generic_email
+from django.contrib import messages
+from django.utils.html import format_html
+
+from .utils import (
+    send_push_notification,
+    send_generic_email,
+    clear_local_dva_fields,
+    sync_user_dva_from_paystack,
+    deactivate_user_dva,
+    recreate_user_dva,
+    requery_dedicated_account,
+)
 from decimal import Decimal
 
 GOOGLE_FORM_TEMPLATE = (
@@ -149,7 +160,11 @@ class CustomUserAdmin(UserAdmin):
         "is_active",
         "is_banned",  # 👈 show banned status
         "profile_picture",
-        "pending_roi",  # 👈 add this
+        "pending_roi",
+        "dva_status_display",
+        "dva_account_number_display",
+        "dva_bank_display",
+        "paystack_customer_code_display",
     )
     list_filter = (
         "is_staff",
@@ -161,8 +176,18 @@ class CustomUserAdmin(UserAdmin):
         "date_joined",
         "is_hired_referrer",
         "is_ambassador",
+        "paystack_identified",
+        "paystack_identification_status",
     )
-    readonly_fields = ("get_total_referrals", "get_confirmed_referrals", "date_joined")
+    readonly_fields = (
+        "get_total_referrals",
+        "get_confirmed_referrals",
+        "date_joined",
+        "dva_status_display",
+        "dva_account_number_display",
+        "dva_bank_display",
+        "paystack_customer_code_display",
+    )
 
     actions = [
         "ban_user",
@@ -184,6 +209,11 @@ class CustomUserAdmin(UserAdmin):
         "test_quarterly_payout",  # ← Add this
         "view_roi_summary",  # ← Add this
         "test_top_saver_reward",
+        "sync_selected_dvas_from_paystack",
+        "requery_selected_dvas",
+        "deactivate_selected_dvas",
+        "clear_selected_local_dvas",
+        "recreate_selected_dvas",
     ]
 
     fieldsets = (
@@ -247,6 +277,26 @@ class CustomUserAdmin(UserAdmin):
                     "next_of_kin_phone_number",
                     "kyc_status",
                     "kyc_rejection_reason",
+                ),
+            },
+        ),
+        (
+            "DVA / Paystack",
+            {
+                "fields": (
+                    "paystack_customer_code",
+                    "paystack_identified",
+                    "paystack_identification_status",
+                    "paystack_identification_reason",
+                    "dva_status_display",
+                    "dva_account_number_display",
+                    "dva_bank_display",
+                    "paystack_customer_code_display",
+                    "dva_account_number",
+                    "dva_account_name",
+                    "dva_bank_name",
+                    "dva_account_id",
+                    "dva_assigned_at",
                 ),
             },
         ),
@@ -323,6 +373,187 @@ class CustomUserAdmin(UserAdmin):
             "investment_roi": round(investment_roi, 2),
             "total_roi": round(total_roi, 2),
         }
+
+    # DVA
+    def dva_status_display(self, obj):
+        if obj.dva_account_number and obj.dva_account_id:
+            return format_html(
+                '<span style="color: green; font-weight: 600;">Assigned</span>'
+            )
+
+        if obj.paystack_identification_status == "processing":
+            return format_html(
+                '<span style="color: orange; font-weight: 600;">Processing</span>'
+            )
+
+        if obj.paystack_identification_reason == "NAME_MISMATCH":
+            return format_html(
+                '<span style="color: red; font-weight: 600;">Name Mismatch</span>'
+            )
+
+        if obj.paystack_identification_status == "failed":
+            return format_html(
+                '<span style="color: red; font-weight: 600;">Failed</span>'
+            )
+
+        return format_html('<span style="color: grey; font-weight: 600;">No DVA</span>')
+
+    dva_status_display.short_description = "DVA Status"
+
+    def dva_account_number_display(self, obj):
+        return obj.dva_account_number or "—"
+
+    dva_account_number_display.short_description = "DVA Number"
+
+    def dva_bank_display(self, obj):
+        return obj.dva_bank_name or "—"
+
+    dva_bank_display.short_description = "DVA Bank"
+
+    def paystack_customer_code_display(self, obj):
+        return obj.paystack_customer_code or "—"
+
+    paystack_customer_code_display.short_description = "Paystack Customer"
+
+    @admin.action(description="🔄 Sync selected users' DVAs from Paystack")
+    def sync_selected_dvas_from_paystack(self, request, queryset):
+        success_count = 0
+        failed_count = 0
+
+        for user in queryset:
+            ok, result = sync_user_dva_from_paystack(user)
+            if ok:
+                success_count += 1
+            else:
+                failed_count += 1
+                self.message_user(
+                    request,
+                    f"Sync failed for {user.email}: {result.get('message')}",
+                    level=messages.ERROR,
+                )
+
+        if success_count:
+            self.message_user(
+                request,
+                f"{success_count} user(s) DVA synced successfully from Paystack.",
+                level=messages.SUCCESS,
+            )
+
+        if failed_count and not success_count:
+            self.message_user(
+                request,
+                "No DVA sync completed successfully.",
+                level=messages.WARNING,
+            )
+
+    @admin.action(description="📡 Requery selected users' DVAs for incoming transfers")
+    def requery_selected_dvas(self, request, queryset):
+        success_count = 0
+        failed_count = 0
+
+        for user in queryset:
+            ok, result = requery_dedicated_account(user)
+            if ok:
+                success_count += 1
+            else:
+                failed_count += 1
+                self.message_user(
+                    request,
+                    f"Requery failed for {user.email}: {result.get('message')}",
+                    level=messages.ERROR,
+                )
+
+        if success_count:
+            self.message_user(
+                request,
+                f"Requery triggered successfully for {success_count} user(s).",
+                level=messages.SUCCESS,
+            )
+
+        if failed_count and not success_count:
+            self.message_user(
+                request,
+                "No DVA requery completed successfully.",
+                level=messages.WARNING,
+            )
+
+    @admin.action(
+        description="🛑 Deactivate selected users' DVAs on Paystack and clear local DVA"
+    )
+    def deactivate_selected_dvas(self, request, queryset):
+        success_count = 0
+        failed_count = 0
+
+        for user in queryset:
+            ok, result = deactivate_user_dva(user, clear_local=True)
+            if ok:
+                success_count += 1
+            else:
+                failed_count += 1
+                self.message_user(
+                    request,
+                    f"Deactivate failed for {user.email}: {result.get('message')}",
+                    level=messages.ERROR,
+                )
+
+        if success_count:
+            self.message_user(
+                request,
+                f"{success_count} DVA(s) deactivated on Paystack and cleared locally.",
+                level=messages.SUCCESS,
+            )
+
+        if failed_count and not success_count:
+            self.message_user(
+                request,
+                "No DVA deactivation completed successfully.",
+                level=messages.WARNING,
+            )
+
+    @admin.action(description="🧹 Clear selected users' local DVA fields only")
+    def clear_selected_local_dvas(self, request, queryset):
+        count = 0
+
+        for user in queryset:
+            clear_local_dva_fields(user, save=True)
+            count += 1
+
+        self.message_user(
+            request,
+            f"Cleared local DVA fields for {count} user(s).",
+            level=messages.SUCCESS,
+        )
+
+    @admin.action(description="🏦 Recreate selected users' DVAs")
+    def recreate_selected_dvas(self, request, queryset):
+        success_count = 0
+        failed_count = 0
+
+        for user in queryset:
+            ok, result = recreate_user_dva(user, preferred_bank="wema-bank")
+            if ok:
+                success_count += 1
+            else:
+                failed_count += 1
+                self.message_user(
+                    request,
+                    f"Recreate failed for {user.email}: {result.get('message')}",
+                    level=messages.ERROR,
+                )
+
+        if success_count:
+            self.message_user(
+                request,
+                f"Recreated DVA successfully for {success_count} user(s).",
+                level=messages.SUCCESS,
+            )
+
+        if failed_count and not success_count:
+            self.message_user(
+                request,
+                "No DVA recreation completed successfully.",
+                level=messages.WARNING,
+            )
 
     @admin.action(description="🚫 Ban selected users (cannot reactivate)")
     def ban_user(self, request, queryset):
@@ -1285,8 +1516,9 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
         "charge_percentage_display",  # %
         "charge_amount_display",  # ₦ charge
         "net_amount_display",  # ₦ to send
-        "target_bank",
+        "target_bank_display",
         "target_account_number",
+        "target_account_name_display",
         "created_at",
         "scheduled_processing_date",
         "transaction_id",
@@ -1311,6 +1543,38 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
     # =========================
     # DISPLAY HELPERS (READ-ONLY)
     # =========================
+
+    def target_bank_display(self, obj):
+        if getattr(obj, "target_bank", None):
+            return obj.target_bank
+
+        bank = BankAccount.objects.filter(
+            user=obj.user,
+            account_number=obj.target_account_number,
+        ).first()
+
+        if bank:
+            return bank.bank_name
+
+        return "-"
+
+    target_bank_display.short_description = "Target Bank"
+
+    def target_account_name_display(self, obj):
+        if getattr(obj, "target_account_name", None):
+            return obj.target_account_name
+
+        bank = BankAccount.objects.filter(
+            user=obj.user,
+            account_number=obj.target_account_number,
+        ).first()
+
+        if bank:
+            return bank.account_name
+
+        return "-"
+
+    target_account_name_display.short_description = "Target Account Name"
 
     def total_amount_display(self, obj):
         """Original amount requested by user"""
@@ -1387,20 +1651,24 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
                     )
 
                     # Email
-                    send_mail(
-                        subject="Withdrawal Successful ✔",
-                        message=(
-                            f"Hi {user.first_name},\n\n"
-                            f"Your withdrawal of ₦{withdrawal.amount:,.2f} from your "
-                            f"{withdrawal.source_account.capitalize()} account "
-                            f"has been processed successfully.\n\n"
-                            f"Transaction ID: {transaction_id}\n\n"
-                            f"MyFund Team"
-                        ),
-                        from_email="MyFund <info@myfundmobile.com>",
-                        recipient_list=[user.email],
-                        fail_silently=False,
-                    )
+                    try:
+                        send_generic_email(
+                            subject="Withdrawal Successful ✔",
+                            message=(
+                                f"Hi {user.first_name},<br><br>"
+                                f"Your withdrawal of ₦{withdrawal.amount:,.2f} from your "
+                                f"{withdrawal.source_account.capitalize()} account "
+                                f"has been processed successfully.<br><br>"
+                                f"Transaction ID: {transaction_id}<br><br>"
+                                f"MyFund Team"
+                            ),
+                            from_email="MyFund <info@myfundmobile.com>",
+                            recipient_list=[user.email],
+                        )
+                    except Exception as email_error:
+                        print(
+                            f"Withdrawal approval email failed for {user.email}: {email_error}"
+                        )
 
             except Exception as e:
                 self.message_user(
@@ -1424,15 +1692,18 @@ class BankAccountAdmin(admin.ModelAdmin):
         "bank_name",
         "account_number",
         "account_name",
+        "bank_code",
+        "paystack_recipient_code",
         "is_default",
     )
-    list_filter = ("is_default",)
+    list_filter = ("is_default", "bank_name")
     search_fields = (
         "user__email",
         "bank_name",
         "account_number",
         "account_name",
-    )  # Add this line
+        "paystack_recipient_code",
+    )
 
 
 admin.site.register(BankAccount, BankAccountAdmin)
@@ -2144,6 +2415,44 @@ class ROITransactionAdmin(admin.ModelAdmin):
     list_filter = ["roi_type", "is_paid_out", "accrued_date", "payout_date"]
     search_fields = ["user__email", "user__first_name", "user__last_name"]
     readonly_fields = ["user", "amount", "roi_type", "accrued_date"]
+
+
+from django.contrib import admin
+from .models import DvaDepositIntent
+
+
+@admin.register(DvaDepositIntent)
+class DvaDepositIntentAdmin(admin.ModelAdmin):
+    list_display = (
+        "user",
+        "purpose",
+        "amount",
+        "status",
+        "transaction_id",
+        "paystack_reference",
+        "created_at",
+        "confirmed_at",
+    )
+    list_filter = ("purpose", "status", "created_at")
+    search_fields = (
+        "user__email",
+        "user__first_name",
+        "user__last_name",
+        "transaction_id",
+        "paystack_reference",
+        "matched_account_number",
+    )
+    readonly_fields = (
+        "user",
+        "amount",
+        "purpose",
+        "status",
+        "transaction_id",
+        "paystack_reference",
+        "matched_account_number",
+        "created_at",
+        "confirmed_at",
+    )
 
 
 admin.site.register(DailyROIAccrual, DailyROIAccrualAdmin)

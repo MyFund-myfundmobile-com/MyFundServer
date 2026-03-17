@@ -818,76 +818,544 @@ def get_next_payout_date(today: date) -> date:
     return date(year + 1, 1, 1)
 
 
-from django.db.models.functions import TruncMonth
-from django.db.models import Sum, Count, F, ExpressionWrapper, DecimalField
-from dateutil.relativedelta import relativedelta
+import requests
+from django.conf import settings
+
+PAYSTACK_BASE_URL = "https://api.paystack.co"
 
 
-def get_monthly_metrics(months=12):
-    now = timezone.now()
-    start_date = now - relativedelta(months=months)
+def get_paystack_headers():
+    return {
+        "Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}",
+        "Content-Type": "application/json",
+    }
 
-    # USERS PER MONTH
-    users_per_month = (
-        CustomUser.objects.filter(is_deleted=False, date_joined__gte=start_date)
-        .annotate(month=TruncMonth("date_joined"))
-        .values("month")
-        .annotate(
-            users=Count("id"),
-            savings=Coalesce(Sum("savings"), Value(0), output_field=DecimalField()),
-            investments=Coalesce(Sum("investment"), Value(0), output_field=DecimalField()),
-            fum=Coalesce(
-                Sum(
-                    ExpressionWrapper(
-                        F("savings") + F("investment"),
-                        output_field=DecimalField(max_digits=15, decimal_places=2),
-                    )
-                ),
-                Value(0),
-                output_field=DecimalField(),
-            ),
+
+def create_paystack_recipient(account_name, account_number, bank_code):
+    """
+    Create a Paystack transfer recipient for withdrawals.
+    Returns the recipient_code on success, else None.
+    """
+    payload = {
+        "type": "nuban",
+        "name": account_name,
+        "account_number": account_number,
+        "bank_code": bank_code,
+        "currency": "NGN",
+    }
+
+    try:
+        response = requests.post(
+            f"{PAYSTACK_BASE_URL}/transferrecipient",
+            json=payload,
+            headers=get_paystack_headers(),
+            timeout=30,
         )
-        .order_by("month")
-    )
+        data = response.json()
+    except requests.RequestException as e:
+        print(f"Paystack recipient request failed: {e}")
+        return None
+    except ValueError:
+        print("Invalid JSON response from Paystack recipient endpoint")
+        return None
 
-    # TRANSACTIONS PER MONTH
-    transactions_per_month = (
-        Transaction.objects.filter(date__gte=start_date)
-        .annotate(month=TruncMonth("date"))
-        .values("month")
-        .annotate(
-            transactions=Count("id"),
-            mas_users=Count(
-                "user",
-                distinct=True,
-                filter=Q(
-                    source__in=["SAVINGS", "INVESTMENT"],
-                    transaction_type="credit",
-                    status="confirmed",
-                ),
-            ),
+    if not response.ok or not data.get("status"):
+        print("PAYSTACK RECIPIENT RESPONSE:", response.status_code, data)
+        return None
+
+    recipient_data = data.get("data", {}) or {}
+    return recipient_data.get("recipient_code")
+
+
+def create_paystack_customer(user):
+    """
+    Create a Paystack customer if the user does not already have one.
+    Returns: (success: bool, result: customer_code or error dict)
+    """
+    existing_code = getattr(user, "paystack_customer_code", None)
+    if existing_code:
+        return True, existing_code
+
+    payload = {
+        "email": user.email,
+        "first_name": getattr(user, "first_name", "") or "",
+        "last_name": getattr(user, "last_name", "") or "",
+        "phone": (
+            getattr(user, "phone_number", None) or getattr(user, "phone", None) or ""
+        ),
+    }
+
+    try:
+        response = requests.post(
+            f"{PAYSTACK_BASE_URL}/customer",
+            json=payload,
+            headers=get_paystack_headers(),
+            timeout=30,
         )
-    )
+        data = response.json()
+    except requests.RequestException as e:
+        return False, {"message": f"Paystack customer request failed: {str(e)}"}
+    except ValueError:
+        return False, {
+            "message": "Invalid JSON response from Paystack customer endpoint"
+        }
 
-    # Merge user + transaction metrics
-    tx_map = {t["month"]: t for t in transactions_per_month}
+    if not response.ok or not data.get("status"):
+        return False, data
 
-    monthly_reports = []
-    for u in users_per_month:
-        month = u["month"]
-        tx = tx_map.get(month, {})
+    customer_data = data.get("data", {}) or {}
+    customer_code = customer_data.get("customer_code")
 
-        monthly_reports.append(
-            {
-                "month": month.strftime("%Y-%m"),
-                "label": month.strftime("%b %Y"),
-                "users": u["users"],
-                "savings": float(u["savings"]),
-                "investments": float(u["investments"]),
-                "fum": float(u["fum"]),
-                "transactions": tx.get("transactions", 0),
-                "mas_users": tx.get("mas_users", 0),
+    if not customer_code:
+        return False, {
+            "message": "Customer code missing from Paystack response",
+            "raw": data,
+        }
+
+    user.paystack_customer_code = customer_code
+    user.save(update_fields=["paystack_customer_code"])
+
+    return True, customer_code
+
+
+def identify_paystack_customer(user, bvn, bank_code, account_number):
+    """
+    Trigger Paystack customer identification for DVA creation.
+    Returns: (success: bool, result: response dict)
+    Only returns success when identification is completed, not merely accepted.
+    """
+    if not getattr(user, "paystack_customer_code", None):
+        ok, result = create_paystack_customer(user)
+        if not ok:
+            return False, result
+
+    payload = {
+        "country": "NG",
+        "type": "bank_account",
+        "account_number": account_number,
+        "bvn": bvn,
+        "bank_code": bank_code,
+        "first_name": getattr(user, "first_name", "") or "",
+        "last_name": getattr(user, "last_name", "") or "",
+    }
+
+    print("PAYSTACK IDENTIFICATION PAYLOAD:", payload)
+    print("PAYSTACK IDENTIFICATION CUSTOMER CODE:", user.paystack_customer_code)
+
+    try:
+        response = requests.post(
+            f"{PAYSTACK_BASE_URL}/customer/{user.paystack_customer_code}/identification",
+            json=payload,
+            headers=get_paystack_headers(),
+            timeout=30,
+        )
+
+        print("PAYSTACK IDENTIFICATION STATUS CODE:", response.status_code)
+        print("PAYSTACK IDENTIFICATION HEADERS:", dict(response.headers))
+        print("PAYSTACK IDENTIFICATION RAW TEXT:", response.text)
+
+        try:
+            data = response.json()
+        except ValueError:
+            return False, {
+                "message": "Paystack identification endpoint returned a non-JSON response.",
+                "status_code": response.status_code,
+                "raw_text": response.text,
             }
-        )
 
-    return monthly_reports
+    except requests.RequestException as e:
+        print("PAYSTACK IDENTIFICATION REQUEST FAILED:", str(e))
+        return False, {"message": f"Paystack identification request failed: {str(e)}"}
+
+    print("PAYSTACK IDENTIFICATION RESPONSE JSON:", data)
+
+    if response.status_code == 200 and data.get("status") is True:
+        return True, data
+
+    return False, {
+        "message": data.get("message", "Customer identification not yet completed."),
+        "status_code": response.status_code,
+        "raw": data,
+    }
+
+
+def create_dedicated_account(user, preferred_bank="wema-bank", force_create=False):
+    """
+    Create a Paystack dedicated virtual account after customer identification.
+    Returns: (success: bool, result: account dict or error dict)
+
+    If force_create=True, do not trust locally saved DVA fields; attempt fresh creation from Paystack.
+    """
+    existing_account_number = getattr(user, "dva_account_number", None)
+
+    if existing_account_number and not force_create:
+        return True, {
+            "account_number": existing_account_number,
+            "bank_name": getattr(user, "dva_bank_name", ""),
+            "account_name": getattr(user, "dva_account_name", ""),
+            "account_id": getattr(user, "dva_account_id", ""),
+        }
+
+    if not getattr(user, "paystack_customer_code", None):
+        return False, {"message": "User has no Paystack customer code"}
+
+    payload = {
+        "customer": user.paystack_customer_code,
+        "preferred_bank": preferred_bank,
+    }
+
+    try:
+        response = requests.post(
+            f"{PAYSTACK_BASE_URL}/dedicated_account",
+            json=payload,
+            headers=get_paystack_headers(),
+            timeout=30,
+        )
+        data = response.json()
+    except requests.RequestException as e:
+        return False, {"message": f"Paystack DVA request failed: {str(e)}"}
+    except ValueError:
+        return False, {
+            "message": "Invalid JSON response from Paystack dedicated account endpoint"
+        }
+
+    print("CREATE DVA STATUS CODE:", response.status_code)
+    print("CREATE DVA RESPONSE:", data)
+
+    if not response.ok or not data.get("status"):
+        return False, data
+
+    dedicated = data.get("data", {}) or {}
+    bank = dedicated.get("bank", {}) or {}
+
+    account_number = dedicated.get("account_number")
+    account_name = dedicated.get("account_name")
+    account_id = dedicated.get("id")
+
+    if not account_number:
+        return False, {
+            "message": "Account number missing from Paystack DVA response",
+            "raw": data,
+        }
+
+    user.dva_account_number = account_number
+    user.dva_account_name = account_name
+    user.dva_bank_name = bank.get("name")
+    user.dva_account_id = str(account_id) if account_id is not None else None
+
+    update_fields = [
+        "dva_account_number",
+        "dva_account_name",
+        "dva_bank_name",
+        "dva_account_id",
+    ]
+
+    if hasattr(user, "dva_assigned_at"):
+        user.dva_assigned_at = timezone.now()
+        update_fields.append("dva_assigned_at")
+
+    user.save(update_fields=update_fields)
+
+    return True, {
+        "account_number": user.dva_account_number,
+        "bank_name": user.dva_bank_name,
+        "account_name": user.dva_account_name,
+        "account_id": user.dva_account_id,
+    }
+
+
+# DVA MANAGEMENT - Utility to normalize bank names to Paystack provider slugs
+def normalize_provider_slug(bank_name):
+    """
+    Convert common bank names to Paystack provider slugs.
+    Defaults to wema-bank if unknown.
+    """
+    if not bank_name:
+        return "wema-bank"
+
+    value = str(bank_name).strip().lower()
+
+    mapping = {
+        "wema bank": "wema-bank",
+        "wema": "wema-bank",
+        "titan paystack": "titan-paystack",
+        "titan": "titan-paystack",
+    }
+
+    return mapping.get(value, value.replace(" ", "-"))
+
+
+def clear_local_dva_fields(user, save=True):
+    """
+    Clear locally stored DVA fields on the user.
+    Does NOT reset paystack_identified by default.
+    """
+    user.dva_account_number = None
+    user.dva_account_name = None
+    user.dva_bank_name = None
+    user.dva_account_id = None
+
+    update_fields = [
+        "dva_account_number",
+        "dva_account_name",
+        "dva_bank_name",
+        "dva_account_id",
+    ]
+
+    if hasattr(user, "dva_assigned_at"):
+        user.dva_assigned_at = None
+        update_fields.append("dva_assigned_at")
+
+    if save:
+        user.save(update_fields=update_fields)
+
+    return True, {
+        "message": "Local DVA fields cleared successfully.",
+        "cleared_fields": update_fields,
+    }
+
+
+def fetch_dedicated_account_by_id(dedicated_account_id):
+    """
+    Fetch a dedicated account directly from Paystack by DVA id.
+    Returns: (success: bool, result: dict)
+    """
+    if not dedicated_account_id:
+        return False, {"message": "No dedicated account id provided."}
+
+    try:
+        response = requests.get(
+            f"{PAYSTACK_BASE_URL}/dedicated_account/{dedicated_account_id}",
+            headers=get_paystack_headers(),
+            timeout=30,
+        )
+        data = response.json()
+    except requests.RequestException as e:
+        return False, {"message": f"Fetch DVA request failed: {str(e)}"}
+    except ValueError:
+        return False, {"message": "Invalid JSON response from fetch DVA endpoint"}
+
+    if not response.ok or not data.get("status"):
+        return False, {
+            "message": data.get("message", "Failed to fetch dedicated account"),
+            "raw": data,
+            "status_code": response.status_code,
+        }
+
+    return True, data.get("data", {}) or {}
+
+
+def list_dedicated_accounts_for_customer(user):
+    """
+    List dedicated accounts for a user's Paystack customer code.
+    Returns: (success: bool, result: list|dict)
+    """
+    customer_code = getattr(user, "paystack_customer_code", None)
+    if not customer_code:
+        return False, {"message": "User has no Paystack customer code."}
+
+    try:
+        response = requests.get(
+            f"{PAYSTACK_BASE_URL}/dedicated_account",
+            headers=get_paystack_headers(),
+            params={"customer": customer_code},
+            timeout=30,
+        )
+        data = response.json()
+    except requests.RequestException as e:
+        return False, {"message": f"List DVA request failed: {str(e)}"}
+    except ValueError:
+        return False, {"message": "Invalid JSON response from list DVA endpoint"}
+
+    if not response.ok or not data.get("status"):
+        return False, {
+            "message": data.get("message", "Failed to list dedicated accounts"),
+            "raw": data,
+            "status_code": response.status_code,
+        }
+
+    return True, data.get("data", []) or []
+
+
+def requery_dedicated_account(user, query_date=None):
+    """
+    Trigger Paystack requery for a user's DVA.
+    Uses account number and provider slug.
+    Returns: (success: bool, result: dict)
+    """
+    account_number = getattr(user, "dva_account_number", None)
+    if not account_number:
+        return False, {"message": "User has no local DVA account number to requery."}
+
+    provider_slug = normalize_provider_slug(getattr(user, "dva_bank_name", None))
+    query_date = query_date or date.today().isoformat()
+
+    try:
+        response = requests.get(
+            f"{PAYSTACK_BASE_URL}/dedicated_account/requery",
+            headers=get_paystack_headers(),
+            params={
+                "account_number": account_number,
+                "provider_slug": provider_slug,
+                "date": query_date,
+            },
+            timeout=30,
+        )
+        data = response.json()
+    except requests.RequestException as e:
+        return False, {"message": f"Requery DVA request failed: {str(e)}"}
+    except ValueError:
+        return False, {"message": "Invalid JSON response from requery DVA endpoint"}
+
+    if not response.ok or not data.get("status"):
+        return False, {
+            "message": data.get("message", "Failed to requery dedicated account"),
+            "raw": data,
+            "status_code": response.status_code,
+        }
+
+    return True, data
+
+
+def sync_user_dva_from_paystack(user):
+    """
+    Sync the user's local DVA fields from Paystack.
+    Priority:
+    1. Fetch by local dva_account_id if available
+    2. Otherwise list by paystack_customer_code and select an assigned account
+    3. If no assigned DVA exists, clear local DVA fields
+
+    Returns: (success: bool, result: dict)
+    """
+    dedicated = None
+
+    local_dva_id = getattr(user, "dva_account_id", None)
+    if local_dva_id:
+        ok, result = fetch_dedicated_account_by_id(local_dva_id)
+        if ok:
+            dedicated = result
+        else:
+            print(f"Fetch by local DVA id failed for {user.email}: {result}")
+
+    if dedicated is None:
+        ok, result = list_dedicated_accounts_for_customer(user)
+        if not ok:
+            return False, result
+
+        accounts = result or []
+
+        assigned_accounts = [item for item in accounts if item.get("assigned") is True]
+
+        if assigned_accounts:
+            # Pick the latest by created_at/update order returned by Paystack
+            dedicated = assigned_accounts[0]
+        else:
+            clear_local_dva_fields(user, save=True)
+            return True, {
+                "message": "No assigned DVA found on Paystack. Local DVA fields cleared.",
+                "action": "cleared_local_dva",
+            }
+
+    bank = dedicated.get("bank", {}) or {}
+    account_id = dedicated.get("id")
+    account_number = dedicated.get("account_number")
+    account_name = dedicated.get("account_name")
+    assigned = dedicated.get("assigned", False)
+
+    if not assigned or not account_number:
+        clear_local_dva_fields(user, save=True)
+        return True, {
+            "message": "Dedicated account is not assigned on Paystack. Local fields cleared.",
+            "action": "cleared_local_dva",
+            "raw": dedicated,
+        }
+
+    user.dva_account_number = account_number
+    user.dva_account_name = account_name
+    user.dva_bank_name = bank.get("name")
+    user.dva_account_id = str(account_id) if account_id is not None else None
+
+    update_fields = [
+        "dva_account_number",
+        "dva_account_name",
+        "dva_bank_name",
+        "dva_account_id",
+    ]
+
+    if hasattr(user, "dva_assigned_at") and not getattr(user, "dva_assigned_at", None):
+        user.dva_assigned_at = timezone.now()
+        update_fields.append("dva_assigned_at")
+
+    user.save(update_fields=update_fields)
+
+    return True, {
+        "message": "Local DVA synced successfully from Paystack.",
+        "account_number": user.dva_account_number,
+        "bank_name": user.dva_bank_name,
+        "account_name": user.dva_account_name,
+        "account_id": user.dva_account_id,
+        "raw": dedicated,
+    }
+
+
+def deactivate_user_dva(user, clear_local=True):
+    """
+    Deactivate (unassign) a user's dedicated account on Paystack.
+    Optionally clears local DVA fields after Paystack success.
+
+    Returns: (success: bool, result: dict)
+    """
+    dedicated_account_id = getattr(user, "dva_account_id", None)
+
+    if not dedicated_account_id:
+        return False, {"message": "User has no local DVA account id."}
+
+    try:
+        response = requests.delete(
+            f"{PAYSTACK_BASE_URL}/dedicated_account/{dedicated_account_id}",
+            headers=get_paystack_headers(),
+            timeout=30,
+        )
+        data = response.json()
+    except requests.RequestException as e:
+        return False, {"message": f"Deactivate DVA request failed: {str(e)}"}
+    except ValueError:
+        return False, {"message": "Invalid JSON response from deactivate DVA endpoint"}
+
+    if not response.ok or not data.get("status"):
+        return False, {
+            "message": data.get("message", "Failed to deactivate dedicated account"),
+            "raw": data,
+            "status_code": response.status_code,
+        }
+
+    result = {
+        "message": data.get("message", "Dedicated account deactivated successfully."),
+        "raw": data,
+    }
+
+    if clear_local:
+        clear_local_dva_fields(user, save=True)
+        result["local_clear"] = True
+
+    return True, result
+
+
+def recreate_user_dva(user, preferred_bank="wema-bank"):
+    """
+    Recreate a user's DVA from admin.
+    Requires a Paystack customer code and successful identification.
+    """
+    if not getattr(user, "paystack_customer_code", None):
+        return False, {"message": "User has no Paystack customer code."}
+
+    if not getattr(user, "paystack_identified", False):
+        return False, {
+            "message": "User is not currently marked as Paystack identified."
+        }
+
+    return create_dedicated_account(
+        user,
+        preferred_bank=preferred_bank,
+        force_create=True,
+    )

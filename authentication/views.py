@@ -77,6 +77,8 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 from django.db import transaction
+from .utils import create_paystack_customer, create_dedicated_account
+
 
 @api_view(["POST"])
 @csrf_exempt
@@ -105,6 +107,17 @@ def signup(request):
 
         # --- Create inactive user ---
         user = serializer.save()
+
+        # Create Paystack customer
+        customer_code = create_paystack_customer(user)
+
+        if customer_code:
+            user.paystack_customer_code = customer_code
+            user.save()
+
+            # Create DVA
+            create_dedicated_account(user)
+
         user.phone_number = validated_phone
         user.how_did_you_hear = serializer.validated_data.get(
             "how_did_you_hear", "OTHER"
@@ -1074,7 +1087,10 @@ def get_user_profile(request):
 
         logger.info("Fetching profile data for user: %s", user.email)
 
+        bank_accounts = BankAccount.objects.filter(user=user)
+
         profile_data = {
+            "id": user.id,
             "firstName": user.first_name,
             "lastName": user.last_name,
             "mobileNumber": user.phone_number,
@@ -1087,7 +1103,21 @@ def get_user_profile(request):
             "preferred_asset": user.preferred_asset,
             "savings_goal_amount": user.savings_goal_amount,
             "time_period": user.time_period,
+            "is_first_time_signup": False,
+            # DVA / Paystack fields
+            "dva_account_number": user.dva_account_number,
+            "dva_account_name": user.dva_account_name,
+            "dva_bank_name": user.dva_bank_name,
+            "dva_assigned_at": user.dva_assigned_at,
+            "dva_account_id": user.dva_account_id,
+            "paystack_identified": user.paystack_identified,
+            "paystack_identification_status": user.paystack_identification_status,
+            "paystack_identification_reason": user.paystack_identification_reason,
+            # Related data
+            "bank_accounts": BankAccountSerializer(bank_accounts, many=True).data,
+            "bankRecords": BankAccountSerializer(bank_accounts, many=True).data,
         }
+
         return Response(profile_data, status=status.HTTP_200_OK)
 
     except Exception as e:
@@ -1566,71 +1596,275 @@ class BankAccountViewSet(viewsets.ModelViewSet):
 
 
 from django.db import IntegrityError
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework import status
+
+from .models import BankAccount
+from .serializers import BankAccountSerializer
+from .utils import (
+    create_paystack_recipient,
+    create_paystack_customer,
+    identify_paystack_customer,
+    create_dedicated_account,
+)
 
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def add_bank_account(request):
-    """
-    Adds a bank account for the authenticated user.
-    """
+    user = request.user
+
     bank_name = request.data.get("bankName")
     account_number = request.data.get("accountNumber")
     account_name = request.data.get("accountName")
     bank_code = request.data.get("bankCode")
+    bvn = request.data.get("bvn")
 
-    # Validate required fields
-    if not all([bank_name, account_number, account_name, bank_code]):
-        error_message = (
-            "All fields (bankName, accountNumber, accountName, bankCode) are required."
+    if not all([bank_name, account_number, account_name, bank_code, bvn]):
+        return Response(
+            {
+                "error": "bankName, accountNumber, accountName, bankCode and bvn are required."
+            },
+            status=status.HTTP_400_BAD_REQUEST,
         )
-        logger.error(error_message)
-        return Response({"error": error_message}, status=status.HTTP_400_BAD_REQUEST)
+
+    print("ADD BANK REQUEST USER ID:", user.id)
+    print("ADD BANK REQUEST USER EMAIL:", user.email)
+    print("ADD BANK REQUEST BANK NAME:", bank_name)
+    print("ADD BANK REQUEST ACCOUNT NUMBER:", account_number)
+    print("ADD BANK REQUEST ACCOUNT NAME:", account_name)
+    print("ADD BANK REQUEST BANK CODE:", bank_code)
+    print("ADD BANK REQUEST BVN:", bvn)
 
     try:
-        # Create Paystack recipient
+        # 1. Create Paystack recipient
         paystack_recipient_code = create_paystack_recipient(
-            account_name, account_number, bank_code
+            account_name,
+            account_number,
+            bank_code,
         )
+
+        print("PAYSTACK RECIPIENT CODE:", paystack_recipient_code)
 
         if not paystack_recipient_code:
-            error_message = "Failed to create Paystack recipient."
-            logger.error(error_message)
             return Response(
-                {"error": error_message}, status=status.HTTP_400_BAD_REQUEST
+                {"error": "Failed to create Paystack recipient."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Save bank account
-        # Save bank account
-        bank_account = BankAccount.objects.create(
-            user=request.user,
-            bank_name=bank_name,
-            account_number=account_number,
-            account_name=account_name,
+        # 2. Save or update bank account
+        try:
+            existing_bank = BankAccount.objects.filter(
+                user=user,
+                account_number=account_number,
+            ).first()
+
+            if existing_bank:
+                print("EXISTING BANK ACCOUNT FOUND:", existing_bank.id)
+                bank_account = existing_bank
+                bank_account.bank_name = bank_name
+                bank_account.account_name = account_name
+                bank_account.bank_code = bank_code
+                bank_account.paystack_recipient_code = paystack_recipient_code
+                bank_account.save(
+                    update_fields=[
+                        "bank_name",
+                        "account_name",
+                        "bank_code",
+                        "paystack_recipient_code",
+                    ]
+                )
+            else:
+                print("NO EXISTING BANK ACCOUNT FOUND. CREATING NEW ONE.")
+                bank_account = BankAccount.objects.create(
+                    user=user,
+                    bank_name=bank_name,
+                    account_number=account_number,
+                    account_name=account_name,
+                    bank_code=bank_code,
+                    paystack_recipient_code=paystack_recipient_code,
+                    is_default=False,
+                )
+                user.bank_accounts.add(bank_account)
+
+        except IntegrityError as e:
+            print("BANK ACCOUNT INTEGRITY ERROR:", str(e))
+            return Response(
+                {
+                    "error": "This bank account already exists or conflicts with another saved record. Please use another",
+                    "details": str(e),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # 3. Create Paystack customer
+        ok, result = create_paystack_customer(user)
+        print("CREATE PAYSTACK CUSTOMER OK:", ok)
+        print("CREATE PAYSTACK CUSTOMER RESULT:", result)
+        print("USER PAYSTACK CUSTOMER CODE AFTER CREATE:", user.paystack_customer_code)
+
+        if not ok:
+            return Response(
+                {
+                    "error": "Failed to create Paystack customer.",
+                    "details": result,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # 4. Identify customer
+        # 4️⃣ Identify customer using BVN
+        # ------------------------------------
+        ok, result = identify_paystack_customer(
+            user=user,
+            bvn=bvn,
             bank_code=bank_code,
-            is_default=False,
-            paystack_recipient_code=paystack_recipient_code,
+            account_number=account_number,
         )
 
-        # 🔥 Link the bank account to the user's ManyToMany field
-        request.user.bank_accounts.add(bank_account)
+        already_validated = (
+            not ok
+            and isinstance(result, dict)
+            and result.get("raw", {}).get("message")
+            == "Customer already validated using the same credentials"
+        )
 
-        logger.info("Bank account added successfully for user: %s", request.user.email)
+        if already_validated:
+            print(
+                f"Customer already validated for {user.email}. Proceeding to DVA creation."
+            )
+            user.paystack_identified = True
+            user.paystack_identification_status = "success"
+            user.paystack_identification_reason = None
+            user.save(
+                update_fields=[
+                    "paystack_identified",
+                    "paystack_identification_status",
+                    "paystack_identification_reason",
+                ]
+            )
+            ok = True
 
-        # Serialize and return response
-        serializer = BankAccountSerializer(bank_account)
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
+        if not ok:
+            if isinstance(result, dict) and result.get("status_code") == 202:
+                user.paystack_identified = False
+                user.paystack_identification_status = "processing"
+                user.paystack_identification_reason = (
+                    "Customer identification in progress"
+                )
+                user.save(
+                    update_fields=[
+                        "paystack_identified",
+                        "paystack_identification_status",
+                        "paystack_identification_reason",
+                    ]
+                )
 
-    except IntegrityError:
-        error_message = "This bank account is already associated with another user."
-        logger.error("IntegrityError: %s", error_message)
-        return Response({"error": error_message}, status=status.HTTP_400_BAD_REQUEST)
+                return Response(
+                    {
+                        "message": "Bank account saved. Customer identification is still processing.",
+                        "identification_in_progress": True,
+                        "bank_account": BankAccountSerializer(bank_account).data,
+                        "details": result,
+                    },
+                    status=status.HTTP_202_ACCEPTED,
+                )
+
+            raw_message = (
+                (result.get("raw") or {}).get("message", "")
+                if isinstance(result, dict)
+                else ""
+            )
+
+            raw_text = (
+                (result.get("raw_text") or "") if isinstance(result, dict) else ""
+            )
+
+            combined_message = f"{raw_message} {raw_text}".strip()
+
+            if is_paystack_name_mismatch_reason(combined_message):
+                user.paystack_identified = False
+                user.paystack_identification_status = "failed"
+                user.paystack_identification_reason = "NAME_MISMATCH"
+                user.save(
+                    update_fields=[
+                        "paystack_identified",
+                        "paystack_identification_status",
+                        "paystack_identification_reason",
+                    ]
+                )
+
+                return Response(
+                    {
+                        "error": "NAME_MISMATCH",
+                        "message": "Your profile name does not match your BVN details. Update your name and try again.",
+                        "details": result,
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            user.paystack_identified = False
+            user.paystack_identification_status = "failed"
+            user.paystack_identification_reason = (
+                combined_message or "Customer identification failed"
+            )
+            user.save(
+                update_fields=[
+                    "paystack_identified",
+                    "paystack_identification_status",
+                    "paystack_identification_reason",
+                ]
+            )
+
+            return Response(
+                {
+                    "error": "Customer identification failed.",
+                    "details": result,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # 5. Create DVA
+        ok, dva_result = create_dedicated_account(
+            user,
+            preferred_bank="wema-bank",
+            force_create=True,
+        )
+
+        print("CREATE DVA OK:", ok)
+        print("CREATE DVA RESULT:", dva_result)
+
+        if not ok:
+            return Response(
+                {
+                    "error": "Bank saved but DVA creation failed.",
+                    "bank_account": BankAccountSerializer(bank_account).data,
+                    "details": dva_result,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # 6. Success
+        return Response(
+            {
+                "message": "Bank account added and DVA created successfully.",
+                "bank_account": BankAccountSerializer(bank_account).data,
+                "dva": {
+                    "account_number": dva_result.get("account_number"),
+                    "bank_name": dva_result.get("bank_name"),
+                    "account_name": dva_result.get("account_name"),
+                },
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
     except Exception as e:
-        error_message = f"An unexpected error occurred: {str(e)}"
-        logger.error("Unexpected error: %s", error_message)
+        print("ADD BANK ACCOUNT GENERAL ERROR:", str(e))
         return Response(
-            {"error": error_message}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            {"error": str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
 
@@ -1639,6 +1873,7 @@ from django.db import transaction
 
 
 @api_view(["DELETE"])
+@permission_classes([IsAuthenticated])
 def delete_bank_account(request, account_number):
     """
     Deletes a bank account identified by the account number.
@@ -5502,6 +5737,313 @@ def initiate_invest_transfer(request):
         )
 
 
+import threading
+import uuid
+from decimal import Decimal, InvalidOperation
+from django.utils import timezone
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework import status
+
+from .models import (
+    CustomUser,
+    Transaction,
+    DvaDepositIntent,
+)
+from .utils import (
+    send_generic_email,
+    send_push_notification,
+    create_paystack_customer,
+    identify_paystack_customer,
+    create_dedicated_account,
+)
+
+
+def _create_dva_intent(user, amount, purpose):
+    transaction_id = str(uuid.uuid4())[:10]
+    current_datetime = timezone.now()
+    referral_email = user.referral.email if user.referral else None
+
+    intent = DvaDepositIntent.objects.create(
+        user=user,
+        amount=amount,
+        purpose=purpose,
+        status="pending",
+        transaction_id=transaction_id,
+    )
+
+    description = (
+        "QuickSave (DVA Pending)"
+        if purpose == "SAVINGS"
+        else "QuickInvest (DVA Pending)"
+    )
+
+    transaction = Transaction.objects.create(
+        user=user,
+        referral_email=referral_email,
+        transaction_type="credit",
+        status="pending",
+        amount=amount,
+        date=current_datetime.date(),
+        time=current_datetime.time(),
+        description=description,
+        transaction_id=transaction_id,
+    )
+
+    return intent, transaction
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def get_or_create_dva_account(request):
+    """
+    First-time DVA setup endpoint.
+    Requires BVN + bank_code + account_number only if user has no DVA yet.
+    """
+    try:
+        user = request.user
+
+        if user.dva_account_number:
+            return Response(
+                {
+                    "message": "DVA already exists",
+                    "has_dva": True,
+                    "account_number": user.dva_account_number,
+                    "bank_name": user.dva_bank_name,
+                    "account_name": user.dva_account_name,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        bvn = request.data.get("bvn")
+        bank_code = request.data.get("bank_code")
+        account_number = request.data.get("account_number")
+        preferred_bank = request.data.get("preferred_bank", "wema-bank")
+
+        if not bvn:
+            return Response(
+                {"error": "BVN is required"}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if not bank_code:
+            return Response(
+                {"error": "Bank code is required"}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if not account_number:
+            return Response(
+                {"error": "Account number is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        ok, result = create_paystack_customer(user)
+        if not ok:
+            return Response(
+                {"error": "Failed to create Paystack customer", "details": result},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        ok, result = identify_paystack_customer(user, bvn, bank_code, account_number)
+        if not ok:
+            return Response(
+                {"error": "Customer identification failed", "details": result},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        ok, result = create_dedicated_account(user, preferred_bank=preferred_bank)
+        if not ok:
+            return Response(
+                {"error": "DVA creation failed", "details": result},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response(
+            {
+                "message": "DVA created successfully",
+                "has_dva": True,
+                "account_number": result["account_number"],
+                "bank_name": result["bank_name"],
+                "account_name": result["account_name"],
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def initiate_dva_quicksave(request):
+    try:
+        user = request.user
+        amount_raw = request.data.get("amount")
+
+        if not amount_raw:
+            return Response(
+                {"error": "Amount is required"}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            amount = Decimal(str(amount_raw))
+            if amount < 100:
+                return Response(
+                    {"error": "Amount must be greater than ₦100"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        except (InvalidOperation, ValueError, TypeError):
+            return Response(
+                {"error": "Invalid amount format. Please enter a valid number."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not user.dva_account_number:
+            return Response(
+                {"error": "No DVA found. Please create your transfer account first."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        intent, transaction = _create_dva_intent(user, amount, "SAVINGS")
+
+        def background_tasks():
+            try:
+                send_push_notification(
+                    user=user,
+                    title="QuickSave Transfer Pending ⏳",
+                    message=(
+                        f"Transfer exactly ₦{amount:,.2f} to your MyFund DVA. "
+                        f"We'll credit your savings automatically once Paystack confirms it."
+                    ),
+                    data={
+                        "amount": str(amount),
+                        "transaction_id": intent.transaction_id,
+                        "type": "QuickSave",
+                        "status": "pending",
+                    },
+                    notif_type="PENDING",
+                )
+
+                send_generic_email(
+                    "QuickSave Transfer Created",
+                    (
+                        f"Hi {user.first_name},<br><br>"
+                        f"Your QuickSave transfer request for ₦{amount:,.2f} has been created."
+                        f"<br><br>Transfer exactly this amount to:"
+                        f"<br><b>{user.dva_account_number}</b> ({user.dva_bank_name})"
+                        f"<br><b>{user.dva_account_name}</b>"
+                        f"<br><br>We will credit your savings automatically once confirmed."
+                    ),
+                    [user.email],
+                    "MyFund <info@myfundmobile.com>",
+                )
+            except Exception as e:
+                print(f"DVA QuickSave background task error: {e}")
+
+        threading.Thread(target=background_tasks, daemon=True).start()
+
+        return Response(
+            {
+                "message": "DVA QuickSave initiated successfully",
+                "transaction_id": intent.transaction_id,
+                "amount": str(amount),
+                "account_number": user.dva_account_number,
+                "bank_name": user.dva_bank_name,
+                "account_name": user.dva_account_name,
+                "purpose": "SAVINGS",
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def initiate_dva_quickinvest(request):
+    try:
+        user = request.user
+        amount_raw = request.data.get("amount")
+
+        if not amount_raw:
+            return Response(
+                {"error": "Amount is required"}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            amount = Decimal(str(amount_raw))
+            if amount < 100:
+                return Response(
+                    {"error": "Amount must be greater than ₦100"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        except (InvalidOperation, ValueError, TypeError):
+            return Response(
+                {"error": "Invalid amount format. Please enter a valid number."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not user.dva_account_number:
+            return Response(
+                {"error": "No DVA found. Please create your transfer account first."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        intent, transaction = _create_dva_intent(user, amount, "INVESTMENT")
+
+        def background_tasks():
+            try:
+                send_push_notification(
+                    user=user,
+                    title="QuickInvest Transfer Pending ⏳",
+                    message=(
+                        f"Transfer exactly ₦{amount:,.2f} to your MyFund DVA. "
+                        f"We'll credit your investment automatically once Paystack confirms it."
+                    ),
+                    data={
+                        "amount": str(amount),
+                        "transaction_id": intent.transaction_id,
+                        "type": "QuickInvest",
+                        "status": "pending",
+                    },
+                    notif_type="PENDING",
+                )
+
+                send_generic_email(
+                    "QuickInvest Transfer Created",
+                    (
+                        f"Hi {user.first_name},<br><br>"
+                        f"Your QuickInvest transfer request for ₦{amount:,.2f} has been created."
+                        f"<br><br>Transfer exactly this amount to:"
+                        f"<br><b>{user.dva_account_number}</b> ({user.dva_bank_name})"
+                        f"<br><b>{user.dva_account_name}</b>"
+                        f"<br><br>We will credit your investment automatically once confirmed."
+                    ),
+                    [user.email],
+                    "MyFund <info@myfundmobile.com>",
+                )
+            except Exception as e:
+                print(f"DVA QuickInvest background task error: {e}")
+
+        threading.Thread(target=background_tasks, daemon=True).start()
+
+        return Response(
+            {
+                "message": "DVA QuickInvest initiated successfully",
+                "transaction_id": intent.transaction_id,
+                "amount": str(amount),
+                "account_number": user.dva_account_number,
+                "bank_name": user.dva_bank_name,
+                "account_name": user.dva_account_name,
+                "purpose": "INVESTMENT",
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
@@ -5788,27 +6330,58 @@ def paystack_submit_otp(request):
 
 
 import threading
-import time
+from decimal import Decimal
+from django.http import JsonResponse
+from django.utils import timezone
+from rest_framework.decorators import api_view
+from rest_framework import status
+
+from .models import (
+    CustomUser,
+    Transaction,
+    AutoSave,
+    AutoInvest,
+    BankAccount,
+    WithdrawalsRequestToAdmin,
+    DvaDepositIntent,
+)
+from .utils import send_generic_email, send_push_notification, create_dedicated_account
 
 paystack_ips = ["52.31.139.75", "52.49.173.169", "52.214.14.220"]
+
+
+def is_paystack_name_mismatch_reason(reason_text):
+    text = (reason_text or "").strip().lower()
+
+    mismatch_phrases = [
+        "name mismatch",
+        "account name or bvn is incorrect",
+        "account name is incorrect",
+        "bvn is incorrect",
+        "name does not match",
+        "does not match your bvn",
+        "does not match bvn",
+        "mismatch",
+    ]
+
+    return any(phrase in text for phrase in mismatch_phrases)
 
 
 @api_view(["POST"])
 def paystack_webhook(request):
     try:
         event = request.data
-
         header_data = request.headers
 
-        ip_address = header_data.get("Cf-Connecting-Ip") or event.get(
-            "ip_address"
-        ) or event.get("ipAddress")
+        ip_address = (
+            request.headers.get("Cf-Connecting-Ip")
+            or request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+            or request.META.get("REMOTE_ADDR")
+        )
 
         ip_is_paystack = ip_address in paystack_ips
+        event_status = event.get("event")
 
-        event_status = event["event"]
-
-        # print(str(event))
         print(f"paystack event status: {event_status}")
 
         if not ip_is_paystack:
@@ -5820,83 +6393,242 @@ def paystack_webhook(request):
                 },
                 status=status.HTTP_403_FORBIDDEN,
             )
-        else:
-            # Create and Start a thread that process the event in the background
-            threading.Thread(
-                target=paystack_webhook_processing,
-                args=(
-                    event,
-                    ip_address,
-                    ip_is_paystack,
-                    header_data,
-                ),
-            ).start()
 
-            return JsonResponse({"status": True}, status=status.HTTP_200_OK)
+        paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data)
+
+        return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
     except Exception as e:
-        # print error
-        print(f"\nPaystack Webhook(Internal Server Error):  {e}\n")
+        print(f"\nPaystack Webhook(Internal Server Error): {e}\n")
 
-        # Send an email of the error that ocurred
         subject = "Paystack Webhook Error!"
-        message = f"Paystack Webhook Internal Server Error:  {e}"
-
+        message = f"Paystack Webhook Internal Server Error: {e}"
         from_email = "MyFund <info@myfundmobile.com>"
         recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
 
-        send_generic_email(subject=subject, message=message, from_email=from_email, recipient_list=recipient_list)
+        send_generic_email(
+            subject=subject,
+            message=message,
+            from_email=from_email,
+            recipient_list=recipient_list,
+        )
 
         return JsonResponse({"error": str(e)}, status=status.HTTP_200_OK)
 
 
-from .models import WithdrawalsRequestToAdmin
-
-
 def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
+    print("WEBHOOK EVENT RECEIVED:", event.get("event"))
+    print("WEBHOOK FULL DATA:", event)
+
     try:
-        # Send a email of the webhook payload
         subject = "Paystack Webhook Received!"
         message = (
             str(event)
             + " ip Address:"
             + str(ip_address)
-            + "  verified:"
+            + " verified:"
             + str(ip_is_paystack)
             + " headers:"
             + str(header_data)
         )
-
         from_email = "MyFund <info@myfundmobile.com>"
         recipient_list = ["webhook@myfundmobile.com", "sammy@myfundmobile.com"]
 
-        send_generic_email(subject=subject, message=message, from_email=from_email, recipient_list=recipient_list)
+        send_generic_email(
+            subject=subject,
+            message=message,
+            from_email=from_email,
+            recipient_list=recipient_list,
+        )
 
-        match event["event"]:
+        match event.get("event"):
+
             case "charge.success":
                 reference = event["data"]["reference"]
                 payment_channel = event["data"]["channel"]
                 email = event["data"]["customer"]["email"]
                 amount = Decimal(event["data"]["amount"]) / 100
-                paystack_auth_code = event["data"]["authorization"][
-                    "authorization_code"
-                ]
-                plan_code = (
-                    event["data"]["plan"]["plan_code"]
-                    if event["data"]["plan"]
-                    else None
+
+                authorization = event["data"].get("authorization", {}) or {}
+                receiver_account_number = authorization.get(
+                    "receiver_bank_account_number"
                 )
-                authorization = event["data"].get("authorization", {})
+
+                print("CHANNEL:", payment_channel)
+                print("RECEIVER ACCOUNT:", receiver_account_number)
+
+                # --------------------------------------------------
+                # DVA / bank transfer intent-based handling
+                # --------------------------------------------------
+                if payment_channel in ["dedicated_nuban", "bank_transfer", "bank"]:
+                    user = None
+
+                    if receiver_account_number:
+                        user = CustomUser.objects.filter(
+                            dva_account_number=receiver_account_number
+                        ).first()
+
+                    if not user and email:
+                        user = CustomUser.objects.filter(email=email).first()
+
+                    if not user:
+                        print(
+                            f"User not found for DVA transfer. Email={email}, "
+                            f"Account={receiver_account_number}"
+                        )
+                        return
+
+                    existing = (
+                        Transaction.objects.filter(transaction_id=reference).first()
+                        or Transaction.objects.filter(
+                            paystack_reference=reference
+                        ).first()
+                    )
+                    if existing and existing.status == "confirmed":
+                        print("Duplicate DVA transfer ignored")
+                        return
+
+                    intent = (
+                        DvaDepositIntent.objects.filter(
+                            user=user,
+                            amount=amount,
+                            status="pending",
+                        )
+                        .order_by("-created_at")
+                        .first()
+                    )
+
+                    if not intent:
+                        print(
+                            f"No pending DVA intent found for {user.email} amount {amount}"
+                        )
+                        return
+
+                    transaction = Transaction.objects.filter(
+                        user=user,
+                        transaction_id=intent.transaction_id,
+                        status="pending",
+                    ).first()
+
+                    if not transaction:
+                        print(
+                            f"No pending transaction found for intent {intent.transaction_id}"
+                        )
+                        return
+
+                    transaction.status = "confirmed"
+                    transaction.paystack_reference = reference
+                    transaction.paystack_auth_code = authorization.get(
+                        "authorization_code"
+                    )
+                    transaction.description = (
+                        "QuickSave (Transfer)"
+                        if intent.purpose == "SAVINGS"
+                        else "QuickInvest (Transfer)"
+                    )
+                    transaction.save(
+                        update_fields=[
+                            "status",
+                            "paystack_reference",
+                            "paystack_auth_code",
+                            "description",
+                        ]
+                    )
+
+                    intent.status = "confirmed"
+                    intent.paystack_reference = reference
+                    intent.matched_account_number = receiver_account_number
+                    intent.confirmed_at = timezone.now()
+                    intent.save(
+                        update_fields=[
+                            "status",
+                            "paystack_reference",
+                            "matched_account_number",
+                            "confirmed_at",
+                        ]
+                    )
+
+                    if intent.purpose == "SAVINGS":
+                        user.savings += amount
+
+                        send_push_notification(
+                            user=user,
+                            title="QuickSave Approved ✅",
+                            message=(
+                                f"Hi {user.first_name}, your transfer of ₦{amount:,.2f} "
+                                f"has been added to your Savings account."
+                            ),
+                            data={
+                                "amount": str(amount),
+                                "transaction_id": transaction.transaction_id,
+                                "type": "QuickSave",
+                            },
+                            notif_type="CREDIT",
+                        )
+
+                        send_generic_email(
+                            subject="QuickSave Updated! ✅",
+                            message=(
+                                f"Hi {user.first_name},<br><br>"
+                                f"Your bank transfer of ₦{amount:,.2f} has been processed "
+                                f"successfully and added to your Savings account."
+                            ),
+                            from_email="MyFund <info@myfundmobile.com>",
+                            recipient_list=[user.email],
+                        )
+
+                    else:
+                        user.investment += amount
+
+                        send_push_notification(
+                            user=user,
+                            title="QuickInvest Approved ✅",
+                            message=(
+                                f"Hi {user.first_name}, your transfer of ₦{amount:,.2f} "
+                                f"has been added to your Investment account."
+                            ),
+                            data={
+                                "amount": str(amount),
+                                "transaction_id": transaction.transaction_id,
+                                "type": "QuickInvest",
+                            },
+                            notif_type="CREDIT",
+                        )
+
+                        send_generic_email(
+                            subject="QuickInvest Updated! ✅",
+                            message=(
+                                f"Hi {user.first_name},<br><br>"
+                                f"Your bank transfer of ₦{amount:,.2f} has been processed "
+                                f"successfully and added to your Investment account."
+                            ),
+                            from_email="MyFund <info@myfundmobile.com>",
+                            recipient_list=[user.email],
+                        )
+
+                    if user.referral:
+                        user.confirm_referral_rewards(is_referrer=False)
+
+                    user.update_total_savings_and_investment_this_month()
+                    user.save()
+
+                    print(
+                        f"✅ DVA {intent.purpose} credited successfully for {user.email}"
+                    )
+                    return
+
+                # --------------------------------------------------
+                # Existing card / autosave / autoinvest flow
+                # --------------------------------------------------
+                paystack_auth_code = authorization.get("authorization_code")
+                plan = event["data"].get("plan") or {}
+                plan_code = plan.get("plan_code")
 
                 try:
                     user = CustomUser.objects.get(email=email)
                 except CustomUser.DoesNotExist:
-                    user = None
-
-                    # Send an email of the error that ocurred
                     subject = "[Webhook Error] User NOT Found in DB"
                     message = f"No user found with email {email}."
-
                     from_email = "MyFund <info@myfundmobile.com>"
                     recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
 
@@ -5974,78 +6706,80 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
 
                 try:
                     transaction = Transaction.objects.get(
-                        transaction_id=reference, amount=amount
+                        transaction_id=reference,
+                        amount=amount,
                     )
                 except Transaction.DoesNotExist:
                     transaction = None
 
-                    # Send an email of the error that ocurred
-                    subject = "[Webhook Error] Referrence ID NOT Found in DB"
-                    message = f"No Transaction found with reference {reference} and amount {amount}."
-
-                    from_email = "MyFund <info@myfundmobile.com>"
-                    recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
-
-                    pass
-
-                # Determine if this is an AutoSave/AutoInvest (has plan_code) or QuickSave/QuickInvest (no plan_code)
                 if plan_code:
-                    # AutoSave or AutoInvest flow
                     autosave = AutoSave.objects.filter(
-                        user=user, paystack_plan_code=plan_code, active=True
+                        user=user,
+                        paystack_plan_code=plan_code,
+                        active=True,
                     ).first()
+
                     autoinvest = None
                     if not autosave:
                         autoinvest = AutoInvest.objects.filter(
-                            user=user, paystack_plan_code=plan_code, active=True
+                            user=user,
+                            paystack_plan_code=plan_code,
+                            active=True,
                         ).first()
 
                     target = autosave if autosave else autoinvest
 
                     if not target:
-                        # Send an email of the error that ocurred
-                        subject = "[Webhook Error] Referrence ID NOT Found in DB"
-                        message = f"No Transaction found with reference {reference} and amount {amount}."
-
+                        subject = "[Webhook Error] Plan Code NOT Found in DB"
+                        message = (
+                            f"No AutoSave/AutoInvest found with reference {reference}, "
+                            f"amount {amount}, and plan_code {plan_code}."
+                        )
                         from_email = "MyFund <info@myfundmobile.com>"
                         recipient_list = [
                             "info@myfundmobile.com",
                             "sammy@myfundmobile.com",
                         ]
 
+                        send_generic_email(
+                            subject=subject,
+                            message=message,
+                            from_email=from_email,
+                            recipient_list=recipient_list,
+                        )
                         return
 
-                    # Create a new confirmed Transaction for this autosave/autoinvest payment
                     if autosave:
-                        # Create transaction if it doesn't exist
                         if not transaction:
                             transaction = Transaction.objects.create(
                                 user=user,
                                 transaction_type="credit",
                                 status="confirmed",
-                                amount=Decimal(amount),
+                                amount=amount,
                                 description=f"AutoSave ({autosave.frequency.capitalize()})",
                                 transaction_id=reference,
                                 paystack_auth_code=paystack_auth_code,
+                                paystack_reference=reference,
                             )
 
-                        # Atomically update user's savings
                         transaction.status = "confirmed"
                         transaction.paystack_auth_code = paystack_auth_code
+                        transaction.paystack_reference = reference
                         transaction.save()
 
-                        user.savings += int(amount)
+                        user.savings += amount
                         user.update_total_savings_and_investment_this_month()
                         user.save()
 
-                        # Send success email
                         subject = f"AutoSave ({autosave.frequency.capitalize()}) Successful! ✅"
                         message = (
                             f"Well done {user.first_name},<br><br>"
-                            f"Your AutoSave was successful and ₦{Decimal(amount):,.2f} has been added to your SAVINGS account."
+                            f"Your AutoSave was successful and ₦{amount:,.2f} "
+                            f"has been added to your SAVINGS account."
                         )
                         from_email = "MyFund <info@myfundmobile.com>"
                         recipient_list = [user.email]
+
                         send_generic_email(
                             subject=subject,
                             message=message,
@@ -6053,13 +6787,13 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             recipient_list=recipient_list,
                         )
 
-                        # Send push notification
                         send_push_notification(
                             user=user,
                             title="AutoSave Successful! ✅",
                             message=(
-                                f"Hi {user.first_name}, your scheduled AutoSave of ₦{Decimal(amount):,.2f} "
-                                f"({autosave.frequency.capitalize()}) has just been deposited into your savings."
+                                f"Hi {user.first_name}, your scheduled AutoSave of "
+                                f"₦{amount:,.2f} ({autosave.frequency.capitalize()}) "
+                                f"has just been deposited into your savings."
                             ),
                             data={
                                 "amount": str(amount),
@@ -6072,39 +6806,39 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         )
 
                         print("AutoSave Successfully Credited your Account.")
+                        return
 
-                        return JsonResponse({"status": True}, status=status.HTTP_200_OK)
-
-                    elif autoinvest:
-                        # Create transaction if it doesn't exist
+                    if autoinvest:
                         if not transaction:
                             transaction = Transaction.objects.create(
                                 user=user,
                                 transaction_type="credit",
                                 status="confirmed",
-                                amount=Decimal(amount),
+                                amount=amount,
                                 description=f"AutoInvest ({autoinvest.frequency.capitalize()})",
                                 transaction_id=reference,
                                 paystack_auth_code=paystack_auth_code,
+                                paystack_reference=reference,
                             )
 
                         transaction.status = "confirmed"
                         transaction.paystack_auth_code = paystack_auth_code
+                        transaction.paystack_reference = reference
                         transaction.save()
 
-                        user.investment += int(amount)
+                        user.investment += amount
                         user.update_total_savings_and_investment_this_month()
                         user.save()
 
-                        # Send success email
                         subject = f"AutoInvest ({autoinvest.frequency.capitalize()}) Successful! 🎉"
                         message = (
                             f"Well done {user.first_name},<br><br>"
-                            f"Your AutoInvest was successful and ₦{Decimal(amount):,.2f} "
+                            f"Your AutoInvest was successful and ₦{amount:,.2f} "
                             f"has been added to your INVESTMENT account."
                         )
                         from_email = "MyFund <info@myfundmobile.com>"
                         recipient_list = [user.email]
+
                         send_generic_email(
                             subject=subject,
                             message=message,
@@ -6112,13 +6846,13 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             recipient_list=recipient_list,
                         )
 
-                        # Send push notification
                         send_push_notification(
                             user=user,
                             title="AutoInvest Successful! 🎉",
                             message=(
-                                f"Your scheduled AutoInvest of ₦{Decimal(amount):,.2f} "
-                                f"({autoinvest.frequency.capitalize()}) has just been deposited into your investments."
+                                f"Your scheduled AutoInvest of ₦{amount:,.2f} "
+                                f"({autoinvest.frequency.capitalize()}) has just been "
+                                f"deposited into your investments."
                             ),
                             data={
                                 "amount": str(amount),
@@ -6131,26 +6865,28 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         )
 
                         print("AutoInvest Successfully Credited your Account.")
-
-                        return JsonResponse({"status": True}, status=status.HTTP_200_OK)
+                        return
 
                 elif transaction and transaction.description.lower().startswith(
                     "quicksave"
                 ):
-
-                    # print("\n====QuickSave Webhook Processing ====\n")
                     transaction.description = f"QuickSave ({payment_channel})"
                     transaction.status = "confirmed"
                     transaction.paystack_auth_code = paystack_auth_code
+                    transaction.paystack_reference = reference
                     transaction.save()
 
-                    user.savings += int(amount)
-                    # user.confirm_referral_rewards(is_referrer=True)
+                    user.savings += amount
                     user.update_total_savings_and_investment_this_month()
                     user.save()
 
                     subject = "QuickSave Successful!"
-                    message = f"Well done {user.first_name},<br><br>Your <b>QuickSave</b> was successful and <b>₦{amount}</b> has been successfully added to your SAVINGS account. <br><br>Keep growing your funds.🥂<br><br>"
+                    message = (
+                        f"Well done {user.first_name},<br><br>"
+                        f"Your <b>QuickSave</b> was successful and <b>₦{amount:,.2f}</b> "
+                        f"has been successfully added to your SAVINGS account."
+                        f"<br><br>Keep growing your funds.🥂<br><br>"
+                    )
                     from_email = "MyFund <info@myfundmobile.com>"
                     recipient_list = [user.email]
 
@@ -6171,15 +6907,20 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     transaction.description = f"QuickInvest ({payment_channel})"
                     transaction.status = "confirmed"
                     transaction.paystack_auth_code = paystack_auth_code
+                    transaction.paystack_reference = reference
                     transaction.save()
 
-                    user.investment += int(amount)
-                    # user.confirm_referral_rewards(is_referrer=True)
+                    user.investment += amount
                     user.update_total_savings_and_investment_this_month()
                     user.save()
 
                     subject = "QuickInvest Successful!"
-                    message = f"Well done {user.first_name},<br><br>Your QuickInvest was successful and ₦{amount} has been successfully added to your INVESTMENTS account. <br><br>Keep growing your funds.🥂<br><br>"
+                    message = (
+                        f"Well done {user.first_name},<br><br>"
+                        f"Your QuickInvest was successful and ₦{amount:,.2f} "
+                        f"has been successfully added to your INVESTMENTS account."
+                        f"<br><br>Keep growing your funds.🥂<br><br>"
+                    )
                     from_email = "MyFund <info@myfundmobile.com>"
                     recipient_list = [user.email]
 
@@ -6191,30 +6932,28 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     )
 
                     print("QuickInvest Successfully Credited your Account.")
-
-                    return JsonResponse(
-                        {"status": True}, status=status.HTTP_200_OK
-                    )  # Prevent double processing
+                    return
 
                 else:
-                    # Handle regular transactions
-                    trans_description = []  # <-- Initialize with a default value
+                    trans_description = []
+                    plan_name = plan.get("name", "")
 
-                    if transaction is None:
-                        trans_description = event["data"]["plan"]["name"].split(" ")
-                        amount = event["data"]["amount"] / 100
-
+                    if transaction is None and plan_name:
+                        trans_description = plan_name.split(" ")
                         Transaction.objects.create(
                             user=user,
                             transaction_type="credit",
                             status="confirmed",
-                            amount=int(amount),
-                            description=f"{trans_description[1]}",
+                            amount=amount,
+                            description=(
+                                f"{trans_description[1]}"
+                                if len(trans_description) > 1
+                                else "Deposit"
+                            ),
                             transaction_id=reference,
+                            paystack_reference=reference,
                         )
 
-                    # Handle AutoInvest case
-                    # Safely access trans_description[1] if it's defined and has enough elements
                     trans_type = (
                         trans_description[1] if len(trans_description) > 1 else ""
                     )
@@ -6228,33 +6967,26 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         transaction = Transaction.objects.create(
                             user=user,
                             transaction_type="credit",
-                            status=(
-                                "confirmed"
-                                if event["data"]["status"] == "success"
-                                else "confirmed"
-                            ),
-                            amount=int(amount),
-                            description=f"{trans_type}",
-                            transaction_id=event["data"]["reference"],
+                            status="confirmed",
+                            amount=amount,
+                            description=f"{trans_type}" if trans_type else "AutoInvest",
+                            transaction_id=reference,
+                            paystack_reference=reference,
                         )
 
-                        user.investment += int(amount)
-                        # user.confirm_referral_rewards(is_referrer=True)
+                        user.investment += amount
                         user.update_total_savings_and_investment_this_month()
                         user.save()
 
                 print(f"transaction before update: {transaction}")
 
-                # Only update AutoSave transactions if they are not already confirmed
                 if transaction and transaction.description.lower().startswith(
                     "autosave"
                 ):
-                    # If already confirmed, do nothing.
                     if transaction.status != "confirmed":
                         autosave_rec = AutoSave.objects.filter(
                             paystack_trans_ref=reference
                         ).first()
-                        # Use the frequency from autosave_rec; if not available, fall back to the frequency sent in the event
                         freq = (
                             autosave_rec.frequency.capitalize()
                             if autosave_rec and autosave_rec.frequency
@@ -6267,12 +6999,10 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             update_fields=["transaction_type", "status", "description"]
                         )
 
-                        user.savings += int(amount)
-                        # user.confirm_referral_rewards(is_referrer=True)
+                        user.savings += amount
                         user.update_total_savings_and_investment_this_month()
                         user.save()
                     else:
-                        # Already confirmed: ensure description includes the frequency.
                         autosave_rec = AutoSave.objects.filter(
                             paystack_trans_ref=reference
                         ).first()
@@ -6281,50 +7011,43 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             if autosave_rec and autosave_rec.frequency
                             else "Confirmed"
                         )
-                        # Force-update description even if status is already confirmed
                         transaction.description = f"AutoSave ({freq})"
                         transaction.save(update_fields=["description"])
                 else:
-                    # For non-AutoSave transactions, follow your existing logic:
-                    if event["data"]["status"] != "success":
-                        base_desc = transaction.description.split(" ")[0]
-                        transaction.status = "failed"
-                        transaction.description = f"{base_desc} (Failed)"
-                        transaction.save(update_fields=["status", "description"])
-                    elif event["data"]["status"] == "success":
-                        base_desc = transaction.description.split(" ")[0]
-                        transaction.transaction_type = "credit"
-                        transaction.status = "confirmed"
-                        transaction.description = f"{base_desc} (Card)"
-                        transaction.save(
-                            update_fields=["transaction_type", "status", "description"]
-                        )
+                    if transaction:
+                        if event["data"]["status"] != "success":
+                            base_desc = transaction.description.split(" ")[0]
+                            transaction.status = "failed"
+                            transaction.description = f"{base_desc} (Failed)"
+                            transaction.save(update_fields=["status", "description"])
+                        else:
+                            base_desc = transaction.description.split(" ")[0]
+                            transaction.transaction_type = "credit"
+                            transaction.status = "confirmed"
+                            transaction.description = f"{base_desc} (Card)"
+                            transaction.save(
+                                update_fields=[
+                                    "transaction_type",
+                                    "status",
+                                    "description",
+                                ]
+                            )
 
-                    amount = transaction.amount
-                    description = transaction.description
+                        amount = transaction.amount
+                        description = transaction.description
 
-                    if description[0] == "AutoSave":
-                        user.savings += int(amount)
+                        if description.startswith("AutoSave"):
+                            user.savings += amount
 
-                        subject = f"{description[0]} Successful!"
-                        message = f"Well done {user.first_name},<br><br>Your {description[0]} was successful and ₦{amount} has been successfully added to your SAVINGS account. <br><br>Keep growing your funds.🥂"
-                        from_email = "MyFund <info@myfundmobile.com>"
-                        recipient_list = [user.email]
-
-                        send_generic_email(
-                            subject=subject,
-                            message=message,
-                            from_email=from_email,
-                            recipient_list=recipient_list,
-                        )
-
-                    if description[0] == "AutoInvest":
-                        user.investment += int(amount)
-
-                        subject = f"{description[0]} Successful!"
-                        message = f"Well done {user.first_name},<br><br>Your {description[0]} was successful and ₦{amount} has been successfully added to your INVESTMENT account. <br><br>Keep growing your funds.🥂<br><br>"
-                        from_email = "MyFund <info@myfundmobile.com>"
-                        recipient_list = [user.email]
+                            subject = "AutoSave Successful!"
+                            message = (
+                                f"Well done {user.first_name},<br><br>"
+                                f"Your AutoSave was successful and ₦{amount:,.2f} "
+                                f"has been successfully added to your SAVINGS account."
+                                f"<br><br>Keep growing your funds.🥂"
+                            )
+                            from_email = "MyFund <info@myfundmobile.com>"
+                            recipient_list = [user.email]
 
                         send_generic_email(
                             subject=subject,
@@ -6333,115 +7056,68 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             recipient_list=recipient_list,
                         )
 
-                    user.confirm_referral_rewards(is_referrer=True)
-                    user.update_total_savings_and_investment_this_month()
-                    user.save()
+                        if description.startswith("AutoInvest"):
+                            user.investment += amount
+
+                            subject = "AutoInvest Successful!"
+                            message = (
+                                f"Well done {user.first_name},<br><br>"
+                                f"Your AutoInvest was successful and ₦{amount:,.2f} "
+                                f"has been successfully added to your INVESTMENT account."
+                                f"<br><br>Keep growing your funds.🥂<br><br>"
+                            )
+                            from_email = "MyFund <info@myfundmobile.com>"
+                            recipient_list = [user.email]
+
+                        send_generic_email(
+                            subject=subject,
+                            message=message,
+                            from_email=from_email,
+                            recipient_list=recipient_list,
+                        )
+
+                        user.confirm_referral_rewards(is_referrer=True)
+                        user.update_total_savings_and_investment_this_month()
+                        user.save()
 
                 print(f"transaction after update: {transaction}")
-
                 return
+
             case "invoice.create":
-                # sub_code = event["data"]["subscription"]["subscription_code"]
-                # sub_token = event["data"]["subscription"]["email_token"]
-                # email = event["data"]["customer"]["email"]
-                # trans_ref = event["data"]["transaction"]["reference"]
-                # user = CustomUser.objects.get(email=email)
-
-                # print(f"sub_code: {sub_code}, sub_token: {sub_token}")
-
-                # if AutoSave.objects.get(
-                #     paystack_sub_code=sub_code,
-                #     paystack_sub_token=sub_token,
-                # ):
-                #     # print(f"AutoSave has a record with the sub_code: {sub_code} and sub_token: {sub_token}")
-
-                #     amount = event["data"]["amount"] / 100  # convert amount to naira
-
-                #     # Check if a transaction with the same transaction_id already exists
-                #     existing_transaction = Transaction.objects.filter(
-                #         transaction_id=trans_ref
-                #     ).first()
-
-                #     if not existing_transaction:
-                #         # Create a new transaction if not found
-                #         Transaction.objects.create(
-                #             user=user,
-                #             transaction_type="credit",
-                #             status="pending",
-                #             amount=int(amount),
-                #             description="AutoSave",
-                #             transaction_id=trans_ref,
-                #         )
-
-                #     return JsonResponse({"status": True}, status=status.HTTP_200_OK)
-
-                # elif AutoInvest.objects.get(
-                #     paystack_sub_code=sub_code,
-                #     paystack_sub_token=sub_token,
-                # ):
-                #     # print(f"AutoInvest has a record with the sub_code: {sub_code} and sub_token: {sub_token}")
-
-                #     amount = event["data"]["amount"] / 100  # convert amount to naira
-
-                #     # Check if a transaction with the same transaction_id already exists
-                #     existing_transaction = Transaction.objects.filter(
-                #         transaction_id=trans_ref
-                #     ).first()
-
-                #     if not existing_transaction:
-                #         # Create a new transaction if not found
-                #         Transaction.objects.create(
-                #             user=user,
-                #             transaction_type="credit",
-                #             status="pending",
-                #             amount=int(amount),
-                #             description="AutoInvest",
-                #             transaction_id=trans_ref,
-                #         )
-
-                #     return JsonResponse({"status": True}, status=status.HTTP_200_OK)
-
-                # else:
-                #     print(
-                #         f'\n"invoice.create" details does not exist in MyFund database\n'
-                #     )
                 return
 
             case "invoice.payment_failed":
-
                 event_data = event["data"]
 
-                # Send an email of the data of the failed payment
                 subject = "Paystack Webhook(Payment Failed)"
-                message = f"Invoice Data:  <br><br>{event_data}"
-
+                message = f"Invoice Data: <br><br>{event_data}"
                 from_email = "MyFund <info@myfundmobile.com>"
                 recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
 
-                return JsonResponse({"status": True}, status=status.HTTP_200_OK)
+                send_generic_email(
+                    subject=subject,
+                    message=message,
+                    from_email=from_email,
+                    recipient_list=recipient_list,
+                )
+                return
 
             case "transfer.failed":
-                amount = event["data"]["amount"]
-                amount = int(amount / 100)  # convert to naira
+                amount = int(event["data"]["amount"] / 100)
                 reason = event["data"]["reason"]
                 transaction_id = event["data"]["transfer_code"]
-                bank_name = event["data"]["recipient"]["details"]["bank_name"]
                 account_number = event["data"]["recipient"]["details"]["account_number"]
-                # print(f"bank_name: {bank_name}")
-                # print(f"account_number: {account_number}")
 
-                # Get the user of the failed withdrawal
                 user = None
                 try:
-                    user = BankAccount.objects.get(
-                        account_number=account_number,
-                    ).user
-                except CustomUser.DoesNotExist:
+                    user = BankAccount.objects.get(account_number=account_number).user
+                except Exception:
                     print("User does not exist")
 
-                # Create a WithdrawalsRequestToAdmin record
                 request = WithdrawalsRequestToAdmin(
-                    user=user, amount=amount, transaction_id=transaction_id
+                    user=user,
+                    amount=amount,
+                    transaction_id=transaction_id,
                 )
                 request.save()
                 
@@ -6456,24 +7132,356 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     "sammy@myfundmobile.com",
                 ]
 
-                send_generic_email(subject=subject, message=message, from_email=from_email, recipient_list=recipient_list)
+                    send_generic_email(
+                        subject=subject,
+                        message=message,
+                        from_email=from_email,
+                        recipient_list=recipient_list,
+                    )
 
-                return JsonResponse({"status": True}, status=status.HTTP_200_OK)
+                return
+
+            case "dedicated_account.credit":
+                print("Received dedicated_account.credit webhook")
+                return
+
+            case "customeridentification.success":
+                customer_code = event["data"]["customer_code"]
+
+                user = CustomUser.objects.filter(
+                    paystack_customer_code=customer_code
+                ).first()
+
+                if not user:
+                    print(f"User not found for customer code {customer_code}")
+                    return
+
+                user.paystack_identified = True
+                user.paystack_identification_status = "success"
+                user.paystack_identification_reason = None
+                user.save(
+                    update_fields=[
+                        "paystack_identified",
+                        "paystack_identification_status",
+                        "paystack_identification_reason",
+                    ]
+                )
+
+                print(f"✅ Customer identification successful for {user.email}")
+
+                if not user.dva_account_number:
+                    success, result = create_dedicated_account(
+                        user,
+                        preferred_bank="wema-bank",
+                        force_create=True,
+                    )
+                    print(
+                        f"DVA creation attempt after KYC for {user.email}: {success}, {result}"
+                    )
+
+                    if success:
+                        send_push_notification(
+                            user=user,
+                            title="Deposit Account Ready ✅",
+                            message=(
+                                f"Hi {user.first_name}, your MyFund Dedicated Virtual Account is now ready. "
+                                f"You can now do QuickSaves with {result.get('account_name')} ({result.get('account_number')} - {result.get('bank_name')})."
+                            ),
+                            data={
+                                "type": "DVA_READY",
+                                "account_number": result.get("account_number"),
+                                "bank_name": result.get("bank_name"),
+                                "account_name": result.get("account_name"),
+                            },
+                            notif_type="SYSTEM",
+                        )
+
+                        send_generic_email(
+                            subject="Your MyFund deposit account is ready ✅",
+                            message=(
+                                f"Hi {user.first_name},<br><br>"
+                                f"Your dedicated MyFund deposit account has been created successfully.<br><br>"
+                                f"<b>Bank:</b> {result.get('bank_name')}<br>"
+                                f"<b>Account Number:</b> {result.get('account_number')}<br>"
+                                f"<b>Account Name:</b> {result.get('account_name')}<br><br>"
+                                f"You can now fund your QuickSave by bank transfer."
+                            ),
+                            from_email="MyFund <info@myfundmobile.com>",
+                            recipient_list=[user.email],
+                        )
+
+                    else:
+                        send_generic_email(
+                            subject="[Paystack DVA Creation Failed After KYC]",
+                            message=(
+                                f"User: {user.email}<br>"
+                                f"Customer code: {customer_code}<br>"
+                                f"Result: {result}"
+                            ),
+                            from_email="MyFund <info@myfundmobile.com>",
+                            recipient_list=[
+                                "info@myfundmobile.com",
+                                "sammy@myfundmobile.com",
+                            ],
+                        )
+
+                else:
+                    send_push_notification(
+                        user=user,
+                        title="Deposit Account Ready ✅",
+                        message=(
+                            f"Hi {user.first_name}, your MyFund deposit account is already ready. "
+                            f"You can now do QuickSaves with {result.get('account_name')} ({result.get('account_number')} - {result.get('bank_name')})."
+                        ),
+                        data={
+                            "type": "DVA_READY",
+                            "account_number": user.dva_account_number,
+                            "bank_name": user.dva_bank_name,
+                            "account_name": user.dva_account_name,
+                        },
+                        notif_type="SYSTEM",
+                    )
+
+                    send_generic_email(
+                        subject="Your MyFund deposit account is ready ✅",
+                        message=(
+                            f"Hi {user.first_name},<br><br>"
+                            f"Your dedicated MyFund deposit account is ready.<br><br>"
+                            f"<b>Bank:</b> {user.dva_bank_name}<br>"
+                            f"<b>Account Number:</b> {user.dva_account_number}<br>"
+                            f"<b>Account Name:</b> {user.dva_account_name}<br><br>"
+                            f"You can now fund your QuickSave by bank transfer."
+                        ),
+                        from_email="MyFund <info@myfundmobile.com>",
+                        recipient_list=[user.email],
+                    )
+
+                return
+
+            case "customeridentification.failed":
+                customer_code = event["data"]["customer_code"]
+                reason = event["data"].get("reason", "Identification failed")
+
+                user = CustomUser.objects.filter(
+                    paystack_customer_code=customer_code
+                ).first()
+
+                if not user:
+                    print(f"User not found for failed customer code {customer_code}")
+                    return
+
+                is_name_mismatch = is_paystack_name_mismatch_reason(reason)
+
+                user.paystack_identified = False
+                user.paystack_identification_status = "failed"
+                user.paystack_identification_reason = (
+                    "NAME_MISMATCH" if is_name_mismatch else reason
+                )
+                user.save(
+                    update_fields=[
+                        "paystack_identified",
+                        "paystack_identification_status",
+                        "paystack_identification_reason",
+                    ]
+                )
+
+                print(f"❌ Customer identification failed for {user.email}: {reason}")
+
+                if is_name_mismatch:
+                    push_title = "Name Mismatch Detected"
+                    push_message = (
+                        f"Hi {user.first_name}, your profile name does not match your BVN/bank details. "
+                        f"Please update your profile name and try again."
+                    )
+                    email_subject = "Action needed: update your name details"
+                    email_message = (
+                        f"Hi {user.first_name},<br><br>"
+                        f"We could not verify your details because your profile name does not match "
+                        f"your BVN/bank details.<br><br>"
+                        f"<b>Reason:</b> {reason}<br><br>"
+                        f"Please update your profile name and try again."
+                    )
+                    push_data = {
+                        "type": "DVA_KYC_FAILED",
+                        "reason": reason,
+                        "code": "NAME_MISMATCH",
+                        "openProfileEditModal": True,
+                    }
+                else:
+                    push_title = "Verification Failed"
+                    push_message = (
+                        f"Hi {user.first_name}, we could not verify your details for "
+                        f"your MyFund deposit account setup. Please update your details and try again."
+                    )
+                    email_subject = "Action needed: verification failed"
+                    email_message = (
+                        f"Hi {user.first_name},<br><br>"
+                        f"We could not verify your details for your MyFund deposit account setup.<br><br>"
+                        f"<b>Reason:</b> {reason}<br><br>"
+                        f"Please update your details and try again."
+                    )
+                    push_data = {
+                        "type": "DVA_KYC_FAILED",
+                        "reason": reason,
+                    }
+
+                send_push_notification(
+                    user=user,
+                    title=push_title,
+                    message=push_message,
+                    data=push_data,
+                    notif_type="SYSTEM",
+                )
+
+                send_generic_email(
+                    subject=email_subject,
+                    message=email_message,
+                    from_email="MyFund <info@myfundmobile.com>",
+                    recipient_list=[user.email],
+                )
+
+                return
+
+            case "dedicatedaccount.assign.success":
+                data = event["data"]
+                customer = data.get("customer", {}) or {}
+                dedicated_account = data.get("dedicated_account", {}) or {}
+
+                customer_code = customer.get("customer_code")
+                user = CustomUser.objects.filter(
+                    paystack_customer_code=customer_code
+                ).first()
+
+                if not user:
+                    print(f"User not found for DVA assignment success: {customer_code}")
+                    return
+
+                user.dva_account_number = dedicated_account.get("account_number")
+                user.dva_account_name = dedicated_account.get("account_name")
+                user.dva_bank_name = (dedicated_account.get("bank", {}) or {}).get(
+                    "name"
+                )
+                user.dva_account_id = str(dedicated_account.get("id"))
+                user.dva_assigned_at = timezone.now()
+                user.save(
+                    update_fields=[
+                        "dva_account_number",
+                        "dva_account_name",
+                        "dva_bank_name",
+                        "dva_account_id",
+                        "dva_assigned_at",
+                    ]
+                )
+
+                print(f"✅ DVA assigned successfully for {user.email}")
+
+                already_notified = (
+                    False  # optional placeholder if you later add a DB flag
+                )
+
+                if not already_notified:
+                    send_push_notification(
+                        user=user,
+                        title="Deposit Account Ready ✅",
+                        message=(
+                            f"Hi {user.first_name}, your MyFund deposit account is now ready. "
+                            f"You can now fund your QuickSave by bank transfer."
+                        ),
+                        data={
+                            "type": "DVA_READY",
+                            "account_number": user.dva_account_number,
+                            "bank_name": user.dva_bank_name,
+                            "account_name": user.dva_account_name,
+                        },
+                        notif_type="SYSTEM",
+                    )
+
+                    send_generic_email(
+                        subject="Your MyFund deposit account is ready ✅",
+                        message=(
+                            f"Hi {user.first_name},<br><br>"
+                            f"Your dedicated MyFund deposit account has been created successfully.<br><br>"
+                            f"<b>Bank:</b> {user.dva_bank_name}<br>"
+                            f"<b>Account Number:</b> {user.dva_account_number}<br>"
+                            f"<b>Account Name:</b> {user.dva_account_name}<br><br>"
+                            f"You can now fund your QuickSave by bank transfer."
+                        ),
+                        from_email="MyFund <info@myfundmobile.com>",
+                        recipient_list=[user.email],
+                    )
+
+                return
+
+            case "dedicatedaccount.assign.failed":
+                data = event["data"]
+                customer = data.get("customer", {}) or {}
+                reason = data.get("reason", "Dedicated account assignment failed")
+
+                customer_code = customer.get("customer_code")
+                user = CustomUser.objects.filter(
+                    paystack_customer_code=customer_code
+                ).first()
+
+                if user:
+                    print(f"❌ DVA assignment failed for {user.email}: {reason}")
+
+                    send_push_notification(
+                        user=user,
+                        title="Deposit Account Setup Failed",
+                        message=(
+                            f"Hi {user.first_name}, we could not complete your "
+                            f"MyFund deposit account setup. Please try again later or contact support."
+                        ),
+                        data={
+                            "type": "DVA_ASSIGN_FAILED",
+                            "reason": reason,
+                        },
+                        notif_type="SYSTEM",
+                    )
+
+                    send_generic_email(
+                        subject="Deposit account setup failed",
+                        message=(
+                            f"Hi {user.first_name},<br><br>"
+                            f"We could not complete your MyFund deposit account setup.<br><br>"
+                            f"<b>Reason:</b> {reason}<br><br>"
+                            f"Please try again later or contact support."
+                        ),
+                        from_email="MyFund <info@myfundmobile.com>",
+                        recipient_list=[user.email],
+                    )
+
+                    send_generic_email(
+                        subject="[Paystack DVA Failed]",
+                        message=f"User: {user.email}<br>Reason: {reason}",
+                        from_email="MyFund <info@myfundmobile.com>",
+                        recipient_list=[
+                            "info@myfundmobile.com",
+                            "sammy@myfundmobile.com",
+                        ],
+                    )
+
+                return
+
+            case _:
+                print(f"Unhandled Paystack event: {event.get('event')}")
+                return
 
     except Exception as e:
-        # print error
-        print(f"\nPaystack Webhook(Internal Server Error):  {e}\n")
+        print(f"\nPaystack Webhook(Internal Server Error): {e}\n")
 
-        # Send an email of the error that ocurred
         subject = "Paystack Webhook Error!"
-        message = f"Paystack Webhook Internal Server Error:  {e}"
-
+        message = f"Paystack Webhook Internal Server Error: {e}"
         from_email = "MyFund <info@myfundmobile.com>"
         recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
 
-        send_generic_email(subject=subject, message=message, from_email=from_email, recipient_list=recipient_list)
-
-        return JsonResponse({"error": str(e)}, status=status.HTTP_200_OK)
+        send_generic_email(
+            subject=subject,
+            message=message,
+            from_email=from_email,
+            recipient_list=recipient_list,
+        )
+        return
 
 
 # ------------------------------ ADMIN SECTION FUNCTIONS
