@@ -5420,7 +5420,6 @@ def create_notification(user, notification_type, title, message, data=None):
 
 
 import threading
-
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def initiate_bank_transfer(request):
@@ -5430,35 +5429,38 @@ def initiate_bank_transfer(request):
         user = request.user
         amount_raw = request.data.get("amount")
 
-        # ✅ Validate and convert amount to Decimal
+        # Validate and convert amount to Decimal
         if not amount_raw:
             return Response(
-                {"error": "Amount is required"}, status=status.HTTP_400_BAD_REQUEST
+                {"error": "Amount is required"},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         try:
             amount = Decimal(str(amount_raw))
-            if amount < 100:
-                return Response(
-                    {"error": "Amount must be greater than #100"},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
         except (InvalidOperation, ValueError, TypeError):
             return Response(
                 {"error": "Invalid amount format. Please enter a valid number."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # ✅ Generate a unique transaction ID
+        if amount < 100:
+            return Response(
+                {"error": "Amount must be greater than ₦100"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Generate a unique transaction ID
         transaction_id = str(uuid.uuid4())[:10]
 
-        # ✅ Create a BankTransferRequest record with transaction_id
-        bank_transfer_request = BankTransferRequest(
-            user=user, amount=amount, transaction_id=transaction_id
+        # Create a BankTransferRequest record
+        bank_transfer_request = BankTransferRequest.objects.create(
+            user=user,
+            amount=amount,
+            transaction_id=transaction_id,
         )
-        bank_transfer_request.save()
 
-        # ✅ Create a pending transaction for the user
+        # Create a pending transaction for the user
         current_datetime = timezone.now()
         referral_email = user.referral.email if user.referral else None
 
@@ -5474,25 +5476,28 @@ def initiate_bank_transfer(request):
             transaction_id=transaction_id,
         )
 
-        # ✅ Return IMMEDIATELY after DB saves
+        # Return immediately after DB saves
         response = Response(
             {
                 "message": "Bank transfer request created and pending admin approval",
                 "amount": str(amount),
+                "transaction_id": transaction_id,
             },
             status=status.HTTP_201_CREATED,
         )
 
-        # ✅ DO ALL NOTIFICATIONS IN BACKGROUND THREAD (including push)
+        # Notifications in background thread
         def background_tasks():
             try:
-                # 1. Send push notification to user (MOVED HERE)
+                # 1. Push notification to user
                 send_push_notification(
                     user=user,
                     title="QuickSave Pending ⏳",
-                    message="Your transfer of ₦{:,.2f} is pending approval. We'll notify you once it's confirmed. Thank you for using MyFund.".format(
-                        float(amount)
-                    ),
+                    message=(
+                        "Your transfer of ₦{:,.2f} is pending approval. "
+                        "We'll notify you once it's confirmed. "
+                        "Thank you for using MyFund."
+                    ).format(float(amount)),
                     data={
                         "amount": str(amount),
                         "transaction_id": transaction_id,
@@ -5502,29 +5507,48 @@ def initiate_bank_transfer(request):
                     notif_type="PENDING",
                 )
 
-        # ✅ Notify User via email
-        user_subject = "QuickSave Pending..."
-        user_message = f"Hi {user.first_name},<br><br>Your bank transfer request of ₦{amount} is pending approval. We'll notify you once it's processed.<br><br>Thank you for using MyFund. <br><br>"
-        threading.Thread(
-            target=send_generic_email,
-            args=(user_subject, user_message, "info@myfundmobile.com", [user.email]),
-            kwargs={"use_celery_threshold": 30, "template": "email/email.html"},
-            daemon=True
-        ).start()
+                # 2. Email to user
+                user_subject = "QuickSave Pending..."
+                user_message = (
+                    f"Hi {user.first_name},<br><br>"
+                    f"Your bank transfer request of ₦{amount} is pending approval. "
+                    f"We'll notify you once it's processed.<br><br>"
+                    f"Thank you for using MyFund.<br><br>"
+                )
 
-                # 3. Notify Admin via Email
-                subject = f"[CHECK] {user.first_name} Made A QuickSave Request"
-                message = f"Hi Admin,<br><br>A bank transfer request of ₦{amount} has been initiated by {user.first_name} {user.last_name} ({user.email}).<br><br>Review here: https://myfundapi-myfund-07ce351a.koyeb.app/admin/<br><br>MyFund Team"
+                send_generic_email(
+                    subject=user_subject,
+                    message=user_message,
+                    from_email="info@myfundmobile.com",
+                    recipient_list=[user.email],
+                    use_celery_threshold=30,
+                    template="email/email.html",
+                )
 
-        threading.Thread(
-            target=send_generic_email,
-            args=(subject, message, "info@myfundmobile.com", ["company@myfundmobile.com", "info@myfundmobile.com"]),
-            kwargs={"use_celery_threshold": 30, "template": "email/email.html"},
-            daemon=True
-        ).start()
+                # 3. Email to admin
+                admin_subject = f"[CHECK] {user.first_name} Made A QuickSave Request"
+                admin_message = (
+                    f"Hi Admin,<br><br>"
+                    f"A bank transfer request of ₦{amount} has been initiated by "
+                    f"{user.first_name} {user.last_name} ({user.email}).<br><br>"
+                    f"Review here: "
+                    f"https://myfundapi-myfund-07ce351a.koyeb.app/admin/<br><br>"
+                    f"MyFund Team"
+                )
 
+                send_generic_email(
+                    subject=admin_subject,
+                    message=admin_message,
+                    from_email="info@myfundmobile.com",
+                    recipient_list=[
+                        "company@myfundmobile.com",
+                        "info@myfundmobile.com",
+                    ],
+                    use_celery_threshold=30,
+                    template="email/email.html",
+                )
 
-                # 4. Notify Admin via Push Notification
+                # 4. Push notification to admins
                 admin_emails = [
                     "tolulopeahmed@gmail.com",
                     "ceo@myfundmobile.com",
@@ -5541,7 +5565,8 @@ def initiate_bank_transfer(request):
                             f"{user.first_name} initiated a New QuickSave"
                         )
                         admin_push_message = (
-                            f"{user.first_name} {user.last_name} ({user.email}) has initiated ₦{amount:,.2f} to Savings Account.\n"
+                            f"{user.first_name} {user.last_name} ({user.email}) "
+                            f"has initiated ₦{amount:,.2f} to Savings Account.\n"
                             f"Please check to confirm."
                         )
 
@@ -5568,9 +5593,7 @@ def initiate_bank_transfer(request):
             except Exception as e:
                 print(f"Background task error: {e}")
 
-        # Start background thread
-        thread = threading.Thread(target=background_tasks, daemon=True)
-        thread.start()
+        threading.Thread(target=background_tasks, daemon=True).start()
 
         return response
 
@@ -6415,7 +6438,6 @@ def paystack_webhook(request):
 
         return JsonResponse({"error": str(e)}, status=status.HTTP_200_OK)
 
-
 def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
     print("WEBHOOK EVENT RECEIVED:", event.get("event"))
     print("WEBHOOK FULL DATA:", event)
@@ -6632,30 +6654,34 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     from_email = "MyFund <info@myfundmobile.com>"
                     recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
 
-                    send_generic_email(subject=subject, message=message, from_email=from_email, recipient_list=recipient_list)
-
+                    send_generic_email(
+                        subject=subject,
+                        message=message,
+                        from_email=from_email,
+                        recipient_list=recipient_list,
+                    )
                     return JsonResponse({"status": True}, status=status.HTTP_200_OK)
-                
-                
+
                 if user and authorization and authorization.get("reusable", False):
                     try:
                         authorization_code = authorization.get("authorization_code")
                         signature = authorization.get("signature")
-                        
+
                         if authorization_code:
-                            # Check if card already exists by authorization_code or signature
                             card_exists = Card.objects.filter(
                                 authorization_code=authorization_code
                             ).exists()
-                            
+
                             if signature and not card_exists:
-                                card_exists = Card.objects.filter(signature=signature).exists()
-                            
+                                card_exists = Card.objects.filter(
+                                    signature=signature
+                                ).exists()
+
                             if not card_exists:
-                                # Check if this is the user's first card (to set as default)
-                                is_first_card = not Card.objects.filter(user=user, is_active=True).exists()
-                                
-                                # Create the card
+                                is_first_card = not Card.objects.filter(
+                                    user=user, is_active=True
+                                ).exists()
+
                                 card = Card.objects.create(
                                     user=user,
                                     authorization_code=authorization_code,
@@ -6666,20 +6692,24 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                                     expiry_year=authorization.get("exp_year", ""),
                                     card_first6_digits=authorization.get("bin", ""),
                                     bank_name=authorization.get("bank", ""),
-                                    card_brand=authorization.get("brand", authorization.get("card_type", "")),
-                                    country_code=authorization.get("country_code", "NG"),
+                                    card_brand=authorization.get(
+                                        "brand", authorization.get("card_type", "")
+                                    ),
+                                    country_code=authorization.get(
+                                        "country_code", "NG"
+                                    ),
                                     reusable=True,
                                     is_default=is_first_card,
                                     is_active=True,
                                 )
-                                
-                                # Optional: Send notification to user about saved card
+
                                 try:
                                     subject = "Payment Card Saved Successfully! 💳"
                                     message = (
                                         f"Hi {user.first_name},<br><br>"
-                                        f"Your <b>{card.card_brand.upper()}</b> card ending in <b>{card.card_last4_digits}</b> "
-                                        f"has been securely saved for faster future payments.<br><br>"
+                                        f"Your <b>{card.card_brand.upper()}</b> card ending in "
+                                        f"<b>{card.card_last4_digits}</b> has been securely saved "
+                                        f"for faster future payments.<br><br>"
                                         f"You can now use QuickSave instantly without entering card details again!<br><br>"
                                         f"Bank: {card.bank_name}<br>"
                                         f"Card Type: {card.card_brand.upper()}<br><br>"
@@ -6688,20 +6718,33 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                                     card_save_from_email = "MyFund <info@myfundmobile.com>"
                                     card_save_recipient_list = [user.email]
 
-                                    send_generic_email(subject=subject, message=message, from_email=card_save_from_email, recipient_list=card_save_recipient_list)
+                                    send_generic_email(
+                                        subject=subject,
+                                        message=message,
+                                        from_email=card_save_from_email,
+                                        recipient_list=card_save_recipient_list,
+                                    )
                                 except Exception as email_error:
-                                    print(f"Failed to send card saved notification: {str(email_error)}")
+                                    print(
+                                        f"Failed to send card saved notification: {str(email_error)}"
+                                    )
                     except Exception as e:
-                        # Log error but don't fail the webhook
                         print(f"❌ Error saving card: {str(e)}")
-                        # Optionally send error email
                         try:
                             subject = "[Webhook Warning] Card Save Failed"
                             message = f"Failed to save card for user {email}: {str(e)}"
                             error_from_email = "MyFund <info@myfundmobile.com>"
-                            error_recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
-                            send_generic_email(subject=subject, message=message, from_email=error_from_email, recipient_list=error_recipient_list)
-                        except:
+                            error_recipient_list = [
+                                "info@myfundmobile.com",
+                                "sammy@myfundmobile.com",
+                            ]
+                            send_generic_email(
+                                subject=subject,
+                                message=message,
+                                from_email=error_from_email,
+                                recipient_list=error_recipient_list,
+                            )
+                        except Exception:
                             pass
 
                 try:
@@ -6771,7 +6814,9 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         user.update_total_savings_and_investment_this_month()
                         user.save()
 
-                        subject = f"AutoSave ({autosave.frequency.capitalize()}) Successful! ✅"
+                        subject = (
+                            f"AutoSave ({autosave.frequency.capitalize()}) Successful! ✅"
+                        )
                         message = (
                             f"Well done {user.first_name},<br><br>"
                             f"Your AutoSave was successful and ₦{amount:,.2f} "
@@ -6830,7 +6875,9 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         user.update_total_savings_and_investment_this_month()
                         user.save()
 
-                        subject = f"AutoInvest ({autoinvest.frequency.capitalize()}) Successful! 🎉"
+                        subject = (
+                            f"AutoInvest ({autoinvest.frequency.capitalize()}) Successful! 🎉"
+                        )
                         message = (
                             f"Well done {user.first_name},<br><br>"
                             f"Your AutoInvest was successful and ₦{amount:,.2f} "
@@ -6897,9 +6944,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         recipient_list=recipient_list,
                     )
 
-                    return JsonResponse(
-                        {"status": True}, status=status.HTTP_200_OK
-                    )  # Prevent double processing
+                    return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
                 elif transaction and transaction.description.lower().startswith(
                     "quickinvest"
@@ -7049,12 +7094,12 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             from_email = "MyFund <info@myfundmobile.com>"
                             recipient_list = [user.email]
 
-                        send_generic_email(
-                            subject=subject,
-                            message=message,
-                            from_email=from_email,
-                            recipient_list=recipient_list,
-                        )
+                            send_generic_email(
+                                subject=subject,
+                                message=message,
+                                from_email=from_email,
+                                recipient_list=recipient_list,
+                            )
 
                         if description.startswith("AutoInvest"):
                             user.investment += amount
@@ -7069,12 +7114,12 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             from_email = "MyFund <info@myfundmobile.com>"
                             recipient_list = [user.email]
 
-                        send_generic_email(
-                            subject=subject,
-                            message=message,
-                            from_email=from_email,
-                            recipient_list=recipient_list,
-                        )
+                            send_generic_email(
+                                subject=subject,
+                                message=message,
+                                from_email=from_email,
+                                recipient_list=recipient_list,
+                            )
 
                         user.confirm_referral_rewards(is_referrer=True)
                         user.update_total_savings_and_investment_this_month()
@@ -7120,11 +7165,15 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     transaction_id=transaction_id,
                 )
                 request.save()
-                
-                print()
-                # Send a Withdrawal Request to Admin
+
                 subject = f"[CHECK] {user.first_name} Withdrawal Request FAILED!"
-                message = f"Hi Admin, <br><br>A withdrawal request of ₦{amount} that was initiated by {user.first_name} {user.last_name} ({user.email}) has just FAILED!<br><br>Reason for failure: {reason}<br><br>Please log in to the admin panel for review: https://myfundapi-myfund-07ce351a.koyeb.app/admin/login/?next=/admin/<br><br>"
+                message = (
+                    f"Hi Admin, <br><br>A withdrawal request of ₦{amount} that was initiated "
+                    f"by {user.first_name} {user.last_name} ({user.email}) has just FAILED!"
+                    f"<br><br>Reason for failure: {reason}<br><br>Please log in to the admin "
+                    f"panel for review: "
+                    f"https://myfundapi-myfund-07ce351a.koyeb.app/admin/login/?next=/admin/<br><br>"
+                )
                 from_email = "MyFund <info@myfundmobile.com>"
                 recipient_list = [
                     "company@myfundmobile.com",
@@ -7132,12 +7181,12 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     "sammy@myfundmobile.com",
                 ]
 
-                    send_generic_email(
-                        subject=subject,
-                        message=message,
-                        from_email=from_email,
-                        recipient_list=recipient_list,
-                    )
+                send_generic_email(
+                    subject=subject,
+                    message=message,
+                    from_email=from_email,
+                    recipient_list=recipient_list,
+                )
 
                 return
 
@@ -7185,7 +7234,8 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             title="Deposit Account Ready ✅",
                             message=(
                                 f"Hi {user.first_name}, your MyFund Dedicated Virtual Account is now ready. "
-                                f"You can now do QuickSaves with {result.get('account_name')} ({result.get('account_number')} - {result.get('bank_name')})."
+                                f"You can now do QuickSaves with {result.get('account_name')} "
+                                f"({result.get('account_number')} - {result.get('bank_name')})."
                             ),
                             data={
                                 "type": "DVA_READY",
@@ -7231,7 +7281,8 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         title="Deposit Account Ready ✅",
                         message=(
                             f"Hi {user.first_name}, your MyFund deposit account is already ready. "
-                            f"You can now do QuickSaves with {result.get('account_name')} ({result.get('account_number')} - {result.get('bank_name')})."
+                            f"You can now do QuickSaves with {user.dva_account_name} "
+                            f"({user.dva_account_number} - {user.dva_bank_name})."
                         ),
                         data={
                             "type": "DVA_READY",
@@ -7375,9 +7426,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
 
                 print(f"✅ DVA assigned successfully for {user.email}")
 
-                already_notified = (
-                    False  # optional placeholder if you later add a DB flag
-                )
+                already_notified = False
 
                 if not already_notified:
                     send_push_notification(
@@ -7482,7 +7531,6 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
             recipient_list=recipient_list,
         )
         return
-
 
 # ------------------------------ ADMIN SECTION FUNCTIONS
 
