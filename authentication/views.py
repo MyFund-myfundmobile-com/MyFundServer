@@ -146,25 +146,19 @@ def signup(request):
             try:
                 send_otp_email(user, otp)
             except Exception as exc:
-                logger.warning(
-                    f"OTP email failed for {user.email}: {exc}"
-                )
+                logger.warning(f"OTP email failed for {user.email}: {exc}")
 
             # SMS should still attempt even if email fails
             try:
                 if user.phone_number:
                     send_otp_sms(user, otp)
             except Exception as exc:
-                logger.warning(
-                    f"OTP SMS failed for {user.phone_number}: {exc}"
-                )
+                logger.warning(f"OTP SMS failed for {user.phone_number}: {exc}")
 
         transaction.on_commit(send_otp_async)
 
         response_data = serializer.data
-        response_data["referral_email"] = (
-            user.referral.email if user.referral else None
-        )
+        response_data["referral_email"] = user.referral.email if user.referral else None
         response_data["message"] = "OTP sent successfully"
 
         return Response(response_data, status=status.HTTP_201_CREATED)
@@ -173,8 +167,9 @@ def signup(request):
         logger.exception("Unexpected error during signup")
 
 
-
 import threading
+
+
 @api_view(["POST"])
 @csrf_exempt
 @permission_classes([AllowAny])
@@ -520,7 +515,12 @@ def send_otp_reset_email(user, otp):
     from_email = "MyFund <info@myfundmobile.com>"
     recipient_list = [user.email]
 
-    send_generic_email(subject=subject, message=message, from_email=from_email, recipient_list=recipient_list)
+    send_generic_email(
+        subject=subject,
+        message=message,
+        from_email=from_email,
+        recipient_list=recipient_list,
+    )
 
 
 def test_email(request):
@@ -536,7 +536,12 @@ def test_email(request):
     from_email = "MyFund <info@myfundmobile.com>"
     recipient_list = ["sammy@myfundmobile.com"]
 
-    send_generic_email(subject=subject, message=message, from_email=from_email, recipient_list=recipient_list)
+    send_generic_email(
+        subject=subject,
+        message=message,
+        from_email=from_email,
+        recipient_list=recipient_list,
+    )
 
     return HttpResponse("Test email sent. This shows the email system is working")
 
@@ -629,7 +634,7 @@ class CustomObtainAuthToken(ObtainAuthToken):
         try:
             username = request.data.get("username", "").strip().lower()
             password = request.data.get("password", "")
-            
+
             # Check if this is an admin login request
             is_admin_endpoint = request.path.startswith("/api/admin/login/")
 
@@ -696,7 +701,7 @@ class CustomObtainAuthToken(ObtainAuthToken):
                         },
                         status=status.HTTP_403_FORBIDDEN,
                     )
-                
+
                 # For regular users, send OTP
                 from authentication.views import send_otp_for_user
 
@@ -813,7 +818,6 @@ from .models import (
 )
 
 
-
 import logging
 import random
 from datetime import timedelta, datetime
@@ -831,6 +835,7 @@ from .models import CustomUser, PasswordReset
 from .utils import send_sms_via_payless, send_generic_email
 
 logger = logging.getLogger(__name__)
+
 
 def _send_otp(user, otp, purpose="signup"):
     """
@@ -920,11 +925,15 @@ def send_password_change_confirmation(user):
             logger.info(f"Password change confirmation sent to {user.email}")
             return True
         except Exception as e:
-            logger.error(f"Failed sending password change confirmation to {user.email}: {e}")
+            logger.error(
+                f"Failed sending password change confirmation to {user.email}: {e}"
+            )
             return False
 
     except Exception as e:
-        logger.error(f"Error preparing password change confirmation for {user.email}: {e}")
+        logger.error(
+            f"Error preparing password change confirmation for {user.email}: {e}"
+        )
         return False
 
 
@@ -958,9 +967,13 @@ def request_password_reset(request):
 
         # Send OTP with try-except to avoid breaking UX
         try:
-            threading.Thread(target=_send_otp, args=(user, otp, "password_reset")).start()
+            threading.Thread(
+                target=_send_otp, args=(user, otp, "password_reset")
+            ).start()
         except Exception as e:
-            logger.error(f"Failed to send email/SMS for password reset to {user.email}: {e}")
+            logger.error(
+                f"Failed to send email/SMS for password reset to {user.email}: {e}"
+            )
 
         return Response({"detail": "Password reset OTP sent successfully."}, status=200)
 
@@ -1001,12 +1014,14 @@ def reset_password(request):
         # Send confirmation email safely
         try:
             threading.Thread(
-                target=send_password_change_confirmation, 
+                target=send_password_change_confirmation,
                 args=(user,),
-                daemon=True  # optional, ensures thread dies with main process
+                daemon=True,  # optional, ensures thread dies with main process
             ).start()
         except Exception as e:
-            logger.warning(f"Could not send password change confirmation to {user.email}: {e}")
+            logger.warning(
+                f"Could not send password change confirmation to {user.email}: {e}"
+            )
 
         return Response({"message": "Password reset successful."}, status=200)
 
@@ -1055,9 +1070,13 @@ def resend_password_otp(request):
         )
 
         try:
-            threading.Thread(target=_send_otp, args=(user, otp, "password_reset")).start()
+            threading.Thread(
+                target=_send_otp, args=(user, otp, "password_reset")
+            ).start()
         except Exception as e:
-            logger.error(f"Failed to resend email/SMS for password reset to {user.email}: {e}")
+            logger.error(
+                f"Failed to resend email/SMS for password reset to {user.email}: {e}"
+            )
 
         return Response({"detail": "OTP resent successfully."}, status=200)
 
@@ -1714,9 +1733,31 @@ def add_bank_account(request):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # 4. Identify customer
-        # 4️⃣ Identify customer using BVN
-        # ------------------------------------
+        # 4. If BVN is not provided yet, save bank account and stop here
+        if not bvn:
+            print("NO BVN PROVIDED. SAVING BANK ACCOUNT WITHOUT IDENTIFICATION/DVA.")
+
+            user.paystack_identified = False
+            user.paystack_identification_status = "pending"
+            user.paystack_identification_reason = "BVN not yet provided"
+            user.save(
+                update_fields=[
+                    "paystack_identified",
+                    "paystack_identification_status",
+                    "paystack_identification_reason",
+                ]
+            )
+
+            return Response(
+                {
+                    "message": "Bank account added successfully. BVN not provided yet, so virtual account creation is pending.",
+                    "bank_account": BankAccountSerializer(bank_account).data,
+                    "bvn_required_for_dva": True,
+                },
+                status=status.HTTP_201_CREATED,
+            )
+
+        # 5. Identify customer using BVN
         ok, result = identify_paystack_customer(
             user=user,
             bvn=bvn,
@@ -1826,7 +1867,7 @@ def add_bank_account(request):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # 5. Create DVA
+        # 6. Create DVA
         ok, dva_result = create_dedicated_account(
             user,
             preferred_bank="wema-bank",
@@ -1846,7 +1887,40 @@ def add_bank_account(request):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # 6. Success
+        # 7. Notify user after successful DVA creation
+        send_push_notification(
+            user=user,
+            title="Deposit Account Ready ✅",
+            message=(
+                f"Hi {user.first_name}, your MyFund Dedicated Virtual Account is now ready. "
+                f"You can now fund your QuickSave with "
+                f"{dva_result.get('account_name')} "
+                f"({dva_result.get('account_number')} - {dva_result.get('bank_name')})."
+            ),
+            data={
+                "type": "DVA_READY",
+                "account_number": dva_result.get("account_number"),
+                "bank_name": dva_result.get("bank_name"),
+                "account_name": dva_result.get("account_name"),
+            },
+            notif_type="SYSTEM",
+        )
+
+        send_generic_email(
+            subject="Your MyFund deposit account is ready ✅",
+            message=(
+                f"Hi {user.first_name},<br><br>"
+                f"Your dedicated MyFund deposit account has been created successfully.<br><br>"
+                f"<b>Bank:</b> {dva_result.get('bank_name')}<br>"
+                f"<b>Account Number:</b> {dva_result.get('account_number')}<br>"
+                f"<b>Account Name:</b> {dva_result.get('account_name')}<br><br>"
+                f"You can now fund your QuickSave by bank transfer."
+            ),
+            from_email="MyFund <info@myfundmobile.com>",
+            recipient_list=[user.email],
+        )
+
+        # 8. Success
         return Response(
             {
                 "message": "Bank account added and DVA created successfully.",
@@ -2092,7 +2166,9 @@ def quicksave(request):
     """
     amount = request.data.get("amount")
     payment_channels = request.data.get("channels", ["card"])
-    use_saved_card = request.data.get("use_saved_card", True)  # Auto use saved card by default
+    use_saved_card = request.data.get(
+        "use_saved_card", True
+    )  # Auto use saved card by default
     card_id = request.data.get("card_id")  # Optional: specific card to use
 
     if amount is None:
@@ -2108,24 +2184,25 @@ def quicksave(request):
     # CHECK FOR SAVED CARD
     # ===================================
     saved_card = None
-    
+
     if use_saved_card:
         if card_id:
             # Use specific card
             try:
                 saved_card = Card.objects.get(
-                    id=card_id,
-                    user=request.user,
-                    is_active=True,
-                    reusable=True
+                    id=card_id, user=request.user, is_active=True, reusable=True
                 )
             except Card.DoesNotExist:
                 return Response(
-                    {"error": "Selected card not found or not available for instant payment"},
-                    status=404
+                    {
+                        "error": "Selected card not found or not available for instant payment"
+                    },
+                    status=404,
                 )
         else:
-            return Response({"error": "'card_id' required for instant card payment"}, status=400)
+            return Response(
+                {"error": "'card_id' required for instant card payment"}, status=400
+            )
         #     # Use default card
         #     saved_card = Card.objects.filter(
         #         user=request.user,
@@ -2133,7 +2210,7 @@ def quicksave(request):
         #         is_active=True,
         #         reusable=True
         #     ).first()
-            
+
         #     # If no default, get the most recent card
         #     if not saved_card:
         #         saved_card = Card.objects.filter(
@@ -2154,7 +2231,7 @@ def quicksave(request):
                 "user_id": request.user.id,
                 "transaction_type": "quicksave",
                 "card_id": saved_card.id,
-            }
+            },
         }
 
         try:
@@ -2167,18 +2244,18 @@ def quicksave(request):
                 },
                 timeout=30,
             )
-            
+
             if resp.status_code != 200:
                 # If instant charge fails, fall back to regular payment
                 print(f"Instant charge failed: {resp.text}")
                 return Response({"error": f"Instant card charge failed"}, status=400)
             else:
                 data = resp.json()
-                
+
                 if data.get("status") and data["data"]["status"] == "success":
                     # Instant payment successful!
                     reference = data["data"]["reference"]
-                    
+
                     # Create completed transaction
                     transaction = Transaction.objects.create(
                         user=request.user,
@@ -2196,7 +2273,7 @@ def quicksave(request):
                     request.user.save()
 
                     # Send success email
-                    try:                        
+                    try:
                         subject = "QuickSave Successful! ✅"
                         message = (
                             f"Well done {request.user.first_name},<br><br>"
@@ -2207,25 +2284,32 @@ def quicksave(request):
                         )
                         from_email = "MyFund <info@myfundmobile.com>"
                         recipient_list = [request.user.email]
-                        
-                        send_generic_email(subject=subject, message=message, from_email=from_email, recipient_list=recipient_list)
+
+                        send_generic_email(
+                            subject=subject,
+                            message=message,
+                            from_email=from_email,
+                            recipient_list=recipient_list,
+                        )
                     except Exception as e:
                         print(f"Failed to send email: {str(e)}")
 
-                    return Response({
-                        "status": "success",
-                        "payment_method": "instant",
-                        "message": "QuickSave successful! Amount added to your savings.",
-                        "amount": float(amount),
-                        "reference": reference,
-                        "card_used": {
-                            "brand": saved_card.card_brand,
-                            "last4": saved_card.card_last4_digits,
-                            "bank": saved_card.bank_name,
-                        },
-                        "new_balance": float(request.user.savings),
-                    })
-                
+                    return Response(
+                        {
+                            "status": "success",
+                            "payment_method": "instant",
+                            "message": "QuickSave successful! Amount added to your savings.",
+                            "amount": float(amount),
+                            "reference": reference,
+                            "card_used": {
+                                "brand": saved_card.card_brand,
+                                "last4": saved_card.card_last4_digits,
+                                "bank": saved_card.bank_name,
+                            },
+                            "new_balance": float(request.user.savings),
+                        }
+                    )
+
         except requests.RequestException as e:
             print(f"Instant payment request failed: {str(e)}")
             return Response({"error": f"Instant payment request failed"}, status=400)
@@ -2240,7 +2324,7 @@ def quicksave(request):
             "metadata": {
                 "user_id": request.user.id,
                 "transaction_type": "quicksave",
-            }
+            },
         }
 
         try:
@@ -2255,8 +2339,7 @@ def quicksave(request):
             )
         except requests.RequestException as e:
             return Response(
-                {"error": f"Payment initialization failed: {str(e)}"}, 
-                status=500
+                {"error": f"Payment initialization failed: {str(e)}"}, status=500
             )
 
         # Check if request to Paystack was successful
@@ -2268,7 +2351,9 @@ def quicksave(request):
 
         if not data.get("status"):
             return Response(
-                {"error": f"Payment initialization failed: {data.get('message', 'Unknown error')}"},
+                {
+                    "error": f"Payment initialization failed: {data.get('message', 'Unknown error')}"
+                },
                 status=400,
             )
 
@@ -2292,20 +2377,21 @@ def quicksave(request):
             paystack_auth_code=authorization_code,
         )
 
-        return Response({
-            "status": "transaction_initiated",
-            "payment_method": "popup",
-            "message": "Authorization of QuickSave transaction on Paystack required",
-            "authorization_url": data["data"]["authorization_url"],
-            "access_code": access_code,
-            "reference": reference,
-            # ✅ NEW: Return authorization info to frontend
-            "authorization_code": authorization_code,
-            "reusable": reusable,
-            "card_brand": card_brand,
-            "card_last4": card_last4,
-        })
-
+        return Response(
+            {
+                "status": "transaction_initiated",
+                "payment_method": "popup",
+                "message": "Authorization of QuickSave transaction on Paystack required",
+                "authorization_url": data["data"]["authorization_url"],
+                "access_code": access_code,
+                "reference": reference,
+                # ✅ NEW: Return authorization info to frontend
+                "authorization_code": authorization_code,
+                "reusable": reusable,
+                "card_brand": card_brand,
+                "card_last4": card_last4,
+            }
+        )
 
 
 import time
@@ -2374,12 +2460,7 @@ def autosave(request):
 
     # Get the selected card
     try:
-        card = Card.objects.get(
-            id=card_id,
-            user=user,
-            is_active=True,
-            reusable=True
-        )
+        card = Card.objects.get(id=card_id, user=user, is_active=True, reusable=True)
     except Card.DoesNotExist:
         return Response(
             {"error": "Selected card not found or not available for AutoSave."},
@@ -2388,7 +2469,7 @@ def autosave(request):
 
     # Get authorization code from the card
     authorization_code = card.authorization_code
-    
+
     if not authorization_code:
         return Response(
             {"error": "This card does not have a valid authorization code."},
@@ -2433,7 +2514,7 @@ def autosave(request):
     subscription_payload = {
         "customer": user.email,
         "plan": plan_code,
-        "authorization": authorization_code  # Use authorization code from selected card
+        "authorization": authorization_code,  # Use authorization code from selected card
     }
 
     try:
@@ -2489,7 +2570,12 @@ def autosave(request):
     from_email = "MyFund <info@myfundmobile.com>"
     recipient_list = [user.email]
 
-    send_generic_email(subject=subject, message=message, from_email=from_email, recipient_list=recipient_list)
+    send_generic_email(
+        subject=subject,
+        message=message,
+        from_email=from_email,
+        recipient_list=recipient_list,
+    )
 
     # Mark user as having autosave enabled
     user.autosave_enabled = True
@@ -2511,19 +2597,22 @@ def autosave(request):
         notif_type="SYSTEM",
     )
 
-    return Response({
-        "message": "AutoSave activated successfully",
-        "autosave": {
-            "amount": amount,
-            "frequency": frequency,
-            # "card_used": {
-            #     "brand": card.card_brand,
-            #     "last4": card.card_last4_digits,
-            #     "bank": card.bank_name,
-            # },
-            # "subscription_code": subscription_code,
-        }
-    }, status=status.HTTP_200_OK)
+    return Response(
+        {
+            "message": "AutoSave activated successfully",
+            "autosave": {
+                "amount": amount,
+                "frequency": frequency,
+                # "card_used": {
+                #     "brand": card.card_brand,
+                #     "last4": card.card_last4_digits,
+                #     "bank": card.bank_name,
+                # },
+                # "subscription_code": subscription_code,
+            },
+        },
+        status=status.HTTP_200_OK,
+    )
 
 
 @api_view(["POST"])
@@ -2597,7 +2686,12 @@ def deactivate_autosave(request):
         from_email = "MyFund <info@myfundmobile.com>"
         recipient_list = [user.email]
 
-        send_generic_email(subject=subject, message=message, from_email=from_email, recipient_list=recipient_list)
+        send_generic_email(
+            subject=subject,
+            message=message,
+            from_email=from_email,
+            recipient_list=recipient_list,
+        )
 
         # Return a success response indicating that AutoSave has been deactivated
         return Response({"message": "AutoSave deactivated"}, status=status.HTTP_200_OK)
@@ -2666,7 +2760,9 @@ def quickinvest(request):
     """
     amount = request.data.get("amount")
     payment_channels = request.data.get("channels", ["card"])
-    use_saved_card = request.data.get("use_saved_card", True)  # Auto use saved card by default
+    use_saved_card = request.data.get(
+        "use_saved_card", True
+    )  # Auto use saved card by default
     card_id = request.data.get("card_id")  # Optional: specific card to use
 
     if amount is None:
@@ -2682,24 +2778,25 @@ def quickinvest(request):
     # CHECK FOR SAVED CARD
     # ===================================
     saved_card = None
-    
+
     if use_saved_card:
         if card_id:
             # Use specific card
             try:
                 saved_card = Card.objects.get(
-                    id=card_id,
-                    user=request.user,
-                    is_active=True,
-                    reusable=True
+                    id=card_id, user=request.user, is_active=True, reusable=True
                 )
             except Card.DoesNotExist:
                 return Response(
-                    {"error": "Selected card not found or not available for instant payment"},
-                    status=404
+                    {
+                        "error": "Selected card not found or not available for instant payment"
+                    },
+                    status=404,
                 )
         else:
-            return Response({"error": "'card_id' required for instant card payment"}, status=400)
+            return Response(
+                {"error": "'card_id' required for instant card payment"}, status=400
+            )
 
     # ===================================
     # INSTANT PAYMENT WITH SAVED CARD
@@ -2713,7 +2810,7 @@ def quickinvest(request):
                 "user_id": request.user.id,
                 "transaction_type": "quickinvest",
                 # "card_id": saved_card.id,
-            }
+            },
         }
 
         try:
@@ -2726,18 +2823,18 @@ def quickinvest(request):
                 },
                 timeout=30,
             )
-            
+
             if resp.status_code != 200:
                 # If instant charge fails, fall back to regular payment
                 print(f"Instant charge failed: {resp.text}")
                 return Response({"error": f"Instant card charge failed"}, status=400)
             else:
                 data = resp.json()
-                
+
                 if data.get("status") and data["data"]["status"] == "success":
                     # Instant payment successful!
                     reference = data["data"]["reference"]
-                    
+
                     # Create completed transaction
                     transaction = Transaction.objects.create(
                         user=request.user,
@@ -2755,7 +2852,7 @@ def quickinvest(request):
                     request.user.save()
 
                     # Send success email
-                    try:                        
+                    try:
                         subject = "QuickInvest Successful! 🎉"
                         message = (
                             f"Well done {request.user.first_name},<br><br>"
@@ -2766,25 +2863,32 @@ def quickinvest(request):
                         )
                         from_email = "MyFund <info@myfundmobile.com>"
                         recipient_list = [request.user.email]
-                        
-                        send_generic_email(subject=subject, message=message, from_email=from_email, recipient_list=recipient_list)
+
+                        send_generic_email(
+                            subject=subject,
+                            message=message,
+                            from_email=from_email,
+                            recipient_list=recipient_list,
+                        )
                     except Exception as e:
                         print(f"Failed to send email: {str(e)}")
 
-                    return Response({
-                        "status": "success",
-                        "payment_method": "instant",
-                        "message": "QuickInvest successful! Amount added to your investments.",
-                        "amount": float(amount),
-                        "reference": reference,
-                        "card_used": {
-                            "brand": saved_card.card_brand,
-                            "last4": saved_card.card_last4_digits,
-                            "bank": saved_card.bank_name,
-                        },
-                        "new_balance": float(request.user.investment),
-                    })
-                
+                    return Response(
+                        {
+                            "status": "success",
+                            "payment_method": "instant",
+                            "message": "QuickInvest successful! Amount added to your investments.",
+                            "amount": float(amount),
+                            "reference": reference,
+                            "card_used": {
+                                "brand": saved_card.card_brand,
+                                "last4": saved_card.card_last4_digits,
+                                "bank": saved_card.bank_name,
+                            },
+                            "new_balance": float(request.user.investment),
+                        }
+                    )
+
         except requests.RequestException as e:
             print(f"Instant payment request failed: {str(e)}")
             return Response({"error": f"Instant payment request failed"}, status=400)
@@ -2799,7 +2903,7 @@ def quickinvest(request):
             "metadata": {
                 "user_id": request.user.id,
                 "transaction_type": "quickinvest",
-            }
+            },
         }
 
         try:
@@ -2814,8 +2918,7 @@ def quickinvest(request):
             )
         except requests.RequestException as e:
             return Response(
-                {"error": f"Payment initialization failed: {str(e)}"}, 
-                status=500
+                {"error": f"Payment initialization failed: {str(e)}"}, status=500
             )
 
         # Check if request to Paystack was successful
@@ -2827,7 +2930,9 @@ def quickinvest(request):
 
         if not data.get("status"):
             return Response(
-                {"error": f"Payment initialization failed: {data.get('message', 'Unknown error')}"},
+                {
+                    "error": f"Payment initialization failed: {data.get('message', 'Unknown error')}"
+                },
                 status=400,
             )
 
@@ -2851,19 +2956,21 @@ def quickinvest(request):
             paystack_auth_code=authorization_code,
         )
 
-        return Response({
-            "status": "transaction_initiated",
-            "payment_method": "popup",
-            "message": "Authorization of QuickInvest transaction on Paystack required",
-            "authorization_url": data["data"]["authorization_url"],
-            "access_code": access_code,
-            "reference": reference,
-            # ✅ NEW: Return authorization info to frontend
-            "authorization_code": authorization_code,
-            "reusable": reusable,
-            "card_brand": card_brand,
-            "card_last4": card_last4,
-        })
+        return Response(
+            {
+                "status": "transaction_initiated",
+                "payment_method": "popup",
+                "message": "Authorization of QuickInvest transaction on Paystack required",
+                "authorization_url": data["data"]["authorization_url"],
+                "access_code": access_code,
+                "reference": reference,
+                # ✅ NEW: Return authorization info to frontend
+                "authorization_code": authorization_code,
+                "reusable": reusable,
+                "card_brand": card_brand,
+                "card_last4": card_last4,
+            }
+        )
 
 
 from .models import AutoInvest
@@ -2906,7 +3013,9 @@ def autoinvest(request):
     valid_frequencies = ["hourly", "daily", "weekly", "monthly"]
     if frequency not in valid_frequencies:
         return Response(
-            {"error": "Invalid frequency. Choose 'hourly', 'daily', 'weekly', or 'monthly'."},
+            {
+                "error": "Invalid frequency. Choose 'hourly', 'daily', 'weekly', or 'monthly'."
+            },
             status=status.HTTP_400_BAD_REQUEST,
         )
 
@@ -2921,12 +3030,7 @@ def autoinvest(request):
 
     # Get the selected card
     try:
-        card = Card.objects.get(
-            id=card_id,
-            user=user,
-            is_active=True,
-            reusable=True
-        )
+        card = Card.objects.get(id=card_id, user=user, is_active=True, reusable=True)
     except Card.DoesNotExist:
         return Response(
             {"error": "Selected card not found or not available for AutoInvest."},
@@ -2935,7 +3039,7 @@ def autoinvest(request):
 
     # Get authorization code from the card
     authorization_code = card.authorization_code
-    
+
     if not authorization_code:
         return Response(
             {"error": "This card does not have a valid authorization code."},
@@ -2961,13 +3065,13 @@ def autoinvest(request):
         )
         plan_response.raise_for_status()
         plan_data = plan_response.json()
-        
+
         if not plan_data.get("status"):
             return Response(
                 {"error": "Failed to create plan on Paystack."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
-        
+
         plan_code = plan_data["data"]["plan_code"]
     except requests.RequestException as e:
         logger.error(f"Paystack plan creation failed: {e}")
@@ -2980,7 +3084,7 @@ def autoinvest(request):
     subscription_payload = {
         "customer": user.email,
         "plan": plan_code,
-        "authorization": authorization_code  # Use authorization code from selected card
+        "authorization": authorization_code,  # Use authorization code from selected card
     }
 
     try:
@@ -2991,14 +3095,14 @@ def autoinvest(request):
         )
         subscription_response.raise_for_status()
         subscription_data = subscription_response.json()
-        
+
         if not subscription_data.get("status"):
             error_message = subscription_data.get("message", "Subscription failed.")
             return Response(
                 {"error": error_message},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
-        
+
         subscription_id = subscription_data.get("data", {}).get("id")
         subscription_code = subscription_data.get("data", {}).get("subscription_code")
         subscription_token = subscription_data.get("data", {}).get("email_token")
@@ -3037,7 +3141,12 @@ def autoinvest(request):
     from_email = "MyFund <info@myfundmobile.com>"
     recipient_list = [user.email]
 
-    send_generic_email(subject=subject, message=message, from_email=from_email, recipient_list=recipient_list)
+    send_generic_email(
+        subject=subject,
+        message=message,
+        from_email=from_email,
+        recipient_list=recipient_list,
+    )
 
     # Optional: Send push notification
     try:
@@ -3058,20 +3167,23 @@ def autoinvest(request):
     except Exception as e:
         logger.error(f"Push notification failed: {e}")
 
-    return Response({
-        "message": "AutoInvest activated successfully",
-        "autoinvest": {
-            "id": autoinvest_record.id,
-            "amount": amount,
-            "frequency": frequency,
-            "card_used": {
-                "brand": card.card_brand,
-                "last4": card.card_last4_digits,
-                "bank": card.bank_name,
+    return Response(
+        {
+            "message": "AutoInvest activated successfully",
+            "autoinvest": {
+                "id": autoinvest_record.id,
+                "amount": amount,
+                "frequency": frequency,
+                "card_used": {
+                    "brand": card.card_brand,
+                    "last4": card.card_last4_digits,
+                    "bank": card.bank_name,
+                },
+                "subscription_code": subscription_code,
             },
-            "subscription_code": subscription_code,
-        }
-    }, status=status.HTTP_200_OK)
+        },
+        status=status.HTTP_200_OK,
+    )
 
 
 @api_view(["POST"])
@@ -3145,7 +3257,12 @@ def deactivate_autoinvest(request):
         from_email = "MyFund <info@myfundmobile.com>"
         recipient_list = [user.email]
 
-        send_generic_email(subject=subject, message=message, from_email=from_email, recipient_list=recipient_list)
+        send_generic_email(
+            subject=subject,
+            message=message,
+            from_email=from_email,
+            recipient_list=recipient_list,
+        )
 
         # Return a success response indicating that AutoInvest has been deactivated
         return Response(
@@ -3706,7 +3823,10 @@ def withdraw_to_local_bank(request):
                 )
 
                 send_generic_email(
-                    subject=subject, message=message, from_email="MyFund <info@myfundmobile.com>", recipient_list=[user.email]
+                    subject=subject,
+                    message=message,
+                    from_email="MyFund <info@myfundmobile.com>",
+                    recipient_list=[user.email],
                 )
 
                 return Response(
@@ -3773,7 +3893,10 @@ def withdraw_to_local_bank(request):
             )
 
             send_generic_email(
-                subject=subject, message=message, from_email="MyFund <info@myfundmobile.com>", recipient_list=[user.email]
+                subject=subject,
+                message=message,
+                from_email="MyFund <info@myfundmobile.com>",
+                recipient_list=[user.email],
             )
 
             # — notify admin
@@ -4119,7 +4242,12 @@ def process_withdrawal_to_local_bank(request):
             from_email = "MyFund <info@myfundmobile.com>"
             recipient_list = [user_locked.email]
 
-            send_generic_email(subject=subject, message=user_message, from_email=from_email, recipient_list=recipient_list)
+            send_generic_email(
+                subject=subject,
+                message=user_message,
+                from_email=from_email,
+                recipient_list=recipient_list,
+            )
 
             # ✅ STEP 10.1: Send push notification to user (rule-based, no false charge alerts)
 
@@ -4236,7 +4364,10 @@ def process_withdrawal_to_local_bank(request):
             ]
 
             send_generic_email(
-                subject=admin_subject, message=admin_message, from_email=from_email, recipient_list=admin_recipient_list
+                subject=admin_subject,
+                message=admin_message,
+                from_email=from_email,
+                recipient_list=admin_recipient_list,
             )
 
             # --- Send push notification to admin users ---
@@ -4427,7 +4558,12 @@ def cancel_scheduled_withdrawal(request):
             from_email = "MyFund <info@myfundmobile.com>"
             recipient_list = [user_locked.email]
 
-            send_generic_email(subject=subject, message=user_message, from_email=from_email, recipient_list=recipient_list)
+            send_generic_email(
+                subject=subject,
+                message=user_message,
+                from_email=from_email,
+                recipient_list=recipient_list,
+            )
             print("✅ STEP 9: Sent cancellation email to user")
 
             # --- Send push notification to user ---
@@ -4562,14 +4698,24 @@ def make_withdrawal_through_admin(user, amount, transaction_id):
             "cto@myfundmobile.com",
         ]
 
-        send_generic_email(subject=subject, message=message, from_email=from_email, recipient_list=recipient_list)
+        send_generic_email(
+            subject=subject,
+            message=message,
+            from_email=from_email,
+            recipient_list=recipient_list,
+        )
 
         # Send a pending quicksave email to the user
         user_subject = "Withdrawal Pending..."
         user_message = f"Hi {user.first_name},<br><br>Your withdrawal of ₦{amount} is pending approval. We will notify you once it's processed. <br><br>Thank you for using MyFund."
         user_email = [user.email]
 
-        send_generic_email(subject=user_subject, message=user_message, from_email=from_email, recipient_list=user_email)
+        send_generic_email(
+            subject=user_subject,
+            message=user_message,
+            from_email=from_email,
+            recipient_list=user_email,
+        )
 
         return {"message": "Withdrawal request created and pending admin approval"}
 
@@ -4677,14 +4823,24 @@ def wallet_transfer_view(request):  # ✅ NEW NAME
     from_email = "MyFund <info@myfundmobile.com>"
     recipient_list = [sender.email]
 
-    send_generic_email(subject=subject, message=message, from_email=from_email, recipient_list=recipient_list)
+    send_generic_email(
+        subject=subject,
+        message=message,
+        from_email=from_email,
+        recipient_list=recipient_list,
+    )
 
     subject = f"You Received ₦{amount} from {sender.first_name}"
     message = f"Hi {target_user.first_name},<br><br>You have received ₦{amount} from {sender.first_name} ({sender.email}).<br><br>Thank you for using MyFund!"
     from_email = "MyFund <info@myfundmobile.com>"
     recipient_list = [target_user.email]
 
-    send_generic_email(subject=subject, message=message, from_email=from_email, recipient_list=recipient_list)
+    send_generic_email(
+        subject=subject,
+        message=message,
+        from_email=from_email,
+        recipient_list=recipient_list,
+    )
 
     return Response({"success": True})
 
@@ -4809,7 +4965,12 @@ class BuyPropertyView(generics.CreateAPIView):
             from_email = "MyFund <info@myfundmobile.com>"
             recipient_list = [user.email]
 
-            send_generic_email(subject=subject, message=message, from_email=from_email, recipient_list=recipient_list)
+            send_generic_email(
+                subject=subject,
+                message=message,
+                from_email=from_email,
+                recipient_list=recipient_list,
+            )
 
             schedule_rent_reward(user.id, rent_reward, uuid.uuid4(), property.name)
 
@@ -4890,7 +5051,12 @@ class BuyPropertyView(generics.CreateAPIView):
                     from_email = "MyFund <info@myfundmobile.com>"
                     recipient_list = [user.email]
 
-                    send_generic_email(subject=subject, message=message, from_email=from_email, recipient_list=recipient_list)
+                    send_generic_email(
+                        subject=subject,
+                        message=message,
+                        from_email=from_email,
+                        recipient_list=recipient_list,
+                    )
 
                     return Response(
                         {"detail": "Property purchased successfully."},
@@ -5208,7 +5374,12 @@ class KYCUpdateView(generics.UpdateAPIView):
             from_email = "MyFund <info@myfundmobile.com>"
             recipient_list = [user.email]
 
-            send_generic_email(subject=user_subject, message=user_message, from_email=from_email, recipient_list=recipient_list)
+            send_generic_email(
+                subject=user_subject,
+                message=user_message,
+                from_email=from_email,
+                recipient_list=recipient_list,
+            )
 
         # 2️⃣ Push notification to user
         send_push_notification(
@@ -5229,7 +5400,10 @@ class KYCUpdateView(generics.UpdateAPIView):
             "https://myfundapi-myfund-07ce351a.koyeb.app/admin/login/?next=/admin/.<br><br>"
         )
         send_generic_email(
-            subject=admin_subject, message=admin_message, from_email="MyFund <info@myfundmobile.com>", recipient_list=admin_email
+            subject=admin_subject,
+            message=admin_message,
+            from_email="MyFund <info@myfundmobile.com>",
+            recipient_list=admin_email,
         )
 
         # 4️⃣ Push notification to admin (KYC alert)
@@ -5420,6 +5594,8 @@ def create_notification(user, notification_type, title, message, data=None):
 
 
 import threading
+
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def initiate_bank_transfer(request):
@@ -5696,7 +5872,7 @@ def initiate_invest_transfer(request):
             target=send_generic_email,
             args=(user_subject, user_message, "info@myfundmobile.com", [user.email]),
             kwargs={"use_celery_threshold": 30, "template": "email/email.html"},
-            daemon=True
+            daemon=True,
         ).start()
 
         # 📧 ADMIN EMAIL — THREADING
@@ -5710,9 +5886,14 @@ def initiate_invest_transfer(request):
         )
         threading.Thread(
             target=send_generic_email,
-            args=(admin_subject, admin_message, "info@myfundmobile.com", ["company@myfundmobile.com", "info@myfundmobile.com"]),
+            args=(
+                admin_subject,
+                admin_message,
+                "info@myfundmobile.com",
+                ["company@myfundmobile.com", "info@myfundmobile.com"],
+            ),
             kwargs={"use_celery_threshold": 30, "template": "email/email.html"},
-            daemon=True
+            daemon=True,
         ).start()
 
         # 🔔 ADMIN PUSH
@@ -6210,7 +6391,10 @@ def send_pin_reset_otp(request):
         MyFund Team
         """
         send_generic_email(
-            subject=subject, message=message, from_email="MyFund <info@myfundmobile.com>", recipient_list=[user.email]
+            subject=subject,
+            message=message,
+            from_email="MyFund <info@myfundmobile.com>",
+            recipient_list=[user.email],
         )
 
         send_push_notification(
@@ -6260,7 +6444,10 @@ def verify_otp_and_reset_pin(request):
         MyFund Team
         """
         send_generic_email(
-            subject=subject, message=message, from_email="MyFund <info@myfundmobile.com>", recipient_list=[user.email]
+            subject=subject,
+            message=message,
+            from_email="MyFund <info@myfundmobile.com>",
+            recipient_list=[user.email],
         )
 
         send_push_notification(
@@ -6322,7 +6509,12 @@ def paystack_submit_otp(request):
                 from_email = "MyFund <info@myfundmobile.com>"
                 recipient_list = [user.email]
 
-                send_generic_email(subject=subject, message=message, from_email=from_email, recipient_list=recipient_list)
+                send_generic_email(
+                    subject=subject,
+                    message=message,
+                    from_email=from_email,
+                    recipient_list=recipient_list,
+                )
 
             if description[0] == "QuickSave":
                 user.savings += int(amount)
@@ -6437,6 +6629,7 @@ def paystack_webhook(request):
         )
 
         return JsonResponse({"error": str(e)}, status=status.HTTP_200_OK)
+
 
 def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
     print("WEBHOOK EVENT RECEIVED:", event.get("event"))
@@ -6715,7 +6908,9 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                                         f"Card Type: {card.card_brand.upper()}<br><br>"
                                         f"Keep growing your funds.🥂"
                                     )
-                                    card_save_from_email = "MyFund <info@myfundmobile.com>"
+                                    card_save_from_email = (
+                                        "MyFund <info@myfundmobile.com>"
+                                    )
                                     card_save_recipient_list = [user.email]
 
                                     send_generic_email(
@@ -6814,9 +7009,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         user.update_total_savings_and_investment_this_month()
                         user.save()
 
-                        subject = (
-                            f"AutoSave ({autosave.frequency.capitalize()}) Successful! ✅"
-                        )
+                        subject = f"AutoSave ({autosave.frequency.capitalize()}) Successful! ✅"
                         message = (
                             f"Well done {user.first_name},<br><br>"
                             f"Your AutoSave was successful and ₦{amount:,.2f} "
@@ -6875,9 +7068,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         user.update_total_savings_and_investment_this_month()
                         user.save()
 
-                        subject = (
-                            f"AutoInvest ({autoinvest.frequency.capitalize()}) Successful! 🎉"
-                        )
+                        subject = f"AutoInvest ({autoinvest.frequency.capitalize()}) Successful! 🎉"
                         message = (
                             f"Well done {user.first_name},<br><br>"
                             f"Your AutoInvest was successful and ₦{amount:,.2f} "
@@ -7532,6 +7723,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
         )
         return
 
+
 # ------------------------------ ADMIN SECTION FUNCTIONS
 
 from datetime import timedelta
@@ -8080,7 +8272,10 @@ def create_groupbuy(request):
 
                         try:
                             send_generic_email(
-                                subject=subject, message=message, from_email=from_email, recipient_list=recipient_list
+                                subject=subject,
+                                message=message,
+                                from_email=from_email,
+                                recipient_list=recipient_list,
                             )
                         except Exception as e:
                             return Response(
@@ -8306,7 +8501,12 @@ def invite_to_groupbuy(request, group_id):
 
             recipient_list = [invited_user.email for invited_user in invited_users]
             try:
-                send_generic_email(subject=subject, message=message, from_email=from_email, recipient_list=recipient_list)
+                send_generic_email(
+                    subject=subject,
+                    message=message,
+                    from_email=from_email,
+                    recipient_list=recipient_list,
+                )
             except Exception as e:
                 return Response(
                     {"error": f"Failed to send email: {str(e)}"},
@@ -8908,7 +9108,12 @@ def add_funds(request, id):
         from_email = "MyFund <info@myfundmobile.com>"
         recipient_list = [user.email]
 
-        send_generic_email(subject=subject, message=message, from_email=from_email, recipient_list=recipient_list)
+        send_generic_email(
+            subject=subject,
+            message=message,
+            from_email=from_email,
+            recipient_list=recipient_list,
+        )
 
         # Return the success message
         return Response(
@@ -9062,7 +9267,12 @@ def withdraw_savings(request, id):
                 from_email = "MyFund <info@myfundmobile.com>"
                 recipient_list = [user.email]
 
-                send_generic_email(subject=subject, message=message, from_email=from_email, recipient_list=recipient_list)
+                send_generic_email(
+                    subject=subject,
+                    message=message,
+                    from_email=from_email,
+                    recipient_list=recipient_list,
+                )
 
                 return Response(
                     {
@@ -9722,7 +9932,7 @@ class TopReferralsAPIView(APIView):
                     "profile_picture": self.get_profile_pic_url(ref_user),
                     "monthly_signups": stat["monthly_signups"],
                     "monthly_confirmed": stat["monthly_confirmed"],
-                    "is_hired_referrer": ref_user.is_hired_referrer
+                    "is_hired_referrer": ref_user.is_hired_referrer,
                 }
             )
 
