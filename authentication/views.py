@@ -1639,12 +1639,12 @@ def add_bank_account(request):
     account_number = request.data.get("accountNumber")
     account_name = request.data.get("accountName")
     bank_code = request.data.get("bankCode")
-    bvn = request.data.get("bvn")
+    bvn = (request.data.get("bvn") or "").strip()
 
-    if not all([bank_name, account_number, account_name, bank_code, bvn]):
+    if not all([bank_name, account_number, account_name, bank_code]):
         return Response(
             {
-                "error": "bankName, accountNumber, accountName, bankCode and bvn are required."
+                "error": "bankName, accountNumber, accountName and bankCode are required."
             },
             status=status.HTTP_400_BAD_REQUEST,
         )
@@ -1738,7 +1738,7 @@ def add_bank_account(request):
             print("NO BVN PROVIDED. SAVING BANK ACCOUNT WITHOUT IDENTIFICATION/DVA.")
 
             user.paystack_identified = False
-            user.paystack_identification_status = "pending"
+            user.paystack_identification_status = "failed"
             user.paystack_identification_reason = "BVN not yet provided"
             user.save(
                 update_fields=[
