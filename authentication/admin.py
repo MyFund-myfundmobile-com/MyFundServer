@@ -52,6 +52,7 @@ from .utils import (
     deactivate_user_dva,
     recreate_user_dva,
     requery_dedicated_account,
+    approve_quicksave_credit,
 )
 from decimal import Decimal
 
@@ -648,10 +649,21 @@ class CustomUserAdmin(UserAdmin):
             )
 
             # Get profile picture URL
-            profile_pic_url = user.profile_picture.url if user.profile_picture else ""
+            # Get profile picture URL safely
+            profile_pic_url = ""
+            if user.profile_picture:
+                if hasattr(user.profile_picture, "url"):
+                    profile_pic_url = user.profile_picture.url
+                else:
+                    profile_pic_url = str(user.profile_picture)
 
-            # Get ID upload URL
-            id_upload_url = user.id_upload.url if user.id_upload else ""
+            # Get ID upload URL safely
+            id_upload_url = ""
+            if user.id_upload:
+                if hasattr(user.id_upload, "url"):
+                    id_upload_url = user.id_upload.url
+                else:
+                    id_upload_url = str(user.id_upload)
 
             # Format "How Did You Hear" for better readability
             how_did_you_hear_display = dict(
@@ -1366,52 +1378,24 @@ class BankTransferRequestAdmin(admin.ModelAdmin):
             user = transfer_request.user
             transaction_id = transfer_request.transaction_id
 
-            transaction = Transaction.objects.filter(
-                user=user, transaction_id=transaction_id, status="pending"
-            ).first()
+            ok, msg = approve_quicksave_credit(
+                user=user,
+                amount=transfer_request.amount,
+                transaction_id=transaction_id,
+                description="QuickSave (Transfer)",
+                source="BANK_TRANSFER",
+            )
 
-            if not transaction:
+            if not ok:
                 self.message_user(
                     request,
-                    f"Pending transaction {transaction_id} not found for {user.email}!",
+                    f"{msg} for {user.email}",
                     level="error",
                 )
                 continue
 
-            transaction.status = "confirmed"
-            transaction.date = timezone.now()
-            transaction.description = "QuickSave (Transfer)"
-            transaction.save()
-
             transfer_request.is_approved = True
-            transfer_request.save()
-
-            user.savings += transfer_request.amount
-            user.save()
-
-            if user.referral:
-                user.confirm_referral_rewards(is_referrer=False)
-
-            user.update_total_savings_and_investment_this_month()
-
-            send_mail(
-                "QuickSave Updated! ✅",
-                f"Hi {user.first_name},\n\nYour bank transfer of ₦{transfer_request.amount} has been proccessed successfully and added to your Savings account.",
-                "MyFund <info@myfundmobile.com>",
-                [user.email],
-            )
-
-            send_push_notification(
-                user=user,
-                title="QuickSave Approved ✅",
-                message=f"Hi {user.first_name}, your transfer of ₦{int(transfer_request.amount):,} has been added to your Savings account.",
-                data={
-                    "amount": str(transfer_request.amount),
-                    "transaction_id": transaction_id,
-                    "type": "QuickSave",
-                },
-                notif_type="CREDIT",
-            )
+            transfer_request.save(update_fields=["is_approved"])
 
         self.message_user(
             request,

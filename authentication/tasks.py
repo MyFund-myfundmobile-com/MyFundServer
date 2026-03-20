@@ -45,7 +45,7 @@ def refund_contributions_if_goal_not_reached():
 
             # Collect user update
             user = target.user
-            user.wallet = models.F('wallet') + Decimal(target.current_amount)
+            user.wallet = models.F("wallet") + Decimal(target.current_amount)
             users_to_update.append(user)
 
             # Collect target update
@@ -64,12 +64,14 @@ def refund_contributions_if_goal_not_reached():
             )
 
             # Collect notification data
-            notifications_to_send.append({
-                'user': user,
-                'title': "Refund Processed 💸",
-                'message': f"₦{target.current_amount:,.2f} refunded for incomplete target '{target.name}'.",
-                'data': {"target_id": target.id, "type": "TARGET_REFUND"},
-            })
+            notifications_to_send.append(
+                {
+                    "user": user,
+                    "title": "Refund Processed 💸",
+                    "message": f"₦{target.current_amount:,.2f} refunded for incomplete target '{target.name}'.",
+                    "data": {"target_id": target.id, "type": "TARGET_REFUND"},
+                }
+            )
 
             refunded_count += 1
 
@@ -78,11 +80,13 @@ def refund_contributions_if_goal_not_reached():
 
     # Bulk operations
     if users_to_update:
-        CustomUser.objects.bulk_update(users_to_update, ['wallet'], batch_size=500)
+        CustomUser.objects.bulk_update(users_to_update, ["wallet"], batch_size=500)
         logger.info(f"✅ Updated wallets for {len(users_to_update)} users")
 
     if targets_to_update:
-        TargetSavings.objects.bulk_update(targets_to_update, ['is_cancelled'], batch_size=500)
+        TargetSavings.objects.bulk_update(
+            targets_to_update, ["is_cancelled"], batch_size=500
+        )
         logger.info(f"✅ Marked {len(targets_to_update)} targets as cancelled")
 
     if transactions_to_create:
@@ -93,13 +97,15 @@ def refund_contributions_if_goal_not_reached():
     for notification in notifications_to_send:
         try:
             send_push_notification(
-                notification['user'],
-                title=notification['title'],
-                message=notification['message'],
-                data=notification['data'],
+                notification["user"],
+                title=notification["title"],
+                message=notification["message"],
+                data=notification["data"],
             )
         except Exception as e:
-            logger.error(f"Error sending notification for user {notification['user'].id}: {e}")
+            logger.error(
+                f"Error sending notification for user {notification['user'].id}: {e}"
+            )
 
     logger.info(f"✅ Processed refunds for {refunded_count} targets (OPTIMIZED)")
     return f"{refunded_count} refunds processed."
@@ -258,10 +264,9 @@ def calculate_daily_roi_task():
         return "✅ ROI already calculated for today."
 
     # Use values_list to avoid loading entire user objects
-    users_data = CustomUser.objects.filter(
-        is_active=True,
-        is_banned=False
-    ).values_list('id', 'first_name', 'savings', 'investment', 'expo_push_tokens')
+    users_data = CustomUser.objects.filter(is_active=True, is_banned=False).values_list(
+        "id", "first_name", "savings", "investment", "expo_push_tokens"
+    )
 
     processed_count = 0
     batch_size = 100
@@ -272,29 +277,31 @@ def calculate_daily_roi_task():
             # Get user object only when needed for calculation
             user = CustomUser.objects.get(id=user_id)
             total_roi, savings_roi, investment_roi = calculate_daily_roi(user, today)
-            
+
             if total_roi > 0:
                 next_payout = get_next_payout_date(today)
 
                 # Collect notification for batch send
-                notifications_batch.append({
-                    'user_id': user_id,
-                    'first_name': first_name,
-                    'expo_tokens': expo_tokens,
-                    'title': "💹 Your Funds Have Grown!",
-                    'message': (
-                        f"Hi {first_name}, your funds have earned returns. "
-                        f"Savings: ₦{savings_roi:,.2f}, Investment: ₦{investment_roi:,.2f}. "
-                        f"Next payout: {next_payout.day}{'st' if next_payout.day == 1 else 'th'} "
-                        f"{next_payout.strftime('%B %Y')} 🎉"
-                    ),
-                    'data': {
-                        "type": "DAILY_ROI",
-                        "total_roi": float(total_roi),
-                        "date": today.isoformat(),
-                        "next_payout": next_payout.isoformat(),
-                    },
-                })
+                notifications_batch.append(
+                    {
+                        "user_id": user_id,
+                        "first_name": first_name,
+                        "expo_tokens": expo_tokens,
+                        "title": "💹 Your Funds Have Grown!",
+                        "message": (
+                            f"Hi {first_name}, your funds have earned returns. "
+                            f"Savings: ₦{savings_roi:,.2f}, Investment: ₦{investment_roi:,.2f}. "
+                            f"Next payout: {next_payout.day}{'st' if next_payout.day == 1 else 'th'} "
+                            f"{next_payout.strftime('%B %Y')} 🎉"
+                        ),
+                        "data": {
+                            "type": "DAILY_ROI",
+                            "total_roi": float(total_roi),
+                            "date": today.isoformat(),
+                            "next_payout": next_payout.isoformat(),
+                        },
+                    }
+                )
 
                 processed_count += 1
 
@@ -319,13 +326,15 @@ def send_batch_roi_notifications(notifications):
     for notification in notifications:
         try:
             send_push_notification(
-                user_id=notification['user_id'],
-                title=notification['title'],
-                message=notification['message'],
-                data=notification['data'],
+                user_id=notification["user_id"],
+                title=notification["title"],
+                message=notification["message"],
+                data=notification["data"],
             )
         except Exception as e:
-            logger.error(f"Error sending ROI notification to user {notification['user_id']}: {e}")
+            logger.error(
+                f"Error sending ROI notification to user {notification['user_id']}: {e}"
+            )
 
 
 @shared_task
@@ -365,12 +374,15 @@ def process_quarterly_payouts_task_fixed():
         quarter_label = f"Q3 {current_year}"
 
     # 🎯 OPTIMIZED: Use database aggregation to get all payouts at once
-    user_payouts = ROITransaction.objects.filter(
-        accrued_date__range=[quarter_start, quarter_end],
-        is_paid_out=False,
-    ).values('user_id').annotate(
-        total_payout=Sum('amount')
-    ).filter(total_payout__gt=0)
+    user_payouts = (
+        ROITransaction.objects.filter(
+            accrued_date__range=[quarter_start, quarter_end],
+            is_paid_out=False,
+        )
+        .values("user_id")
+        .annotate(total_payout=Sum("amount"))
+        .filter(total_payout__gt=0)
+    )
 
     total_paid_users = 0
     total_amount = Decimal("0.00")
@@ -380,13 +392,13 @@ def process_quarterly_payouts_task_fixed():
     transactions_to_create = []
     emails_to_send = []
     roi_to_mark_paid = []
-    
+
     logger.info(f"📊 Processing quarterly payouts for {len(user_payouts)} users")
 
     for payout_data in user_payouts:
         try:
-            user_id = payout_data['user_id']
-            total_payout = Decimal(str(payout_data['total_payout']))
+            user_id = payout_data["user_id"]
+            total_payout = Decimal(str(payout_data["total_payout"]))
 
             if total_payout <= 0:
                 continue
@@ -395,7 +407,7 @@ def process_quarterly_payouts_task_fixed():
             user = CustomUser.objects.get(id=user_id)
 
             # Collect user wallet update
-            user.wallet = models.F('wallet') + total_payout
+            user.wallet = models.F("wallet") + total_payout
             users_to_update.append(user)
 
             # Collect transaction record
@@ -413,25 +425,45 @@ def process_quarterly_payouts_task_fixed():
             )
 
             # Get ROI breakdown for email
-            roi_breakdown = ROITransaction.objects.filter(
-                user_id=user_id,
-                accrued_date__range=[quarter_start, quarter_end],
-                is_paid_out=False,
-            ).values('roi_type').annotate(total=Sum('amount'))
+            roi_breakdown = (
+                ROITransaction.objects.filter(
+                    user_id=user_id,
+                    accrued_date__range=[quarter_start, quarter_end],
+                    is_paid_out=False,
+                )
+                .values("roi_type")
+                .annotate(total=Sum("amount"))
+            )
 
-            savings_roi = next((Decimal(str(r['total'])) for r in roi_breakdown if r['roi_type'] == 'SAVINGS'), Decimal('0'))
-            investment_roi = next((Decimal(str(r['total'])) for r in roi_breakdown if r['roi_type'] == 'INVESTMENT'), Decimal('0'))
+            savings_roi = next(
+                (
+                    Decimal(str(r["total"]))
+                    for r in roi_breakdown
+                    if r["roi_type"] == "SAVINGS"
+                ),
+                Decimal("0"),
+            )
+            investment_roi = next(
+                (
+                    Decimal(str(r["total"]))
+                    for r in roi_breakdown
+                    if r["roi_type"] == "INVESTMENT"
+                ),
+                Decimal("0"),
+            )
 
             # Collect email data
-            emails_to_send.append({
-                'email': user.email,
-                'first_name': user.first_name,
-                'total_payout': total_payout,
-                'savings_roi': savings_roi,
-                'investment_roi': investment_roi,
-                'quarter_label': quarter_label,
-                'user': user,
-            })
+            emails_to_send.append(
+                {
+                    "email": user.email,
+                    "first_name": user.first_name,
+                    "total_payout": total_payout,
+                    "savings_roi": savings_roi,
+                    "investment_roi": investment_roi,
+                    "quarter_label": quarter_label,
+                    "user": user,
+                }
+            )
 
             # Mark ROI records for update
             roi_records = ROITransaction.objects.filter(
@@ -453,7 +485,7 @@ def process_quarterly_payouts_task_fixed():
 
     # 🚀 BULK OPERATIONS
     if users_to_update:
-        CustomUser.objects.bulk_update(users_to_update, ['wallet'], batch_size=500)
+        CustomUser.objects.bulk_update(users_to_update, ["wallet"], batch_size=500)
         logger.info(f"✅ Updated wallets for {len(users_to_update)} users")
 
     if transactions_to_create:
@@ -461,14 +493,16 @@ def process_quarterly_payouts_task_fixed():
         logger.info(f"✅ Created {len(transactions_to_create)} transaction records")
 
     if roi_to_mark_paid:
-        ROITransaction.objects.bulk_update(roi_to_mark_paid, ['is_paid_out', 'payout_date'], batch_size=500)
+        ROITransaction.objects.bulk_update(
+            roi_to_mark_paid, ["is_paid_out", "payout_date"], batch_size=500
+        )
         logger.info(f"✅ Marked {len(roi_to_mark_paid)} ROI records as paid")
 
     # 📧 Send emails and notifications
     for email_data in emails_to_send:
         try:
-            user = email_data['user']
-            
+            user = email_data["user"]
+
             # Push notification
             send_push_notification(
                 user,
@@ -479,8 +513,8 @@ def process_quarterly_payouts_task_fixed():
                 ),
                 data={
                     "type": "QUARTERLY_PAYOUT",
-                    "amount": float(email_data['total_payout']),
-                    "period": email_data['quarter_label'],
+                    "amount": float(email_data["total_payout"]),
+                    "period": email_data["quarter_label"],
                 },
             )
 
@@ -493,7 +527,7 @@ def process_quarterly_payouts_task_fixed():
                     f"(Savings: ₦{email_data['savings_roi']:,.2f}, Investment: ₦{email_data['investment_roi']:,.2f})<br><br>"
                     "Thank you for using MyFund. Keep growing your funds to earn more in the next quarter! 🚀"
                 ),
-                recipient_list=[email_data['email']],
+                recipient_list=[email_data["email"]],
                 from_email="MyFund <info@myfundmobile.com>",
             )
         except Exception as e:
@@ -1636,3 +1670,80 @@ def backfill_dvas_for_old_users(test_only=True):
         "failed": failed_users,
         "total_processed": users.count(),
     }
+
+
+from celery import shared_task
+from decimal import Decimal
+from django.utils import timezone
+from django.conf import settings
+from authentication.models import TargetSavings, TargetSavingsCompletion, Transaction
+from authentication.utils import send_generic_email, send_push_notification
+
+
+@shared_task
+def fix_stuck_target_completion(target_id):
+    t = TargetSavings.objects.select_related("user").get(id=target_id)
+    u = t.user
+
+    # Safety checks
+    if TargetSavingsCompletion.objects.filter(target_savings=t, user=u).exists():
+        return "Completion already exists. Skipped."
+
+    if Transaction.objects.filter(
+        user=u, target_savings=t, source="TARGET_COMPLETION"
+    ).exists():
+        return "Transaction already exists. Skipped."
+
+    amount = t.current_amount
+
+    # credit wallet
+    u.wallet += amount
+    u.save(update_fields=["wallet"])
+
+    # create completion record
+    TargetSavingsCompletion.objects.create(
+        user=u,
+        target_savings=t,
+        completed_amount=amount,
+        bonus_amount=Decimal("0.00"),
+        total_amount=amount,
+        completed_date=timezone.now().date(),
+        was_on_time=True,
+    )
+
+    # transaction
+    Transaction.objects.create(
+        user=u,
+        transaction_type="credit",
+        status="confirmed",
+        amount=amount,
+        description=f"{t.name} Completed! Manual Fix",
+        service_charge=0,
+        total_amount=amount,
+        target_savings=t,
+        source="TARGET_COMPLETION",
+        transaction_id=f"[{t.id}]-MANUAL-FIX",
+    )
+
+    # clear target
+    t.current_amount = Decimal("0.00")
+    t.is_active = False
+    t.save(update_fields=["current_amount", "is_active"])
+
+    # email
+    send_generic_email(
+        f"🎉 {t.name} Target Completed!",
+        f"Hi {u.first_name}, ₦{amount:,.2f} has been credited to your wallet.",
+        settings.DEFAULT_FROM_EMAIL,
+        [u.email],
+    )
+
+    # push
+    send_push_notification(
+        u,
+        title=f"🎉 {t.name} Completed!",
+        message=f"{u.first_name}, ₦{amount:,.2f} has been credited to your wallet.",
+        data={"target_id": t.id, "type": "TARGET_COMPLETED_MANUAL_FIX"},
+    )
+
+    return f"Fixed target {t.id} successfully"
