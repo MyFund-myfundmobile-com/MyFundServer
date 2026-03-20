@@ -37,9 +37,10 @@ from .views import (
     send_admin_push_notification,
     save_expo_push_token,
     earnings_summary,
-     get_or_create_dva_account,
+    get_or_create_dva_account,
     initiate_dva_quicksave,
     initiate_dva_quickinvest,
+    requery_my_dva_payments,
 )
 from django.views.decorators.csrf import csrf_exempt
 from authentication.views import CustomGraphQLView
@@ -209,7 +210,6 @@ urlpatterns = [
         "create-alert-message/", views.create_alert_message, name="create_alert_message"
     ),
     path("get-alert-messages/", views.get_alert_messages, name="get_alert_messages"),
-    
     # Bank Transfer API
     path(
         "initiate-save-transfer/",
@@ -222,12 +222,18 @@ urlpatterns = [
         name="initiate_invest_transfer",
     ),
     path("message-admin/", views.message_admin, name="message-admin"),
-
-    #DVAs
+    # DVAs
     path("dva/account/", get_or_create_dva_account, name="get_or_create_dva_account"),
     path("dva/quicksave/", initiate_dva_quicksave, name="initiate_dva_quicksave"),
     path("dva/quickinvest/", initiate_dva_quickinvest, name="initiate_dva_quickinvest"),
-
+    path(
+        "initiate-dva-quicksave/", initiate_dva_quicksave, name="initiate_dva_quicksave"
+    ),
+    path(
+        "requery-my-dva-payments/",
+        requery_my_dva_payments,
+        name="requery_my_dva_payments",
+    ),
     # PIN Management APIs
     path("update-myfundpin/", views.update_myfund_pin, name="update-myfundpin"),
     path("has-myfundpin/", views.has_myfund_pin, name="has-myfundpin"),

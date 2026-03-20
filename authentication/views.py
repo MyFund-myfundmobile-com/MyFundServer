@@ -67,6 +67,7 @@ from .utils import (
     validate_phone_number,
     send_bulk_sms,
     send_admin_push_notification,
+    approve_quicksave_credit,
 )
 from rest_framework.exceptions import AuthenticationFailed
 import threading
@@ -5978,9 +5979,9 @@ def _create_dva_intent(user, amount, purpose):
     )
 
     description = (
-        "QuickSave (DVA Pending)"
+        "QuickSave (Pending)"
         if purpose == "SAVINGS"
-        else "QuickInvest (DVA Pending)"
+        else "QuickInvest (Pending)"
     )
 
     transaction = Transaction.objects.create(
@@ -6076,17 +6077,21 @@ def get_or_create_dva_account(request):
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def initiate_dva_quicksave(request):
     try:
         user = request.user
+        print("INITIATING DVA QUICKSAVE")
+        print("PAYSTACK SECRET PREFIX:", settings.PAYSTACK_SECRET_KEY[:10])
+        print("USER DVA:", user.dva_account_number, user.dva_bank_name)
+
         amount_raw = request.data.get("amount")
 
         if not amount_raw:
             return Response(
-                {"error": "Amount is required"}, status=status.HTTP_400_BAD_REQUEST
+                {"error": "Amount is required"},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         try:
@@ -6110,57 +6115,63 @@ def initiate_dva_quicksave(request):
 
         intent, transaction = _create_dva_intent(user, amount, "SAVINGS")
 
-        def background_tasks():
-            try:
-                send_push_notification(
-                    user=user,
-                    title="QuickSave Transfer Pending ⏳",
-                    message=(
-                        f"Transfer exactly ₦{amount:,.2f} to your MyFund DVA. "
-                        f"We'll credit your savings automatically once Paystack confirms it."
-                    ),
-                    data={
-                        "amount": str(amount),
-                        "transaction_id": intent.transaction_id,
-                        "type": "QuickSave",
-                        "status": "pending",
-                    },
-                    notif_type="PENDING",
-                )
-
-                send_generic_email(
-                    "QuickSave Transfer Created",
-                    (
-                        f"Hi {user.first_name},<br><br>"
-                        f"Your QuickSave transfer request for ₦{amount:,.2f} has been created."
-                        f"<br><br>Transfer exactly this amount to:"
-                        f"<br><b>{user.dva_account_number}</b> ({user.dva_bank_name})"
-                        f"<br><b>{user.dva_account_name}</b>"
-                        f"<br><br>We will credit your savings automatically once confirmed."
-                    ),
-                    [user.email],
-                    "MyFund <info@myfundmobile.com>",
-                )
-            except Exception as e:
-                print(f"DVA QuickSave background task error: {e}")
-
-        threading.Thread(target=background_tasks, daemon=True).start()
-
         return Response(
             {
                 "message": "DVA QuickSave initiated successfully",
                 "transaction_id": intent.transaction_id,
+                "intent_id": intent.id,
                 "amount": str(amount),
                 "account_number": user.dva_account_number,
                 "bank_name": user.dva_bank_name,
                 "account_name": user.dva_account_name,
                 "purpose": "SAVINGS",
+                "status": "pending_confirmation",
             },
             status=status.HTTP_201_CREATED,
         )
 
     except Exception as e:
-        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            {"error": str(e)},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework import status
+
+from .utils import requery_paystack_dva
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def requery_my_dva_payments(request):
+    try:
+        user = request.user
+
+        if not user.dva_account_number:
+            return Response(
+                {"error": "No DVA found for this user."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        status_code, result = requery_paystack_dva(user.dva_account_number)
+
+        return Response(
+            {
+                "message": "DVA requery triggered.",
+                "paystack_status_code": status_code,
+                "details": result,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    except Exception as e:
+        return Response(
+            {"error": str(e)},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
 
 @api_view(["POST"])
@@ -6203,7 +6214,7 @@ def initiate_dva_quickinvest(request):
                     title="QuickInvest Transfer Pending ⏳",
                     message=(
                         f"Transfer exactly ₦{amount:,.2f} to your MyFund DVA. "
-                        f"We'll credit your investment automatically once Paystack confirms it."
+                        f"Your Investment account will be credited automatically once confirmed."
                     ),
                     data={
                         "amount": str(amount),
@@ -6560,7 +6571,13 @@ from .models import (
     WithdrawalsRequestToAdmin,
     DvaDepositIntent,
 )
-from .utils import send_generic_email, send_push_notification, create_dedicated_account
+from .utils import (
+    send_generic_email,
+    send_push_notification,
+    approve_quicksave_credit,
+    create_dedicated_account,
+)
+
 
 paystack_ips = ["52.31.139.75", "52.49.173.169", "52.214.14.220"]
 
@@ -6582,11 +6599,64 @@ def is_paystack_name_mismatch_reason(reason_text):
     return any(phrase in text for phrase in mismatch_phrases)
 
 
+import json
+import hmac
+import hashlib
+
+from django.conf import settings
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from rest_framework import status
+from rest_framework.decorators import (
+    api_view,
+    permission_classes,
+    authentication_classes,
+)
+from rest_framework.permissions import AllowAny
+
+
+@csrf_exempt
 @api_view(["POST"])
+@authentication_classes([])
+@permission_classes([AllowAny])
 def paystack_webhook(request):
     try:
-        event = request.data
-        header_data = request.headers
+        raw_body = request.body or b""
+        signature = request.headers.get("x-paystack-signature", "")
+
+        if not raw_body:
+            return JsonResponse(
+                {"status": False, "message": "Empty webhook body"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not signature:
+            return JsonResponse(
+                {"status": False, "message": "Missing Paystack signature"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        computed_signature = hmac.new(
+            settings.PAYSTACK_SECRET_KEY.encode("utf-8"),
+            msg=raw_body,
+            digestmod=hashlib.sha512,
+        ).hexdigest()
+
+        if not hmac.compare_digest(signature, computed_signature):
+            return JsonResponse(
+                {"status": False, "message": "Invalid Paystack signature"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        try:
+            event = json.loads(raw_body.decode("utf-8"))
+        except json.JSONDecodeError:
+            return JsonResponse(
+                {"status": False, "message": "Invalid JSON payload"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        header_data = dict(request.headers)
 
         ip_address = (
             request.headers.get("Cf-Connecting-Ip")
@@ -6594,46 +6664,37 @@ def paystack_webhook(request):
             or request.META.get("REMOTE_ADDR")
         )
 
-        ip_is_paystack = ip_address in paystack_ips
         event_status = event.get("event")
+        print("========== PAYSTACK WEBHOOK HIT ==========")
+        print("paystack event status:", event_status)
+        print("ip_address:", ip_address)
+        print("signature verified: True")
 
-        print(f"paystack event status: {event_status}")
-
-        if not ip_is_paystack:
-            return JsonResponse(
-                {
-                    "status": False,
-                    "message": "Request not from paystack",
-                    "ip": ip_address,
-                },
-                status=status.HTTP_403_FORBIDDEN,
-            )
-
-        paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data)
+        paystack_webhook_processing(event, ip_address, True, header_data)
 
         return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
     except Exception as e:
         print(f"\nPaystack Webhook(Internal Server Error): {e}\n")
 
-        subject = "Paystack Webhook Error!"
-        message = f"Paystack Webhook Internal Server Error: {e}"
-        from_email = "MyFund <info@myfundmobile.com>"
-        recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
-
         send_generic_email(
-            subject=subject,
-            message=message,
-            from_email=from_email,
-            recipient_list=recipient_list,
+            subject="Paystack Webhook Error!",
+            message=f"Paystack Webhook Internal Server Error: {e}",
+            from_email="MyFund <info@myfundmobile.com>",
+            recipient_list=["info@myfundmobile.com", "sammy@myfundmobile.com"],
         )
 
-        return JsonResponse({"error": str(e)}, status=status.HTTP_200_OK)
-
+        return JsonResponse(
+            {"status": False, "error": str(e)},
+            status=status.HTTP_200_OK,
+        )
 
 def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
+    print("========== PAYSTACK WEBHOOK HIT ==========")
     print("WEBHOOK EVENT RECEIVED:", event.get("event"))
     print("WEBHOOK FULL DATA:", event)
+    print("PAYSTACK SECRET PREFIX:", settings.PAYSTACK_SECRET_KEY[:10])
+    print("WEBHOOK URL HIT LOCALLY")
 
     try:
         subject = "Paystack Webhook Received!"
@@ -6731,24 +6792,21 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         )
                         return
 
-                    transaction.status = "confirmed"
-                    transaction.paystack_reference = reference
-                    transaction.paystack_auth_code = authorization.get(
-                        "authorization_code"
-                    )
-                    transaction.description = (
-                        "QuickSave (Transfer)"
-                        if intent.purpose == "SAVINGS"
-                        else "QuickInvest (Transfer)"
-                    )
-                    transaction.save(
-                        update_fields=[
-                            "status",
-                            "paystack_reference",
-                            "paystack_auth_code",
-                            "description",
-                        ]
-                    )
+                    if intent.purpose != "SAVINGS":
+                        transaction.status = "confirmed"
+                        transaction.paystack_reference = reference
+                        transaction.paystack_auth_code = authorization.get(
+                            "authorization_code"
+                        )
+                        transaction.description = "QuickInvest (Transfer)"
+                        transaction.save(
+                            update_fields=[
+                                "status",
+                                "paystack_reference",
+                                "paystack_auth_code",
+                                "description",
+                            ]
+                        )
 
                     intent.status = "confirmed"
                     intent.paystack_reference = reference
@@ -6764,33 +6822,19 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     )
 
                     if intent.purpose == "SAVINGS":
-                        user.savings += amount
-
-                        send_push_notification(
+                        ok, msg = approve_quicksave_credit(
                             user=user,
-                            title="QuickSave Approved ✅",
-                            message=(
-                                f"Hi {user.first_name}, your transfer of ₦{amount:,.2f} "
-                                f"has been added to your Savings account."
-                            ),
-                            data={
-                                "amount": str(amount),
-                                "transaction_id": transaction.transaction_id,
-                                "type": "QuickSave",
-                            },
-                            notif_type="CREDIT",
+                            amount=amount,
+                            transaction_id=transaction.transaction_id,
+                            description="QuickSave (Transfer)",
+                            source="DVA",
+                            paystack_reference=reference,
+                            paystack_auth_code=authorization.get("authorization_code"),
                         )
 
-                        send_generic_email(
-                            subject="QuickSave Updated! ✅",
-                            message=(
-                                f"Hi {user.first_name},<br><br>"
-                                f"Your bank transfer of ₦{amount:,.2f} has been processed "
-                                f"successfully and added to your Savings account."
-                            ),
-                            from_email="MyFund <info@myfundmobile.com>",
-                            recipient_list=[user.email],
-                        )
+                        if not ok:
+                            print(f"QuickSave DVA approval failed: {msg}")
+                            return
 
                     else:
                         user.investment += amount
@@ -6821,11 +6865,12 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             recipient_list=[user.email],
                         )
 
-                    if user.referral:
-                        user.confirm_referral_rewards(is_referrer=False)
+                    if intent.purpose != "SAVINGS":
+                        if user.referral:
+                            user.confirm_referral_rewards(is_referrer=False)
 
-                    user.update_total_savings_and_investment_this_month()
-                    user.save()
+                        user.update_total_savings_and_investment_this_month()
+                        user.save()
 
                     print(
                         f"✅ DVA {intent.purpose} credited successfully for {user.email}"

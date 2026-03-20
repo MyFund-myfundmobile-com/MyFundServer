@@ -1359,3 +1359,113 @@ def recreate_user_dva(user, preferred_bank="wema-bank"):
         preferred_bank=preferred_bank,
         force_create=True,
     )
+
+
+from decimal import Decimal
+from django.utils import timezone
+
+from .models import Transaction
+from .utils import send_generic_email, send_push_notification
+
+
+def approve_quicksave_credit(
+    *,
+    user,
+    amount,
+    transaction_id,
+    description="QuickSave (Transfer)",
+    source="BANK_TRANSFER",
+    paystack_reference=None,
+    paystack_auth_code=None,
+):
+    transaction = Transaction.objects.filter(
+        user=user,
+        transaction_id=transaction_id,
+        status="pending",
+    ).first()
+
+    if not transaction:
+        return False, f"Pending transaction {transaction_id} not found."
+
+    transaction.status = "confirmed"
+    transaction.transaction_type = "credit"
+    transaction.date = timezone.now().date()
+    transaction.time = timezone.now().time()
+    transaction.description = description
+
+    if paystack_reference:
+        transaction.paystack_reference = paystack_reference
+
+    if paystack_auth_code:
+        transaction.paystack_auth_code = paystack_auth_code
+
+    transaction.save(
+        update_fields=[
+            "status",
+            "transaction_type",
+            "date",
+            "time",
+            "description",
+            "paystack_reference",
+            "paystack_auth_code",
+        ]
+    )
+
+    user.savings = (user.savings or Decimal("0")) + Decimal(str(amount))
+
+    if user.referral:
+        user.confirm_referral_rewards(is_referrer=False)
+
+    user.update_total_savings_and_investment_this_month()
+    user.save()
+
+    send_generic_email(
+        subject="QuickSave Updated! ✅",
+        message=(
+            f"Hi {user.first_name},<br><br>"
+            f"Your QuickSave deposit of ₦{Decimal(str(amount)):,.2f} "
+            f"has been confirmed and added to your Savings account."
+        ),
+        from_email="MyFund <info@myfundmobile.com>",
+        recipient_list=[user.email],
+    )
+
+    send_push_notification(
+        user=user,
+        title="QuickSave Approved ✅",
+        message=(
+            f"Hi {user.first_name}, your transfer of "
+            f"₦{Decimal(str(amount)):,.2f} has been added to your Savings account."
+        ),
+        data={
+            "amount": str(amount),
+            "transaction_id": transaction_id,
+            "type": "QuickSave",
+            "source": source,
+        },
+        notif_type="CREDIT",
+    )
+
+    return True, "QuickSave approved successfully."
+
+
+import requests
+from django.conf import settings
+
+
+def requery_paystack_dva(account_number):
+    url = f"https://api.paystack.co/dedicated_account/requery?account_number={account_number}"
+
+    headers = {
+        "Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    response = requests.get(url, headers=headers, timeout=60)
+
+    try:
+        data = response.json()
+    except Exception:
+        data = {"status": False, "message": response.text}
+
+    return response.status_code, data
