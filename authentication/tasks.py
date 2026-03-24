@@ -245,96 +245,153 @@ def retry_failed_deductions():
     return {"retry_count": retry_targets.count()}
 
 
-from .models import CustomUser, Transaction
-from .utils import get_next_payout_date, calculate_daily_roi, send_push_notification
+from celery import shared_task
+from django.utils import timezone
 from django.db import transaction as db_transaction
+from django.db import IntegrityError
+import logging
+from django.db.models import Sum
+
+logger = logging.getLogger(__name__)
+
+from .models import CustomUser, ROITransaction, Transaction, DailyROIAccrual
+from .utils import get_next_payout_date, calculate_daily_roi, send_push_notification
 
 
 @shared_task
 def calculate_daily_roi_task():
     """
     Calculate and accrue daily ROI for all active users.
-    Optimized: Uses values_list to avoid loading full objects and batches notifications.
+    Skips only users already accrued for today instead of stopping the whole task.
     """
     today = timezone.now().date()
 
-    from .models import ROITransaction
-
-    if ROITransaction.objects.filter(accrued_date=today).exists():
-        return "✅ ROI already calculated for today."
-
-    # Use values_list to avoid loading entire user objects
     users_data = CustomUser.objects.filter(is_active=True, is_banned=False).values_list(
-        "id", "first_name", "savings", "investment", "expo_push_tokens"
+        "id", "first_name", "expo_push_tokens"
     )
 
     processed_count = 0
+    skipped_count = 0
+    error_count = 0
     batch_size = 100
     notifications_batch = []
 
-    for user_id, first_name, savings, investment, expo_tokens in users_data:
+    logger.info(f"Starting calculate_daily_roi_task for {today}")
+
+    for user_id, first_name, expo_tokens in users_data:
         try:
-            # Get user object only when needed for calculation
+            # Skip only this user if ROI already exists for today
+            if DailyROIAccrual.objects.filter(user_id=user_id, date=today).exists():
+                skipped_count += 1
+                logger.info(f"Skipping user {user_id}: ROI already exists for {today}")
+                continue
+
             user = CustomUser.objects.get(id=user_id)
+
             total_roi, savings_roi, investment_roi = calculate_daily_roi(user, today)
 
             if total_roi > 0:
                 next_payout = get_next_payout_date(today)
 
-                # Collect notification for batch send
+                # ✅ Calculate month-to-date earnings BEFORE dict
+                start_of_month = today.replace(day=1)
+                month_name = today.strftime("%B")
+
+                month_earnings = (
+                    DailyROIAccrual.objects.filter(
+                        user_id=user_id, date__range=[start_of_month, today]
+                    ).aggregate(total=Sum("total_roi"))["total"]
+                    or 0
+                )
+
                 notifications_batch.append(
                     {
                         "user_id": user_id,
-                        "first_name": first_name,
-                        "expo_tokens": expo_tokens,
                         "title": "💹 Your Funds Have Grown!",
                         "message": (
-                            f"Hi {first_name}, your funds have earned returns. "
-                            f"Savings: ₦{savings_roi:,.2f}, Investment: ₦{investment_roi:,.2f}. "
-                            f"Next payout: {next_payout.day}{'st' if next_payout.day == 1 else 'th'} "
-                            f"{next_payout.strftime('%B %Y')} 🎉"
+                            f"Hi {first_name or 'there'}, your funds have earned returns. "
+                            f"Savings: ₦{savings_roi:,.2f}, "
+                            f"Investment: ₦{investment_roi:,.2f}. "
+                            f"{month_name} earnings: ₦{month_earnings:,.2f}. "
+                            f"Next payout: {next_payout.strftime('%d %B %Y')} 🎉"
                         ),
                         "data": {
                             "type": "DAILY_ROI",
                             "total_roi": float(total_roi),
+                            "savings_roi": float(savings_roi),
+                            "investment_roi": float(investment_roi),
+                            "month_earnings": float(month_earnings),
                             "date": today.isoformat(),
                             "next_payout": next_payout.isoformat(),
                         },
                     }
                 )
 
-                processed_count += 1
+            else:
+                logger.info(f"No ROI accrued for user {user_id}")
 
-                # Send batch when it reaches batch_size
-                if len(notifications_batch) >= batch_size:
-                    send_batch_roi_notifications(notifications_batch)
-                    notifications_batch = []
+        except IntegrityError as e:
+            skipped_count += 1
+            logger.warning(f"Duplicate ROI prevented for user {user_id}: {e}")
 
         except Exception as e:
+            error_count += 1
             logger.error(f"ROI error for user {user_id}: {e}")
 
-    # Send remaining notifications
     if notifications_batch:
-        send_batch_roi_notifications(notifications_batch)
+        batch_result = send_batch_roi_notifications(notifications_batch)
+        logger.info(
+            f"Final ROI notification batch sent. "
+            f"Sent: {batch_result['sent']}, Failed: {batch_result['failed']}"
+        )
 
-    logger.info(f"✅ Daily ROI accrued for {processed_count} users (OPTIMIZED)")
-    return f"✅ Daily ROI accrued for {processed_count} users."
+    logger.info(
+        f"✅ Daily ROI task complete. Processed: {processed_count}, "
+        f"Skipped: {skipped_count}, Errors: {error_count}"
+    )
+
+    return (
+        f"✅ Daily ROI task complete. Processed: {processed_count}, "
+        f"Skipped: {skipped_count}, Errors: {error_count}"
+    )
 
 
 def send_batch_roi_notifications(notifications):
-    """Send batched ROI notifications efficiently"""
+    """Send ROI notifications one by one with safe logging."""
+    sent_count = 0
+    failed_count = 0
+
     for notification in notifications:
         try:
-            send_push_notification(
+            result = send_push_notification(
                 user_id=notification["user_id"],
                 title=notification["title"],
                 message=notification["message"],
                 data=notification["data"],
+                notif_type="DAILY_ROI",
             )
+
+            if result.get("success"):
+                sent_count += 1
+                logger.info(f"ROI push sent to user {notification['user_id']}")
+            else:
+                failed_count += 1
+                logger.warning(
+                    f"ROI push not sent to user {notification['user_id']} "
+                    f"(no tokens or Expo rejected it)"
+                )
+
         except Exception as e:
+            failed_count += 1
             logger.error(
                 f"Error sending ROI notification to user {notification['user_id']}: {e}"
             )
+
+    logger.info(
+        f"ROI notification batch complete. Sent: {sent_count}, Failed: {failed_count}"
+    )
+
+    return {"sent": sent_count, "failed": failed_count}
 
 
 @shared_task

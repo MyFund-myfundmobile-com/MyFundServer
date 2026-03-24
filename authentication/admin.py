@@ -53,6 +53,7 @@ from .utils import (
     recreate_user_dva,
     requery_dedicated_account,
     approve_quicksave_credit,
+    send_ambassador_status_notification,
 )
 from decimal import Decimal
 
@@ -203,7 +204,8 @@ class CustomUserAdmin(UserAdmin):
         "make_ambassador",
         "revoke_ambassador",
         "delete_selected",
-        "deactivate_user" "notify_outdated_users",
+        "deactivate_user", 
+        "notify_outdated_users",
         "say_hello",
         "simulate_quarterly_payout",
         "test_daily_roi_calculation",  # ← Add this
@@ -556,6 +558,66 @@ class CustomUserAdmin(UserAdmin):
                 level=messages.WARNING,
             )
 
+    def save_model(self, request, obj, form, change):
+        previous_is_ambassador = None
+
+        if change and obj.pk:
+            previous_is_ambassador = (
+                CustomUser.objects.filter(pk=obj.pk)
+                .values_list("is_ambassador", flat=True)
+                .first()
+            )
+
+        super().save_model(request, obj, form, change)
+
+        if change and previous_is_ambassador is not None:
+            if previous_is_ambassador != obj.is_ambassador:
+                send_ambassador_status_notification(
+                    user=obj,
+                    became_ambassador=obj.is_ambassador,
+                )
+
+    @admin.action(description="🌟 Make selected users ambassadors")
+    def make_ambassador(self, request, queryset):
+        updated_count = 0
+
+        for user in queryset:
+            if not user.is_ambassador:
+                user.is_ambassador = True
+                user.save(update_fields=["is_ambassador"])
+                send_ambassador_status_notification(
+                    user=user,
+                    became_ambassador=True,
+                )
+                updated_count += 1
+
+        self.message_user(
+            request,
+            f"{updated_count} user(s) updated to ambassador and notified.",
+            level=messages.SUCCESS,
+        )
+        
+
+    @admin.action(description="❌ Revoke ambassador status")
+    def revoke_ambassador(self, request, queryset):
+        updated_count = 0
+
+        for user in queryset:
+            if user.is_ambassador:
+                user.is_ambassador = False
+                user.save(update_fields=["is_ambassador"])
+                send_ambassador_status_notification(
+                    user=user,
+                    became_ambassador=False,
+                )
+                updated_count += 1
+
+        self.message_user(
+            request,
+            f"{updated_count} user(s) ambassador status revoked and notified.",
+            level=messages.SUCCESS,
+        )
+        
     @admin.action(description="🚫 Ban selected users (cannot reactivate)")
     def ban_user(self, request, queryset):
         queryset.update(is_banned=True, is_active=False)
