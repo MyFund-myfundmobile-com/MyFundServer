@@ -1123,7 +1123,16 @@ def get_user_profile(request):
             "preferred_asset": user.preferred_asset,
             "savings_goal_amount": user.savings_goal_amount,
             "time_period": user.time_period,
-            "is_first_time_signup": False,
+            "is_first_time_signup": user.is_first_time_signup,
+            "is_confirmed": user.is_confirmed,
+            "is_subscribed": user.is_subscribed,
+            "is_ambassador": user.is_ambassador,
+            "savings": user.savings,
+            "investment": user.investment,
+            "properties": user.properties,
+            "wallet": user.wallet,
+            "how_did_you_hear": user.how_did_you_hear,
+
             # DVA / Paystack fields
             "dva_account_number": user.dva_account_number,
             "dva_account_name": user.dva_account_name,
@@ -1133,6 +1142,7 @@ def get_user_profile(request):
             "paystack_identified": user.paystack_identified,
             "paystack_identification_status": user.paystack_identification_status,
             "paystack_identification_reason": user.paystack_identification_reason,
+
             # Related data
             "bank_accounts": BankAccountSerializer(bank_accounts, many=True).data,
             "bankRecords": BankAccountSerializer(bank_accounts, many=True).data,

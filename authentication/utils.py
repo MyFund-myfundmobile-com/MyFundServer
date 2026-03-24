@@ -27,9 +27,32 @@ ADMIN_PUSH_EMAILS = [
 ]
 
 
-def send_push_notification(user, title, message, data=None, notif_type="SYSTEM"):
+def send_push_notification(
+    user=None,
+    title="",
+    message="",
+    data=None,
+    notif_type="SYSTEM",
+    user_id=None,
+):
     """Send a push notification to a user via Expo and store in DB."""
+
     data = data or {}
+
+    if user is None and user_id is not None:
+        User = get_user_model()
+        try:
+            user = User.objects.get(id=user_id)
+        except User.DoesNotExist:
+            logger.warning(
+                f"Push notification failed: user with id {user_id} does not exist"
+            )
+            return {"sent": 0, "total": 0, "success": False}
+
+    if user is None:
+        logger.warning("Push notification failed: no user or user_id provided")
+        return {"sent": 0, "total": 0, "success": False}
+
     tokens = getattr(user, "expo_push_tokens", []) or []
 
     notification = PushNotifications.objects.create(
@@ -43,13 +66,17 @@ def send_push_notification(user, title, message, data=None, notif_type="SYSTEM")
 
     if not tokens:
         logger.warning(f"No push tokens for {user.email}")
-        return {"sent": 0, "total": 0}
+        return {"sent": 0, "total": 0, "success": False}
 
     sent_count = 0
+    valid_tokens_count = 0
+
     for token_entry in tokens:
         token = token_entry.get("token")
         if not token:
             continue
+
+        valid_tokens_count += 1
 
         payload = {
             "to": token,
@@ -61,21 +88,43 @@ def send_push_notification(user, title, message, data=None, notif_type="SYSTEM")
             "priority": "high",
         }
 
-        headers = {"Accept": "application/json", "Content-Type": "application/json"}
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
 
         try:
             resp = requests.post(
-                EXPO_PUSH_URL, json=payload, headers=headers, timeout=10
+                EXPO_PUSH_URL,
+                json=payload,
+                headers=headers,
+                timeout=10,
             )
             res_data = resp.json()
-            if res_data.get("data", {}).get("status") == "ok":
-                sent_count += 1
+
+            expo_data = res_data.get("data")
+            if isinstance(expo_data, dict):
+                if expo_data.get("status") == "ok":
+                    sent_count += 1
+                else:
+                    logger.warning(f"Failed sending push to {token}: {res_data}")
+            elif isinstance(expo_data, list):
+                item = expo_data[0] if expo_data else {}
+                if item.get("status") == "ok":
+                    sent_count += 1
+                else:
+                    logger.warning(f"Failed sending push to {token}: {res_data}")
             else:
-                logger.warning(f"Failed sending push to {token}: {res_data}")
+                logger.warning(f"Unexpected Expo response for {token}: {res_data}")
+
         except Exception as e:
             logger.error(f"Error sending push to {token}: {e}")
 
-    return {"sent": sent_count, "total": len(tokens)}
+    return {
+        "sent": sent_count,
+        "total": valid_tokens_count,
+        "success": sent_count > 0,
+    }
 
 
 def send_admin_push_notification(title, message, data=None, notif_type="ADMIN_ALERT"):
@@ -1469,3 +1518,78 @@ def requery_paystack_dva(account_number):
         data = {"status": False, "message": response.text}
 
     return response.status_code, data
+
+
+def send_ambassador_status_notification(user, became_ambassador=True):
+    """
+    Send push notification + email when ambassador status changes.
+    """
+    try:
+        if became_ambassador:
+            push_title = "🎉 You are now a MyFund Ambassador!"
+            push_message = (
+                f"Hi {user.first_name}, congratulations! "
+                "Your account has been updated to Ambassador status. You now have access to the MyFund Ambassador portal and benefits. Enjoy!"
+            )
+
+            email_subject = "You are now a MyFund Ambassador 🎉"
+            email_message = (
+                f"Hi {user.first_name},<br><br>"
+                "Congratulations! Your MyFund account has been updated to "
+                "<b>Ambassador status</b>.<br><br>"
+                "You can now enjoy ambassador-related benefits and opportunities on MyFund.<br><br>"
+                "Keep winning with MyFund. 🚀"
+            )
+
+            data = {
+                "type": "AMBASSADOR_GRANTED",
+                "is_ambassador": True,
+            }
+        else:
+            push_title = "Ambassador Status Updated"
+            push_message = (
+                f"Hi {user.first_name}, your MyFund Ambassador status has been removed."
+            )
+
+            email_subject = "Your MyFund Ambassador Status Was Updated"
+            email_message = (
+                f"Hi {user.first_name},<br><br>"
+                "Your MyFund Ambassador status has been removed from your account.<br><br>"
+                "If you believe this was done in error, please contact support.<br><br>"
+                "MyFund Team"
+            )
+
+            data = {
+                "type": "AMBASSADOR_REVOKED",
+                "is_ambassador": False,
+            }
+
+        # Push
+        try:
+            send_push_notification(
+                user=user,
+                title=push_title,
+                message=push_message,
+                data=data,
+                notif_type="SYSTEM",
+            )
+        except Exception as push_error:
+            logger.error(
+                f"Failed to send ambassador push to {user.email}: {push_error}"
+            )
+
+        # Email
+        try:
+            send_generic_email(
+                subject=email_subject,
+                message=email_message,
+                from_email="MyFund <info@myfundmobile.com>",
+                recipient_list=[user.email],
+            )
+        except Exception as email_error:
+            logger.error(
+                f"Failed to send ambassador email to {user.email}: {email_error}"
+            )
+
+    except Exception as e:
+        logger.error(f"Ambassador notification error for {user.email}: {e}")
