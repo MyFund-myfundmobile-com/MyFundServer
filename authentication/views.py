@@ -1132,7 +1132,6 @@ def get_user_profile(request):
             "properties": user.properties,
             "wallet": user.wallet,
             "how_did_you_hear": user.how_did_you_hear,
-
             # DVA / Paystack fields
             "dva_account_number": user.dva_account_number,
             "dva_account_name": user.dva_account_name,
@@ -1142,7 +1141,6 @@ def get_user_profile(request):
             "paystack_identified": user.paystack_identified,
             "paystack_identification_status": user.paystack_identification_status,
             "paystack_identification_reason": user.paystack_identification_reason,
-
             # Related data
             "bank_accounts": BankAccountSerializer(bank_accounts, many=True).data,
             "bankRecords": BankAccountSerializer(bank_accounts, many=True).data,
@@ -5989,9 +5987,7 @@ def _create_dva_intent(user, amount, purpose):
     )
 
     description = (
-        "QuickSave (Pending)"
-        if purpose == "SAVINGS"
-        else "QuickInvest (Pending)"
+        "QuickSave (Pending)" if purpose == "SAVINGS" else "QuickInvest (Pending)"
     )
 
     transaction = Transaction.objects.create(
@@ -6087,6 +6083,7 @@ def get_or_create_dva_account(request):
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def initiate_dva_quicksave(request):
@@ -6145,7 +6142,8 @@ def initiate_dva_quicksave(request):
             {"error": str(e)},
             status=status.HTTP_400_BAD_REQUEST,
         )
-    
+
+
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -6698,6 +6696,7 @@ def paystack_webhook(request):
             {"status": False, "error": str(e)},
             status=status.HTTP_200_OK,
         )
+
 
 def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
     print("========== PAYSTACK WEBHOOK HIT ==========")
@@ -9928,7 +9927,6 @@ class TopReferralsAPIView(APIView):
                 "Refer more friends to climb higher and earn more referral bonus!"
             )
 
-        # Send email
         send_generic_email(
             subject=subject,
             message=message,
@@ -9936,7 +9934,6 @@ class TopReferralsAPIView(APIView):
             recipient_list=[user.email],
         )
 
-        # Send push notification
         send_push_notification(
             user=user,
             title=push_title,
@@ -9950,7 +9947,10 @@ class TopReferralsAPIView(APIView):
         now = timezone.now()
         start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
-        # Get referral performance
+        # If logged-in user is ambassador, show only ambassador rankings
+        ambassador_view = getattr(user, "is_ambassador", False)
+
+        # Get referral performance for the month
         ref_stats = (
             CustomUser.objects.filter(
                 referral__isnull=False,
@@ -9978,6 +9978,11 @@ class TopReferralsAPIView(APIView):
             ref_user = ref_users.get(stat["referral"])
             if not ref_user:
                 continue
+
+            # If ambassador is viewing, only include ambassadors
+            if ambassador_view and not getattr(ref_user, "is_ambassador", False):
+                continue
+
             top_users.append(
                 {
                     "id": ref_user.id,
@@ -9988,30 +9993,32 @@ class TopReferralsAPIView(APIView):
                     "monthly_signups": stat["monthly_signups"],
                     "monthly_confirmed": stat["monthly_confirmed"],
                     "is_hired_referrer": ref_user.is_hired_referrer,
+                    "is_ambassador": getattr(ref_user, "is_ambassador", False),
                 }
             )
 
-        # Sort and rank
+        # Sort final filtered list
         top_users.sort(key=lambda x: (-x["monthly_confirmed"], -x["monthly_signups"]))
 
+        # Update rank only based on the correct leaderboard being viewed
         rank_changes = {}
         for index, user_data in enumerate(top_users):
-            u = CustomUser.objects.get(id=user_data["id"])
+            ranked_user = CustomUser.objects.get(id=user_data["id"])
             new_rank = index + 1
-            old_rank = u.last_referral_rank or 0
+            old_rank = ranked_user.last_referral_rank or 0
 
             if old_rank != new_rank:
-                rank_changes[u] = (old_rank, new_rank)
-                u.last_referral_rank = new_rank
-                u.save(update_fields=["last_referral_rank"])
+                rank_changes[ranked_user] = (old_rank, new_rank)
+                ranked_user.last_referral_rank = new_rank
+                ranked_user.save(update_fields=["last_referral_rank"])
 
-        # Send notifications
         for user_obj, (old_rank, new_rank) in rank_changes.items():
             self.send_rank_notification(user_obj, old_rank, new_rank)
 
-        # Current user stats
+        # Current user monthly stats
         my_signups = CustomUser.objects.filter(
-            referral=user, date_joined__gte=start_of_month
+            referral=user,
+            date_joined__gte=start_of_month,
         )
         my_confirmed = my_signups.filter(
             referral_reward_confirmed_at__gte=start_of_month,
@@ -10026,8 +10033,13 @@ class TopReferralsAPIView(APIView):
             "profile_picture": self.get_profile_pic_url(user),
             "monthly_signups": my_signups.count(),
             "monthly_confirmed": my_confirmed.count(),
+            "is_ambassador": getattr(user, "is_ambassador", False),
             "rank": next(
-                (i + 1 for i, u in enumerate(top_users) if u["email"] == user.email),
+                (
+                    i + 1
+                    for i, ranked_user in enumerate(top_users)
+                    if ranked_user["email"] == user.email
+                ),
                 None,
             ),
         }
