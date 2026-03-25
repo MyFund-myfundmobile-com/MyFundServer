@@ -38,124 +38,117 @@ def get_monthly_advanced_metrics(months=12):
     # Determine start date for metrics
     cutoff_date = now - relativedelta(months=months)
 
-        # ================= USERS IN MONTH =================
-        users_qs = CustomUser.objects.filter(
-            is_deleted=False,
-            date_joined__lt=month_end,
-        )
+    # ------------------- USER METRICS -------------------
+    users_qs = CustomUser.objects.filter(is_deleted=False, date_joined__lt=now)
+    users_by_month = users_qs.annotate(
+        month=TruncMonth('date_joined')
+    ).values('month').annotate(
+        total_users=Count('id'),
+        new_users=Count('id', filter=Q(date_joined__gte=cutoff_date)),
+        investor_heavy=Count('id', filter=Q(savings__gt=0, investment__gt=F('savings'))),
+        savings_heavy=Count('id', filter=Q(savings__gt=0, investment__lte=F('savings'))),
+        referrals_count=Count('id', filter=Q(referral_id__isnull=False)),
+        influencers_count=Count('id', filter=Q(is_ambassador=True)),
+        fum=Coalesce(Sum(F('savings') + F('investment')), Value(0), output_field=DecimalField()),
+    ).order_by('month')
+    user_metrics_dict = {m['month'].date(): m for m in users_by_month}
 
-        total_users = users_qs.count()
+    # ------------------- TRANSACTION METRICS -------------------
+    tx_qs = Transaction.objects.filter(date__lt=now)
+    tx_by_month = tx_qs.annotate(
+        month=TruncMonth('date')
+    ).values('month').annotate(
+        total_tx=Count('id'),
+        failed_tx=Count('id', filter=Q(status='failed')),
+        mas_users=Count(
+            'user_id',
+            filter=Q(
+                source__in=['SAVINGS', 'INVESTMENT'],
+                transaction_type='credit',
+                status='confirmed'
+            ),
+            distinct=True
+        ),
+        mas_amount=Coalesce(
+            Sum('amount', filter=Q(
+                source__in=['SAVINGS', 'INVESTMENT'],
+                transaction_type='credit',
+                status='confirmed'
+            )),
+            Value(0),
+            output_field=DecimalField()
+        ),
+        total_referrals=Count('id', filter=Q(referral_email__isnull=False)),
+        confirmed_referrals=Count('id', filter=Q(status='confirmed', referral_email__isnull=False)),
+    ).order_by('month')
+    tx_metrics_dict = {m['month'].date(): m for m in tx_by_month}
 
-        new_users_qs = CustomUser.objects.filter(
-            is_deleted=False,
-            date_joined__gte=month_start,
-            date_joined__lt=month_end,
-        )
+    # ------------------- COHORT RETENTION SUBQUERY -------------------
+    # We want users who joined 30 days before the month and had a confirmed transaction in the month
+    cohort_subquery = Transaction.objects.filter(
+        user=OuterRef('pk'),
+        transaction_type='credit',
+        status='confirmed',
+        source__in=['SAVINGS', 'INVESTMENT'],
+        date__gte=OuterRef('cohort_start'),
+        date__lt=OuterRef('cohort_end')
+    ).values('user').distinct().values('pk')
 
-        new_users_count = new_users_qs.count()
-
-        # ================= INVESTORS VS SAVERS =================
-        investor_heavy = users_qs.filter(
-            savings__gt=0,
-            investment__gt=F("savings")
-        ).count()
-
-        savings_heavy = users_qs.filter(
-            savings__gt=0,
-            investment__lte=F("savings")
-        ).count()
-
-        # ================= FUM =================
-        fum = users_qs.aggregate(
-            fum=Coalesce(
-                Sum(F("savings") + F("investment")),
-                Value(0),
-                output_field=DecimalField()
-            )
-        )["fum"]
-
-        # ================= TRANSACTIONS =================
-        tx_qs = Transaction.objects.filter(
-            date__gte=month_start,
-            date__lt=month_end,
-        )
-
-        total_tx = tx_qs.count()
-        failed_tx = tx_qs.filter(status="failed").count()
-
-        transaction_failure_rate = (
-            failed_tx / total_tx * 100 if total_tx else 0
-        )
-
-        # ================= MONTHLY ACTIVE SAVERS (MAS) =================
-        mas_users = tx_qs.filter(
-            source__in=["SAVINGS", "INVESTMENT"],
-            transaction_type="credit",
-            status="confirmed",
-        ).values("user").distinct().count()
-
-        mas_amount = tx_qs.filter(
-            source__in=["SAVINGS", "INVESTMENT"],
-            transaction_type="credit",
-            status="confirmed",
-        ).aggregate(
-            total=Coalesce(Sum("amount"), Value(0), output_field=DecimalField())
-        )["total"]
-
-        # ================= ACTIVATION RATE =================
-        if new_users_count > 0:
-            activated_users = Transaction.objects.filter(
-                user__in=new_users_qs,
-                transaction_type="credit",
-                status="confirmed",
-                source__in=["SAVINGS", "INVESTMENT"],
-            ).values("user").distinct().count()
-
-            activation_rate = activated_users / new_users_count * 100
-        else:
-            activation_rate = 0
-
-        # ================= RETENTION (30D) =================
+    # ------------------- LOOP PER MONTH -------------------
+    for i in range(months):
+        target_month = now - relativedelta(months=i)
+        month_start = target_month.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        month_end = month_start + relativedelta(months=1)
         cohort_start = month_start - relativedelta(days=30)
         cohort_end = month_start
 
+        month_key = month_start.date()
+        user_data = user_metrics_dict.get(month_key, {})
+        tx_data = tx_metrics_dict.get(month_key, {})
+
+        total_users = user_data.get('total_users', 0)
+        new_users = user_data.get('new_users', 0)
+        investor_heavy = user_data.get('investor_heavy', 0)
+        savings_heavy = user_data.get('savings_heavy', 0)
+        fum = user_data.get('fum', Decimal('0'))
+        referrals = user_data.get('referrals_count', 0)
+        influencers = user_data.get('influencers_count', 0)
+
+        total_tx = tx_data.get('total_tx', 0)
+        failed_tx = tx_data.get('failed_tx', 0)
+        mas_users = tx_data.get('mas_users', 0)
+        mas_amount = tx_data.get('mas_amount', Decimal('0'))
+        total_referrals = tx_data.get('total_referrals', 0)
+        confirmed_referrals = tx_data.get('confirmed_referrals', 0)
+
+        # ------------------- CALCULATED METRICS -------------------
+        transaction_failure_rate = (failed_tx / total_tx * 100) if total_tx else 0
+        activation_rate = (mas_users / new_users * 100) if new_users else 0
+        churn_rate = ((total_users - mas_users) / total_users * 100) if total_users else 0
+        referrals_pct = (referrals / total_users * 100) if total_users else 0
+        influencers_pct = (influencers / total_users * 100) if total_users else 0
+        investor_pct = investor_heavy
+        saver_pct = savings_heavy
+
+        # ------------------- RETENTION (30D COHORT) -------------------
         cohort_users = CustomUser.objects.filter(
             date_joined__gte=cohort_start,
             date_joined__lt=cohort_end,
-            is_deleted=False,
+            is_deleted=False
         )
         cohort_count = cohort_users.count()
-
         if cohort_count > 0:
             retained_users = Transaction.objects.filter(
                 user__in=cohort_users,
+                transaction_type='credit',
+                status='confirmed',
+                source__in=['SAVINGS', 'INVESTMENT'],
                 date__gte=month_start,
-                date__lt=month_end,
-                transaction_type="credit",
-                status="confirmed",
-            ).values("user").distinct().count()
-
+                date__lt=month_end
+            ).values('user').distinct().count()
             retention_rate = retained_users / cohort_count * 100
         else:
             retention_rate = 0
-
-        # ================= CHURN RATE =================
-        active_users = Transaction.objects.filter(
-            date__gte=month_start - relativedelta(days=30),
-            date__lt=month_end,
-        ).values("user").distinct().count()
-
-        churn_rate = (
-            (total_users - active_users) / total_users * 100
-            if total_users else 0
-        )
-
-        # ================= GROWTH MULTIPLIERS =================
-        referrals = users_qs.filter(referral_id__isnull=False).count()
-        influencers = users_qs.filter(is_ambassador=True).count()
-
-        referrals_pct = (referrals / total_users * 100) if total_users else 0
-        influencers_pct = (influencers / total_users * 100) if total_users else 0
 
         results.append({
             "month": month_start.strftime("%Y-%m"),
@@ -170,9 +163,7 @@ def get_monthly_advanced_metrics(months=12):
                 "investor_heavy": investor_heavy,
                 "savings_heavy": savings_heavy,
             },
-
             "transaction_failure_rate": round(transaction_failure_rate, 2),
-
             "growth_multipliers": {
                 "referrals_pct": round(referrals_pct, 2),
                 "influencers_pct": round(influencers_pct, 2),
