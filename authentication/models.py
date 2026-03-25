@@ -131,6 +131,21 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     investment = models.DecimalField(max_digits=11, decimal_places=2, default=0)
     properties = models.PositiveIntegerField(default=0)
     wallet = models.DecimalField(max_digits=11, decimal_places=2, default=0)
+
+    # PAYSTACK DVA
+    paystack_customer_code = models.CharField(max_length=255, null=True, blank=True)
+    dva_account_number = models.CharField(max_length=20, null=True, blank=True)
+    dva_account_name = models.CharField(max_length=255, null=True, blank=True)
+    dva_bank_name = models.CharField(max_length=100, null=True, blank=True)
+    dva_assigned_at = models.DateTimeField(null=True, blank=True)
+    dva_account_id = models.CharField(max_length=50, null=True, blank=True)
+    paystack_identified = models.BooleanField(default=False)
+    paystack_identification_status = models.CharField(
+        max_length=30, null=True, blank=True
+    )
+    paystack_identification_reason = models.TextField(null=True, blank=True)
+
+    # DIVIDENDS
     pending_roi = models.DecimalField(max_digits=11, decimal_places=2, default=0)
     savings_and_investments = models.DecimalField(
         max_digits=11, decimal_places=2, default=0
@@ -148,8 +163,8 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
 
     is_first_time_signup = models.BooleanField(default=True)
 
-    is_active = models.BooleanField(default=True)
-    is_banned = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True, db_index=True)
+    is_banned = models.BooleanField(default=False, db_index=True)
     is_staff = models.BooleanField(default=False)
     is_superuser = models.BooleanField(default=False)
 
@@ -1029,13 +1044,26 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         if self.password_record:
             return self.password_record.check_password(raw_password)
         return False
-    
+
     class Meta:
         indexes = [
-            models.Index(fields=['is_deleted', 'date_joined']),  # ✅ Critical for user queries
-            models.Index(fields=['is_deleted', 'savings', 'investment']),  # ✅ For FUM calculations
-            models.Index(fields=['referral_id']),  # ✅ For referral stats
-            models.Index(fields=['is_ambassador']),  # ✅ For influencer stats
+            models.Index(
+                fields=["is_deleted", "date_joined"]
+            ),  # ✅ Critical for user queries
+            models.Index(
+                fields=["is_deleted", "savings", "investment"]
+            ),  # ✅ For FUM calculations
+            models.Index(fields=["referral_id"]),  # ✅ For referral stats
+            models.Index(fields=["is_ambassador"]),  # ✅ For influencer stats
+            models.Index(
+                fields=["is_active", "is_banned"]
+            ),  # ✅ ADDED: Critical for ROI & admin filters
+            models.Index(
+                fields=["date_joined", "is_deleted"]
+            ),  # ✅ ADDED: For admin list queries
+            models.Index(
+                fields=["referral_id", "date_joined"]
+            ),  # ✅ ADDED: For referral queries
         ]
 
 
@@ -1186,87 +1214,32 @@ class BankAccount(models.Model):
 
 class CardManager(models.Manager):
     """Custom manager to exclude cards without valid authorization codes"""
-    
+
     def get_queryset(self):
         """Override to exclude cards without authorization_code"""
-        return super().get_queryset().exclude(
-            models.Q(authorization_code='') | models.Q(authorization_code__isnull=True)
+        return (
+            super()
+            .get_queryset()
+            .exclude(
+                models.Q(authorization_code="")
+                | models.Q(authorization_code__isnull=True)
+            )
         )
-    
+
     def all_including_invalid(self):
         """Get all cards including those without authorization codes"""
         return super().get_queryset()
+
 
 class Card(models.Model):
     user = models.ForeignKey(
         get_user_model(), on_delete=models.CASCADE, related_name="owned_cards"
     )
-    
-    # Paystack authorization details
-    authorization_code = models.CharField(max_length=255, default="")
-    signature = models.CharField(max_length=255, unique=True, null=True, blank=True)
-    
-    # Card metadata (safe to store)
-    card_type = models.CharField(max_length=50, default="")  # visa, mastercard, verve
-    card_first6_digits = models.CharField(max_length=10, default="")  # First 6 digits
-    card_last4_digits = models.CharField(max_length=4, default="")
-    expiry_month = models.CharField(max_length=2, default="")
-    expiry_year = models.CharField(max_length=4, default="")
-    bank_name = models.CharField(max_length=100, default="")
-    card_brand = models.CharField(max_length=50, default="")  # visa, mastercard, etc.
-    country_code = models.CharField(max_length=10, default="")  # e.g., NG
-    card_owner_name = models.CharField(max_length=255, default="")  # Name on card
-    
-    # Flags
-    reusable = models.BooleanField(default=True)
+    bank_name = models.CharField(max_length=100)
     is_default = models.BooleanField(default=False)
-    is_active = models.BooleanField(default=True)
-    
-    # Timestamps
-    created_at = models.DateTimeField(default=timezone.now)
-
-    # Custom manager
-    objects = CardManager()
-
-    class Meta:
-        ordering = ['-is_default', '-created_at']
-        indexes = [
-            models.Index(fields=['user', 'is_active']),
-            models.Index(fields=['authorization_code']),
-        ]
 
     def __str__(self):
-        return f"{self.user.email}'s {self.card_brand.upper()} •••• {self.card_last4_digits} ({self.bank_name})"
-
-    def save(self, *args, **kwargs):
-        # If this is the first valid card for the user, make it default
-        if not self.pk and self.authorization_code:
-            # Only check for valid cards (with authorization_code)
-            has_valid_cards = Card.objects.filter(user=self.user).exists()
-            if not has_valid_cards:
-                self.is_default = True
-        
-        # If this card is being set as default, unset other defaults
-        if self.is_default and self.authorization_code:
-            Card.objects.filter(user=self.user, is_default=True).exclude(
-                pk=self.pk
-            ).update(is_default=False)
-        
-        super().save(*args, **kwargs)
-    
-    @property
-    def is_valid_for_payment(self):
-        """Check if card has valid authorization code and can be used for payments"""
-        return bool(self.authorization_code and self.authorization_code.strip())
-    
-    def clean(self):
-        """Validate that cards marked as default have authorization codes"""
-        from django.core.exceptions import ValidationError
-        
-        if self.is_default and not self.authorization_code:
-            raise ValidationError(
-                "Cards without authorization codes cannot be set as default"
-            )
+        return f"{self.user.email}'s Card ({self.bank_name})"
 
 
 # Update the models to use settings.AUTH_USER_MODEL
@@ -1276,6 +1249,44 @@ class AccountBalance(models.Model):
     investment = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     properties = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     wallet = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+
+
+from django.db import models
+from django.conf import settings
+
+
+class DvaDepositIntent(models.Model):
+    PURPOSE_CHOICES = (
+        ("SAVINGS", "Savings"),
+        ("INVESTMENT", "Investment"),
+    )
+
+    STATUS_CHOICES = (
+        ("pending", "Pending"),
+        ("confirmed", "Confirmed"),
+        ("expired", "Expired"),
+        ("failed", "Failed"),
+    )
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="dva_deposit_intents",
+    )
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    purpose = models.CharField(max_length=20, choices=PURPOSE_CHOICES)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
+    transaction_id = models.CharField(max_length=50, unique=True)
+    paystack_reference = models.CharField(max_length=100, null=True, blank=True)
+    matched_account_number = models.CharField(max_length=20, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.user.email} - {self.purpose} - {self.amount} - {self.status}"
 
 
 from django.db import models
@@ -1934,7 +1945,7 @@ class TargetSavingsCompletion(models.Model):
         )
 
 
-# TRANSACTIONS MODEL
+# TRANSACTIONS MODEL # TRANSACTION MODEL
 from decimal import Decimal, InvalidOperation, DecimalException
 from django.utils import timezone
 import uuid
@@ -1989,7 +2000,7 @@ class Transaction(models.Model):
     status = models.CharField(
         max_length=20, choices=STATUS_TYPES, default="pending", db_index=True
     )
-    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
     date = models.DateTimeField(auto_now_add=True)
     time = models.TimeField(auto_now_add=True)
     description = models.CharField(
@@ -2014,13 +2025,18 @@ class Transaction(models.Model):
         editable=False,
         db_index=True,
     )
-
+    paystack_reference = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        db_index=True,
+    )
     idempotency_key = models.CharField(
         max_length=64, unique=True, null=True, blank=True, db_index=True
     )
 
-    service_charge = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
-    total_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
+    service_charge = models.DecimalField(max_digits=14, decimal_places=2, default=0.0)
+    total_amount = models.DecimalField(max_digits=14, decimal_places=2, default=0.0)
     referral_email = models.EmailField(
         max_length=255, blank=True, null=True, db_index=True
     )
@@ -2060,12 +2076,16 @@ class Transaction(models.Model):
 
     def __str__(self):
         return f"{self.transaction_type} - {self.amount} - {self.status} - {self.date}"
-    
+
     class Meta:
         indexes = [
-            models.Index(fields=['date', 'status', 'transaction_type']),  # ✅ Critical
-            models.Index(fields=['user', 'date', 'status']),  # ✅ For user-specific queries
-            models.Index(fields=['source', 'transaction_type', 'status', 'date']),  # ✅ For MAS
+            models.Index(fields=["date", "status", "transaction_type"]),  # ✅ Critical
+            models.Index(
+                fields=["user", "date", "status"]
+            ),  # ✅ For user-specific queries
+            models.Index(
+                fields=["source", "transaction_type", "status", "date"]
+            ),  # ✅ For MAS
         ]
 
 
@@ -2280,7 +2300,7 @@ class WithdrawalsRequestToAdmin(models.Model):
     source_account = models.CharField(max_length=255, default="savings")
     target_bank = models.CharField(max_length=100, default="")
     target_account_number = models.CharField(max_length=50, default="")
-
+    target_account_name = models.CharField(max_length=255, blank=True, null=True)
     # Withdrawal type fields
     withdrawal_type = models.CharField(
         max_length=50,
@@ -2576,3 +2596,193 @@ class MonthlyFinancialRecord(models.Model):
 
     def __str__(self):
         return f"{self.user.email} - {self.month.strftime('%B %Y')}"
+
+
+
+from decimal import Decimal
+from django.conf import settings
+from django.db import models
+from django.utils import timezone
+
+
+class AmbassadorPointConfig(models.Model):
+    """
+    Central place to adjust ambassador points without touching code.
+    Keep one active record.
+    """
+    name = models.CharField(max_length=100, default="Default Ambassador Config")
+    is_active = models.BooleanField(default=True)
+
+    signup_points = models.DecimalField(max_digits=6, decimal_places=2, default=Decimal("0.50"))
+    signup_points_cap = models.DecimalField(max_digits=6, decimal_places=2, default=Decimal("10.00"))
+
+    confirmed_points = models.DecimalField(max_digits=6, decimal_places=2, default=Decimal("10.00"))
+
+    savings_points_per_10000 = models.DecimalField(max_digits=6, decimal_places=2, default=Decimal("0.40"))
+    savings_points_cap = models.DecimalField(max_digits=6, decimal_places=2, default=Decimal("20.00"))
+
+    attendance_points = models.DecimalField(max_digits=6, decimal_places=2, default=Decimal("1.00"))
+
+    coursera_points = models.DecimalField(max_digits=6, decimal_places=2, default=Decimal("5.00"))
+    social_media_points = models.DecimalField(max_digits=6, decimal_places=2, default=Decimal("5.00"))
+    abroad_confirmed_points = models.DecimalField(max_digits=6, decimal_places=2, default=Decimal("10.00"))
+    myfund_event_points = models.DecimalField(max_digits=6, decimal_places=2, default=Decimal("5.00"))
+    other_points = models.DecimalField(max_digits=6, decimal_places=2, default=Decimal("10.00"))
+
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Ambassador Point Config"
+        verbose_name_plural = "Ambassador Point Config"
+
+    def __str__(self):
+        return f"{self.name} ({'Active' if self.is_active else 'Inactive'})"
+
+    @classmethod
+    def get_active(cls):
+        config = cls.objects.filter(is_active=True).order_by("-updated_at").first()
+        if config:
+            return config
+        return cls.objects.create()
+
+
+class AmbassadorMonthlyReport(models.Model):
+    STATUS_CHOICES = [
+        ("pending", "Pending"),
+        ("approved", "Approved"),
+        ("rejected", "Rejected"),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="ambassador_reports",
+    )
+
+    month = models.CharField(max_length=7, db_index=True)  # YYYY-MM
+
+    # system / prefilled submitted values
+    signups_submitted = models.PositiveIntegerField(default=0)
+    confirmed_submitted = models.PositiveIntegerField(default=0)
+    savings_submitted = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    attendance_submitted = models.PositiveIntegerField(default=0)
+    others_submitted = models.PositiveIntegerField(default=0)
+
+    # user-editable submitted values
+    coursera_submitted = models.PositiveIntegerField(default=0)
+    social_media_submitted = models.PositiveIntegerField(default=0)
+    abroad_confirmed_submitted = models.PositiveIntegerField(default=0)
+    events_submitted = models.PositiveIntegerField(default=0)
+    notes = models.TextField(blank=True, null=True)
+
+    # evidence
+    coursera_certificate = models.ImageField(upload_to="ambassador_reports/", blank=True, null=True)
+    social_media_evidence = models.ImageField(upload_to="ambassador_reports/", blank=True, null=True)
+    abroad_signups_evidence = models.ImageField(upload_to="ambassador_reports/", blank=True, null=True)
+    events_evidence = models.ImageField(upload_to="ambassador_reports/", blank=True, null=True)
+
+    # admin-reviewed values
+    signups_approved = models.PositiveIntegerField(default=0)
+    confirmed_approved = models.PositiveIntegerField(default=0)
+    savings_approved = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    attendance_approved = models.PositiveIntegerField(default=0)
+    others_approved = models.PositiveIntegerField(default=0)
+
+    coursera_approved = models.PositiveIntegerField(default=0)
+    social_media_approved = models.PositiveIntegerField(default=0)
+    abroad_confirmed_approved = models.PositiveIntegerField(default=0)
+    events_approved = models.PositiveIntegerField(default=0)
+
+    # points breakdown
+    signup_points_awarded = models.DecimalField(max_digits=8, decimal_places=2, default=Decimal("0.00"))
+    confirmed_points_awarded = models.DecimalField(max_digits=8, decimal_places=2, default=Decimal("0.00"))
+    savings_points_awarded = models.DecimalField(max_digits=8, decimal_places=2, default=Decimal("0.00"))
+    attendance_points_awarded = models.DecimalField(max_digits=8, decimal_places=2, default=Decimal("0.00"))
+    coursera_points_awarded = models.DecimalField(max_digits=8, decimal_places=2, default=Decimal("0.00"))
+    social_media_points_awarded = models.DecimalField(max_digits=8, decimal_places=2, default=Decimal("0.00"))
+    abroad_points_awarded = models.DecimalField(max_digits=8, decimal_places=2, default=Decimal("0.00"))
+    events_points_awarded = models.DecimalField(max_digits=8, decimal_places=2, default=Decimal("0.00"))
+    others_points_awarded = models.DecimalField(max_digits=8, decimal_places=2, default=Decimal("0.00"))
+    total_points_awarded = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
+
+    # stipend
+    stipend_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    stipend_paid = models.BooleanField(default=False)
+
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
+    admin_note = models.TextField(blank=True, null=True)
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name="approved_ambassador_reports",
+    )
+    approved_at = models.DateTimeField(blank=True, null=True)
+
+    submitted_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ["user", "month"]
+        ordering = ["-submitted_at"]
+
+    def __str__(self):
+        return f"{self.user.email} - {self.month} - {self.status}"
+
+    def set_stipend_from_points(self):
+        self.stipend_amount = self.total_points_awarded * Decimal("100")
+        
+    def recalculate_points(self):
+        config = AmbassadorPointConfig.get_active()
+
+        signup_points = Decimal(self.signups_approved) * config.signup_points
+        if signup_points > config.signup_points_cap:
+            signup_points = config.signup_points_cap
+
+        confirmed_points = Decimal(self.confirmed_approved) * config.confirmed_points
+
+        savings_units = Decimal(self.savings_approved) / Decimal("10000")
+        savings_points = savings_units * config.savings_points_per_10000
+        if savings_points > config.savings_points_cap:
+            savings_points = config.savings_points_cap
+
+        attendance_points = Decimal(self.attendance_approved) * config.attendance_points
+        coursera_points = Decimal(self.coursera_approved) * config.coursera_points
+        social_media_points = Decimal(self.social_media_approved) * config.social_media_points
+        abroad_points = Decimal(self.abroad_confirmed_approved) * config.abroad_confirmed_points
+        events_points = Decimal(self.events_approved) * config.myfund_event_points
+        others_points = Decimal(self.others_approved) * config.other_points
+
+        self.signup_points_awarded = signup_points
+        self.confirmed_points_awarded = confirmed_points
+        self.savings_points_awarded = savings_points
+        self.attendance_points_awarded = attendance_points
+        self.coursera_points_awarded = coursera_points
+        self.social_media_points_awarded = social_media_points
+        self.abroad_points_awarded = abroad_points
+        self.events_points_awarded = events_points
+        self.others_points_awarded = others_points
+
+        self.total_points_awarded = (
+            signup_points
+            + confirmed_points
+            + savings_points
+            + attendance_points
+            + coursera_points
+            + social_media_points
+            + abroad_points
+            + events_points
+            + others_points
+        )
+
+    def copy_submitted_to_approved_defaults(self):
+        self.signups_approved = self.signups_submitted
+        self.confirmed_approved = self.confirmed_submitted
+        self.savings_approved = self.savings_submitted
+        self.attendance_approved = self.attendance_submitted
+        self.others_approved = self.others_submitted
+        self.coursera_approved = self.coursera_submitted
+        self.social_media_approved = self.social_media_submitted
+        self.abroad_confirmed_approved = self.abroad_confirmed_submitted
+        self.events_approved = self.events_submitted

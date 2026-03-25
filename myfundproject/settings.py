@@ -83,17 +83,13 @@ ALLOWED_HOSTS = [
     "10.0.0.140",
     "10.182.118.111",
     "192.168.1.148",
+    "lipopectic-nonopinionatively-woodrow.ngrok-free.dev",
     "10.0.0.37",
     "10.5.8.33",
     "192.168.137.1",
     "172.24.144.1",
     "192.168.20.99",
     "192.168.20.159",
-    "10.5.14.67",
-    "10.5.7.234",
-    "10.0.0.142",
-    "10.5.12.187",
-    "10.5.4.23"
 ]
 
 SECURE_SSL_REDIRECT = False  # Disable forced HTTPS redirect
@@ -231,6 +227,7 @@ CORS_ALLOW_HEADERS = [
     "content-type",
     "authorization",
     "x-requested-with",
+    "x-idempotency-key",
     "accept",
     "origin",
     "user-agent",
@@ -379,6 +376,13 @@ PAYLESS_SMS_USERNAME = config("PAYLESS_SMS_USERNAME")
 PAYLESS_SMS_PASSWORD = config("PAYLESS_SMS_PASSWORD")
 PAYLESS_SMS_SENDER_ID = config("PAYLESS_SMS_SENDER_ID")
 
+CELERY_TASK_ROUTES = {
+    "authentication.tasks.send_namecheap_safe_email_task": {"queue": "emails"},
+    "authentication.tasks.send_bulk_email_task": {"queue": "emails"},
+    "authentication.tasks.calculate_daily_roi_task": {"queue": "critical"},
+    "authentication.tasks.process_target_savings_deductions": {"queue": "critical"},
+    "authentication.tasks.process_due_scheduled_withdrawals": {"queue": "critical"},
+}
 
 # ===== EMAIL CONFIGURATION =====
 EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
@@ -399,8 +403,8 @@ EMAIL_TIMEOUT = 20
 # EMAIL_TIMEOUT = 20
 
 
-EMAIL_HOST_USER = "message@myfundmobile.com"
-EMAIL_HOST_PASSWORD = "AdminSecure123..."
+EMAIL_HOST_USER = "info@myfundmobile.com"
+EMAIL_HOST_PASSWORD = "Reproduction1..."
 
 
 AUTHENTICATION_BACKENDS = [
@@ -425,4 +429,10 @@ AUTHENTICATION_BACKENDS = [
 # SECURE_HSTS_PRELOAD = True
 # SECURE_HSTS_INCLUDE_SUBDOMAINS = True
 
-PAYSTACK_SECRET_KEY = os.getenv("PAYSTACK_KEY_LIVE")
+# settings.py
+import os
+
+if os.getenv("DJANGO_ENV") == "production":
+    PAYSTACK_SECRET_KEY = os.getenv("PAYSTACK_KEY_LIVE")
+else:
+    PAYSTACK_SECRET_KEY = os.getenv("PAYSTACK_KEY_TEST")

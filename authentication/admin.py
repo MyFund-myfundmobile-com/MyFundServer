@@ -41,7 +41,20 @@ import csv
 from django.http import HttpResponse
 from django.utils.html import format_html
 from django.urls import reverse
-from .utils import send_push_notification, send_generic_email
+from django.contrib import messages
+from django.utils.html import format_html
+
+from .utils import (
+    send_push_notification,
+    send_generic_email,
+    clear_local_dva_fields,
+    sync_user_dva_from_paystack,
+    deactivate_user_dva,
+    recreate_user_dva,
+    requery_dedicated_account,
+    approve_quicksave_credit,
+    send_ambassador_status_notification,
+)
 from decimal import Decimal
 
 GOOGLE_FORM_TEMPLATE = (
@@ -120,6 +133,8 @@ class ROITransactionInline(admin.TabularInline):
 
 from .utils import send_push_notification  # assuming utils is in authentication
 from decimal import Decimal
+from django.db.models import OuterRef, Subquery, Count, IntegerField
+from django.db.models.functions import Coalesce
 
 
 class CustomUserAdmin(UserAdmin):
@@ -147,7 +162,11 @@ class CustomUserAdmin(UserAdmin):
         "is_active",
         "is_banned",  # 👈 show banned status
         "profile_picture",
-        "pending_roi",  # 👈 add this
+        "pending_roi",
+        "dva_status_display",
+        "dva_account_number_display",
+        "dva_bank_display",
+        "paystack_customer_code_display",
     )
     list_filter = (
         "is_staff",
@@ -159,8 +178,18 @@ class CustomUserAdmin(UserAdmin):
         "date_joined",
         "is_hired_referrer",
         "is_ambassador",
+        "paystack_identified",
+        "paystack_identification_status",
     )
-    readonly_fields = ("get_total_referrals", "get_confirmed_referrals", "date_joined")
+    readonly_fields = (
+        "get_total_referrals",
+        "get_confirmed_referrals",
+        "date_joined",
+        "dva_status_display",
+        "dva_account_number_display",
+        "dva_bank_display",
+        "paystack_customer_code_display",
+    )
 
     actions = [
         "ban_user",
@@ -175,13 +204,19 @@ class CustomUserAdmin(UserAdmin):
         "make_ambassador",
         "revoke_ambassador",
         "delete_selected",
-        "deactivate_user" "notify_outdated_users",
+        "deactivate_user", 
+        "notify_outdated_users",
         "say_hello",
         "simulate_quarterly_payout",
         "test_daily_roi_calculation",  # ← Add this
         "test_quarterly_payout",  # ← Add this
         "view_roi_summary",  # ← Add this
         "test_top_saver_reward",
+        "sync_selected_dvas_from_paystack",
+        "requery_selected_dvas",
+        "deactivate_selected_dvas",
+        "clear_selected_local_dvas",
+        "recreate_selected_dvas",
     ]
 
     fieldsets = (
@@ -245,6 +280,26 @@ class CustomUserAdmin(UserAdmin):
                     "next_of_kin_phone_number",
                     "kyc_status",
                     "kyc_rejection_reason",
+                ),
+            },
+        ),
+        (
+            "DVA / Paystack",
+            {
+                "fields": (
+                    "paystack_customer_code",
+                    "paystack_identified",
+                    "paystack_identification_status",
+                    "paystack_identification_reason",
+                    "dva_status_display",
+                    "dva_account_number_display",
+                    "dva_bank_display",
+                    "paystack_customer_code_display",
+                    "dva_account_number",
+                    "dva_account_name",
+                    "dva_bank_name",
+                    "dva_account_id",
+                    "dva_assigned_at",
                 ),
             },
         ),
@@ -322,6 +377,247 @@ class CustomUserAdmin(UserAdmin):
             "total_roi": round(total_roi, 2),
         }
 
+    # DVA
+    def dva_status_display(self, obj):
+        if obj.dva_account_number and obj.dva_account_id:
+            return format_html(
+                '<span style="color: green; font-weight: 600;">Assigned</span>'
+            )
+
+        if obj.paystack_identification_status == "processing":
+            return format_html(
+                '<span style="color: orange; font-weight: 600;">Processing</span>'
+            )
+
+        if obj.paystack_identification_reason == "NAME_MISMATCH":
+            return format_html(
+                '<span style="color: red; font-weight: 600;">Name Mismatch</span>'
+            )
+
+        if obj.paystack_identification_status == "failed":
+            return format_html(
+                '<span style="color: red; font-weight: 600;">Failed</span>'
+            )
+
+        return format_html('<span style="color: grey; font-weight: 600;">No DVA</span>')
+
+    dva_status_display.short_description = "DVA Status"
+
+    def dva_account_number_display(self, obj):
+        return obj.dva_account_number or "—"
+
+    dva_account_number_display.short_description = "DVA Number"
+
+    def dva_bank_display(self, obj):
+        return obj.dva_bank_name or "—"
+
+    dva_bank_display.short_description = "DVA Bank"
+
+    def paystack_customer_code_display(self, obj):
+        return obj.paystack_customer_code or "—"
+
+    paystack_customer_code_display.short_description = "Paystack Customer"
+
+    @admin.action(description="🔄 Sync selected users' DVAs from Paystack")
+    def sync_selected_dvas_from_paystack(self, request, queryset):
+        success_count = 0
+        failed_count = 0
+
+        for user in queryset:
+            ok, result = sync_user_dva_from_paystack(user)
+            if ok:
+                success_count += 1
+            else:
+                failed_count += 1
+                self.message_user(
+                    request,
+                    f"Sync failed for {user.email}: {result.get('message')}",
+                    level=messages.ERROR,
+                )
+
+        if success_count:
+            self.message_user(
+                request,
+                f"{success_count} user(s) DVA synced successfully from Paystack.",
+                level=messages.SUCCESS,
+            )
+
+        if failed_count and not success_count:
+            self.message_user(
+                request,
+                "No DVA sync completed successfully.",
+                level=messages.WARNING,
+            )
+
+    @admin.action(description="📡 Requery selected users' DVAs for incoming transfers")
+    def requery_selected_dvas(self, request, queryset):
+        success_count = 0
+        failed_count = 0
+
+        for user in queryset:
+            ok, result = requery_dedicated_account(user)
+            if ok:
+                success_count += 1
+            else:
+                failed_count += 1
+                self.message_user(
+                    request,
+                    f"Requery failed for {user.email}: {result.get('message')}",
+                    level=messages.ERROR,
+                )
+
+        if success_count:
+            self.message_user(
+                request,
+                f"Requery triggered successfully for {success_count} user(s).",
+                level=messages.SUCCESS,
+            )
+
+        if failed_count and not success_count:
+            self.message_user(
+                request,
+                "No DVA requery completed successfully.",
+                level=messages.WARNING,
+            )
+
+    @admin.action(
+        description="🛑 Deactivate selected users' DVAs on Paystack and clear local DVA"
+    )
+    def deactivate_selected_dvas(self, request, queryset):
+        success_count = 0
+        failed_count = 0
+
+        for user in queryset:
+            ok, result = deactivate_user_dva(user, clear_local=True)
+            if ok:
+                success_count += 1
+            else:
+                failed_count += 1
+                self.message_user(
+                    request,
+                    f"Deactivate failed for {user.email}: {result.get('message')}",
+                    level=messages.ERROR,
+                )
+
+        if success_count:
+            self.message_user(
+                request,
+                f"{success_count} DVA(s) deactivated on Paystack and cleared locally.",
+                level=messages.SUCCESS,
+            )
+
+        if failed_count and not success_count:
+            self.message_user(
+                request,
+                "No DVA deactivation completed successfully.",
+                level=messages.WARNING,
+            )
+
+    @admin.action(description="🧹 Clear selected users' local DVA fields only")
+    def clear_selected_local_dvas(self, request, queryset):
+        count = 0
+
+        for user in queryset:
+            clear_local_dva_fields(user, save=True)
+            count += 1
+
+        self.message_user(
+            request,
+            f"Cleared local DVA fields for {count} user(s).",
+            level=messages.SUCCESS,
+        )
+
+    @admin.action(description="🏦 Recreate selected users' DVAs")
+    def recreate_selected_dvas(self, request, queryset):
+        success_count = 0
+        failed_count = 0
+
+        for user in queryset:
+            ok, result = recreate_user_dva(user, preferred_bank="wema-bank")
+            if ok:
+                success_count += 1
+            else:
+                failed_count += 1
+                self.message_user(
+                    request,
+                    f"Recreate failed for {user.email}: {result.get('message')}",
+                    level=messages.ERROR,
+                )
+
+        if success_count:
+            self.message_user(
+                request,
+                f"Recreated DVA successfully for {success_count} user(s).",
+                level=messages.SUCCESS,
+            )
+
+        if failed_count and not success_count:
+            self.message_user(
+                request,
+                "No DVA recreation completed successfully.",
+                level=messages.WARNING,
+            )
+
+    def save_model(self, request, obj, form, change):
+        previous_is_ambassador = None
+
+        if change and obj.pk:
+            previous_is_ambassador = (
+                CustomUser.objects.filter(pk=obj.pk)
+                .values_list("is_ambassador", flat=True)
+                .first()
+            )
+
+        super().save_model(request, obj, form, change)
+
+        if change and previous_is_ambassador is not None:
+            if previous_is_ambassador != obj.is_ambassador:
+                send_ambassador_status_notification(
+                    user=obj,
+                    became_ambassador=obj.is_ambassador,
+                )
+
+    @admin.action(description="🌟 Make selected users ambassadors")
+    def make_ambassador(self, request, queryset):
+        updated_count = 0
+
+        for user in queryset:
+            if not user.is_ambassador:
+                user.is_ambassador = True
+                user.save(update_fields=["is_ambassador"])
+                send_ambassador_status_notification(
+                    user=user,
+                    became_ambassador=True,
+                )
+                updated_count += 1
+
+        self.message_user(
+            request,
+            f"{updated_count} user(s) updated to ambassador and notified.",
+            level=messages.SUCCESS,
+        )
+        
+
+    @admin.action(description="❌ Revoke ambassador status")
+    def revoke_ambassador(self, request, queryset):
+        updated_count = 0
+
+        for user in queryset:
+            if user.is_ambassador:
+                user.is_ambassador = False
+                user.save(update_fields=["is_ambassador"])
+                send_ambassador_status_notification(
+                    user=user,
+                    became_ambassador=False,
+                )
+                updated_count += 1
+
+        self.message_user(
+            request,
+            f"{updated_count} user(s) ambassador status revoked and notified.",
+            level=messages.SUCCESS,
+        )
+        
     @admin.action(description="🚫 Ban selected users (cannot reactivate)")
     def ban_user(self, request, queryset):
         queryset.update(is_banned=True, is_active=False)
@@ -415,10 +711,21 @@ class CustomUserAdmin(UserAdmin):
             )
 
             # Get profile picture URL
-            profile_pic_url = user.profile_picture.url if user.profile_picture else ""
+            # Get profile picture URL safely
+            profile_pic_url = ""
+            if user.profile_picture:
+                if hasattr(user.profile_picture, "url"):
+                    profile_pic_url = user.profile_picture.url
+                else:
+                    profile_pic_url = str(user.profile_picture)
 
-            # Get ID upload URL
-            id_upload_url = user.id_upload.url if user.id_upload else ""
+            # Get ID upload URL safely
+            id_upload_url = ""
+            if user.id_upload:
+                if hasattr(user.id_upload, "url"):
+                    id_upload_url = user.id_upload.url
+                else:
+                    id_upload_url = str(user.id_upload)
 
             # Format "How Did You Hear" for better readability
             how_did_you_hear_display = dict(
@@ -1133,52 +1440,24 @@ class BankTransferRequestAdmin(admin.ModelAdmin):
             user = transfer_request.user
             transaction_id = transfer_request.transaction_id
 
-            transaction = Transaction.objects.filter(
-                user=user, transaction_id=transaction_id, status="pending"
-            ).first()
+            ok, msg = approve_quicksave_credit(
+                user=user,
+                amount=transfer_request.amount,
+                transaction_id=transaction_id,
+                description="QuickSave (Transfer)",
+                source="BANK_TRANSFER",
+            )
 
-            if not transaction:
+            if not ok:
                 self.message_user(
                     request,
-                    f"Pending transaction {transaction_id} not found for {user.email}!",
+                    f"{msg} for {user.email}",
                     level="error",
                 )
                 continue
 
-            transaction.status = "confirmed"
-            transaction.date = timezone.now()
-            transaction.description = "QuickSave (Transfer)"
-            transaction.save()
-
             transfer_request.is_approved = True
-            transfer_request.save()
-
-            user.savings += transfer_request.amount
-            user.save()
-
-            if user.referral:
-                user.confirm_referral_rewards(is_referrer=False)
-
-            user.update_total_savings_and_investment_this_month()
-
-            send_mail(
-                "QuickSave Updated! ✅",
-                f"Hi {user.first_name},\n\nYour bank transfer of ₦{transfer_request.amount} has been proccessed successfully and added to your Savings account.",
-                "MyFund <info@myfundmobile.com>",
-                [user.email],
-            )
-
-            send_push_notification(
-                user=user,
-                title="QuickSave Approved ✅",
-                message=f"Hi {user.first_name}, your transfer of ₦{int(transfer_request.amount):,} has been added to your Savings account.",
-                data={
-                    "amount": str(transfer_request.amount),
-                    "transaction_id": transaction_id,
-                    "type": "QuickSave",
-                },
-                notif_type="CREDIT",
-            )
+            transfer_request.save(update_fields=["is_approved"])
 
         self.message_user(
             request,
@@ -1283,8 +1562,9 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
         "charge_percentage_display",  # %
         "charge_amount_display",  # ₦ charge
         "net_amount_display",  # ₦ to send
-        "target_bank",
+        "target_bank_display",
         "target_account_number",
+        "target_account_name_display",
         "created_at",
         "scheduled_processing_date",
         "transaction_id",
@@ -1309,6 +1589,38 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
     # =========================
     # DISPLAY HELPERS (READ-ONLY)
     # =========================
+
+    def target_bank_display(self, obj):
+        if getattr(obj, "target_bank", None):
+            return obj.target_bank
+
+        bank = BankAccount.objects.filter(
+            user=obj.user,
+            account_number=obj.target_account_number,
+        ).first()
+
+        if bank:
+            return bank.bank_name
+
+        return "-"
+
+    target_bank_display.short_description = "Target Bank"
+
+    def target_account_name_display(self, obj):
+        if getattr(obj, "target_account_name", None):
+            return obj.target_account_name
+
+        bank = BankAccount.objects.filter(
+            user=obj.user,
+            account_number=obj.target_account_number,
+        ).first()
+
+        if bank:
+            return bank.account_name
+
+        return "-"
+
+    target_account_name_display.short_description = "Target Account Name"
 
     def total_amount_display(self, obj):
         """Original amount requested by user"""
@@ -1385,20 +1697,24 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
                     )
 
                     # Email
-                    send_mail(
-                        subject="Withdrawal Successful ✔",
-                        message=(
-                            f"Hi {user.first_name},\n\n"
-                            f"Your withdrawal of ₦{withdrawal.amount:,.2f} from your "
-                            f"{withdrawal.source_account.capitalize()} account "
-                            f"has been processed successfully.\n\n"
-                            f"Transaction ID: {transaction_id}\n\n"
-                            f"MyFund Team"
-                        ),
-                        from_email="MyFund <info@myfundmobile.com>",
-                        recipient_list=[user.email],
-                        fail_silently=False,
-                    )
+                    try:
+                        send_generic_email(
+                            subject="Withdrawal Successful ✔",
+                            message=(
+                                f"Hi {user.first_name},<br><br>"
+                                f"Your withdrawal of ₦{withdrawal.amount:,.2f} from your "
+                                f"{withdrawal.source_account.capitalize()} account "
+                                f"has been processed successfully.<br><br>"
+                                f"Transaction ID: {transaction_id}<br><br>"
+                                f"MyFund Team"
+                            ),
+                            from_email="MyFund <info@myfundmobile.com>",
+                            recipient_list=[user.email],
+                        )
+                    except Exception as email_error:
+                        print(
+                            f"Withdrawal approval email failed for {user.email}: {email_error}"
+                        )
 
             except Exception as e:
                 self.message_user(
@@ -1422,15 +1738,18 @@ class BankAccountAdmin(admin.ModelAdmin):
         "bank_name",
         "account_number",
         "account_name",
+        "bank_code",
+        "paystack_recipient_code",
         "is_default",
     )
-    list_filter = ("is_default",)
+    list_filter = ("is_default", "bank_name")
     search_fields = (
         "user__email",
         "bank_name",
         "account_number",
         "account_name",
-    )  # Add this line
+        "paystack_recipient_code",
+    )
 
 
 admin.site.register(BankAccount, BankAccountAdmin)
@@ -1441,16 +1760,10 @@ class CardAdmin(admin.ModelAdmin):
         "id",
         "user",
         "bank_name",
-        "card_type",
-        "card_first6_digits",
-        "card_last4_digits",
-        "card_brand",
-        "expiry_month",
-        "expiry_year",
         "is_default",
     )
     list_filter = ("is_default",)
-    search_fields = ("user__email", "bank_name", "card_first6_digits")  # Add search options
+    search_fields = ("user__email", "bank_name", "card_number")  # Add search options
 
 
 class AutoSaveAdmin(admin.ModelAdmin):
@@ -1473,6 +1786,12 @@ from django.contrib import admin
 from .models import Transaction
 
 
+from django.contrib import admin
+from django.utils import timezone
+from .models import Transaction
+from .utils import send_generic_email, send_push_notification
+
+
 class TransactionAdmin(admin.ModelAdmin):
     list_display = (
         "user",
@@ -1490,30 +1809,117 @@ class TransactionAdmin(admin.ModelAdmin):
         "status",
         ("date", admin.DateFieldListFilter),
     )
-    # error comes
     search_fields = (
         "user__email",
         "user__first_name",
         "user__last_name",
         "description",
         "transaction_id",
-        "status",
-        "amount",
-        # "referral__user__email",
         "referral_email",
     )
+
+    actions = ["force_confirm_transactions"]
+
+    # --- 1. THE DROPDOWN ACTION ---
+    @admin.action(description="Force Confirm Selected Pending Transactions")
+    def force_confirm_transactions(self, request, queryset):
+        count = 0
+        # Only process transactions that are currently pending
+        for txn in queryset.filter(status="pending"):
+            self._confirm_transaction_logic(txn)
+            count += 1
+
+        if count > 0:
+            self.message_user(
+                request,
+                f"Successfully confirmed {count} transactions, updated balances, and sent notifications.",
+            )
+        else:
+            self.message_user(
+                request, "No pending transactions were selected.", level="warning"
+            )
+
+    # --- 2. THE MANUAL SAVE LOGIC ---
+    def save_model(self, request, obj, form, change):
+        # If an existing transaction is changed to 'confirmed' manually in the edit form
+        if change and "status" in form.changed_data and obj.status == "confirmed":
+            self._confirm_transaction_logic(obj)
+        else:
+            super().save_model(request, obj, form, change)
+
+    # --- 3. THE CENTRAL BRAIN (Handles Balances, Referrals, and Notifications) ---
+    def _confirm_transaction_logic(self, txn):
+        """Processes the entire confirmation workflow."""
+        user = txn.user
+
+        # Double-check protection: don't process if already confirmed in DB
+        txn_in_db = Transaction.objects.filter(id=txn.id).first()
+        if txn_in_db and txn_in_db.status == "confirmed":
+            return
+
+        # A. Update Transaction Status
+        txn.status = "confirmed"
+        txn.date = timezone.now()
+        # Keep original description but append (Manual Approval) if you want to track it
+        txn.save()
+
+        # B. Update User Balances
+        amount = txn.amount
+        is_investment = (
+            "invest" in txn.description.lower()
+            or txn.transaction_type.lower() == "investment"
+        )
+
+        if is_investment:
+            user.investment += int(amount)
+            folder_name = "Investment"
+            notif_title = "QuickInvest Approved ✅"
+        else:
+            user.savings += int(amount)
+            folder_name = "Savings"
+            notif_title = "QuickSave Approved ✅"
+
+        user.update_total_savings_and_investment_this_month()
+        user.save()
+
+        # C. Trigger Referral Rewards (If applicable)
+        # This checks if the user has a referrer and grants bonuses for the first deposit
+        if hasattr(user, "confirm_referral_rewards"):
+            user.confirm_referral_rewards(is_referrer=False)
+
+        # D. Send Email Notification (Using your Generic Email Utility)
+        email_subject = f"{folder_name} Updated! ✅"
+        email_body = (
+            f"Hi {{first_name}},\n\n"
+            f"Your transfer of ₦{int(amount):,} has been processed successfully "
+            f"and added to your {folder_name} account.\n\n"
+            f"Keep growing your funds!\n\nMyFund Team"
+        )
+        send_generic_email(email_subject, email_body, [user.email])
+
+        # E. Send Push Notification
+        try:
+            from .utils import send_push_notification  # Adjust import path
+
+            send_push_notification(
+                user=user,
+                title=notif_title,
+                message=f"Hi {user.first_name}, your transfer of ₦{int(amount):,} has been added to your {folder_name} account.",
+                data={
+                    "amount": str(amount),
+                    "transaction_id": txn.transaction_id,
+                    "type": folder_name,
+                },
+                notif_type="CREDIT",
+            )
+        except Exception as e:
+            print(f"Push notification failed: {e}")
 
     def is_referral_transaction(self, obj):
         return bool(obj.referral_email)
 
     is_referral_transaction.boolean = True
     is_referral_transaction.short_description = "Is Referral?"
-
-    def save_model(self, request, obj, form, change):
-        print(
-            f"DEBUG: Saving transaction: {obj.transaction_type} (Length: {len(obj.transaction_type)})"
-        )
-        super().save_model(request, obj, form, change)
 
 
 class PropertyAdmin(admin.ModelAdmin):
@@ -2056,6 +2462,364 @@ class ROITransactionAdmin(admin.ModelAdmin):
     search_fields = ["user__email", "user__first_name", "user__last_name"]
     readonly_fields = ["user", "amount", "roi_type", "accrued_date"]
 
+
+from django.contrib import admin
+from .models import DvaDepositIntent
+
+
+@admin.register(DvaDepositIntent)
+class DvaDepositIntentAdmin(admin.ModelAdmin):
+    list_display = (
+        "user",
+        "purpose",
+        "amount",
+        "status",
+        "transaction_id",
+        "paystack_reference",
+        "created_at",
+        "confirmed_at",
+    )
+    list_filter = ("purpose", "status", "created_at")
+    search_fields = (
+        "user__email",
+        "user__first_name",
+        "user__last_name",
+        "transaction_id",
+        "paystack_reference",
+        "matched_account_number",
+    )
+    readonly_fields = (
+        "user",
+        "amount",
+        "purpose",
+        "status",
+        "transaction_id",
+        "paystack_reference",
+        "matched_account_number",
+        "created_at",
+        "confirmed_at",
+    )
+
+from decimal import Decimal
+from django.contrib import admin, messages
+from django.db import transaction as db_transaction
+from django.utils import timezone
+
+from .models import AmbassadorPointConfig, AmbassadorMonthlyReport, Transaction
+from .utils import send_push_notification, send_generic_email
+
+
+@admin.register(AmbassadorPointConfig)
+class AmbassadorPointConfigAdmin(admin.ModelAdmin):
+    list_display = (
+        "name",
+        "is_active",
+        "signup_points",
+        "signup_points_cap",
+        "confirmed_points",
+        "savings_points_per_10000",
+        "savings_points_cap",
+        "updated_at",
+    )
+
+    def save_model(self, request, obj, form, change):
+        if obj.is_active:
+            AmbassadorPointConfig.objects.exclude(pk=obj.pk).update(is_active=False)
+        super().save_model(request, obj, form, change)
+
+
+@admin.register(AmbassadorMonthlyReport)
+class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "user",
+        "month",
+        "status",
+        "total_points_awarded",
+        "stipend_amount",
+        "stipend_paid",
+        "submitted_at",
+        "approved_at",
+    )
+    list_filter = ("status", "month", "stipend_paid", "submitted_at")
+    search_fields = ("user__email", "user__first_name", "user__last_name", "month")
+    readonly_fields = (
+        "submitted_at",
+        "updated_at",
+        "approved_at",
+        "signup_points_awarded",
+        "confirmed_points_awarded",
+        "savings_points_awarded",
+        "attendance_points_awarded",
+        "coursera_points_awarded",
+        "social_media_points_awarded",
+        "abroad_points_awarded",
+        "events_points_awarded",
+        "others_points_awarded",
+        "total_points_awarded",
+        "stipend_amount",
+    )
+
+    fieldsets = (
+        (
+            "Report Info",
+            {
+                "fields": (
+                    "user",
+                    "month",
+                    "status",
+                    "admin_note",
+                    "approved_by",
+                    "approved_at",
+                    "submitted_at",
+                    "updated_at",
+                )
+            },
+        ),
+        (
+            "Submitted Values",
+            {
+                "fields": (
+                    "signups_submitted",
+                    "confirmed_submitted",
+                    "savings_submitted",
+                    "attendance_submitted",
+                    "others_submitted",
+                    "coursera_submitted",
+                    "social_media_submitted",
+                    "abroad_confirmed_submitted",
+                    "events_submitted",
+                    "notes",
+                )
+            },
+        ),
+        (
+            "Evidence",
+            {
+                "fields": (
+                    "coursera_certificate",
+                    "social_media_evidence",
+                    "abroad_signups_evidence",
+                    "events_evidence",
+                )
+            },
+        ),
+        (
+            "Approved Values",
+            {
+                "fields": (
+                    "signups_approved",
+                    "confirmed_approved",
+                    "savings_approved",
+                    "attendance_approved",
+                    "others_approved",
+                    "coursera_approved",
+                    "social_media_approved",
+                    "abroad_confirmed_approved",
+                    "events_approved",
+                )
+            },
+        ),
+        (
+            "Points Breakdown",
+            {
+                "fields": (
+                    "signup_points_awarded",
+                    "confirmed_points_awarded",
+                    "savings_points_awarded",
+                    "attendance_points_awarded",
+                    "coursera_points_awarded",
+                    "social_media_points_awarded",
+                    "abroad_points_awarded",
+                    "events_points_awarded",
+                    "others_points_awarded",
+                    "total_points_awarded",
+                )
+            },
+        ),
+        (
+            "Stipend",
+            {
+                "fields": (
+                    "stipend_amount",
+                    "stipend_paid",
+                )
+            },
+        ),
+    )
+
+    actions = ["approve_reports", "reject_reports", "recalculate_selected_reports"]
+
+    def credit_stipend_and_notify(self, report):
+        user = report.user
+
+        if report.stipend_paid:
+            return False, "Stipend already paid for this report."
+
+        stipend_amount = Decimal(report.stipend_amount or 0)
+        if stipend_amount <= 0:
+            return False, "Stipend amount is zero. Nothing to pay."
+
+        with db_transaction.atomic():
+            # lock user row safely
+            locked_user = type(user).objects.select_for_update().get(pk=user.pk)
+
+            # credit wallet
+            locked_user.wallet = (locked_user.wallet or Decimal("0.00")) + stipend_amount
+            locked_user.save(update_fields=["wallet"])
+
+            # create confirmed credit transaction
+            Transaction.objects.create(
+                user=locked_user,
+                transaction_type="credit",
+                status="confirmed",
+                amount=stipend_amount,
+                description=f"Ambassador stipend for {report.month} ({report.total_points_awarded} points)",
+                source="WALLET",
+            )
+
+            report.stipend_paid = True
+            report.save(update_fields=["stipend_paid"])
+
+        # email user
+        send_generic_email(
+            subject="Ambassador Stipend Credited ✅",
+            message=(
+                f"Hi {user.first_name},<br><br>"
+                f"Your ambassador report for {report.month} has been approved and your stipend has been credited to your wallet.<br><br>"
+                f"Points awarded: {report.total_points_awarded}<br>"
+                f"Stipend credited: ₦{stipend_amount:,.2f}<br><br>"
+                "Thank you for representing MyFund.<br><br>"
+                "MyFund"
+            ),
+            from_email="MyFund <info@myfundmobile.com>",
+            recipient_list=[user.email],
+        )
+
+        # push user
+        send_push_notification(
+            user=user,
+            title="Ambassador Stipend Credited ✅",
+            message=(
+                f"Your stipend for {report.month} has been credited. "
+                f"₦{stipend_amount:,.2f} added to your wallet."
+            ),
+            data={
+                "report_id": report.id,
+                "month": report.month,
+                "type": "AMBASSADOR_STIPEND",
+                "points": float(report.total_points_awarded),
+                "stipend_amount": float(stipend_amount),
+            },
+            notif_type="SYSTEM",
+        )
+
+        return True, f"₦{stipend_amount:,.2f} credited successfully."
+
+    def notify_user_rejected(self, report):
+        user = report.user
+
+        send_generic_email(
+            subject="Ambassador Report Update",
+            message=(
+                f"Hi {user.first_name},<br><br>"
+                f"Your ambassador report for {report.month} was reviewed but not approved.<br><br>"
+                f"Admin note: {report.admin_note or 'Please contact support for clarification.'}<br><br>"
+                "MyFund"
+            ),
+            from_email="MyFund <info@myfundmobile.com>",
+            recipient_list=[user.email],
+        )
+
+        send_push_notification(
+            user=user,
+            title="Ambassador Report Not Approved",
+            message=f"Your report for {report.month} was reviewed. Please check the update.",
+            data={
+                "report_id": report.id,
+                "month": report.month,
+                "status": report.status,
+            },
+            notif_type="SYSTEM",
+        )
+
+    def save_model(self, request, obj, form, change):
+        old_status = None
+        old_stipend_paid = False
+
+        if change and obj.pk:
+            old_obj = AmbassadorMonthlyReport.objects.get(pk=obj.pk)
+            old_status = old_obj.status
+            old_stipend_paid = old_obj.stipend_paid
+
+        obj.recalculate_points()
+
+        if obj.status == "approved" and not obj.approved_at:
+            obj.approved_at = timezone.now()
+
+        if obj.status == "approved" and not obj.approved_by:
+            obj.approved_by = request.user
+
+        super().save_model(request, obj, form, change)
+
+        if old_status != "rejected" and obj.status == "rejected":
+            self.notify_user_rejected(obj)
+
+        if obj.status == "approved" and not old_stipend_paid and not obj.stipend_paid:
+            success, msg = self.credit_stipend_and_notify(obj)
+            if success:
+                self.message_user(request, msg, level=messages.SUCCESS)
+            else:
+                self.message_user(request, msg, level=messages.WARNING)
+
+    @admin.action(description="✅ Approve selected ambassador reports")
+    def approve_reports(self, request, queryset):
+        approved_count = 0
+        credited_count = 0
+
+        for report in queryset:
+            if report.status != "approved":
+                report.status = "approved"
+                report.approved_by = request.user
+                report.approved_at = timezone.now()
+
+            report.recalculate_points()
+            report.save()
+
+            approved_count += 1
+
+            if not report.stipend_paid:
+                success, _ = self.credit_stipend_and_notify(report)
+                if success:
+                    credited_count += 1
+
+        self.message_user(
+            request,
+            f"{approved_count} report(s) approved. {credited_count} stipend(s) credited.",
+            level=messages.SUCCESS,
+        )
+
+    @admin.action(description="❌ Reject selected ambassador reports")
+    def reject_reports(self, request, queryset):
+        count = 0
+        for report in queryset:
+            report.status = "rejected"
+            report.save()
+            self.notify_user_rejected(report)
+            count += 1
+
+        self.message_user(request, f"{count} report(s) rejected.", level=messages.WARNING)
+
+    @admin.action(description="🔄 Recalculate selected ambassador reports")
+    def recalculate_selected_reports(self, request, queryset):
+        count = 0
+        for report in queryset:
+            report.recalculate_points()
+            report.save()
+            count += 1
+
+        self.message_user(request, f"{count} report(s) recalculated.", level=messages.SUCCESS)
+        
 
 admin.site.register(DailyROIAccrual, DailyROIAccrualAdmin)
 admin.site.register(ROITransaction, ROITransactionAdmin)

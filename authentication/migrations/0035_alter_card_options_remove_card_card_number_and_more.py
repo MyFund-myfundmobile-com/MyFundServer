@@ -7,96 +7,86 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('authentication', '0034_customuser_kyc_rejection_reason_and_more'),
+        ("authentication", "0034_customuser_kyc_rejection_reason_and_more"),
     ]
 
     operations = [
         migrations.AlterModelOptions(
-            name='card',
-            options={'ordering': ['-is_default', '-created_at']},
-        ),
-        migrations.RemoveField(
-            model_name='card',
-            name='card_number',
-        ),
-        migrations.RemoveField(
-            model_name='card',
-            name='cvv',
-        ),
-        migrations.RemoveField(
-            model_name='card',
-            name='expiry_date',
-        ),
-        migrations.RemoveField(
-            model_name='card',
-            name='pin',
+            name="card",
+            options={"ordering": ["-is_default", "-created_at"]},
         ),
         migrations.AddField(
-            model_name='card',
-            name='authorization_code',
-            field=models.CharField(default='', max_length=255),
+            model_name="card",
+            name="authorization_code",
+            field=models.CharField(default="", max_length=255),
         ),
         migrations.AddField(
-            model_name='card',
-            name='card_brand',
-            field=models.CharField(default='', max_length=50),
+            model_name="card",
+            name="card_brand",
+            field=models.CharField(default="", max_length=50),
         ),
         migrations.AddField(
-            model_name='card',
-            name='card_first6_digits',
-            field=models.CharField(default='', max_length=10),
+            model_name="card",
+            name="card_first6_digits",
+            field=models.CharField(default="", max_length=10),
         ),
         migrations.AddField(
-            model_name='card',
-            name='card_last4_digits',
-            field=models.CharField(default='', max_length=4),
+            model_name="card",
+            name="card_last4_digits",
+            field=models.CharField(default="", max_length=4),
         ),
         migrations.AddField(
-            model_name='card',
-            name='card_type',
-            field=models.CharField(default='', max_length=50),
+            model_name="card",
+            name="card_type",
+            field=models.CharField(default="", max_length=50),
         ),
         migrations.AddField(
-            model_name='card',
-            name='created_at',
+            model_name="card",
+            name="created_at",
             field=models.DateTimeField(default=django.utils.timezone.now),
         ),
         migrations.AddField(
-            model_name='card',
-            name='expiry_month',
-            field=models.CharField(default='', max_length=2),
+            model_name="card",
+            name="expiry_month",
+            field=models.CharField(default="", max_length=2),
         ),
         migrations.AddField(
-            model_name='card',
-            name='expiry_year',
-            field=models.CharField(default='', max_length=4),
+            model_name="card",
+            name="expiry_year",
+            field=models.CharField(default="", max_length=4),
         ),
         migrations.AddField(
-            model_name='card',
-            name='is_active',
+            model_name="card",
+            name="is_active",
             field=models.BooleanField(default=True),
         ),
         migrations.AddField(
-            model_name='card',
-            name='reusable',
+            model_name="card",
+            name="reusable",
             field=models.BooleanField(default=True),
         ),
         migrations.AddField(
-            model_name='card',
-            name='signature',
+            model_name="card",
+            name="signature",
             field=models.CharField(blank=True, max_length=255, null=True, unique=True),
         ),
         migrations.AlterField(
-            model_name='card',
-            name='bank_name',
-            field=models.CharField(default='', max_length=100),
+            model_name="card",
+            name="bank_name",
+            field=models.CharField(default="", max_length=100),
         ),
         migrations.AddIndex(
-            model_name='card',
-            index=models.Index(fields=['user', 'is_active'], name='authenticat_user_id_0c7591_idx'),
+            model_name="card",
+            index=models.Index(
+                fields=["user", "is_active"],
+                name="authenticat_user_id_0c7591_idx",
+            ),
         ),
         migrations.AddIndex(
-            model_name='card',
-            index=models.Index(fields=['authorization_code'], name='authenticat_authori_5a6d2b_idx'),
+            model_name="card",
+            index=models.Index(
+                fields=["authorization_code"],
+                name="authenticat_authori_5a6d2b_idx",
+            ),
         ),
     ]
