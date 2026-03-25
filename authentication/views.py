@@ -10147,3 +10147,129 @@ def earnings_summary(request):
     }
 
     return Response(data)
+
+
+from rest_framework import generics, permissions, status
+from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from .models import AmbassadorMonthlyReport, CustomUser
+from .serializers import AmbassadorMonthlyReportSerializer
+from .utils import send_push_notification, send_generic_email
+
+
+class AmbassadorMonthlyReportCreateView(generics.CreateAPIView):
+    serializer_class = AmbassadorMonthlyReportSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        report = serializer.save()
+
+        user = request.user
+
+        # user email
+        user_subject = "Ambassador Report Received... 🕒"
+        user_message = (
+            f"Hi {user.first_name},<br><br>"
+            f"We’ve received your ambassador report for {report.month}. "
+            "It is now under review. We’ll notify you once it has been approved.<br><br>"
+            "Thank you for using MyFund.<br><br>"
+        )
+        send_generic_email(
+            subject=user_subject,
+            message=user_message,
+            from_email="MyFund <info@myfundmobile.com>",
+            recipient_list=[user.email],
+        )
+
+        # user push
+        send_push_notification(
+            user=user,
+            title="Ambassador Report Submitted... 🕒",
+            message=f"Your report for {report.month} is under review. We’ll notify you once it has been approved.",
+            data={"report_id": report.id, "month": report.month, "status": report.status},
+            notif_type="SYSTEM",
+        )
+
+        # admin email
+        admin_email = ["info@myfundmobile.com", "company@myfundmobile.com"]
+        admin_subject = f"Ambassador Report Pending Review - {user.first_name} {user.last_name}"
+        admin_message = (
+            f"Hello Admin,<br><br>"
+            f"{user.first_name} {user.last_name} ({user.email}) has submitted an ambassador report for {report.month}. "
+            "Please review it in Django admin.<br><br>"
+        )
+        send_generic_email(
+            subject=admin_subject,
+            message=admin_message,
+            from_email="MyFund <info@myfundmobile.com>",
+            recipient_list=admin_email,
+        )
+
+        # admin push
+        admin_emails = [
+            "tolulopeahmed@gmail.com",
+            "ceo@myfundmobile.com",
+            "lioness@myfundmobile.com",
+        ]
+        admin_users = CustomUser.objects.filter(email__in=admin_emails)
+        for admin_user in admin_users:
+            if getattr(admin_user, "expo_push_tokens", []):
+                send_push_notification(
+                    user=admin_user,
+                    title="📋 Ambassador Report Submitted",
+                    message=f"{user.first_name} {user.last_name} submitted a report for {report.month}.",
+                    data={
+                        "report_id": report.id,
+                        "user_email": user.email,
+                        "month": report.month,
+                        "type": "admin_ambassador_report_alert",
+                    },
+                    notif_type="ADMIN_ALERT",
+                )
+
+        return Response(
+            {
+                "message": f"Your ambassador report for {report.month} has been submitted and is under review.",
+                "report_id": report.id,
+                "status": report.status,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class AmbassadorMonthlyReportStatusView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        latest_report = (
+            AmbassadorMonthlyReport.objects.filter(user=request.user)
+            .order_by("-submitted_at")
+            .first()
+        )
+
+        if not latest_report:
+            return Response(
+                {"message": "No ambassador report found yet.", "report": None},
+                status=status.HTTP_200_OK,
+            )
+
+        return Response(
+            {
+                "report": {
+                    "id": latest_report.id,
+                    "month": latest_report.month,
+                    "status": latest_report.status,
+                    "total_points_awarded": str(latest_report.total_points_awarded),
+                    "stipend_amount": str(latest_report.stipend_amount),
+                    "submitted_at": latest_report.submitted_at,
+                    "approved_at": latest_report.approved_at,
+                    "admin_note": latest_report.admin_note,
+                }
+            },
+            status=status.HTTP_200_OK,
+        )

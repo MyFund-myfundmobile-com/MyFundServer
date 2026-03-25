@@ -2500,6 +2500,326 @@ class DvaDepositIntentAdmin(admin.ModelAdmin):
         "confirmed_at",
     )
 
+from decimal import Decimal
+from django.contrib import admin, messages
+from django.db import transaction as db_transaction
+from django.utils import timezone
+
+from .models import AmbassadorPointConfig, AmbassadorMonthlyReport, Transaction
+from .utils import send_push_notification, send_generic_email
+
+
+@admin.register(AmbassadorPointConfig)
+class AmbassadorPointConfigAdmin(admin.ModelAdmin):
+    list_display = (
+        "name",
+        "is_active",
+        "signup_points",
+        "signup_points_cap",
+        "confirmed_points",
+        "savings_points_per_10000",
+        "savings_points_cap",
+        "updated_at",
+    )
+
+    def save_model(self, request, obj, form, change):
+        if obj.is_active:
+            AmbassadorPointConfig.objects.exclude(pk=obj.pk).update(is_active=False)
+        super().save_model(request, obj, form, change)
+
+
+@admin.register(AmbassadorMonthlyReport)
+class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "user",
+        "month",
+        "status",
+        "total_points_awarded",
+        "stipend_amount",
+        "stipend_paid",
+        "submitted_at",
+        "approved_at",
+    )
+    list_filter = ("status", "month", "stipend_paid", "submitted_at")
+    search_fields = ("user__email", "user__first_name", "user__last_name", "month")
+    readonly_fields = (
+        "submitted_at",
+        "updated_at",
+        "approved_at",
+        "signup_points_awarded",
+        "confirmed_points_awarded",
+        "savings_points_awarded",
+        "attendance_points_awarded",
+        "coursera_points_awarded",
+        "social_media_points_awarded",
+        "abroad_points_awarded",
+        "events_points_awarded",
+        "others_points_awarded",
+        "total_points_awarded",
+        "stipend_amount",
+    )
+
+    fieldsets = (
+        (
+            "Report Info",
+            {
+                "fields": (
+                    "user",
+                    "month",
+                    "status",
+                    "admin_note",
+                    "approved_by",
+                    "approved_at",
+                    "submitted_at",
+                    "updated_at",
+                )
+            },
+        ),
+        (
+            "Submitted Values",
+            {
+                "fields": (
+                    "signups_submitted",
+                    "confirmed_submitted",
+                    "savings_submitted",
+                    "attendance_submitted",
+                    "others_submitted",
+                    "coursera_submitted",
+                    "social_media_submitted",
+                    "abroad_confirmed_submitted",
+                    "events_submitted",
+                    "notes",
+                )
+            },
+        ),
+        (
+            "Evidence",
+            {
+                "fields": (
+                    "coursera_certificate",
+                    "social_media_evidence",
+                    "abroad_signups_evidence",
+                    "events_evidence",
+                )
+            },
+        ),
+        (
+            "Approved Values",
+            {
+                "fields": (
+                    "signups_approved",
+                    "confirmed_approved",
+                    "savings_approved",
+                    "attendance_approved",
+                    "others_approved",
+                    "coursera_approved",
+                    "social_media_approved",
+                    "abroad_confirmed_approved",
+                    "events_approved",
+                )
+            },
+        ),
+        (
+            "Points Breakdown",
+            {
+                "fields": (
+                    "signup_points_awarded",
+                    "confirmed_points_awarded",
+                    "savings_points_awarded",
+                    "attendance_points_awarded",
+                    "coursera_points_awarded",
+                    "social_media_points_awarded",
+                    "abroad_points_awarded",
+                    "events_points_awarded",
+                    "others_points_awarded",
+                    "total_points_awarded",
+                )
+            },
+        ),
+        (
+            "Stipend",
+            {
+                "fields": (
+                    "stipend_amount",
+                    "stipend_paid",
+                )
+            },
+        ),
+    )
+
+    actions = ["approve_reports", "reject_reports", "recalculate_selected_reports"]
+
+    def credit_stipend_and_notify(self, report):
+        user = report.user
+
+        if report.stipend_paid:
+            return False, "Stipend already paid for this report."
+
+        stipend_amount = Decimal(report.stipend_amount or 0)
+        if stipend_amount <= 0:
+            return False, "Stipend amount is zero. Nothing to pay."
+
+        with db_transaction.atomic():
+            # lock user row safely
+            locked_user = type(user).objects.select_for_update().get(pk=user.pk)
+
+            # credit wallet
+            locked_user.wallet = (locked_user.wallet or Decimal("0.00")) + stipend_amount
+            locked_user.save(update_fields=["wallet"])
+
+            # create confirmed credit transaction
+            Transaction.objects.create(
+                user=locked_user,
+                transaction_type="credit",
+                status="confirmed",
+                amount=stipend_amount,
+                description=f"Ambassador stipend for {report.month} ({report.total_points_awarded} points)",
+                source="WALLET",
+            )
+
+            report.stipend_paid = True
+            report.save(update_fields=["stipend_paid"])
+
+        # email user
+        send_generic_email(
+            subject="Ambassador Stipend Credited ✅",
+            message=(
+                f"Hi {user.first_name},<br><br>"
+                f"Your ambassador report for {report.month} has been approved and your stipend has been credited to your wallet.<br><br>"
+                f"Points awarded: {report.total_points_awarded}<br>"
+                f"Stipend credited: ₦{stipend_amount:,.2f}<br><br>"
+                "Thank you for representing MyFund.<br><br>"
+                "MyFund"
+            ),
+            from_email="MyFund <info@myfundmobile.com>",
+            recipient_list=[user.email],
+        )
+
+        # push user
+        send_push_notification(
+            user=user,
+            title="Ambassador Stipend Credited ✅",
+            message=(
+                f"Your stipend for {report.month} has been credited. "
+                f"₦{stipend_amount:,.2f} added to your wallet."
+            ),
+            data={
+                "report_id": report.id,
+                "month": report.month,
+                "type": "AMBASSADOR_STIPEND",
+                "points": float(report.total_points_awarded),
+                "stipend_amount": float(stipend_amount),
+            },
+            notif_type="SYSTEM",
+        )
+
+        return True, f"₦{stipend_amount:,.2f} credited successfully."
+
+    def notify_user_rejected(self, report):
+        user = report.user
+
+        send_generic_email(
+            subject="Ambassador Report Update",
+            message=(
+                f"Hi {user.first_name},<br><br>"
+                f"Your ambassador report for {report.month} was reviewed but not approved.<br><br>"
+                f"Admin note: {report.admin_note or 'Please contact support for clarification.'}<br><br>"
+                "MyFund"
+            ),
+            from_email="MyFund <info@myfundmobile.com>",
+            recipient_list=[user.email],
+        )
+
+        send_push_notification(
+            user=user,
+            title="Ambassador Report Not Approved",
+            message=f"Your report for {report.month} was reviewed. Please check the update.",
+            data={
+                "report_id": report.id,
+                "month": report.month,
+                "status": report.status,
+            },
+            notif_type="SYSTEM",
+        )
+
+    def save_model(self, request, obj, form, change):
+        old_status = None
+        old_stipend_paid = False
+
+        if change and obj.pk:
+            old_obj = AmbassadorMonthlyReport.objects.get(pk=obj.pk)
+            old_status = old_obj.status
+            old_stipend_paid = old_obj.stipend_paid
+
+        obj.recalculate_points()
+
+        if obj.status == "approved" and not obj.approved_at:
+            obj.approved_at = timezone.now()
+
+        if obj.status == "approved" and not obj.approved_by:
+            obj.approved_by = request.user
+
+        super().save_model(request, obj, form, change)
+
+        if old_status != "rejected" and obj.status == "rejected":
+            self.notify_user_rejected(obj)
+
+        if obj.status == "approved" and not old_stipend_paid and not obj.stipend_paid:
+            success, msg = self.credit_stipend_and_notify(obj)
+            if success:
+                self.message_user(request, msg, level=messages.SUCCESS)
+            else:
+                self.message_user(request, msg, level=messages.WARNING)
+
+    @admin.action(description="✅ Approve selected ambassador reports")
+    def approve_reports(self, request, queryset):
+        approved_count = 0
+        credited_count = 0
+
+        for report in queryset:
+            if report.status != "approved":
+                report.status = "approved"
+                report.approved_by = request.user
+                report.approved_at = timezone.now()
+
+            report.recalculate_points()
+            report.save()
+
+            approved_count += 1
+
+            if not report.stipend_paid:
+                success, _ = self.credit_stipend_and_notify(report)
+                if success:
+                    credited_count += 1
+
+        self.message_user(
+            request,
+            f"{approved_count} report(s) approved. {credited_count} stipend(s) credited.",
+            level=messages.SUCCESS,
+        )
+
+    @admin.action(description="❌ Reject selected ambassador reports")
+    def reject_reports(self, request, queryset):
+        count = 0
+        for report in queryset:
+            report.status = "rejected"
+            report.save()
+            self.notify_user_rejected(report)
+            count += 1
+
+        self.message_user(request, f"{count} report(s) rejected.", level=messages.WARNING)
+
+    @admin.action(description="🔄 Recalculate selected ambassador reports")
+    def recalculate_selected_reports(self, request, queryset):
+        count = 0
+        for report in queryset:
+            report.recalculate_points()
+            report.save()
+            count += 1
+
+        self.message_user(request, f"{count} report(s) recalculated.", level=messages.SUCCESS)
+        
 
 admin.site.register(DailyROIAccrual, DailyROIAccrualAdmin)
 admin.site.register(ROITransaction, ROITransactionAdmin)

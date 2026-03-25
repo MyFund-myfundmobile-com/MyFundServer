@@ -6,24 +6,11 @@ from django.db import migrations
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('authentication', '0035_transaction_idempotency_key'),
+        ("authentication", "0035_transaction_idempotency_key"),
     ]
 
     operations = [
-        migrations.RemoveField(
-            model_name='card',
-            name='card_number',
-        ),
-        migrations.RemoveField(
-            model_name='card',
-            name='cvv',
-        ),
-        migrations.RemoveField(
-            model_name='card',
-            name='expiry_date',
-        ),
-        migrations.RemoveField(
-            model_name='card',
-            name='pin',
-        ),
+        # No-op migration.
+        # The card fields were already removed in
+        # 0035_alter_card_options_remove_card_card_number_and_more.
     ]
