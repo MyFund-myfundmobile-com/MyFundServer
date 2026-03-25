@@ -27,9 +27,32 @@ ADMIN_PUSH_EMAILS = [
 ]
 
 
-def send_push_notification(user, title, message, data=None, notif_type="SYSTEM"):
+def send_push_notification(
+    user=None,
+    title="",
+    message="",
+    data=None,
+    notif_type="SYSTEM",
+    user_id=None,
+):
     """Send a push notification to a user via Expo and store in DB."""
+
     data = data or {}
+
+    if user is None and user_id is not None:
+        User = get_user_model()
+        try:
+            user = User.objects.get(id=user_id)
+        except User.DoesNotExist:
+            logger.warning(
+                f"Push notification failed: user with id {user_id} does not exist"
+            )
+            return {"sent": 0, "total": 0, "success": False}
+
+    if user is None:
+        logger.warning("Push notification failed: no user or user_id provided")
+        return {"sent": 0, "total": 0, "success": False}
+
     tokens = getattr(user, "expo_push_tokens", []) or []
 
     notification = PushNotifications.objects.create(
@@ -43,13 +66,17 @@ def send_push_notification(user, title, message, data=None, notif_type="SYSTEM")
 
     if not tokens:
         logger.warning(f"No push tokens for {user.email}")
-        return {"sent": 0, "total": 0}
+        return {"sent": 0, "total": 0, "success": False}
 
     sent_count = 0
+    valid_tokens_count = 0
+
     for token_entry in tokens:
         token = token_entry.get("token")
         if not token:
             continue
+
+        valid_tokens_count += 1
 
         payload = {
             "to": token,
@@ -61,21 +88,43 @@ def send_push_notification(user, title, message, data=None, notif_type="SYSTEM")
             "priority": "high",
         }
 
-        headers = {"Accept": "application/json", "Content-Type": "application/json"}
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
 
         try:
             resp = requests.post(
-                EXPO_PUSH_URL, json=payload, headers=headers, timeout=10
+                EXPO_PUSH_URL,
+                json=payload,
+                headers=headers,
+                timeout=10,
             )
             res_data = resp.json()
-            if res_data.get("data", {}).get("status") == "ok":
-                sent_count += 1
+
+            expo_data = res_data.get("data")
+            if isinstance(expo_data, dict):
+                if expo_data.get("status") == "ok":
+                    sent_count += 1
+                else:
+                    logger.warning(f"Failed sending push to {token}: {res_data}")
+            elif isinstance(expo_data, list):
+                item = expo_data[0] if expo_data else {}
+                if item.get("status") == "ok":
+                    sent_count += 1
+                else:
+                    logger.warning(f"Failed sending push to {token}: {res_data}")
             else:
-                logger.warning(f"Failed sending push to {token}: {res_data}")
+                logger.warning(f"Unexpected Expo response for {token}: {res_data}")
+
         except Exception as e:
             logger.error(f"Error sending push to {token}: {e}")
 
-    return {"sent": sent_count, "total": len(tokens)}
+    return {
+        "sent": sent_count,
+        "total": valid_tokens_count,
+        "success": sent_count > 0,
+    }
 
 
 def send_admin_push_notification(title, message, data=None, notif_type="ADMIN_ALERT"):
@@ -107,6 +156,7 @@ def send_admin_push_notification(title, message, data=None, notif_type="ADMIN_AL
 
 import logging
 import re
+import time
 from datetime import date
 from django.conf import settings
 from django.core.mail import send_mail
@@ -139,258 +189,197 @@ def send_generic_email(
         f"📧 START send_generic_email - Subject: '{subject}', Recipients: {len(recipient_list) if isinstance(recipient_list, list) else 'single'}"
     )
 
-    try:
-        if isinstance(recipient_list, str):
-            recipient_list = [recipient_list]
+    if isinstance(recipient_list, str):
+        recipient_list = [recipient_list]
 
-        if not recipient_list:
-            logger.warning("No recipients provided")
-            return {"status": "skipped", "reason": "No recipients"}
+    if not recipient_list:
+        logger.warning("No recipients provided")
+        return {"status": "skipped", "reason": "No recipients"}
 
-        valid_recipients = []
-        invalid_recipients = []
+    valid_recipients = []
+    invalid_recipients = []
 
-        for email in recipient_list:
-            email = str(email).strip().lower()
-            if validate_email(email):
-                valid_recipients.append(email)
-            else:
-                invalid_recipients.append(email)
-                logger.warning(f"Invalid email skipped: {email}")
+    for email in recipient_list:
+        email = str(email).strip().lower()
+        if validate_email(email):
+            valid_recipients.append(email)
+        else:
+            invalid_recipients.append(email)
+            logger.warning(f"Invalid email skipped: {email}")
 
-        if not valid_recipients:
-            logger.error("No valid email addresses")
-            return {
-                "status": "error",
-                "reason": "No valid emails",
-                "invalid": invalid_recipients,
-            }
-
-        from_email = from_email or settings.DEFAULT_FROM_EMAIL
-        total_valid = len(valid_recipients)
-        logger.info(
-            f"📧 Valid recipients: {total_valid}, Invalid skipped: {len(invalid_recipients)}"
-        )
-
-        # ---------- Personalization ----------
-        def personalize(email_addr):
-            try:
-                logger.debug(f"Personalizing email for: {email_addr}")
-                user = CustomUser.objects.filter(email=email_addr).first()
-
-                # ROI / Quarter placeholders
-                today = timezone.now().date()
-                year, month = today.year, today.month
-                if month <= 3:
-                    qs, qe, ql = (
-                        date(year - 1, 10, 1),
-                        date(year - 1, 12, 31),
-                        f"Q4 {year-1}",
-                    )
-                elif month <= 6:
-                    qs, qe, ql = date(year, 1, 1), date(year, 3, 31), f"Q1 {year}"
-                elif month <= 9:
-                    qs, qe, ql = date(year, 4, 1), date(year, 6, 30), f"Q2 {year}"
-                else:
-                    qs, qe, ql = date(year, 7, 1), date(year, 9, 30), f"Q3 {year}"
-
-                roi_qs = (
-                    ROITransaction.objects.filter(
-                        user=user, accrued_date__range=[qs, qe], is_paid_out=True
-                    )
-                    if user
-                    else []
-                )
-
-                total_roi = sum(r.amount for r in roi_qs)
-                savings_roi = sum(r.amount for r in roi_qs if r.roi_type == "SAVINGS")
-                investment_roi = sum(
-                    r.amount for r in roi_qs if r.roi_type == "INVESTMENT"
-                )
-
-                placeholders = {
-                    "{first_name}": user.first_name if user else "User",
-                    "{last_name}": user.last_name if user else "",
-                    "{full_name}": getattr(user, "full_name", email_addr),
-                    "{email}": email_addr,
-                    "{wallet}": f"{getattr(user, 'wallet', 0):,.2f}",
-                    "{savings}": f"{getattr(user, 'savings', 0):,.2f}",
-                    "{investment}": f"{getattr(user, 'investment', 0):,.2f}",
-                    "{total_payout}": f"{total_roi:,.2f}",
-                    "{savings_roi}": f"{savings_roi:,.2f}",
-                    "{investment_roi}": f"{investment_roi:,.2f}",
-                    "{quarter_label}": ql,
-                }
-
-                # Replace placeholders in subject & message
-                p_subject = subject  # <-- add this before the loop
-                p_message = message  # you already have this
-                for k, v in placeholders.items():
-                    p_subject = p_subject.replace(k, v)
-                    p_message = p_message.replace(k, v)
-
-                # Render template
-                context = {
-                    "subject": p_subject,
-                    "message": p_message,
-                    "user": user,
-                    "email": email_addr,
-                }
-
-                try:
-                    html_message = render_to_string(template, context)
-                except Exception as e:
-                    logger.warning(f"Template rendering failed for {email_addr}: {e}")
-                    html_message = f"<html><body>{p_message}</body></html>"
-
-                plain_message = strip_tags(html_message) or p_message
-
-                return {
-                    "to": email_addr,
-                    "subject": p_subject,
-                    "html_message": html_message,
-                    "plain_message": plain_message,
-                }
-
-            except Exception as e:
-                logger.error(f"Personalization error for {email_addr}: {e}")
-                return {
-                    "to": email_addr,
-                    "subject": subject,
-                    "html_message": f"<html><body>{message}</body></html>",
-                    "plain_message": str(message),
-                }
-
-        payloads = [personalize(e) for e in valid_recipients]
-        logger.info(f"📧 Personalization complete. Payloads: {len(payloads)}")
-
-        # ---------- INLINE SEND (≤30 recipients) ----------
-        if total_valid <= use_celery_threshold:
-            logger.info(f"📧 Using INLINE send for {total_valid} recipients")
-            sent_count = 0
-            failed_emails = []
-
-            for p in payloads:
-                try:
-                    logger.debug(f"Sending email to: {p['to']}")
-                    send_mail(
-                        subject=p["subject"],
-                        message=p["plain_message"],
-                        from_email=from_email,
-                        recipient_list=[p["to"]],
-                        html_message=p["html_message"],
-                        fail_silently=False,
-                    )
-                    sent_count += 1
-                    logger.info(f"✅ Inline email sent to {p['to']}")
-                except Exception as e:
-                    logger.error(f"❌ Failed to send email to {p['to']}: {e}")
-                    failed_emails.append(p["to"])
-
-            logger.info(
-                f"📧 Inline send complete: {sent_count} sent, {len(failed_emails)} failed"
-            )
-
-            # Return proper result dictionary
-            if failed_emails == []:
-                return {
-                    "status": "completed",
-                    "sent": sent_count,
-                    "failed": 0,
-                    "failed_emails": [],
-                    "total": total_valid,
-                    "invalid_skipped": len(invalid_recipients),
-                    "invalid_emails": invalid_recipients,
-                }
-            else:
-                return {
-                    "status": "partial",
-                    "sent": sent_count,
-                    "failed": len(failed_emails),
-                    "failed_emails": failed_emails,
-                    "total": total_valid,
-                    "invalid_skipped": len(invalid_recipients),
-                    "invalid_emails": invalid_recipients,
-                }
-
-        # ---------- CELERY BATCH SEND (>30 recipients) WITH NAMECHEAP SAFETY ----------
-        logger.info(f"📧 Using CELERY batch send for {total_valid} recipients")
-        try:
-            from .tasks import send_bulk_email_task, send_namecheap_safe_email_task
-
-            # Namecheap-safe settings (MAX 50 emails per hour)
-            NAMECHEAP_MAX_PER_HOUR = 45  # Keep it safe at 45
-            BATCH_SIZE = 15  # Small batches
-            DELAY_BETWEEN_BATCHES_MINUTES = 60  # 1 hour between batches
-
-            if total_valid <= 100:
-                # Small batch (<100): Send immediately with small delay
-                send_bulk_email_task.delay(payloads, from_email)
-                logger.info(f"📦 Small batch queued: {total_valid} recipients")
-            else:
-                # Large batch: Split into Namecheap-safe chunks
-                num_batches = (total_valid + BATCH_SIZE - 1) // BATCH_SIZE
-                batches = [
-                    payloads[i : i + BATCH_SIZE]
-                    for i in range(0, total_valid, BATCH_SIZE)
-                ]
-
-                logger.info(
-                    f"📦 Splitting {total_valid} emails into {num_batches} batches of {BATCH_SIZE}"
-                )
-
-                # Schedule batches with 1-hour delays
-                for i, batch in enumerate(batches):
-                    delay_minutes = i * DELAY_BETWEEN_BATCHES_MINUTES
-
-                    send_namecheap_safe_email_task.apply_async(
-                        args=[batch, from_email],
-                        countdown=delay_minutes * 60,  # Convert minutes to seconds
-                        retry=True,
-                        retry_policy={
-                            "max_retries": 3,
-                            "interval_start": 10,
-                            "interval_step": 10,
-                            "interval_max": 50,
-                        },
-                    )
-
-                    logger.info(
-                        f"📦 Batch {i+1}/{num_batches} queued with {delay_minutes} min delay"
-                    )
-
-            # Return queued status
-            return {
-                "status": "queued",
-                "total": total_valid,
-                "invalid_skipped": len(invalid_recipients),
-                "method": "celery_namecheap_safe",
-                "note": "Emails will be sent in safe batches to avoid Namecheap limits",
-                "estimated_completion": f"~{max(1, (total_valid // BATCH_SIZE))} hours",
-            }
-
-        except ImportError as e:
-            logger.error(f"❌ Cannot import Celery task module: {e}")
-            return {
-                "status": "error",
-                "reason": f"Cannot import Celery task module: {str(e)}",
-                "total": total_valid,
-            }
-        except Exception as e:
-            logger.error(f"❌ Failed to queue Celery task: {e}")
-            return {
-                "status": "error",
-                "reason": f"Celery queue failed: {str(e)}",
-                "total": total_valid,
-            }
-
-    except Exception as e:
-        logger.error(f"❌ UNEXPECTED ERROR in send_generic_email: {e}", exc_info=True)
+    if not valid_recipients:
+        logger.error("No valid email addresses")
         return {
             "status": "error",
-            "reason": f"Unexpected error: {str(e)}",
-            "traceback": str(e.__traceback__) if hasattr(e, "__traceback__") else None,
+            "reason": "No valid emails",
+            "invalid": invalid_recipients,
         }
+
+    from_email = from_email or settings.DEFAULT_FROM_EMAIL
+    total_valid = len(valid_recipients)
+    logger.info(
+        f"📧 Valid recipients: {total_valid}, Invalid skipped: {len(invalid_recipients)}"
+    )
+
+    # ---------- Personalization ----------
+    def personalize(email_addr):
+        try:
+            user = CustomUser.objects.filter(email=email_addr).first()
+
+            today = timezone.now().date()
+            year, month = today.year, today.month
+            if month <= 3:
+                qs, qe, ql = (
+                    date(year - 1, 10, 1),
+                    date(year - 1, 12, 31),
+                    f"Q4 {year-1}",
+                )
+            elif month <= 6:
+                qs, qe, ql = date(year, 1, 1), date(year, 3, 31), f"Q1 {year}"
+            elif month <= 9:
+                qs, qe, ql = date(year, 4, 1), date(year, 6, 30), f"Q2 {year}"
+            else:
+                qs, qe, ql = date(year, 7, 1), date(year, 9, 30), f"Q3 {year}"
+
+            roi_qs = (
+                ROITransaction.objects.filter(
+                    user=user, accrued_date__range=[qs, qe], is_paid_out=True
+                )
+                if user
+                else []
+            )
+
+            total_roi = sum(r.amount for r in roi_qs)
+            savings_roi = sum(r.amount for r in roi_qs if r.roi_type == "SAVINGS")
+            investment_roi = sum(r.amount for r in roi_qs if r.roi_type == "INVESTMENT")
+
+            placeholders = {
+                "{first_name}": user.first_name if user else "User",
+                "{last_name}": user.last_name if user else "",
+                "{full_name}": getattr(user, "full_name", email_addr),
+                "{email}": email_addr,
+                "{wallet}": f"{getattr(user, 'wallet', 0):,.2f}",
+                "{savings}": f"{getattr(user, 'savings', 0):,.2f}",
+                "{investment}": f"{getattr(user, 'investment', 0):,.2f}",
+                "{total_payout}": f"{total_roi:,.2f}",
+                "{savings_roi}": f"{savings_roi:,.2f}",
+                "{investment_roi}": f"{investment_roi:,.2f}",
+                "{quarter_label}": ql,
+            }
+
+            p_subject = subject
+            p_message = message
+            for k, v in placeholders.items():
+                p_subject = p_subject.replace(k, v)
+                p_message = p_message.replace(k, v)
+
+            context = {
+                "subject": p_subject,
+                "message": p_message,
+                "user": user,
+                "email": email_addr,
+            }
+
+            try:
+                html_message = render_to_string(template, context)
+            except Exception as e:
+                logger.warning(f"Template rendering failed for {email_addr}: {e}")
+                html_message = f"<html><body>{p_message}</body></html>"
+
+            plain_message = strip_tags(html_message) or p_message
+
+            return {
+                "to": email_addr,
+                "subject": p_subject,
+                "html_message": html_message,
+                "plain_message": plain_message,
+            }
+
+        except Exception as e:
+            logger.error(f"Personalization error for {email_addr}: {e}")
+            return {
+                "to": email_addr,
+                "subject": subject,
+                "html_message": f"<html><body>{message}</body></html>",
+                "plain_message": str(message),
+            }
+
+    payloads = [personalize(e) for e in valid_recipients]
+    logger.info(f"📧 Personalization complete. Payloads: {len(payloads)}")
+
+    # ---------- INLINE SEND (≤30 recipients) ----------
+    if total_valid <= use_celery_threshold:
+        logger.info(f"📧 Using INLINE send for {total_valid} recipients")
+        sent_count = 0
+        failed_emails = []
+
+        for p in payloads:
+            try:
+                send_mail(
+                    subject=p["subject"],
+                    message=p["plain_message"],
+                    from_email=from_email,
+                    recipient_list=[p["to"]],
+                    html_message=p["html_message"],
+                    fail_silently=False,
+                )
+                sent_count += 1
+                logger.info(f"✅ Email sent to {p['to']}")
+            except Exception as e:
+                logger.error(f"❌ Email failed for {p['to']}: {e}")
+                failed_emails.append(p["to"])
+            time.sleep(1)
+
+        return {
+            "status": "completed",
+            "sent": sent_count,
+            "failed": len(failed_emails),
+            "failed_emails": failed_emails,
+            "total": total_valid,
+            "invalid_skipped": len(invalid_recipients),
+            "invalid_emails": invalid_recipients,
+        }
+
+    # ---------- CELERY BATCH SEND (>30 recipients) ----------
+    logger.info(f"📧 Using CELERY batch send for {total_valid} recipients")
+    try:
+        from .tasks import send_bulk_email_task
+
+        # Namecheap-safe batching: 45 emails/hour
+        BATCH_SIZE = 45
+        DELAY_BETWEEN_EMAILS = 72  # seconds (~50/hour)
+        num_batches = (total_valid + BATCH_SIZE - 1) // BATCH_SIZE
+        batches = [
+            payloads[i : i + BATCH_SIZE] for i in range(0, total_valid, BATCH_SIZE)
+        ]
+
+        for i, batch in enumerate(batches):
+            countdown_seconds = i * 900  # 15 minutes between batches
+            logger.info(
+                f"⏱ Scheduling batch {i+1}/{num_batches} to run in {countdown_seconds}s ({len(batch)} emails)"
+            )
+            send_bulk_email_task.apply_async(
+                args=[batch, from_email],
+                kwargs={
+                    "batch_size": len(batch),
+                    "delay_seconds": DELAY_BETWEEN_EMAILS,
+                },
+                countdown=countdown_seconds,
+                queue="email_queue",
+            )
+
+        return {
+            "status": "queued",
+            "total": total_valid,
+            "invalid_skipped": len(invalid_recipients),
+            "method": "namecheap_safe_batches",
+            "note": f"Emails queued in safe batches (50/hr, ~12-14h total)",
+            "estimated_hours": f"{num_batches} hours",
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Failed to queue Celery task: {e}")
+        return {"status": "error", "reason": str(e), "total": total_valid}
 
 
 def get_user_balance(user, source):
@@ -878,76 +867,729 @@ def get_next_payout_date(today: date) -> date:
     return date(year + 1, 1, 1)
 
 
-from django.db.models.functions import TruncMonth
-from django.db.models import Sum, Count, F, ExpressionWrapper, DecimalField
-from dateutil.relativedelta import relativedelta
+import requests
+from django.conf import settings
+
+PAYSTACK_BASE_URL = "https://api.paystack.co"
 
 
-def get_monthly_metrics(months=12):
-    now = timezone.now()
-    start_date = now - relativedelta(months=months)
+def get_paystack_headers():
+    return {
+        "Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}",
+        "Content-Type": "application/json",
+    }
 
-    # USERS PER MONTH
-    users_per_month = (
-        CustomUser.objects.filter(is_deleted=False, date_joined__gte=start_date)
-        .annotate(month=TruncMonth("date_joined"))
-        .values("month")
-        .annotate(
-            users=Count("id"),
-            savings=Coalesce(Sum("savings"), Value(0), output_field=DecimalField()),
-            investments=Coalesce(Sum("investment"), Value(0), output_field=DecimalField()),
-            fum=Coalesce(
-                Sum(
-                    ExpressionWrapper(
-                        F("savings") + F("investment"),
-                        output_field=DecimalField(max_digits=15, decimal_places=2),
-                    )
-                ),
-                Value(0),
-                output_field=DecimalField(),
-            ),
+
+def create_paystack_recipient(account_name, account_number, bank_code):
+    """
+    Create a Paystack transfer recipient for withdrawals.
+    Returns the recipient_code on success, else None.
+    """
+    payload = {
+        "type": "nuban",
+        "name": account_name,
+        "account_number": account_number,
+        "bank_code": bank_code,
+        "currency": "NGN",
+    }
+
+    try:
+        response = requests.post(
+            f"{PAYSTACK_BASE_URL}/transferrecipient",
+            json=payload,
+            headers=get_paystack_headers(),
+            timeout=30,
         )
-        .order_by("month")
-    )
+        data = response.json()
+    except requests.RequestException as e:
+        print(f"Paystack recipient request failed: {e}")
+        return None
+    except ValueError:
+        print("Invalid JSON response from Paystack recipient endpoint")
+        return None
 
-    # TRANSACTIONS PER MONTH
-    transactions_per_month = (
-        Transaction.objects.filter(date__gte=start_date)
-        .annotate(month=TruncMonth("date"))
-        .values("month")
-        .annotate(
-            transactions=Count("id"),
-            mas_users=Count(
-                "user",
-                distinct=True,
-                filter=Q(
-                    source__in=["SAVINGS", "INVESTMENT"],
-                    transaction_type="credit",
-                    status="confirmed",
-                ),
-            ),
+    if not response.ok or not data.get("status"):
+        print("PAYSTACK RECIPIENT RESPONSE:", response.status_code, data)
+        return None
+
+    recipient_data = data.get("data", {}) or {}
+    return recipient_data.get("recipient_code")
+
+
+def create_paystack_customer(user):
+    """
+    Create a Paystack customer if the user does not already have one.
+    Returns: (success: bool, result: customer_code or error dict)
+    """
+    existing_code = getattr(user, "paystack_customer_code", None)
+    if existing_code:
+        return True, existing_code
+
+    payload = {
+        "email": user.email,
+        "first_name": getattr(user, "first_name", "") or "",
+        "last_name": getattr(user, "last_name", "") or "",
+        "phone": (
+            getattr(user, "phone_number", None) or getattr(user, "phone", None) or ""
+        ),
+    }
+
+    try:
+        response = requests.post(
+            f"{PAYSTACK_BASE_URL}/customer",
+            json=payload,
+            headers=get_paystack_headers(),
+            timeout=30,
         )
-    )
+        data = response.json()
+    except requests.RequestException as e:
+        return False, {"message": f"Paystack customer request failed: {str(e)}"}
+    except ValueError:
+        return False, {
+            "message": "Invalid JSON response from Paystack customer endpoint"
+        }
 
-    # Merge user + transaction metrics
-    tx_map = {t["month"]: t for t in transactions_per_month}
+    if not response.ok or not data.get("status"):
+        return False, data
 
-    monthly_reports = []
-    for u in users_per_month:
-        month = u["month"]
-        tx = tx_map.get(month, {})
+    customer_data = data.get("data", {}) or {}
+    customer_code = customer_data.get("customer_code")
 
-        monthly_reports.append(
-            {
-                "month": month.strftime("%Y-%m"),
-                "label": month.strftime("%b %Y"),
-                "users": u["users"],
-                "savings": float(u["savings"]),
-                "investments": float(u["investments"]),
-                "fum": float(u["fum"]),
-                "transactions": tx.get("transactions", 0),
-                "mas_users": tx.get("mas_users", 0),
+    if not customer_code:
+        return False, {
+            "message": "Customer code missing from Paystack response",
+            "raw": data,
+        }
+
+    user.paystack_customer_code = customer_code
+    user.save(update_fields=["paystack_customer_code"])
+
+    return True, customer_code
+
+
+def identify_paystack_customer(user, bvn, bank_code, account_number):
+    """
+    Trigger Paystack customer identification for DVA creation.
+    Returns: (success: bool, result: response dict)
+    Only returns success when identification is completed, not merely accepted.
+    """
+    if not getattr(user, "paystack_customer_code", None):
+        ok, result = create_paystack_customer(user)
+        if not ok:
+            return False, result
+
+    payload = {
+        "country": "NG",
+        "type": "bank_account",
+        "account_number": account_number,
+        "bvn": bvn,
+        "bank_code": bank_code,
+        "first_name": getattr(user, "first_name", "") or "",
+        "last_name": getattr(user, "last_name", "") or "",
+    }
+
+    print("PAYSTACK IDENTIFICATION PAYLOAD:", payload)
+    print("PAYSTACK IDENTIFICATION CUSTOMER CODE:", user.paystack_customer_code)
+
+    try:
+        response = requests.post(
+            f"{PAYSTACK_BASE_URL}/customer/{user.paystack_customer_code}/identification",
+            json=payload,
+            headers=get_paystack_headers(),
+            timeout=30,
+        )
+
+        print("PAYSTACK IDENTIFICATION STATUS CODE:", response.status_code)
+        print("PAYSTACK IDENTIFICATION HEADERS:", dict(response.headers))
+        print("PAYSTACK IDENTIFICATION RAW TEXT:", response.text)
+
+        try:
+            data = response.json()
+        except ValueError:
+            return False, {
+                "message": "Paystack identification endpoint returned a non-JSON response.",
+                "status_code": response.status_code,
+                "raw_text": response.text,
             }
-        )
 
-    return monthly_reports
+    except requests.RequestException as e:
+        print("PAYSTACK IDENTIFICATION REQUEST FAILED:", str(e))
+        return False, {"message": f"Paystack identification request failed: {str(e)}"}
+
+    print("PAYSTACK IDENTIFICATION RESPONSE JSON:", data)
+
+    if response.status_code == 200 and data.get("status") is True:
+        return True, data
+
+    return False, {
+        "message": data.get("message", "Customer identification not yet completed."),
+        "status_code": response.status_code,
+        "raw": data,
+    }
+
+
+def create_dedicated_account(user, preferred_bank="wema-bank", force_create=False):
+    """
+    Create a Paystack dedicated virtual account after customer identification.
+    Returns: (success: bool, result: account dict or error dict)
+
+    If force_create=True, do not trust locally saved DVA fields; attempt fresh creation from Paystack.
+    """
+    existing_account_number = getattr(user, "dva_account_number", None)
+
+    if existing_account_number and not force_create:
+        return True, {
+            "account_number": existing_account_number,
+            "bank_name": getattr(user, "dva_bank_name", ""),
+            "account_name": getattr(user, "dva_account_name", ""),
+            "account_id": getattr(user, "dva_account_id", ""),
+        }
+
+    if not getattr(user, "paystack_customer_code", None):
+        return False, {"message": "User has no Paystack customer code"}
+
+    payload = {
+        "customer": user.paystack_customer_code,
+        "preferred_bank": preferred_bank,
+    }
+
+    try:
+        response = requests.post(
+            f"{PAYSTACK_BASE_URL}/dedicated_account",
+            json=payload,
+            headers=get_paystack_headers(),
+            timeout=30,
+        )
+        data = response.json()
+    except requests.RequestException as e:
+        return False, {"message": f"Paystack DVA request failed: {str(e)}"}
+    except ValueError:
+        return False, {
+            "message": "Invalid JSON response from Paystack dedicated account endpoint"
+        }
+
+    print("CREATE DVA STATUS CODE:", response.status_code)
+    print("CREATE DVA RESPONSE:", data)
+
+    if not response.ok or not data.get("status"):
+        return False, data
+
+    dedicated = data.get("data", {}) or {}
+    bank = dedicated.get("bank", {}) or {}
+
+    account_number = dedicated.get("account_number")
+    account_name = dedicated.get("account_name")
+    account_id = dedicated.get("id")
+
+    if not account_number:
+        return False, {
+            "message": "Account number missing from Paystack DVA response",
+            "raw": data,
+        }
+
+    user.dva_account_number = account_number
+    user.dva_account_name = account_name
+    user.dva_bank_name = bank.get("name")
+    user.dva_account_id = str(account_id) if account_id is not None else None
+
+    update_fields = [
+        "dva_account_number",
+        "dva_account_name",
+        "dva_bank_name",
+        "dva_account_id",
+    ]
+
+    if hasattr(user, "dva_assigned_at"):
+        user.dva_assigned_at = timezone.now()
+        update_fields.append("dva_assigned_at")
+
+    user.save(update_fields=update_fields)
+
+    return True, {
+        "account_number": user.dva_account_number,
+        "bank_name": user.dva_bank_name,
+        "account_name": user.dva_account_name,
+        "account_id": user.dva_account_id,
+    }
+
+
+# DVA MANAGEMENT - Utility to normalize bank names to Paystack provider slugs
+def normalize_provider_slug(bank_name):
+    """
+    Convert common bank names to Paystack provider slugs.
+    Defaults to wema-bank if unknown.
+    """
+    if not bank_name:
+        return "wema-bank"
+
+    value = str(bank_name).strip().lower()
+
+    mapping = {
+        "wema bank": "wema-bank",
+        "wema": "wema-bank",
+        "titan paystack": "titan-paystack",
+        "titan": "titan-paystack",
+    }
+
+    return mapping.get(value, value.replace(" ", "-"))
+
+
+def clear_local_dva_fields(user, save=True):
+    """
+    Clear locally stored DVA fields on the user.
+    Does NOT reset paystack_identified by default.
+    """
+    user.dva_account_number = None
+    user.dva_account_name = None
+    user.dva_bank_name = None
+    user.dva_account_id = None
+
+    update_fields = [
+        "dva_account_number",
+        "dva_account_name",
+        "dva_bank_name",
+        "dva_account_id",
+    ]
+
+    if hasattr(user, "dva_assigned_at"):
+        user.dva_assigned_at = None
+        update_fields.append("dva_assigned_at")
+
+    if save:
+        user.save(update_fields=update_fields)
+
+    return True, {
+        "message": "Local DVA fields cleared successfully.",
+        "cleared_fields": update_fields,
+    }
+
+
+def fetch_dedicated_account_by_id(dedicated_account_id):
+    """
+    Fetch a dedicated account directly from Paystack by DVA id.
+    Returns: (success: bool, result: dict)
+    """
+    if not dedicated_account_id:
+        return False, {"message": "No dedicated account id provided."}
+
+    try:
+        response = requests.get(
+            f"{PAYSTACK_BASE_URL}/dedicated_account/{dedicated_account_id}",
+            headers=get_paystack_headers(),
+            timeout=30,
+        )
+        data = response.json()
+    except requests.RequestException as e:
+        return False, {"message": f"Fetch DVA request failed: {str(e)}"}
+    except ValueError:
+        return False, {"message": "Invalid JSON response from fetch DVA endpoint"}
+
+    if not response.ok or not data.get("status"):
+        return False, {
+            "message": data.get("message", "Failed to fetch dedicated account"),
+            "raw": data,
+            "status_code": response.status_code,
+        }
+
+    return True, data.get("data", {}) or {}
+
+
+def list_dedicated_accounts_for_customer(user):
+    """
+    List dedicated accounts for a user's Paystack customer code.
+    Returns: (success: bool, result: list|dict)
+    """
+    customer_code = getattr(user, "paystack_customer_code", None)
+    if not customer_code:
+        return False, {"message": "User has no Paystack customer code."}
+
+    try:
+        response = requests.get(
+            f"{PAYSTACK_BASE_URL}/dedicated_account",
+            headers=get_paystack_headers(),
+            params={"customer": customer_code},
+            timeout=30,
+        )
+        data = response.json()
+    except requests.RequestException as e:
+        return False, {"message": f"List DVA request failed: {str(e)}"}
+    except ValueError:
+        return False, {"message": "Invalid JSON response from list DVA endpoint"}
+
+    if not response.ok or not data.get("status"):
+        return False, {
+            "message": data.get("message", "Failed to list dedicated accounts"),
+            "raw": data,
+            "status_code": response.status_code,
+        }
+
+    return True, data.get("data", []) or []
+
+
+def requery_dedicated_account(user, query_date=None):
+    """
+    Trigger Paystack requery for a user's DVA.
+    Uses account number and provider slug.
+    Returns: (success: bool, result: dict)
+    """
+    account_number = getattr(user, "dva_account_number", None)
+    if not account_number:
+        return False, {"message": "User has no local DVA account number to requery."}
+
+    provider_slug = normalize_provider_slug(getattr(user, "dva_bank_name", None))
+    query_date = query_date or date.today().isoformat()
+
+    try:
+        response = requests.get(
+            f"{PAYSTACK_BASE_URL}/dedicated_account/requery",
+            headers=get_paystack_headers(),
+            params={
+                "account_number": account_number,
+                "provider_slug": provider_slug,
+                "date": query_date,
+            },
+            timeout=30,
+        )
+        data = response.json()
+    except requests.RequestException as e:
+        return False, {"message": f"Requery DVA request failed: {str(e)}"}
+    except ValueError:
+        return False, {"message": "Invalid JSON response from requery DVA endpoint"}
+
+    if not response.ok or not data.get("status"):
+        return False, {
+            "message": data.get("message", "Failed to requery dedicated account"),
+            "raw": data,
+            "status_code": response.status_code,
+        }
+
+    return True, data
+
+
+def sync_user_dva_from_paystack(user):
+    """
+    Sync the user's local DVA fields from Paystack.
+    Priority:
+    1. Fetch by local dva_account_id if available
+    2. Otherwise list by paystack_customer_code and select an assigned account
+    3. If no assigned DVA exists, clear local DVA fields
+
+    Returns: (success: bool, result: dict)
+    """
+    dedicated = None
+
+    local_dva_id = getattr(user, "dva_account_id", None)
+    if local_dva_id:
+        ok, result = fetch_dedicated_account_by_id(local_dva_id)
+        if ok:
+            dedicated = result
+        else:
+            print(f"Fetch by local DVA id failed for {user.email}: {result}")
+
+    if dedicated is None:
+        ok, result = list_dedicated_accounts_for_customer(user)
+        if not ok:
+            return False, result
+
+        accounts = result or []
+
+        assigned_accounts = [item for item in accounts if item.get("assigned") is True]
+
+        if assigned_accounts:
+            # Pick the latest by created_at/update order returned by Paystack
+            dedicated = assigned_accounts[0]
+        else:
+            clear_local_dva_fields(user, save=True)
+            return True, {
+                "message": "No assigned DVA found on Paystack. Local DVA fields cleared.",
+                "action": "cleared_local_dva",
+            }
+
+    bank = dedicated.get("bank", {}) or {}
+    account_id = dedicated.get("id")
+    account_number = dedicated.get("account_number")
+    account_name = dedicated.get("account_name")
+    assigned = dedicated.get("assigned", False)
+
+    if not assigned or not account_number:
+        clear_local_dva_fields(user, save=True)
+        return True, {
+            "message": "Dedicated account is not assigned on Paystack. Local fields cleared.",
+            "action": "cleared_local_dva",
+            "raw": dedicated,
+        }
+
+    user.dva_account_number = account_number
+    user.dva_account_name = account_name
+    user.dva_bank_name = bank.get("name")
+    user.dva_account_id = str(account_id) if account_id is not None else None
+
+    update_fields = [
+        "dva_account_number",
+        "dva_account_name",
+        "dva_bank_name",
+        "dva_account_id",
+    ]
+
+    if hasattr(user, "dva_assigned_at") and not getattr(user, "dva_assigned_at", None):
+        user.dva_assigned_at = timezone.now()
+        update_fields.append("dva_assigned_at")
+
+    user.save(update_fields=update_fields)
+
+    return True, {
+        "message": "Local DVA synced successfully from Paystack.",
+        "account_number": user.dva_account_number,
+        "bank_name": user.dva_bank_name,
+        "account_name": user.dva_account_name,
+        "account_id": user.dva_account_id,
+        "raw": dedicated,
+    }
+
+
+def deactivate_user_dva(user, clear_local=True):
+    """
+    Deactivate (unassign) a user's dedicated account on Paystack.
+    Optionally clears local DVA fields after Paystack success.
+
+    Returns: (success: bool, result: dict)
+    """
+    dedicated_account_id = getattr(user, "dva_account_id", None)
+
+    if not dedicated_account_id:
+        return False, {"message": "User has no local DVA account id."}
+
+    try:
+        response = requests.delete(
+            f"{PAYSTACK_BASE_URL}/dedicated_account/{dedicated_account_id}",
+            headers=get_paystack_headers(),
+            timeout=30,
+        )
+        data = response.json()
+    except requests.RequestException as e:
+        return False, {"message": f"Deactivate DVA request failed: {str(e)}"}
+    except ValueError:
+        return False, {"message": "Invalid JSON response from deactivate DVA endpoint"}
+
+    if not response.ok or not data.get("status"):
+        return False, {
+            "message": data.get("message", "Failed to deactivate dedicated account"),
+            "raw": data,
+            "status_code": response.status_code,
+        }
+
+    result = {
+        "message": data.get("message", "Dedicated account deactivated successfully."),
+        "raw": data,
+    }
+
+    if clear_local:
+        clear_local_dva_fields(user, save=True)
+        result["local_clear"] = True
+
+    return True, result
+
+
+def recreate_user_dva(user, preferred_bank="wema-bank"):
+    """
+    Recreate a user's DVA from admin.
+    Requires a Paystack customer code and successful identification.
+    """
+    if not getattr(user, "paystack_customer_code", None):
+        return False, {"message": "User has no Paystack customer code."}
+
+    if not getattr(user, "paystack_identified", False):
+        return False, {
+            "message": "User is not currently marked as Paystack identified."
+        }
+
+    return create_dedicated_account(
+        user,
+        preferred_bank=preferred_bank,
+        force_create=True,
+    )
+
+
+from decimal import Decimal
+from django.utils import timezone
+
+from .models import Transaction
+from .utils import send_generic_email, send_push_notification
+
+
+def approve_quicksave_credit(
+    *,
+    user,
+    amount,
+    transaction_id,
+    description="QuickSave (Transfer)",
+    source="BANK_TRANSFER",
+    paystack_reference=None,
+    paystack_auth_code=None,
+):
+    transaction = Transaction.objects.filter(
+        user=user,
+        transaction_id=transaction_id,
+        status="pending",
+    ).first()
+
+    if not transaction:
+        return False, f"Pending transaction {transaction_id} not found."
+
+    transaction.status = "confirmed"
+    transaction.transaction_type = "credit"
+    transaction.date = timezone.now().date()
+    transaction.time = timezone.now().time()
+    transaction.description = description
+
+    if paystack_reference:
+        transaction.paystack_reference = paystack_reference
+
+    if paystack_auth_code:
+        transaction.paystack_auth_code = paystack_auth_code
+
+    transaction.save(
+        update_fields=[
+            "status",
+            "transaction_type",
+            "date",
+            "time",
+            "description",
+            "paystack_reference",
+            "paystack_auth_code",
+        ]
+    )
+
+    user.savings = (user.savings or Decimal("0")) + Decimal(str(amount))
+
+    if user.referral:
+        user.confirm_referral_rewards(is_referrer=False)
+
+    user.update_total_savings_and_investment_this_month()
+    user.save()
+
+    send_generic_email(
+        subject="QuickSave Updated! ✅",
+        message=(
+            f"Hi {user.first_name},<br><br>"
+            f"Your QuickSave deposit of ₦{Decimal(str(amount)):,.2f} "
+            f"has been confirmed and added to your Savings account."
+        ),
+        from_email="MyFund <info@myfundmobile.com>",
+        recipient_list=[user.email],
+    )
+
+    send_push_notification(
+        user=user,
+        title="QuickSave Approved ✅",
+        message=(
+            f"Hi {user.first_name}, your transfer of "
+            f"₦{Decimal(str(amount)):,.2f} has been added to your Savings account."
+        ),
+        data={
+            "amount": str(amount),
+            "transaction_id": transaction_id,
+            "type": "QuickSave",
+            "source": source,
+        },
+        notif_type="CREDIT",
+    )
+
+    return True, "QuickSave approved successfully."
+
+
+import requests
+from django.conf import settings
+
+
+def requery_paystack_dva(account_number):
+    url = f"https://api.paystack.co/dedicated_account/requery?account_number={account_number}"
+
+    headers = {
+        "Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    response = requests.get(url, headers=headers, timeout=60)
+
+    try:
+        data = response.json()
+    except Exception:
+        data = {"status": False, "message": response.text}
+
+    return response.status_code, data
+
+
+def send_ambassador_status_notification(user, became_ambassador=True):
+    """
+    Send push notification + email when ambassador status changes.
+    """
+    try:
+        if became_ambassador:
+            push_title = "🎉 You are now a MyFund Ambassador!"
+            push_message = (
+                f"Hi {user.first_name}, congratulations! "
+                "Your account has been updated to Ambassador status. You now have access to the MyFund Ambassador portal and benefits. Enjoy!"
+            )
+
+            email_subject = "You are now a MyFund Ambassador 🎉"
+            email_message = (
+                f"Hi {user.first_name},<br><br>"
+                "Congratulations! Your MyFund account has been updated to "
+                "<b>Ambassador status</b>.<br><br>"
+                "You can now enjoy ambassador-related benefits and opportunities on MyFund.<br><br>"
+                "Keep winning with MyFund. 🚀"
+            )
+
+            data = {
+                "type": "AMBASSADOR_GRANTED",
+                "is_ambassador": True,
+            }
+        else:
+            push_title = "Ambassador Status Updated"
+            push_message = (
+                f"Hi {user.first_name}, your MyFund Ambassador status has been removed."
+            )
+
+            email_subject = "Your MyFund Ambassador Status Was Updated"
+            email_message = (
+                f"Hi {user.first_name},<br><br>"
+                "Your MyFund Ambassador status has been removed from your account.<br><br>"
+                "If you believe this was done in error, please contact support.<br><br>"
+                "MyFund Team"
+            )
+
+            data = {
+                "type": "AMBASSADOR_REVOKED",
+                "is_ambassador": False,
+            }
+
+        # Push
+        try:
+            send_push_notification(
+                user=user,
+                title=push_title,
+                message=push_message,
+                data=data,
+                notif_type="SYSTEM",
+            )
+        except Exception as push_error:
+            logger.error(
+                f"Failed to send ambassador push to {user.email}: {push_error}"
+            )
+
+        # Email
+        try:
+            send_generic_email(
+                subject=email_subject,
+                message=email_message,
+                from_email="MyFund <info@myfundmobile.com>",
+                recipient_list=[user.email],
+            )
+        except Exception as email_error:
+            logger.error(
+                f"Failed to send ambassador email to {user.email}: {email_error}"
+            )
+
+    except Exception as e:
+        logger.error(f"Ambassador notification error for {user.email}: {e}")

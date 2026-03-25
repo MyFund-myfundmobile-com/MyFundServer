@@ -155,6 +155,15 @@ class UserSerializer(serializers.ModelSerializer):
             "next_of_kin_phone_number",
             "state",
             "country",
+            # DVA / Paystack fields
+            "dva_account_number",
+            "dva_account_name",
+            "dva_bank_name",
+            "dva_assigned_at",
+            "dva_account_id",
+            "paystack_identified",
+            "paystack_identification_status",
+            "paystack_identification_reason",
             # Add new referral fields
             "total_referrals",
             "confirmed_referrals",
@@ -829,3 +838,64 @@ class DailyROISerializer(serializers.ModelSerializer):
     class Meta:
         model = DailyROIAccrual
         fields = ["date", "savings_roi", "investment_roi", "total_roi"]
+
+
+from rest_framework import serializers
+from .models import AmbassadorMonthlyReport
+
+
+class AmbassadorMonthlyReportSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AmbassadorMonthlyReport
+        fields = [
+            "id",
+            "month",
+            "signups_submitted",
+            "confirmed_submitted",
+            "savings_submitted",
+            "attendance_submitted",
+            "others_submitted",
+            "coursera_submitted",
+            "social_media_submitted",
+            "abroad_confirmed_submitted",
+            "events_submitted",
+            "notes",
+            "coursera_certificate",
+            "social_media_evidence",
+            "abroad_signups_evidence",
+            "events_evidence",
+            "status",
+            "submitted_at",
+        ]
+        read_only_fields = ["id", "status", "submitted_at"]
+
+    def validate_month(self, value):
+        if len(value) != 7 or value[4] != "-":
+            raise serializers.ValidationError("Month must be in YYYY-MM format.")
+        return value
+
+    def validate(self, attrs):
+        request = self.context.get("request")
+        user = request.user
+
+        if not getattr(user, "is_ambassador", False):
+            raise serializers.ValidationError("Only ambassadors can submit reports.")
+
+        month = attrs.get("month")
+        if AmbassadorMonthlyReport.objects.filter(user=user, month=month).exists():
+            raise serializers.ValidationError("You have already submitted a report for this month.")
+
+        return attrs
+
+    def create(self, validated_data):
+        request = self.context.get("request")
+        user = request.user
+
+        report = AmbassadorMonthlyReport.objects.create(
+            user=user,
+            **validated_data,
+        )
+        report.copy_submitted_to_approved_defaults()
+        report.recalculate_points()
+        report.save()
+        return report

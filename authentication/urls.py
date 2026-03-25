@@ -37,6 +37,12 @@ from .views import (
     send_admin_push_notification,
     save_expo_push_token,
     earnings_summary,
+    get_or_create_dva_account,
+    initiate_dva_quicksave,
+    initiate_dva_quickinvest,
+    requery_my_dva_payments,
+    AmbassadorMonthlyReportCreateView, 
+    AmbassadorMonthlyReportStatusView,
 )
 from django.views.decorators.csrf import csrf_exempt
 from authentication.views import CustomGraphQLView
@@ -219,6 +225,18 @@ urlpatterns = [
         name="initiate_invest_transfer",
     ),
     path("message-admin/", views.message_admin, name="message-admin"),
+    # DVAs
+    path("dva/account/", get_or_create_dva_account, name="get_or_create_dva_account"),
+    path("dva/quicksave/", initiate_dva_quicksave, name="initiate_dva_quicksave"),
+    path("dva/quickinvest/", initiate_dva_quickinvest, name="initiate_dva_quickinvest"),
+    path(
+        "initiate-dva-quicksave/", initiate_dva_quicksave, name="initiate_dva_quicksave"
+    ),
+    path(
+        "requery-my-dva-payments/",
+        requery_my_dva_payments,
+        name="requery_my_dva_payments",
+    ),
     # PIN Management APIs
     path("update-myfundpin/", views.update_myfund_pin, name="update-myfundpin"),
     path("has-myfundpin/", views.has_myfund_pin, name="has-myfundpin"),
@@ -352,4 +370,9 @@ urlpatterns = [
     path("admin/send-push/", send_admin_push_notification, name="send_admin_push"),
     path("push/save-token/", save_expo_push_token, name="save_push_token"),
     path("top-referrals/", TopReferralsAPIView.as_view(), name="top-referrals"),
+
+    # Ambassadors
+    path("ambassador-report/", AmbassadorMonthlyReportCreateView.as_view(), name="ambassador-report"),
+    path("ambassador-report/status/", AmbassadorMonthlyReportStatusView.as_view(), name="ambassador-report-status"),
+
 ]
