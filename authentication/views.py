@@ -1131,6 +1131,7 @@ def get_user_profile(request):
             "investment": user.investment,
             "properties": user.properties,
             "wallet": user.wallet,
+            "total_savings_and_investments_this_month": user.total_savings_and_investments_this_month,
             "how_did_you_hear": user.how_did_you_hear,
             # DVA / Paystack fields
             "dva_account_number": user.dva_account_number,
@@ -1738,6 +1739,17 @@ def add_bank_account(request):
                 {
                     "error": "Failed to create Paystack customer.",
                     "details": result,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user.paystack_customer_code = str(user.paystack_customer_code or "").strip()
+
+        if not user.paystack_customer_code.startswith("CUS_"):
+            return Response(
+                {
+                    "error": "Invalid Paystack customer code stored for user.",
+                    "details": {"paystack_customer_code": user.paystack_customer_code},
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -10149,14 +10161,15 @@ def earnings_summary(request):
     return Response(data)
 
 
+from django.db import transaction
 from rest_framework import generics, permissions, status
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import AmbassadorMonthlyReport, CustomUser
+from .models import AmbassadorMonthlyReport
 from .serializers import AmbassadorMonthlyReportSerializer
-from .utils import send_push_notification, send_generic_email
+from .tasks import send_ambassador_report_notifications_task
 
 
 class AmbassadorMonthlyReportCreateView(generics.CreateAPIView):
@@ -10165,78 +10178,29 @@ class AmbassadorMonthlyReportCreateView(generics.CreateAPIView):
     parser_classes = [MultiPartParser, FormParser]
 
     def create(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data, context={"request": request})
+        serializer = self.get_serializer(
+            data=request.data,
+            context={"request": request},
+        )
         serializer.is_valid(raise_exception=True)
-        report = serializer.save()
 
-        user = request.user
+        with transaction.atomic():
+            report = serializer.save()
+            user = request.user
 
-        # user email
-        user_subject = "Ambassador Report Received... 🕒"
-        user_message = (
-            f"Hi {user.first_name},<br><br>"
-            f"We’ve received your ambassador report for {report.month}. "
-            "It is now under review. We’ll notify you once it has been approved.<br><br>"
-            "Thank you for using MyFund.<br><br>"
-        )
-        send_generic_email(
-            subject=user_subject,
-            message=user_message,
-            from_email="MyFund <info@myfundmobile.com>",
-            recipient_list=[user.email],
-        )
-
-        # user push
-        send_push_notification(
-            user=user,
-            title="Ambassador Report Submitted... 🕒",
-            message=f"Your report for {report.month} is under review. We’ll notify you once it has been approved.",
-            data={"report_id": report.id, "month": report.month, "status": report.status},
-            notif_type="SYSTEM",
-        )
-
-        # admin email
-        admin_email = ["info@myfundmobile.com", "company@myfundmobile.com"]
-        admin_subject = f"Ambassador Report Pending Review - {user.first_name} {user.last_name}"
-        admin_message = (
-            f"Hello Admin,<br><br>"
-            f"{user.first_name} {user.last_name} ({user.email}) has submitted an ambassador report for {report.month}. "
-            "Please review it in Django admin.<br><br>"
-        )
-        send_generic_email(
-            subject=admin_subject,
-            message=admin_message,
-            from_email="MyFund <info@myfundmobile.com>",
-            recipient_list=admin_email,
-        )
-
-        # admin push
-        admin_emails = [
-            "tolulopeahmed@gmail.com",
-            "ceo@myfundmobile.com",
-            "lioness@myfundmobile.com",
-        ]
-        admin_users = CustomUser.objects.filter(email__in=admin_emails)
-        for admin_user in admin_users:
-            if getattr(admin_user, "expo_push_tokens", []):
-                send_push_notification(
-                    user=admin_user,
-                    title="📋 Ambassador Report Submitted",
-                    message=f"{user.first_name} {user.last_name} submitted a report for {report.month}.",
-                    data={
-                        "report_id": report.id,
-                        "user_email": user.email,
-                        "month": report.month,
-                        "type": "admin_ambassador_report_alert",
-                    },
-                    notif_type="ADMIN_ALERT",
+            transaction.on_commit(
+                lambda: send_ambassador_report_notifications_task.delay(
+                    report_id=report.id,
+                    user_id=user.id,
                 )
+            )
 
         return Response(
             {
                 "message": f"Your ambassador report for {report.month} has been submitted and is under review.",
                 "report_id": report.id,
                 "status": report.status,
+                "month": report.month,
             },
             status=status.HTTP_201_CREATED,
         )
