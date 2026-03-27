@@ -29,7 +29,7 @@ from django.contrib.auth import logout
 from django.shortcuts import render, redirect
 from django.core.exceptions import ObjectDoesNotExist
 from django.utils import timezone
-from authentication.models import CustomUser
+from authentication.models import CustomUser, AmbassadorAttendanceSubmission
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from .serializers import UserProfileUpdateSerializer
@@ -9909,6 +9909,13 @@ class TopReferralsAPIView(APIView):
             return pic
         return None
 
+    def get_user_monthly_attendance_count(self, user_obj, start_of_month):
+        current_month = start_of_month.strftime("%Y-%m")
+        return AmbassadorAttendanceSubmission.objects.filter(
+            user=user_obj,
+            month=current_month,
+        ).count()
+
     def send_rank_notification(self, user, old_rank, new_rank):
         """Sends consistent email + push notifications for rank changes."""
         if new_rank < old_rank:
@@ -10004,6 +10011,9 @@ class TopReferralsAPIView(APIView):
                     "profile_picture": self.get_profile_pic_url(ref_user),
                     "monthly_signups": stat["monthly_signups"],
                     "monthly_confirmed": stat["monthly_confirmed"],
+                    "monthly_attendance": self.get_user_monthly_attendance_count(
+                        ref_user, start_of_month
+                    ),
                     "is_hired_referrer": ref_user.is_hired_referrer,
                     "is_ambassador": getattr(ref_user, "is_ambassador", False),
                 }
@@ -10045,6 +10055,9 @@ class TopReferralsAPIView(APIView):
             "profile_picture": self.get_profile_pic_url(user),
             "monthly_signups": my_signups.count(),
             "monthly_confirmed": my_confirmed.count(),
+            "monthly_attendance": self.get_user_monthly_attendance_count(
+                user, start_of_month
+            ),
             "is_ambassador": getattr(user, "is_ambassador", False),
             "rank": next(
                 (
@@ -10237,3 +10250,44 @@ class AmbassadorMonthlyReportStatusView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+from rest_framework.decorators import (
+    api_view,
+    permission_classes,
+    authentication_classes,
+)
+from rest_framework.permissions import AllowAny
+from rest_framework.response import Response
+from rest_framework import status
+from django.utils import timezone
+
+from .models import AmbassadorAttendanceSubmission
+from .serializers import AmbassadorAttendanceSubmissionSerializer
+
+@api_view(["POST"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def submit_ambassador_attendance(request):
+    serializer = AmbassadorAttendanceSubmissionSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    submission = serializer.save()
+
+    current_month = submission.attendance_date.strftime("%B %Y")
+    current_month_key = submission.attendance_date.strftime("%Y-%m")
+
+    monthly_count = AmbassadorAttendanceSubmission.objects.filter(
+        user=submission.user,
+        month=current_month_key,
+    ).count()
+
+    return Response(
+        {
+            "message": f"Attendance recorded successfully for {current_month}.",
+            "attendance_count_this_month": monthly_count,
+            "points_for_this_attendance": 0.5,
+            "attendance_date": submission.attendance_date.strftime("%Y-%m-%d"),
+            "weekly_submission_saved": True,
+        },
+        status=status.HTTP_201_CREATED,
+    )
