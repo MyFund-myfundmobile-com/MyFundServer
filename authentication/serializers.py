@@ -956,3 +956,59 @@ class AmbassadorMonthlyReportSerializer(serializers.ModelSerializer):
 
         report.save()
         return report
+
+
+from django.utils import timezone
+from .models import AmbassadorAttendanceSubmission, CustomUser
+
+from datetime import datetime
+from rest_framework import serializers
+from .models import AmbassadorAttendanceSubmission, CustomUser
+
+
+class AmbassadorAttendanceSubmissionSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    attendance_date = serializers.DateField(input_formats=["%Y-%m-%d"])
+    takeaway = serializers.CharField()
+    recommendation = serializers.CharField()
+
+    def validate_email(self, value):
+        email = value.strip().lower()
+
+        try:
+            user = CustomUser.objects.get(email=email, is_ambassador=True)
+        except CustomUser.DoesNotExist:
+            raise serializers.ValidationError(
+                "No ambassador account was found with that email address."
+            )
+
+        self.context["attendance_user"] = user
+        return email
+
+    def validate(self, attrs):
+        user = self.context["attendance_user"]
+        attendance_date = attrs["attendance_date"]
+
+        month = attendance_date.strftime("%Y-%m")
+        week_key = attendance_date.strftime("%Y-W%U")
+
+        already_submitted = AmbassadorAttendanceSubmission.objects.filter(
+            user=user,
+            week_key=week_key,
+        ).exists()
+
+        if already_submitted:
+            raise serializers.ValidationError(
+                {
+                    "message": "Attendance has already been submitted for this week with this email address."
+                }
+            )
+
+        attrs["user"] = user
+        attrs["week_key"] = week_key
+        attrs["month"] = month
+        attrs["email"] = attrs["email"].strip().lower()
+        return attrs
+
+    def create(self, validated_data):
+        return AmbassadorAttendanceSubmission.objects.create(**validated_data)

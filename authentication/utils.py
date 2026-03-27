@@ -1701,3 +1701,16 @@ def send_ambassador_status_notification(user, became_ambassador=True):
 
     except Exception as e:
         logger.error(f"Ambassador notification error for {user.email}: {e}")
+
+
+from django.utils import timezone
+from .models import AmbassadorAttendanceSubmission
+
+
+def get_user_monthly_attendance_count(user):
+    now = timezone.now()
+    current_month = now.strftime("%Y-%m")
+    return AmbassadorAttendanceSubmission.objects.filter(
+        user=user,
+        month=current_month,
+    ).count()

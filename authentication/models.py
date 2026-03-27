@@ -2632,7 +2632,7 @@ class AmbassadorPointConfig(models.Model):
     )
 
     attendance_points = models.DecimalField(
-        max_digits=6, decimal_places=2, default=Decimal("1.00")
+        max_digits=6, decimal_places=2, default=Decimal("0.50")
     )
 
     coursera_points = models.DecimalField(
@@ -2867,3 +2867,27 @@ class AmbassadorMonthlyReport(models.Model):
         self.social_media_approved = self.social_media_submitted
         self.abroad_confirmed_approved = self.abroad_confirmed_submitted
         self.events_approved = self.events_submitted
+
+
+class AmbassadorAttendanceSubmission(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="ambassador_attendance_submissions",
+    )
+    email = models.EmailField()
+    attendance_date = models.DateField(null=True, blank=True)
+    takeaway = models.TextField()
+    recommendation = models.TextField()
+
+    month = models.CharField(max_length=7, db_index=True)  # YYYY-MM
+    week_key = models.CharField(max_length=20, db_index=True)  # e.g. 2026-W13
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ["user", "week_key"]
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.user.email} - {self.week_key} - {self.attendance_date}"
