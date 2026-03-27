@@ -2504,7 +2504,7 @@ from decimal import Decimal
 from django.contrib import admin, messages
 from django.db import transaction as db_transaction
 from django.utils import timezone
-
+from datetime import datetime
 from .models import AmbassadorPointConfig, AmbassadorMonthlyReport, Transaction
 from .utils import send_push_notification, send_generic_email
 
@@ -2671,12 +2671,20 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
             locked_user.save(update_fields=["wallet"])
 
             # create confirmed credit transaction
+            formatted_month = report.month
+            try:
+                formatted_month = datetime.strptime(report.month, "%Y-%m").strftime(
+                    "%b %Y"
+                )
+            except Exception:
+                pass
+
             Transaction.objects.create(
                 user=locked_user,
                 transaction_type="credit",
                 status="confirmed",
                 amount=stipend_amount,
-                description=f"{report.month} Stipend",
+                description=f"{formatted_month} Stipend",
                 source="WALLET",
             )
 
