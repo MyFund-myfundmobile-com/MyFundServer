@@ -90,10 +90,11 @@ ALLOWED_HOSTS = [
     "172.24.144.1",
     "192.168.20.99",
     "192.168.20.159",
-    '10.5.4.23'
+    '10.5.4.23',
+    '192.168.20.47'
 ]
 
-SECURE_SSL_REDIRECT = False  # Disable forced HTTPS redirect
+SECURE_SSL_REDIRECT = False  # Disable forced HTTPS redirect@
 SESSION_COOKIE_SECURE = False  # Prevent forcing HTTPS for cookies
 CSRF_COOKIE_SECURE = False  # Prevent CSRF issues with HTTPS
 
