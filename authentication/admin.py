@@ -204,7 +204,7 @@ class CustomUserAdmin(UserAdmin):
         "make_ambassador",
         "revoke_ambassador",
         "delete_selected",
-        "deactivate_user", 
+        "deactivate_user",
         "notify_outdated_users",
         "say_hello",
         "simulate_quarterly_payout",
@@ -596,7 +596,6 @@ class CustomUserAdmin(UserAdmin):
             f"{updated_count} user(s) updated to ambassador and notified.",
             level=messages.SUCCESS,
         )
-        
 
     @admin.action(description="❌ Revoke ambassador status")
     def revoke_ambassador(self, request, queryset):
@@ -617,7 +616,7 @@ class CustomUserAdmin(UserAdmin):
             f"{updated_count} user(s) ambassador status revoked and notified.",
             level=messages.SUCCESS,
         )
-        
+
     @admin.action(description="🚫 Ban selected users (cannot reactivate)")
     def ban_user(self, request, queryset):
         queryset.update(is_banned=True, is_active=False)
@@ -2500,6 +2499,7 @@ class DvaDepositIntentAdmin(admin.ModelAdmin):
         "confirmed_at",
     )
 
+
 from decimal import Decimal
 from django.contrib import admin, messages
 from django.db import transaction as db_transaction
@@ -2665,7 +2665,9 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
             locked_user = type(user).objects.select_for_update().get(pk=user.pk)
 
             # credit wallet
-            locked_user.wallet = (locked_user.wallet or Decimal("0.00")) + stipend_amount
+            locked_user.wallet = (
+                locked_user.wallet or Decimal("0.00")
+            ) + stipend_amount
             locked_user.save(update_fields=["wallet"])
 
             # create confirmed credit transaction
@@ -2674,7 +2676,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
                 transaction_type="credit",
                 status="confirmed",
                 amount=stipend_amount,
-                description=f"Ambassador stipend for {report.month} ({report.total_points_awarded} points)",
+                description=f"{report.month} Stipend",
                 source="WALLET",
             )
 
@@ -2808,7 +2810,9 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
             self.notify_user_rejected(report)
             count += 1
 
-        self.message_user(request, f"{count} report(s) rejected.", level=messages.WARNING)
+        self.message_user(
+            request, f"{count} report(s) rejected.", level=messages.WARNING
+        )
 
     @admin.action(description="🔄 Recalculate selected ambassador reports")
     def recalculate_selected_reports(self, request, queryset):
@@ -2818,8 +2822,10 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
             report.save()
             count += 1
 
-        self.message_user(request, f"{count} report(s) recalculated.", level=messages.SUCCESS)
-        
+        self.message_user(
+            request, f"{count} report(s) recalculated.", level=messages.SUCCESS
+        )
+
 
 admin.site.register(DailyROIAccrual, DailyROIAccrualAdmin)
 admin.site.register(ROITransaction, ROITransactionAdmin)

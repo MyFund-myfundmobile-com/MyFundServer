@@ -33,6 +33,15 @@ app.conf.task_routes = {
     "authentication.tasks.send_bulk_email_task": {"queue": "email_queue"},
     "authentication.tasks.send_single_email_task": {"queue": "email_queue"},
     "authentication.tasks.send_namecheap_safe_email_task_v2": {"queue": "default"},
+    "authentication.tasks.calculate_daily_roi_task": {"queue": "default"},
+    "authentication.tasks.process_target_savings_deductions": {"queue": "default"},
+    "authentication.tasks.retry_failed_deductions": {"queue": "default"},
+    "authentication.tasks.check_completed_targets": {"queue": "default"},
+    "authentication.tasks.refund_contributions_if_goal_not_reached": {"queue": "default"},
+    "authentication.tasks.process_due_scheduled_withdrawals": {"queue": "default"},
+    "authentication.tasks.send_birthday_greetings": {"queue": "default"},
+    "authentication.tasks.reward_top_savers_of_month": {"queue": "default"},
+    "authentication.tasks.process_quarterly_payouts_task": {"queue": "default"},
 }
 
 # Default queue for unspecified tasks
@@ -70,6 +79,7 @@ app.conf.beat_schedule = {
     "calculate-daily-roi": {
         "task": "authentication.tasks.calculate_daily_roi_task",
         "schedule": crontab(hour=12, minute=0),
+        "options": {"queue": "default"},
     },
     "process-quarterly-payouts": {
         "task": "authentication.tasks.process_quarterly_payouts_task",

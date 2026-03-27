@@ -136,6 +136,7 @@ class UserSerializer(serializers.ModelSerializer):
             "investment",
             "properties",
             "wallet",
+            "total_savings_and_investments_this_month",
             "is_hired_referrer",
             "is_ambassador",
             "autosave_enabled",
@@ -457,12 +458,12 @@ class CardSerializer(serializers.ModelSerializer):
             "is_default",
         )
         read_only_fields = ("id", "is_default")
-        
+
     def to_representation(self, instance):
         """Return None for cards without valid authorization_code so they can be filtered out"""
         if not instance.authorization_code or instance.authorization_code == "":
             return None
-        
+
         return super().to_representation(instance)
 
     # def create(self, validated_data):
@@ -883,7 +884,9 @@ class AmbassadorMonthlyReportSerializer(serializers.ModelSerializer):
 
         month = attrs.get("month")
         if AmbassadorMonthlyReport.objects.filter(user=user, month=month).exists():
-            raise serializers.ValidationError("You have already submitted a report for this month.")
+            raise serializers.ValidationError(
+                "You have already submitted a report for this month."
+            )
 
         return attrs
 
@@ -897,5 +900,59 @@ class AmbassadorMonthlyReportSerializer(serializers.ModelSerializer):
         )
         report.copy_submitted_to_approved_defaults()
         report.recalculate_points()
+        report.save()
+        return report
+
+    from rest_framework import serializers
+
+
+from .models import AmbassadorMonthlyReport
+
+
+class AmbassadorMonthlyReportSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AmbassadorMonthlyReport
+        fields = "__all__"
+        read_only_fields = ("user",)
+
+    def validate(self, attrs):
+        request = self.context.get("request")
+        user = request.user
+        month = attrs.get("month")
+
+        already_exists = AmbassadorMonthlyReport.objects.filter(
+            user=user,
+            month=month,
+        ).exists()
+
+        if already_exists:
+            raise serializers.ValidationError(
+                {
+                    "message": f"You have already submitted your ambassador report for {month}."
+                }
+            )
+
+        return attrs
+
+    def create(self, validated_data):
+        request = self.context.get("request")
+        validated_data["user"] = request.user
+
+        report = AmbassadorMonthlyReport(**validated_data)
+
+        # Copy submitted values into approved values by default
+        report.signups_approved = report.signups_submitted
+        report.confirmed_approved = report.confirmed_submitted
+        report.savings_approved = report.savings_submitted
+        report.attendance_approved = report.attendance_submitted
+        report.others_approved = report.others_submitted
+        report.coursera_approved = report.coursera_submitted
+        report.social_media_approved = report.social_media_submitted
+        report.abroad_confirmed_approved = report.abroad_confirmed_submitted
+        report.events_approved = report.events_submitted
+
+        # Calculate points + stipend immediately
+        report.recalculate_points()
+
         report.save()
         return report

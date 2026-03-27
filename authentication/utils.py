@@ -17,6 +17,11 @@ import requests
 from django.contrib.auth import get_user_model
 from .models import PushNotifications  # Ensure this is the correct import
 
+import logging
+import requests
+
+from django.contrib.auth import get_user_model
+
 logger = logging.getLogger(__name__)
 
 EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
@@ -27,6 +32,63 @@ ADMIN_PUSH_EMAILS = [
 ]
 
 
+class SafeDict(dict):
+    """
+    Returns the placeholder itself if key is missing,
+    so message formatting won't crash.
+    Example:
+    "Hi {first_name} {unknown}".format_map(SafeDict({"first_name": "Tee"}))
+    => "Hi Tee {unknown}"
+    """
+
+    def __missing__(self, key):
+        return "{" + key + "}"
+
+
+def build_push_context(user, extra_context=None):
+    """
+    Build personalization context for push notifications.
+    """
+    extra_context = extra_context or {}
+
+    first_name = getattr(user, "first_name", "") or ""
+    last_name = getattr(user, "last_name", "") or ""
+    email = getattr(user, "email", "") or ""
+    phone_number = getattr(user, "phone_number", "") or ""
+
+    full_name = f"{first_name} {last_name}".strip()
+
+    context = {
+        "first_name": first_name,
+        "last_name": last_name,
+        "full_name": full_name,
+        "email": email,
+        "phone_number": phone_number,
+        "user_id": str(user.id) if getattr(user, "id", None) else "",
+    }
+
+    # allow extra values like amount, savings_balance, etc.
+    context.update(extra_context)
+
+    return context
+
+
+def render_push_text(template, context):
+    """
+    Safely render push title/message with placeholders.
+    Example:
+    template = "Hi {first_name}, your wallet was credited with ₦{amount}"
+    """
+    if not template:
+        return ""
+
+    try:
+        return str(template).format_map(SafeDict(context))
+    except Exception as e:
+        logger.error(f"Push template rendering failed: {e}")
+        return str(template)
+
+
 def send_push_notification(
     user=None,
     title="",
@@ -34,10 +96,20 @@ def send_push_notification(
     data=None,
     notif_type="SYSTEM",
     user_id=None,
+    extra_context=None,
 ):
-    """Send a push notification to a user via Expo and store in DB."""
+    """
+    Send a push notification to a user via Expo and store in DB.
+
+    Supports personalization placeholders like:
+    {first_name}, {last_name}, {full_name}, {email}, {phone_number}, {user_id}
+
+    You can also pass extra_context for custom placeholders like:
+    {amount}, {plan_name}, {wallet_balance}, etc.
+    """
 
     data = data or {}
+    extra_context = extra_context or {}
 
     if user is None and user_id is not None:
         User = get_user_model()
@@ -53,14 +125,21 @@ def send_push_notification(
         logger.warning("Push notification failed: no user or user_id provided")
         return {"sent": 0, "total": 0, "success": False}
 
+    # Build personalization context
+    context = build_push_context(user, extra_context=extra_context)
+
+    # Render title and message before saving and sending
+    rendered_title = render_push_text(title, context)
+    rendered_message = render_push_text(message, context)
+
     tokens = getattr(user, "expo_push_tokens", []) or []
 
     notification = PushNotifications.objects.create(
         user=user,
-        title=title,
-        message=message,
+        title=rendered_title,
+        message=rendered_message,
         notification_type=notif_type,
-        data=data,
+        data={**data, "personalization_context": context},
     )
     logger.info(f"Created notification ID {notification.id} for {user.email}")
 
@@ -81,8 +160,8 @@ def send_push_notification(
         payload = {
             "to": token,
             "sound": "default",
-            "title": title,
-            "body": message,
+            "title": rendered_title,
+            "body": rendered_message,
             "data": {**data, "notification_id": str(notification.id)},
             "channelId": "default",
             "priority": "high",
@@ -127,15 +206,26 @@ def send_push_notification(
     }
 
 
-def send_admin_push_notification(title, message, data=None, notif_type="ADMIN_ALERT"):
-    """Send push notifications to all admin users."""
+def send_admin_push_notification(
+    title,
+    message,
+    data=None,
+    notif_type="ADMIN_ALERT",
+    extra_context=None,
+):
+    """
+    Send push notifications to all admin users.
+    Supports personalization too.
+    """
     User = get_user_model()
     admins = User.objects.filter(email__in=ADMIN_PUSH_EMAILS)
+
     if not admins.exists():
         logger.warning("No admin users found for push notification")
         return {"sent": 0, "total": 0}
 
     sent_count = 0
+
     for admin in admins:
         if getattr(admin, "expo_push_tokens", []):
             result = send_push_notification(
@@ -144,6 +234,7 @@ def send_admin_push_notification(title, message, data=None, notif_type="ADMIN_AL
                 message=message,
                 data=data,
                 notif_type=notif_type,
+                extra_context=extra_context,
             )
             if result and result.get("sent", 0) > 0:
                 sent_count += 1
@@ -921,9 +1012,19 @@ def create_paystack_customer(user):
     Create a Paystack customer if the user does not already have one.
     Returns: (success: bool, result: customer_code or error dict)
     """
+
     existing_code = getattr(user, "paystack_customer_code", None)
+
     if existing_code:
-        return True, existing_code
+        existing_code = str(existing_code).strip()
+
+        # Guard against corrupted tuple-like values accidentally stored
+        if existing_code.startswith("CUS_"):
+            return True, existing_code
+
+        # If corrupted, clear it and recreate
+        user.paystack_customer_code = None
+        user.save(update_fields=["paystack_customer_code"])
 
     payload = {
         "email": user.email,
@@ -955,16 +1056,16 @@ def create_paystack_customer(user):
     customer_data = data.get("data", {}) or {}
     customer_code = customer_data.get("customer_code")
 
-    if not customer_code:
+    if not customer_code or not str(customer_code).startswith("CUS_"):
         return False, {
-            "message": "Customer code missing from Paystack response",
+            "message": "Customer code missing or invalid from Paystack response",
             "raw": data,
         }
 
-    user.paystack_customer_code = customer_code
+    user.paystack_customer_code = str(customer_code).strip()
     user.save(update_fields=["paystack_customer_code"])
 
-    return True, customer_code
+    return True, user.paystack_customer_code
 
 
 def identify_paystack_customer(user, bvn, bank_code, account_number):
@@ -973,10 +1074,16 @@ def identify_paystack_customer(user, bvn, bank_code, account_number):
     Returns: (success: bool, result: response dict)
     Only returns success when identification is completed, not merely accepted.
     """
-    if not getattr(user, "paystack_customer_code", None):
+
+    customer_code = getattr(user, "paystack_customer_code", None)
+
+    if not customer_code or not str(customer_code).startswith("CUS_"):
         ok, result = create_paystack_customer(user)
         if not ok:
             return False, result
+        customer_code = result
+    else:
+        customer_code = str(customer_code).strip()
 
     payload = {
         "country": "NG",
@@ -989,11 +1096,11 @@ def identify_paystack_customer(user, bvn, bank_code, account_number):
     }
 
     print("PAYSTACK IDENTIFICATION PAYLOAD:", payload)
-    print("PAYSTACK IDENTIFICATION CUSTOMER CODE:", user.paystack_customer_code)
+    print("PAYSTACK IDENTIFICATION CUSTOMER CODE:", customer_code)
 
     try:
         response = requests.post(
-            f"{PAYSTACK_BASE_URL}/customer/{user.paystack_customer_code}/identification",
+            f"{PAYSTACK_BASE_URL}/customer/{customer_code}/identification",
             json=payload,
             headers=get_paystack_headers(),
             timeout=30,
@@ -1025,6 +1132,7 @@ def identify_paystack_customer(user, bvn, bank_code, account_number):
         "message": data.get("message", "Customer identification not yet completed."),
         "status_code": response.status_code,
         "raw": data,
+        "raw_text": response.text,
     }
 
 

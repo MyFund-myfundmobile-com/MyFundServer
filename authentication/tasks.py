@@ -256,18 +256,23 @@ logger = logging.getLogger(__name__)
 
 from .models import CustomUser, ROITransaction, Transaction, DailyROIAccrual
 from .utils import get_next_payout_date, calculate_daily_roi, send_push_notification
+from django.db.models import Q
 
 
 @shared_task
 def calculate_daily_roi_task():
     """
-    Calculate and accrue daily ROI for all active users.
-    Skips only users already accrued for today instead of stopping the whole task.
+    Calculate and accrue daily ROI only for active users with savings or investment balance above zero.
     """
     today = timezone.now().date()
 
-    users_data = CustomUser.objects.filter(is_active=True, is_banned=False).values_list(
-        "id", "first_name", "expo_push_tokens"
+    users_data = (
+        CustomUser.objects.filter(
+            is_active=True,
+            is_banned=False,
+        )
+        .filter(Q(savings__gt=0) | Q(investment__gt=0))
+        .values_list("id", "first_name", "expo_push_tokens")
     )
 
     processed_count = 0
@@ -280,7 +285,6 @@ def calculate_daily_roi_task():
 
     for user_id, first_name, expo_tokens in users_data:
         try:
-            # Skip only this user if ROI already exists for today
             if DailyROIAccrual.objects.filter(user_id=user_id, date=today).exists():
                 skipped_count += 1
                 logger.info(f"Skipping user {user_id}: ROI already exists for {today}")
@@ -293,7 +297,6 @@ def calculate_daily_roi_task():
             if total_roi > 0:
                 next_payout = get_next_payout_date(today)
 
-                # ✅ Calculate month-to-date earnings BEFORE dict
                 start_of_month = today.replace(day=1)
                 month_name = today.strftime("%B")
 
@@ -326,6 +329,17 @@ def calculate_daily_roi_task():
                         },
                     }
                 )
+
+                processed_count += 1
+                logger.info(f"Processed ROI for user {user_id}")
+
+                if len(notifications_batch) >= batch_size:
+                    batch_result = send_batch_roi_notifications(notifications_batch)
+                    logger.info(
+                        f"Batch ROI notifications sent. "
+                        f"Sent: {batch_result['sent']}, Failed: {batch_result['failed']}"
+                    )
+                    notifications_batch = []
 
             else:
                 logger.info(f"No ROI accrued for user {user_id}")
@@ -1476,331 +1490,82 @@ DME, MyFund
     return result
 
 
-from decimal import Decimal
-from django.utils import timezone
-from django.conf import settings
-import logging
-
-from authentication.models import CustomUser, Transaction
-from authentication.utils import send_generic_email, send_push_notification
-
-logger = logging.getLogger(__name__)
-
-
-def credit_february_ambassadors(test_mode=True):
-    """
-    Ambassador payout function.
-
-    TEST MODE:
-        - Credits ADMIN users only
-        - Creates transactions
-        - Sends push + email
-        - Does NOT touch ambassadors
-
-    LIVE MODE:
-        - Credits ambassadors
-        - Creates transactions
-        - Sends push + email
-    """
-
-    ADMIN_TEST_EMAILS = [
-        "valueplusrecords@gmail.com",
-    ]
-
-    ambassadors = {
-        "ofeimunjudith@gmail.com": 44,
-        "iyinoluwaadedoyin@gmail.com": 25,
-        "olorunfemiprecious2109@gmail.com": 25,
-        "vancedmist@gmail.com": 36,
-        "oyelakinakolade52@gmail.com": 68,
-        "aregold44@gmail.com": 24,
-        "simysola22@gmail.com": 15,
-        "anniejhnson45@gmail.com": 20,
-        "danzydavid44@gmail.com": 7,
-        "adequateugbong@gmail.com": 7,
-    }
-
-    # ---------- TEST MODE ---------- #
-
-    if test_mode:
-
-        logger.warning("🧪 TEST MODE ACTIVE — CREDITING ADMINS ONLY")
-
-        admin_users = list(CustomUser.objects.filter(email__in=ADMIN_TEST_EMAILS))
-
-        if not admin_users:
-            logger.error("❌ No admin users found for test payout")
-            return "No admins found"
-
-        ambassador_values = list(ambassadors.values())
-
-        while len(ambassador_values) < len(admin_users):
-            ambassador_values.extend(ambassador_values)
-
-        payout_map = {
-            admin_users[i]: ambassador_values[i] for i in range(len(admin_users))
-        }
-
-    # ---------- LIVE MODE ---------- #
-
-    else:
-
-        logger.warning("🚀 LIVE MODE — CREDITING AMBASSADORS")
-
-        payout_map = {}
-
-        for email, points in ambassadors.items():
-
-            user = CustomUser.objects.filter(email=email).first()
-
-            if not user:
-                logger.error(f"User not found: {email}")
-                continue
-
-            payout_map[user] = points
-
-    processed = 0
-
-    for user, points in payout_map.items():
-
-        try:
-
-            amount = Decimal(points * 100)
-
-            # ---------- EMAIL / PUSH CONTENT ---------- #
-
-            if points > 0:
-
-                subject = "🎉 February Ambassador Reward!"
-
-                message = f"""
-                Hi {{first_name}},<br><br>
-
-                Well done in February! Your commitment to expanding the MyFund community truly stands out.<br><br>
-
-                <strong>₦{amount:,.2f}</strong> has been credited to your wallet.<br><br>
-
-                🔥 <strong>Let’s make March even stronger especially for confirmed referrals.</strong>
-
-                <ul>
-                    <li>Follow up with your referrals</li>
-                    <li>Help them complete the registration</li>
-                    <li>Guide them to make their first savings and earn their first ROI</li>
-                    <li>Add them to your growing community</li>
-                </ul>
-
-                Consistency is what separates top ambassadors.<br><br>
-
-                Keep winning 🚀<br><br>
-
-                <strong>— MyFund Team</strong>
-                """
-
-                push_title = "February Reward Credited 🎉"
-
-                push_body = f"₦{amount:,.0f} has been added to your wallet as part of your efforts as an ambassador in February. Let’s do better in March especially for confirmed referrals!"
-
-            else:
-
-                subject = "Your Ambassador Performance"
-
-                message = """
-                Hi {first_name},<br><br>
-
-                You had no confirmed referrals records in February.<br><br>
-
-                Please note that the ambassador program is performance-driven, and continued inactivity may lead to removal.<br><br>
-
-                <strong>March is your opportunity to bounce back.</strong>
-
-                <ul>
-                    <li>Reconnect with referrals</li>
-                    <li>Encourage completed signups</li>
-                    <li>Drive confirmations</li>
-                </ul>
-
-                We believe you can turn this around — but action is required.<br><br>
-
-                <strong>— MyFund Team</strong>
-                """
-
-                push_title = "⚠️ Ambassador Performance"
-
-                push_body = "There were no confirmed referrals recorded for you in February. Step up in March to remain eligible for the MyFund Ambassadorship programme."
-
-            # ---------- CREDIT WALLET ---------- #
-
-            if amount > 0:
-
-                user.wallet += amount
-                user.save(update_fields=["wallet"])
-
-                Transaction.objects.create(
-                    user=user,
-                    transaction_type="credit",
-                    status="confirmed",
-                    amount=amount,
-                    description="February Ambassador Reward 🎉",
-                    service_charge=0,
-                    total_amount=amount,
-                    source="AMBASSADOR_REWARD",
-                    transaction_id=f"AMB-{timezone.now().strftime('%Y%m%d%H%M%S')}-{user.id}",
-                )
-
-            # ---------- EMAIL ---------- #
-
-            send_generic_email(
-                subject=subject,
-                message=message,
-                recipient_list=[user.email],
-                from_email=settings.DEFAULT_FROM_EMAIL,
-            )
-
-            # ---------- PUSH ---------- #
-
-            send_push_notification(
-                user=user,
-                title=push_title,
-                message=push_body,
-                data={
-                    "type": "AMBASSADOR_REWARD",
-                    "points": points,
-                    "amount": float(amount),
-                },
-                notif_type="AMBASSADOR",
-            )
-
-            processed += 1
-            logger.info(f"✅ Processed {user.email}")
-
-        except Exception as e:
-
-            logger.error(f"❌ Failed for {user.email}: {str(e)}")
-
-    return f"✅ Payout completed. Total processed: {processed}"
-
-
-# tasks.py
 from celery import shared_task
-from authentication.models import CustomUser
-from authentication.utils import create_dedicated_account
-import logging
-
-logger = logging.getLogger(__name__)
+from .models import AmbassadorMonthlyReport, CustomUser
+from .utils import send_push_notification, send_generic_email
 
 
-@shared_task
-def backfill_dvas_for_old_users(test_only=True):
-    """
-    Populate DVA for old users who don't have one.
-    If test_only=True, only process two test accounts.
-    """
-    if test_only:
-        users = CustomUser.objects.filter(
-            email__in=["tolulopeahmed@gmail.com", "company@myfundmobile.com"]
+@shared_task(bind=True, max_retries=3, default_retry_delay=60)
+def send_ambassador_report_notifications_task(self, report_id, user_id):
+    try:
+        report = AmbassadorMonthlyReport.objects.select_related("user").get(
+            id=report_id
         )
-        logger.info("🧪 TEST MODE: Processing only 2 users")
-    else:
-        users = CustomUser.objects.filter(dva_account_number__isnull=True)
-        logger.info(f"🚀 LIVE MODE: Processing {users.count()} users")
+        user = CustomUser.objects.get(id=user_id)
 
-    created_count = 0
-    failed_users = []
+        # USER EMAIL
+        send_generic_email(
+            subject="Ambassador Report Received... 🕒",
+            message=(
+                f"Hi {user.first_name},<br><br>"
+                f"We’ve received your ambassador report for {report.month}. "
+                "It is now under review. We’ll notify you once it has been approved.<br><br>"
+                "Thank you for using MyFund.<br><br>"
+            ),
+            from_email="MyFund <info@myfundmobile.com>",
+            recipient_list=[user.email],
+        )
 
-    for user in users:
-        try:
-            success = create_dedicated_account(user)
-            if success:
-                created_count += 1
-                logger.info(
-                    f"✅ DVA created for {user.email} -> {user.dva_account_number}"
+        # USER PUSH
+        send_push_notification(
+            user=user,
+            title="Ambassador Report Submitted 🕒",
+            message=f"Your report for {report.month} is under review.",
+            data={
+                "report_id": report.id,
+                "month": report.month,
+                "status": report.status,
+            },
+            notif_type="SYSTEM",
+        )
+
+        # ADMIN EMAIL
+        send_generic_email(
+            subject=f"Ambassador Report - {user.first_name} {user.last_name}",
+            message=(
+                f"Hello Admin,<br><br>"
+                f"{user.first_name} {user.last_name} ({user.email}) submitted an ambassador report for {report.month}. "
+                "Please review it in Django admin.<br><br>"
+            ),
+            from_email="MyFund <info@myfundmobile.com>",
+            recipient_list=["info@myfundmobile.com", "company@myfundmobile.com"],
+        )
+
+        # ADMIN PUSH
+        admin_users = CustomUser.objects.filter(
+            email__in=[
+                "tolulopeahmed@gmail.com",
+                "ceo@myfundmobile.com",
+                "lioness@myfundmobile.com",
+            ]
+        )
+
+        for admin_user in admin_users:
+            if getattr(admin_user, "expo_push_tokens", []):
+                send_push_notification(
+                    user=admin_user,
+                    title="📋 Ambassador Report Submitted",
+                    message=f"{user.first_name} {user.last_name} submitted a report for {report.month}.",
+                    data={
+                        "report_id": report.id,
+                        "user_email": user.email,
+                        "month": report.month,
+                        "type": "admin_ambassador_report_alert",
+                    },
+                    notif_type="ADMIN_ALERT",
                 )
-            else:
-                failed_users.append(user.email)
-                logger.warning(f"⚠️ Failed to create DVA for {user.email}")
-        except Exception as e:
-            failed_users.append(user.email)
-            logger.error(f"❌ Exception creating DVA for {user.email}: {str(e)}")
 
-    return {
-        "created": created_count,
-        "failed": failed_users,
-        "total_processed": users.count(),
-    }
+        return f"Notifications sent successfully for report {report.id}"
 
-
-from celery import shared_task
-from decimal import Decimal
-from django.utils import timezone
-from django.conf import settings
-from authentication.models import TargetSavings, TargetSavingsCompletion, Transaction
-from authentication.utils import send_generic_email, send_push_notification
-
-
-@shared_task
-def fix_stuck_target_completion(target_id):
-    t = TargetSavings.objects.select_related("user").get(id=target_id)
-    u = t.user
-
-    # Safety checks
-    if TargetSavingsCompletion.objects.filter(target_savings=t, user=u).exists():
-        return "Completion already exists. Skipped."
-
-    if Transaction.objects.filter(
-        user=u, target_savings=t, source="TARGET_COMPLETION"
-    ).exists():
-        return "Transaction already exists. Skipped."
-
-    amount = t.current_amount
-
-    # credit wallet
-    u.wallet += amount
-    u.save(update_fields=["wallet"])
-
-    # create completion record
-    TargetSavingsCompletion.objects.create(
-        user=u,
-        target_savings=t,
-        completed_amount=amount,
-        bonus_amount=Decimal("0.00"),
-        total_amount=amount,
-        completed_date=timezone.now().date(),
-        was_on_time=True,
-    )
-
-    # transaction
-    Transaction.objects.create(
-        user=u,
-        transaction_type="credit",
-        status="confirmed",
-        amount=amount,
-        description=f"{t.name} Completed! Manual Fix",
-        service_charge=0,
-        total_amount=amount,
-        target_savings=t,
-        source="TARGET_COMPLETION",
-        transaction_id=f"[{t.id}]-MANUAL-FIX",
-    )
-
-    # clear target
-    t.current_amount = Decimal("0.00")
-    t.is_active = False
-    t.save(update_fields=["current_amount", "is_active"])
-
-    # email
-    send_generic_email(
-        f"🎉 {t.name} Target Completed!",
-        f"Hi {u.first_name}, ₦{amount:,.2f} has been credited to your wallet.",
-        settings.DEFAULT_FROM_EMAIL,
-        [u.email],
-    )
-
-    # push
-    send_push_notification(
-        u,
-        title=f"🎉 {t.name} Completed!",
-        message=f"{u.first_name}, ₦{amount:,.2f} has been credited to your wallet.",
-        data={"target_id": t.id, "type": "TARGET_COMPLETED_MANUAL_FIX"},
-    )
-
-    return f"Fixed target {t.id} successfully"
+    except Exception as exc:
+        raise self.retry(exc=exc)
