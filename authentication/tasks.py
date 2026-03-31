@@ -1504,6 +1504,11 @@ def send_ambassador_report_notifications_task(self, report_id, user_id):
         )
         user = CustomUser.objects.get(id=user_id)
 
+        formatted_month = report.month
+        try:
+            formatted_month = datetime.strptime(report.month, "%Y-%m").strftime("%B %Y")
+        except Exception:
+            pass
         # USER EMAIL
         send_generic_email(
             subject="Ambassador Report Received... 🕒",
@@ -1570,3 +1575,385 @@ def send_ambassador_report_notifications_task(self, report_id, user_id):
 
     except Exception as exc:
         raise self.retry(exc=exc)
+
+
+import logging
+import re
+
+from django.conf import settings
+
+from authentication.models import CustomUser
+from authentication.utils import send_generic_email
+
+logger = logging.getLogger(__name__)
+
+
+AMBASSADOR_GROUP_LINK = "https://chat.whatsapp.com/K6ydqeE0zKuGX0Sek87tkW"
+
+TEST_AMBASSADOR_EMAILS = [
+    "dme@myfundmobile.com",
+    "lioness@myfundmobile.com",
+    "janet.adegbenro@gmail.com",
+    "patrickmundi1@myfundmobile.com",
+    "valueplusrecords@gmail.com",
+]
+
+SHORTLISTED_EMAILS = [
+    "sopiribi.fenibo76@gmail.com",
+    "developermykel@gmail.com",
+    "eyibiootu001@gmail.com",
+    "chiomahappiness2006@gmail.com",
+    "treasurepre06@gmail.com",
+    "akoredeboluwatife09@gmail.com",
+    "amosanyebe700@gmail.com",
+    "treasuryboxnosa@gmail.com",
+    "zainabishola@gmail.com",
+    "osobukolasemilore@gmail.com",
+    "mahmoudteslim5@gmail.com",
+    "opesunday21@gmail.com",
+]
+
+SECOND_CATEGORY_EMAILS = [
+    "jamestobiloba6@gmail.com",
+    "faithyemisi58@gmail.com",
+    "afsatadeyemi@gmail.com",
+    "olorodeayomide320@gmail.com",
+    "pleasantdinehin@gmail.com",
+    "uyannajeremiah@gmail.com",
+    "idowuayomideemmanuel@gmail.com",
+    "okoigunehino829@gmail.com",
+    "petrusbabalola08@gmail.com",
+    "adebayogafar43@gmail.com",
+    "ogunniyiezekiel79@gmail.com",
+    "adeoyetemiloluwa33@gmail.com",
+    "eoluwatoyin128@gmail.com",
+    "olawunmikofoworola2019@gmail.com",
+    "lydiaekeabor@gmail.com",
+    "justinafolabi2006@gmail.com",
+    "adeolasamuel2017@gmail.com",
+    "idunnuarowolo@gmail.com",
+    "adeoyeoyinkansola57@gmail.com",
+    "obadimuesther22@gmail.com",
+    "bamigboyeesther2022@gmail.com",
+    "tomisax04@gmail.com",
+    "adewumie61@gmail.com",
+    "thomasesther545@gmail.com",
+    "deborahakomolafe260@gmail.com",
+    "joodajuliana4@gmail.com",
+    "johnadefolu992@gmail.com",
+    "banjoboluwatife182@gmail.com",
+    "favoureffiong2008@gmail.com",
+]
+
+
+def _is_valid_email(email):
+    if not email:
+        return False
+    email = str(email).strip()
+    pattern = r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$"
+    return bool(re.match(pattern, email))
+
+
+def _clean_recipient_list(email_list):
+    cleaned = []
+    seen = set()
+
+    for email in email_list:
+        if not email:
+            continue
+
+        email = str(email).strip().lower()
+
+        if not _is_valid_email(email):
+            logger.warning(f"Skipping invalid email: {email}")
+            continue
+
+        if email in seen:
+            continue
+
+        seen.add(email)
+        cleaned.append(email)
+
+    return cleaned
+
+
+def _guess_first_name_from_email(email):
+    try:
+        local_part = email.split("@")[0]
+        local_part = local_part.replace(".", " ").replace("_", " ").replace("-", " ")
+        first_name = local_part.split()[0].strip()
+        return first_name.capitalize() if first_name else "Applicant"
+    except Exception:
+        return "Applicant"
+
+
+def _get_first_name(email):
+    user = (
+        CustomUser.objects.filter(email__iexact=email)
+        .only("first_name", "email")
+        .first()
+    )
+
+    if user and user.first_name and user.first_name.strip():
+        return user.first_name.strip()
+
+    return _guess_first_name_from_email(email)
+
+
+def _shortlist_email_html(first_name):
+    return f"""
+<p>Hi {first_name},</p>
+
+<p><strong>Congratulations!</strong></p>
+
+<p>We’re excited to inform you that you have been shortlisted for the <strong>MyFund Ambassador Program (Cohort 3)</strong>.</p>
+
+<p>After carefully reviewing all applications, your profile stood out based on your potential, clarity, and alignment with what we are building at MyFund; a community of individuals committed to smarter financial habits and long-term wealth creation.</p>
+
+<p>Being shortlisted means you are one step closer to joining a group of ambassadors who will:</p>
+
+<ul>
+  <li>Drive meaningful impact through financial education</li>
+  <li>Build and influence communities</li>
+  <li>Grow personally while earning and gaining real-world experience</li>
+</ul>
+
+<p><strong>Next Steps:</strong></p>
+
+<ul>
+  <li>Join the official shortlisted candidates group</li>
+  <li>Ensure you are signed up on MyFund</li>
+  <li>Ensure your KYC is updated/completed</li>
+</ul>
+
+<p>Use the button below to join the group:</p>
+
+<p style="margin: 24px 0;">
+  <a href="{AMBASSADOR_GROUP_LINK}"
+     style="
+        background-color: #4c28BC;
+        color: #ffffff !important;
+        text-decoration: none;
+        padding: 14px 18px;
+        border-radius: 8px;
+        display: block;
+        width: 100%;
+        max-width: 100%;
+        box-sizing: border-box;
+        text-align: center;
+        font-weight: 700;
+        white-space: nowrap;
+     ">
+     Join Group
+  </a>
+</p>
+
+<p>Further details about the next stage of the selection process will be shared in the group.</p>
+
+<p>We’re excited about the possibility of having you on this journey with us.</p>
+
+<p>Welcome to the next stage.</p>
+
+<p>
+Best regards,<br>
+<strong>Chubi</strong><br>
+DME MyFund
+</p>
+"""
+
+
+def _second_category_email_html():
+    return """
+<p>Hello,</p>
+
+<p>Thank you for taking the time to apply for the <strong>MyFund Ambassador Program (Cohort 3)</strong>.</p>
+
+<p>We received a strong number of applications, and while you were not included in the first batch of shortlisted candidates, we’re pleased to let you know that you are being considered for the <strong>second batch</strong> of the selection process.</p>
+
+<p>This means your application is still very much active, and we see potential in your profile.</p>
+
+<p>You will receive a follow-up email with details on how to proceed to the next stage in 
+April. We encourage you to stay prepared and keep an eye on your inbox.</p>
+
+<p>We appreciate your interest in building with MyFund and look forward to what’s ahead.</p>
+
+<p>
+Best regards,<br>
+<strong>Chubi</strong><br>
+DME MyFund
+</p>
+"""
+
+
+def send_shortlisted_ambassador_emails(test_mode=True, only_email=None):
+    """
+    Sends shortlisted emails directly without Celery.
+
+    Usage:
+        send_shortlisted_ambassador_emails(test_mode=True)
+        send_shortlisted_ambassador_emails(test_mode=False)
+        send_shortlisted_ambassador_emails(only_email="someone@gmail.com")
+    """
+
+    subject = (
+        "Congratulations! You’ve Been Shortlisted as a MyFund Ambassador (Cohort 3)"
+    )
+    from_email = getattr(
+        settings,
+        "DEFAULT_FROM_EMAIL",
+        "MyFund <info@myfundmobile.com>",
+    )
+
+    if only_email:
+        recipients = [only_email]
+        logger.warning(f"Single email mode for shortlisted send: {only_email}")
+    elif test_mode:
+        recipients = TEST_AMBASSADOR_EMAILS
+        logger.warning(
+            "TEST MODE ENABLED — sending shortlisted email to test emails only"
+        )
+    else:
+        recipients = SHORTLISTED_EMAILS
+        logger.warning(
+            "LIVE MODE ENABLED — sending shortlisted email to all shortlisted candidates"
+        )
+
+    recipients = _clean_recipient_list(recipients)
+
+    if not recipients:
+        logger.warning("No valid recipients found for shortlisted email send.")
+        return {"success": False, "sent": 0, "failed": 0, "details": []}
+
+    sent_count = 0
+    failed_count = 0
+    details = []
+
+    for email in recipients:
+        try:
+            first_name = _get_first_name(email)
+            message = _shortlist_email_html(first_name=first_name)
+
+            result = send_generic_email(
+                subject=subject,
+                message=message,
+                recipient_list=[email],
+                from_email=from_email,
+                use_celery_threshold=999999,
+            )
+
+            sent_count += 1
+            details.append(
+                {
+                    "email": email,
+                    "status": "sent",
+                    "first_name": first_name,
+                    "result": result,
+                }
+            )
+            logger.info(f"Shortlisted email sent to {email}")
+
+        except Exception as e:
+            failed_count += 1
+            details.append(
+                {
+                    "email": email,
+                    "status": "failed",
+                    "error": str(e),
+                }
+            )
+            logger.exception(f"Failed to send shortlisted email to {email}: {str(e)}")
+
+    summary = {
+        "success": failed_count == 0,
+        "sent": sent_count,
+        "failed": failed_count,
+        "details": details,
+    }
+
+    logger.info(f"Shortlisted ambassador email summary: {summary}")
+    return summary
+
+
+def send_second_batch_ambassador_emails(test_mode=True, only_email=None):
+    """
+    Sends second category emails directly without Celery.
+
+    Usage:
+        send_second_batch_ambassador_emails(test_mode=True)
+        send_second_batch_ambassador_emails(test_mode=False)
+        send_second_batch_ambassador_emails(only_email="someone@gmail.com")
+    """
+
+    subject = "Update on Your MyFund Ambassador Application (Cohort 3)"
+    from_email = getattr(
+        settings,
+        "DEFAULT_FROM_EMAIL",
+        "MyFund <info@myfundmobile.com>",
+    )
+
+    if only_email:
+        recipients = [only_email]
+        logger.warning(f"Single email mode for second batch send: {only_email}")
+    elif test_mode:
+        recipients = TEST_AMBASSADOR_EMAILS
+        logger.warning(
+            "TEST MODE ENABLED — sending second batch email to test emails only"
+        )
+    else:
+        recipients = SECOND_CATEGORY_EMAILS
+        logger.warning(
+            "LIVE MODE ENABLED — sending second batch email to second category candidates"
+        )
+
+    recipients = _clean_recipient_list(recipients)
+
+    if not recipients:
+        logger.warning("No valid recipients found for second batch email send.")
+        return {"success": False, "sent": 0, "failed": 0, "details": []}
+
+    sent_count = 0
+    failed_count = 0
+    details = []
+
+    for email in recipients:
+        try:
+            message = _second_category_email_html()
+
+            result = send_generic_email(
+                subject=subject,
+                message=message,
+                recipient_list=[email],
+                from_email=from_email,
+                use_celery_threshold=999999,
+            )
+
+            sent_count += 1
+            details.append(
+                {
+                    "email": email,
+                    "status": "sent",
+                    "result": result,
+                }
+            )
+            logger.info(f"Second batch email sent to {email}")
+
+        except Exception as e:
+            failed_count += 1
+            details.append(
+                {
+                    "email": email,
+                    "status": "failed",
+                    "error": str(e),
+                }
+            )
+            logger.exception(f"Failed to send second batch email to {email}: {str(e)}")
+
+    summary = {
+        "success": failed_count == 0,
+        "sent": sent_count,
+        "failed": failed_count,
+        "details": details,
+    }
+
+    logger.info(f"Second batch ambassador email summary: {summary}")
+    return summary
