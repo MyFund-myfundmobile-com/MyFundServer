@@ -125,7 +125,6 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     bank_accounts = models.ManyToManyField(
         "BankAccount", related_name="owners", blank=True
     )
-    cards = models.ManyToManyField("Card", related_name="owners", blank=True)
 
     savings = models.DecimalField(max_digits=11, decimal_places=2, default=0)
     investment = models.DecimalField(max_digits=11, decimal_places=2, default=0)
@@ -1216,7 +1215,6 @@ class CardManager(models.Manager):
     """Custom manager to exclude cards without valid authorization codes"""
 
     def get_queryset(self):
-        """Override to exclude cards without authorization_code"""
         return (
             super()
             .get_queryset()
@@ -1227,19 +1225,66 @@ class CardManager(models.Manager):
         )
 
     def all_including_invalid(self):
-        """Get all cards including those without authorization codes"""
         return super().get_queryset()
 
 
 class Card(models.Model):
     user = models.ForeignKey(
-        get_user_model(), on_delete=models.CASCADE, related_name="owned_cards"
+        get_user_model(),
+        on_delete=models.CASCADE,
+        related_name="owned_cards",
     )
-    bank_name = models.CharField(max_length=100)
+
+    authorization_code = models.CharField(max_length=255, null=True, blank=True)
+    signature = models.CharField(max_length=255, null=True, blank=True, db_index=True)
+
+    card_type = models.CharField(max_length=50, null=True, blank=True)
+    card_brand = models.CharField(max_length=50, null=True, blank=True)
+    card_first6_digits = models.CharField(max_length=6, null=True, blank=True)
+    card_last4_digits = models.CharField(max_length=4, null=True, blank=True)
+    card_owner_name = models.CharField(max_length=255, null=True, blank=True)
+
+    expiry_month = models.CharField(max_length=2, null=True, blank=True)
+    expiry_year = models.CharField(max_length=4, null=True, blank=True)
+
+    bank_name = models.CharField(max_length=100, null=True, blank=True)
+    country_code = models.CharField(max_length=10, null=True, blank=True, default="NG")
+
+    reusable = models.BooleanField(default=False)
     is_default = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    objects = CardManager()
+    all_objects = models.Manager()
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["user", "is_active", "is_default"]),
+            models.Index(fields=["user", "is_active", "reusable"]),
+            models.Index(fields=["authorization_code"]),
+            models.Index(fields=["signature"]),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.is_default and self.user_id:
+            Card.all_objects.filter(user=self.user, is_default=True).exclude(
+                id=self.id
+            ).update(is_default=False)
+
+        if not self.is_active:
+            self.is_default = False
+
+        super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.user.email}'s Card ({self.bank_name})"
+        brand = (self.card_brand or self.card_type or "Card").upper()
+        last4 = self.card_last4_digits or "****"
+        bank = self.bank_name or "Unknown Bank"
+        return f"{self.user.email} - {brand} •••• {last4} ({bank})"
 
 
 # Update the models to use settings.AUTH_USER_MODEL

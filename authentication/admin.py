@@ -1762,7 +1762,13 @@ class CardAdmin(admin.ModelAdmin):
         "is_default",
     )
     list_filter = ("is_default",)
-    search_fields = ("user__email", "bank_name", "card_number")  # Add search options
+    search_fields = (
+        "user__email",
+        "bank_name",
+        "card_last4_digits",
+        "card_brand",
+        "authorization_code",
+    )
 
 
 class AutoSaveAdmin(admin.ModelAdmin):
