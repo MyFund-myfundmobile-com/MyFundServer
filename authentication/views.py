@@ -223,7 +223,7 @@ def confirm_otp(request):
             admin_emails = [
                 "tolulopeahmed@gmail.com",
                 "ceo@myfundmobile.com",
-                "lioness@myfundmobile.com",
+                "janet.adegbenro@gmail.com",
             ]
             admin_users = CustomUser.objects.filter(email__in=admin_emails)
             for admin_user in admin_users:
@@ -4071,7 +4071,7 @@ def withdraw_to_local_bank(request):
             admin_emails = [
                 "tolulopeahmed@gmail.com",
                 "ceo@myfundmobile.com",
-                "lioness@myfundmobile.com",
+                "janet.adegbenro@gmail.com",
             ]
             admin_users = CustomUser.objects.filter(email__in=admin_emails)
 
@@ -4510,7 +4510,7 @@ def process_withdrawal_to_local_bank(request):
             admin_recipient_list = [
                 "company@myfundmobile.com",
                 "tolulopeahmed@gmail.com",
-                "lioness@myfundmobile.com",
+                "janet.adegbenro@gmail.com",
             ]
 
             send_generic_email(
@@ -4525,7 +4525,7 @@ def process_withdrawal_to_local_bank(request):
             admin_emails = [
                 "tolulopeahmed@gmail.com",
                 "ceo@myfundmobile.com",
-                "lioness@myfundmobile.com",
+                "janet.adegbenro@gmail.com",
             ]
             admin_users = CustomUser.objects.filter(email__in=admin_emails)
 
@@ -5560,7 +5560,7 @@ class KYCUpdateView(generics.UpdateAPIView):
         admin_emails = [
             "tolulopeahmed@gmail.com",
             "ceo@myfundmobile.com",
-            "lioness@myfundmobile.com",
+            "janet.adegbenro@gmail.com",
         ]
 
         admin_users = CustomUser.objects.filter(email__in=admin_emails)
@@ -5878,7 +5878,7 @@ def initiate_bank_transfer(request):
                 admin_emails = [
                     "tolulopeahmed@gmail.com",
                     "ceo@myfundmobile.com",
-                    "lioness@myfundmobile.com",
+                    "janet.adegbenro@gmail.com",
                 ]
                 admin_users = CustomUser.objects.filter(email__in=admin_emails)
 
@@ -7073,20 +7073,34 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
 
                         # Save only valid reusable cards
                         if reusable and authorization_code:
-                            existing_card = Card.objects.filter(
+                            # 1. Check same user by auth code first
+                            existing_card = Card.all_objects.filter(
                                 user=user,
                                 authorization_code=authorization_code,
-                                is_active=True,
                             ).first()
 
-                            if not existing_card and signature:
-                                existing_card = Card.objects.filter(
-                                    user=user,
+                            # 2. Then check globally by signature
+                            existing_signature_card = None
+                            if signature:
+                                existing_signature_card = Card.all_objects.filter(
                                     signature=signature,
-                                    is_active=True,
                                 ).first()
 
-                            if not existing_card:
+                            # 3. If same card already exists anywhere, don't try to create again
+                            if existing_card:
+                                print("ℹ️ Card already exists for this user, skipping create")
+
+                            elif existing_signature_card:
+                                print(
+                                    f"ℹ️ Card signature already exists on user_id={existing_signature_card.user_id}, skipping create"
+                                )
+
+                                # Optional:
+                                # If you WANT to re-link same physical card to this user instead,
+                                # you must first remove the DB unique constraint on signature.
+                                # Until then, do not create a new row.
+
+                            else:
                                 is_first_card = (
                                     not Card.objects.filter(
                                         user=user,
@@ -7109,12 +7123,8 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                                     card_first6_digits=authorization.get("bin", ""),
                                     bank_name=bank,
                                     card_brand=brand,
-                                    card_owner_name=authorization.get("account_name")
-                                    or user.first_name
-                                    or "",
-                                    country_code=authorization.get(
-                                        "country_code", "NG"
-                                    ),
+                                    card_owner_name=authorization.get("account_name") or user.first_name or "",
+                                    country_code=authorization.get("country_code", "NG"),
                                     reusable=True,
                                     is_default=is_first_card,
                                     is_active=True,
@@ -7123,8 +7133,6 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                                 print(
                                     f"✅ CARD SAVED: id={card.id}, auth={card.authorization_code}, last4={card.card_last4_digits}"
                                 )
-                            else:
-                                print("ℹ️ Card already exists, skipping create")
 
                         else:
                             print(

@@ -1552,7 +1552,7 @@ def send_ambassador_report_notifications_task(self, report_id, user_id):
             email__in=[
                 "tolulopeahmed@gmail.com",
                 "ceo@myfundmobile.com",
-                "lioness@myfundmobile.com",
+                "janet.adegbenro@gmail.com",
             ]
         )
 
@@ -1592,7 +1592,7 @@ AMBASSADOR_GROUP_LINK = "https://chat.whatsapp.com/K6ydqeE0zKuGX0Sek87tkW"
 
 TEST_AMBASSADOR_EMAILS = [
     "dme@myfundmobile.com",
-    "lioness@myfundmobile.com",
+    "janet.adegbenro@gmail.com",
     "janet.adegbenro@gmail.com",
     "patrickmundi1@myfundmobile.com",
     "valueplusrecords@gmail.com",
