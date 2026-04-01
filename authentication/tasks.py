@@ -409,291 +409,157 @@ def send_batch_roi_notifications(notifications):
 
 
 @shared_task
-def process_quarterly_payouts_task_fixed():
+def release_quarterly_roi(test_mode=True):
     """
-    Process quarterly ROI payouts for the previous quarter.
-    Optimized: Uses database aggregation, bulk_update, and batch operations.
+    Release accrued quarterly ROI to users' wallets.
+    Only credits ROITransaction records that have been calculated but not yet paid out.
+    Emails are staggered via Celery to avoid Namecheap rate limits.
     """
-    from django.utils import timezone
     from decimal import Decimal
-    from django.db.models import Sum, Q
     from datetime import date
-    import logging
+    from django.db import transaction as db_transaction
+    from django.db.models import Sum
+    from .models import CustomUser, ROITransaction, Transaction
+    from .utils import send_push_notification
+    from .tasks import send_single_email_task
 
-    logger = logging.getLogger(__name__)
+    QUARTER_START = date(2026, 1, 1)
+    QUARTER_END = date(2026, 3, 31)
+    QUARTER_LABEL = "Q1 2026"
 
-    today = timezone.now().date()
-    current_year = today.year
-    current_month = today.month
+    TEST_EMAILS = [
+        "sammy@myfundmobile.com",
+        # "valueplusrecords@gmail.com",
+        # "tolulopeahmed@gmail.com",
+    ]
 
-    # Determine previous quarter
-    if current_month in [1, 2, 3]:
-        quarter_start = date(current_year - 1, 10, 1)
-        quarter_end = date(current_year - 1, 12, 31)
-        quarter_label = f"Q4 {current_year - 1}"
-    elif current_month in [4, 5, 6]:
-        quarter_start = date(current_year, 1, 1)
-        quarter_end = date(current_year, 3, 31)
-        quarter_label = f"Q1 {current_year}"
-    elif current_month in [7, 8, 9]:
-        quarter_start = date(current_year, 4, 1)
-        quarter_end = date(current_year, 6, 30)
-        quarter_label = f"Q2 {current_year}"
-    else:
-        quarter_start = date(current_year, 7, 1)
-        quarter_end = date(current_year, 9, 30)
-        quarter_label = f"Q3 {current_year}"
+    logger.info(f"🚀 release_quarterly_roi started. test_mode={test_mode}")
 
-    # 🎯 OPTIMIZED: Use database aggregation to get all payouts at once
-    user_payouts = (
+    qs = (
         ROITransaction.objects.filter(
-            accrued_date__range=[quarter_start, quarter_end],
+            accrued_date__range=[QUARTER_START, QUARTER_END],
             is_paid_out=False,
         )
         .values("user_id")
-        .annotate(total_payout=Sum("amount"))
+        .annotate(
+            total_payout=Sum("amount"),
+            savings_roi=Sum("amount", filter=models.Q(roi_type="SAVINGS")),
+            investment_roi=Sum("amount", filter=models.Q(roi_type="INVESTMENT")),
+        )
         .filter(total_payout__gt=0)
     )
 
-    total_paid_users = 0
-    total_amount = Decimal("0.00")
+    if test_mode:
+        test_user_ids = CustomUser.objects.filter(email__in=TEST_EMAILS).values_list(
+            "id", flat=True
+        )
+        qs = qs.filter(user_id__in=test_user_ids)
+        logger.info(f"🧪 TEST MODE — restricted to {TEST_EMAILS}")
 
-    # Collect data for bulk operations
-    users_to_update = []
-    transactions_to_create = []
-    emails_to_send = []
-    roi_to_mark_paid = []
+    if not qs.exists():
+        msg = "No unpaid ROI found for the quarter."
+        logger.info(msg)
+        return msg
 
-    logger.info(f"📊 Processing quarterly payouts for {len(user_payouts)} users")
+    processed = 0
+    skipped = 0
+    errors = 0
 
-    for payout_data in user_payouts:
+    for row in qs:
+        user_id = row["user_id"]
+        total_payout = Decimal(str(row["total_payout"] or 0))
+        savings_roi = Decimal(str(row["savings_roi"] or 0))
+        investment_roi = Decimal(str(row["investment_roi"] or 0))
+
+        if total_payout <= 0:
+            skipped += 1
+            continue
+
         try:
-            user_id = payout_data["user_id"]
-            total_payout = Decimal(str(payout_data["total_payout"]))
-
-            if total_payout <= 0:
-                continue
-
-            # Get user object for notifications
             user = CustomUser.objects.get(id=user_id)
 
-            # Collect user wallet update
-            user.wallet = models.F("wallet") + total_payout
-            users_to_update.append(user)
+            with db_transaction.atomic():
+                # 1. Credit wallet
+                user.wallet = models.F("wallet") + total_payout
+                user.save(update_fields=["wallet"])
+                user.refresh_from_db(fields=["wallet"])
 
-            # Collect transaction record
-            transactions_to_create.append(
-                Transaction(
-                    user_id=user_id,
+                # 2. Transaction record
+                Transaction.objects.create(
+                    user=user,
                     transaction_type="credit",
-                    source="INVESTMENT",
+                    source="WALLET",
                     status="confirmed",
                     amount=total_payout,
                     service_charge=Decimal("0.00"),
                     total_amount=total_payout,
-                    description=f"Dividends: {quarter_label} ROI",
+                    description=f"Dividends: {QUARTER_LABEL} ROI",
                 )
-            )
 
-            # Get ROI breakdown for email
-            roi_breakdown = (
+                # 3. Mark ROI records as paid
                 ROITransaction.objects.filter(
-                    user_id=user_id,
-                    accrued_date__range=[quarter_start, quarter_end],
+                    user=user,
+                    accrued_date__range=[QUARTER_START, QUARTER_END],
                     is_paid_out=False,
-                )
-                .values("roi_type")
-                .annotate(total=Sum("amount"))
-            )
+                ).update(is_paid_out=True, payout_date=date.today())
 
-            savings_roi = next(
-                (
-                    Decimal(str(r["total"]))
-                    for r in roi_breakdown
-                    if r["roi_type"] == "SAVINGS"
-                ),
-                Decimal("0"),
-            )
-            investment_roi = next(
-                (
-                    Decimal(str(r["total"]))
-                    for r in roi_breakdown
-                    if r["roi_type"] == "INVESTMENT"
-                ),
-                Decimal("0"),
-            )
-
-            # Collect email data
-            emails_to_send.append(
-                {
-                    "email": user.email,
-                    "first_name": user.first_name,
-                    "total_payout": total_payout,
-                    "savings_roi": savings_roi,
-                    "investment_roi": investment_roi,
-                    "quarter_label": quarter_label,
-                    "user": user,
-                }
-            )
-
-            # Mark ROI records for update
-            roi_records = ROITransaction.objects.filter(
-                user_id=user_id,
-                accrued_date__range=[quarter_start, quarter_end],
-                is_paid_out=False,
-            )
-            for roi in roi_records:
-                roi.is_paid_out = True
-                roi.payout_date = today
-                roi_to_mark_paid.append(roi)
-
-            total_paid_users += 1
-            total_amount += total_payout
-
-        except Exception as e:
-            logger.error(f"Error processing payout for user {user_id}: {e}")
-            continue
-
-    # 🚀 BULK OPERATIONS
-    if users_to_update:
-        CustomUser.objects.bulk_update(users_to_update, ["wallet"], batch_size=500)
-        logger.info(f"✅ Updated wallets for {len(users_to_update)} users")
-
-    if transactions_to_create:
-        Transaction.objects.bulk_create(transactions_to_create, batch_size=500)
-        logger.info(f"✅ Created {len(transactions_to_create)} transaction records")
-
-    if roi_to_mark_paid:
-        ROITransaction.objects.bulk_update(
-            roi_to_mark_paid, ["is_paid_out", "payout_date"], batch_size=500
-        )
-        logger.info(f"✅ Marked {len(roi_to_mark_paid)} ROI records as paid")
-
-    # 📧 Send emails and notifications
-    for email_data in emails_to_send:
-        try:
-            user = email_data["user"]
-
-            # Push notification
+            # 4. Push notification (immediate)
             send_push_notification(
-                user,
-                title=f"🎉 {email_data['quarter_label']} Dividends Paid! (₦{email_data['total_payout']:,.2f})",
+                user=user,
+                title=f"🎉 {QUARTER_LABEL} Dividends Paid!",
                 message=(
-                    f"{user.first_name}, ₦{email_data['total_payout']:,.2f} has been added to your wallet as dividends! "
-                    f"(Savings: ₦{email_data['savings_roi']:,.2f}, Investment: ₦{email_data['investment_roi']:,.2f})"
+                    f"Congratulations {user.first_name}, ₦{total_payout:,.2f} has been added to "
+                    f"your wallet as dividends for {QUARTER_LABEL}! "
+                    f"(Savings: ₦{savings_roi:,.2f}, Investment: ₦{investment_roi:,.2f}). "
+                    f"Keep growing your funds for better ROI by the next payout by July."
                 ),
                 data={
                     "type": "QUARTERLY_PAYOUT",
-                    "amount": float(email_data["total_payout"]),
-                    "period": email_data["quarter_label"],
+                    "amount": float(total_payout),
+                    "period": QUARTER_LABEL,
                 },
             )
 
-            # Send email via utility (handles batching)
-            send_generic_email(
-                subject=f"🎉 {email_data['first_name']}, ₦{email_data['total_payout']:,.2f} Has Been Added to Your Wallet!",
-                message=(
-                    f"Hi {email_data['first_name']},<br><br>"
-                    f"Your ROI of ₦{email_data['total_payout']:,.2f} has been credited to your MyFund wallet for ({email_data['quarter_label']})!<br>"
-                    f"(Savings: ₦{email_data['savings_roi']:,.2f}, Investment: ₦{email_data['investment_roi']:,.2f})<br><br>"
-                    "Thank you for using MyFund. Keep growing your funds to earn more in the next quarter! 🚀"
-                ),
-                recipient_list=[email_data["email"]],
-                from_email="MyFund <info@myfundmobile.com>",
-            )
-        except Exception as e:
-            logger.error(f"Error processing user {user.email}: {e}")
-            continue
-
-    return f"✅ Quarterly ROI processed for {total_paid_users} users, total ₦{total_amount:,.2f}, period {quarter_label}"
-
-
-@shared_task
-def process_quarterly_payout_single_user(email):
-    from django.utils import timezone
-    from .models import CustomUser, ROITransaction, Transaction
-    from .utils import send_push_notification
-    from decimal import Decimal
-    from django.db import transaction as db_transaction
-    from datetime import date
-
-    today = timezone.now().date()
-    current_year = today.year
-    current_month = today.month
-
-    # Previous quarter logic same as fixed task
-    if current_month in [1, 2, 3]:
-        quarter_start = date(current_year - 1, 10, 1)
-        quarter_end = date(current_year - 1, 12, 31)
-        quarter_label = f"Q4 {current_year - 1}"
-    elif current_month in [4, 5, 6]:
-        quarter_start = date(current_year, 1, 1)
-        quarter_end = date(current_year, 3, 31)
-        quarter_label = f"Q1 {current_year}"
-    elif current_month in [7, 8, 9]:
-        quarter_start = date(current_year, 4, 1)
-        quarter_end = date(current_year, 6, 30)
-        quarter_label = f"Q2 {current_year}"
-    else:
-        quarter_start = date(current_year, 7, 1)
-        quarter_end = date(current_year, 9, 30)
-        quarter_label = f"Q3 {current_year}"
-
-    user = CustomUser.objects.filter(email=email).first()
-    if not user:
-        return f"User {email} not found"
-
-    unpaid_roi = ROITransaction.objects.filter(
-        user=user, accrued_date__range=[quarter_start, quarter_end], is_paid_out=False
-    )
-    total_payout = sum(t.amount for t in unpaid_roi)
-
-    if total_payout <= 0:
-        return f"No unpaid ROI for {email}"
-
-    with db_transaction.atomic():
-        user.wallet += total_payout
-        user.save(update_fields=["wallet"])
-        unpaid_roi.update(is_paid_out=True, payout_date=today)
-        Transaction.objects.create(
-            user=user,
-            transaction_type="credit",
-            source="INVESTMENT",
-            status="confirmed",
-            amount=Decimal(total_payout),
-            service_charge=Decimal("0.00"),
-            total_amount=Decimal(total_payout),
-            description=f"Dividends: {quarter_label} ROI",
-        )
-
-        send_push_notification(
-            user,
-            title=f"🎉 Quarterly ROI Paid! ({quarter_label})",
-            message=f"Hi {user.first_name}, Your ROI of ₦{total_payout:,.2f} has been credited to your Wallet for {quarter_label}! Keep growing your funds to earn more in the next quarter.",
-            data={
-                "type": "QUARTERLY_PAYOUT",
-                "amount": float(total_payout),
-                "period": quarter_label,
-            },
-        )
-
-        # Send email notification
-        savings_roi = sum(t.amount for t in unpaid_roi if t.roi_type == "SAVINGS")
-        investment_roi = sum(t.amount for t in unpaid_roi if t.roi_type == "INVESTMENT")
-
-        send_generic_email(
-            subject=f"🎉 Quarterly ROI Paid! ({quarter_label})",
-            message=(
+            # 5. Email (staggered via Celery — 72s apart = ~50/hour, safe for Namecheap)
+            email_body = (
                 f"Hi {user.first_name},<br><br>"
-                f"Your ROI of ₦{total_payout:,.2f} has been credited to your MyFund Wallet for {quarter_label}!<br>"
-                f"(Savings: ₦{savings_roi:,.2f}, Investment: ₦{investment_roi:,.2f})<br><br>"
-                "Thank you for using MyFund. Keep growing your funds to earn more in the next quarter! 🚀"
-            ),
-            recipient_list=[user.email],
-            from_email="MyFund <info@myfundmobile.com>",
-        )
+                f"Your quarterly ROI has been added to your MyFund Wallet as dividends for <b>{QUARTER_LABEL}</b>.<br><br>"
+                f"<b>Total ROI credited:</b> ₦{total_payout:,.2f}<br>"
+                f"<b>Savings ROI:</b> ₦{savings_roi:,.2f}<br>"
+                f"<b>Investment ROI:</b> ₦{investment_roi:,.2f}<br><br>"
+                f"This payout covers your earnings for {QUARTER_LABEL}.<br><br>"
+                f"The next payout will be in July. Keep growing your funds.<br><br>"
+                f"Thank you for using MyFund.<br><br>"
+                f"The MyFund Team"
+            )
 
-    return f"✅ Paid ₦{total_payout:,.2f} to {email}"
+            send_single_email_task.apply_async(
+                args=[
+                    user.email,
+                    f"Quarterly ROI Paid! ({QUARTER_LABEL})",
+                    email_body,
+                    "MyFund <info@myfundmobile.com>",
+                ],
+                countdown=processed
+                * 30,  # stagger: user 0 = now, user 1 = 72s, user 2 = 144s...
+                queue="email_queue",
+            )
+
+            processed += 1
+            logger.info(
+                f"✅ Credited & email queued for {user.email} (countdown: {processed * 72}s)"
+            )
+
+        except Exception as e:
+            errors += 1
+            logger.error(f"❌ Error processing user {user_id}: {e}")
+
+    result = (
+        f"✅ release_quarterly_roi complete. "
+        f"Processed: {processed}, Skipped: {skipped}, Errors: {errors}"
+    )
+    logger.info(result)
+    return result
 
 
 # ✅ tasks.py
@@ -1487,6 +1353,118 @@ DME, MyFund
     )
 
     logger.info(f"📊 Tax update email task result: {result}")
+    return result
+
+
+@shared_task
+def apply_withholding_tax_q1_2026(test_mode=True):
+    """
+    Apply 10% Withholding Tax on Q1 2026 dividend payouts.
+    Debits wallet and creates a transaction record only — no push, no email.
+    """
+    from decimal import Decimal, ROUND_HALF_UP
+    from datetime import date
+    from django.db import transaction as db_transaction
+    from django.db.models import Sum
+    from .models import CustomUser, Transaction, ROITransaction
+
+    QUARTER_START = date(2026, 1, 1)
+    QUARTER_END = date(2026, 3, 31)
+    QUARTER_LABEL = "Q1 2026"
+    WHT_RATE = Decimal("0.10")
+
+    TEST_EMAILS = [
+        "company@myfundmobile.com",
+        "valueplusrecords@gmail.com",
+        "tolulopeahmed@gmail.com",
+    ]
+
+    logger.info(f"🚀 apply_withholding_tax_q1_2026 started. test_mode={test_mode}")
+
+    # Get all users who were paid out this quarter
+    qs = (
+        ROITransaction.objects.filter(
+            accrued_date__range=[QUARTER_START, QUARTER_END],
+            is_paid_out=True,
+        )
+        .values("user_id")
+        .annotate(total_payout=Sum("amount"))
+        .filter(total_payout__gt=0)
+    )
+
+    if test_mode:
+        test_user_ids = CustomUser.objects.filter(email__in=TEST_EMAILS).values_list(
+            "id", flat=True
+        )
+        qs = qs.filter(user_id__in=test_user_ids)
+        logger.info(f"🧪 TEST MODE — restricted to {TEST_EMAILS}")
+
+    if not qs.exists():
+        msg = "No paid ROI found for the quarter."
+        logger.info(msg)
+        return msg
+
+    processed = 0
+    skipped = 0
+    errors = 0
+
+    for row in qs:
+        user_id = row["user_id"]
+        total_payout = Decimal(str(row["total_payout"] or 0))
+        wht_amount = (total_payout * WHT_RATE).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+
+        if wht_amount <= 0:
+            skipped += 1
+            continue
+
+        # Skip if WHT already applied for this user this quarter
+        already_charged = Transaction.objects.filter(
+            user_id=user_id,
+            description=f"WHT: {QUARTER_LABEL} Dividends",
+            transaction_type="debit",
+            status="confirmed",
+        ).exists()
+
+        if already_charged:
+            logger.info(f"⏭️ WHT already applied for user {user_id}, skipping.")
+            skipped += 1
+            continue
+
+        try:
+            user = CustomUser.objects.get(id=user_id)
+
+            with db_transaction.atomic():
+                # 1. Debit wallet
+                user.wallet = models.F("wallet") - wht_amount
+                user.save(update_fields=["wallet"])
+                user.refresh_from_db(fields=["wallet"])
+
+                # 2. Transaction record
+                Transaction.objects.create(
+                    user=user,
+                    transaction_type="debit",
+                    source="WALLET",
+                    status="confirmed",
+                    amount=wht_amount,
+                    service_charge=Decimal("0.00"),
+                    total_amount=wht_amount,
+                    description=f"WHT: {QUARTER_LABEL} Dividends",
+                )
+
+            processed += 1
+            logger.info(f"✅ WHT ₦{wht_amount:,.2f} debited from {user.email}")
+
+        except Exception as e:
+            errors += 1
+            logger.error(f"❌ Error applying WHT for user {user_id}: {e}")
+
+    result = (
+        f"✅ apply_withholding_tax_q1_2026 complete. "
+        f"Processed: {processed}, Skipped: {skipped}, Errors: {errors}"
+    )
+    logger.info(result)
     return result
 
 
