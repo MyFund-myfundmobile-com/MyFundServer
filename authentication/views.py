@@ -2177,6 +2177,77 @@ def set_default_card(request):
     )
 
 
+def save_or_update_card_from_paystack_auth(user, authorization):
+    """
+    Save or update a reusable card from Paystack authorization payload.
+    """
+    if not authorization:
+        return None
+
+    authorization_code = authorization.get("authorization_code")
+    signature = authorization.get("signature")
+    reusable = bool(authorization.get("reusable", False))
+
+    if not authorization_code:
+        return None
+
+    card_defaults = {
+        "authorization_code": authorization_code,
+        "signature": signature,
+        "card_type": authorization.get("channel"),
+        "card_brand": authorization.get("brand"),
+        "card_first6_digits": authorization.get("bin"),
+        "card_last4_digits": authorization.get("last4"),
+        "card_owner_name": authorization.get("account_name") or user.first_name or "",
+        "expiry_month": str(authorization.get("exp_month") or ""),
+        "expiry_year": str(authorization.get("exp_year") or ""),
+        "bank_name": authorization.get("bank"),
+        "country_code": authorization.get("country_code") or "NG",
+        "reusable": reusable,
+        "is_active": True,
+    }
+
+    existing_card = None
+
+    # First try matching by signature for same physical card
+    if signature:
+        existing_card = Card.all_objects.filter(
+            user=user,
+            signature=signature,
+        ).first()
+
+    # Fallback: match by authorization code
+    if not existing_card and authorization_code:
+        existing_card = Card.all_objects.filter(
+            user=user,
+            authorization_code=authorization_code,
+        ).first()
+
+    if existing_card:
+        for field, value in card_defaults.items():
+            setattr(existing_card, field, value)
+
+        # Keep current default if already set, otherwise make default if no default exists
+        if (
+            not Card.all_objects.filter(user=user, is_default=True, is_active=True)
+            .exclude(id=existing_card.id)
+            .exists()
+        ):
+            existing_card.is_default = True
+
+        existing_card.save()
+        return existing_card
+
+    is_first_card = not Card.all_objects.filter(user=user, is_active=True).exists()
+
+    new_card = Card.all_objects.create(
+        user=user,
+        is_default=is_first_card,
+        **card_defaults,
+    )
+    return new_card
+
+
 class TransactionCreateView(generics.CreateAPIView):
     serializer_class = TransactionSerializer
     permission_classes = [IsAuthenticated]
@@ -2739,16 +2810,25 @@ def deactivate_autosave(request):
     if not frequency:
         return Response(
             {
-                "error": "Frequency Missing: Please, provide the frequency of the autosave."
+                "error": "Frequency Missing: Please provide the frequency of the autosave."
             },
             status=status.HTTP_400_BAD_REQUEST,
         )
 
     try:
-        # Find all active AutoSaves for the user with the given frequency
         active_autosaves = AutoSave.objects.filter(
-            user=user, frequency=frequency, active=True
+            user=user,
+            frequency=frequency,
+            active=True,
         )
+
+        if not active_autosaves.exists():
+            user.autosave_enabled = False
+            user.save(update_fields=["autosave_enabled"])
+            return Response(
+                {"message": "No active AutoSave found for this frequency."},
+                status=status.HTTP_200_OK,
+            )
 
         headers = {
             "Authorization": f"Bearer {paystack_secret_key}",
@@ -2756,48 +2836,41 @@ def deactivate_autosave(request):
         }
 
         for autosave in active_autosaves:
-
-            # print(f"autosave: {autosave}")
-
-            if autosave.paystack_sub_id and autosave.paystack_sub_token:
-                # Prepare the data for the request
+            # If Paystack subscription exists, disable it first
+            if autosave.paystack_sub_code and autosave.paystack_sub_token:
                 data = {
                     "code": autosave.paystack_sub_code,
                     "token": autosave.paystack_sub_token,
                 }
 
-                # Log the data being sent
-                # print("Disabling subscription with data:", autosave.paystack_trans_ref)
-
-                # Make the API request
                 deactivate_response = requests.post(
                     "https://api.paystack.co/subscription/disable",
                     json=data,
                     headers=headers,
+                    timeout=30,
                 )
+                deactivate_response.raise_for_status()
 
-                # Check for successful response
-                deactivate_response.raise_for_status()  # Raises an HTTPError for bad responses
+            # Whether or not Paystack details exist, make sure record is no longer active
+            autosave.active = False
+            autosave.save(update_fields=["active"])
+            autosave.delete()
 
-                # Deactivate the AutoSave
-                autosave.active = False
-                autosave.save()
-                autosave.delete()
-            else:
-                autosave.delete()
-                return Response(
-                    {
-                        "error": "Paystack subscription details are missing for one or more AutoSaves"
-                    },
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                )
+        # Check if user still has any active autosave left
+        still_has_active_autosave = AutoSave.objects.filter(
+            user=user,
+            active=True,
+        ).exists()
 
-        user.autosave_enabled = False
-        user.save()
+        user.autosave_enabled = still_has_active_autosave
+        user.save(update_fields=["autosave_enabled"])
 
-        # Send a confirmation email
         subject = "AutoSave Deactivated!"
-        message = f"Hi {user.first_name},<br><br>Your {frequency} AutoSave(s) have been deactivated. <br><br>Keep growing your funds.🥂"
+        message = (
+            f"Hi {user.first_name},<br><br>"
+            f"Your {frequency} AutoSave has been deactivated successfully."
+            f"<br><br>Keep growing your funds.🥂"
+        )
         from_email = "MyFund <info@myfundmobile.com>"
         recipient_list = [user.email]
 
@@ -2808,12 +2881,19 @@ def deactivate_autosave(request):
             recipient_list=recipient_list,
         )
 
-        # Return a success response indicating that AutoSave has been deactivated
-        return Response({"message": "AutoSave deactivated"}, status=status.HTTP_200_OK)
+        return Response(
+            {"message": "AutoSave deactivated"},
+            status=status.HTTP_200_OK,
+        )
 
     except requests.RequestException as e:
         return Response(
             {"error": f"Failed to deactivate subscription on Paystack: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+    except Exception as e:
+        return Response(
+            {"error": str(e)},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
@@ -7050,100 +7130,48 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     )
                     return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
+                saved_card = None
+
                 if user and authorization:
                     try:
-                        authorization_code = authorization.get("authorization_code")
-                        signature = authorization.get("signature")
-                        reusable = authorization.get("reusable", False)
-                        last4 = authorization.get("last4", "")
-                        brand = authorization.get(
-                            "brand", authorization.get("card_type", "")
-                        )
-                        bank = authorization.get("bank", "")
-
                         print("========== CARD SAVE DEBUG ==========")
                         print("email:", email)
                         print("authorization:", authorization)
-                        print("authorization_code:", authorization_code)
-                        print("signature:", signature)
-                        print("reusable:", reusable)
-                        print("last4:", last4)
-                        print("brand:", brand)
-                        print("bank:", bank)
+                        print(
+                            "authorization_code:",
+                            authorization.get("authorization_code"),
+                        )
+                        print("signature:", authorization.get("signature"))
+                        print("reusable:", authorization.get("reusable", False))
+                        print("last4:", authorization.get("last4", ""))
+                        print(
+                            "brand:",
+                            authorization.get(
+                                "brand", authorization.get("card_type", "")
+                            ),
+                        )
+                        print("bank:", authorization.get("bank", ""))
 
-                        # Save only valid reusable cards
-                        if reusable and authorization_code:
-                            # 1. Check same user by auth code first
-                            existing_card = Card.all_objects.filter(
-                                user=user,
-                                authorization_code=authorization_code,
-                            ).first()
+                        saved_card = save_or_update_card_from_paystack_auth(
+                            user, authorization
+                        )
 
-                            # 2. Then check globally by signature
-                            existing_signature_card = None
-                            if signature:
-                                existing_signature_card = Card.all_objects.filter(
-                                    signature=signature,
-                                ).first()
-
-                            # 3. If same card already exists anywhere, don't try to create again
-                            if existing_card:
-                                print("ℹ️ Card already exists for this user, skipping create")
-
-                            elif existing_signature_card:
-                                print(
-                                    f"ℹ️ Card signature already exists on user_id={existing_signature_card.user_id}, skipping create"
-                                )
-
-                                # Optional:
-                                # If you WANT to re-link same physical card to this user instead,
-                                # you must first remove the DB unique constraint on signature.
-                                # Until then, do not create a new row.
-
-                            else:
-                                is_first_card = (
-                                    not Card.objects.filter(
-                                        user=user,
-                                        is_active=True,
-                                        reusable=True,
-                                    )
-                                    .exclude(authorization_code__isnull=True)
-                                    .exclude(authorization_code="")
-                                    .exists()
-                                )
-
-                                card = Card.objects.create(
-                                    user=user,
-                                    authorization_code=authorization_code,
-                                    signature=signature,
-                                    card_type=authorization.get("card_type", ""),
-                                    card_last4_digits=last4,
-                                    expiry_month=authorization.get("exp_month", ""),
-                                    expiry_year=authorization.get("exp_year", ""),
-                                    card_first6_digits=authorization.get("bin", ""),
-                                    bank_name=bank,
-                                    card_brand=brand,
-                                    card_owner_name=authorization.get("account_name") or user.first_name or "",
-                                    country_code=authorization.get("country_code", "NG"),
-                                    reusable=True,
-                                    is_default=is_first_card,
-                                    is_active=True,
-                                )
-
-                                print(
-                                    f"✅ CARD SAVED: id={card.id}, auth={card.authorization_code}, last4={card.card_last4_digits}"
-                                )
-
+                        if saved_card:
+                            print(
+                                f"✅ CARD SAVED/UPDATED: id={saved_card.id}, auth={saved_card.authorization_code}, last4={saved_card.card_last4_digits}, reusable={saved_card.reusable}"
+                            )
                         else:
                             print(
-                                "⚠️ Card not saved because reusable=False or authorization_code missing"
+                                "⚠️ Card not saved because authorization_code is missing or authorization payload is invalid"
                             )
 
                     except Exception as e:
                         print(f"❌ Error saving card: {str(e)}")
                         try:
                             subject = "[Webhook Warning] Card Save Failed"
-                            message = f"Failed to save card for user {email}: {str(e)}"
+                            message = (
+                                f"Failed to save/update card for user {email}: {str(e)}"
+                            )
                             error_from_email = "MyFund <info@myfundmobile.com>"
                             error_recipient_list = [
                                 "info@myfundmobile.com",
@@ -7320,13 +7348,20 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
 
                         print("AutoInvest Successfully Credited your Account.")
                         return
-
+                # Updated
                 elif transaction and transaction.description.lower().startswith(
                     "quicksave"
                 ):
-                    transaction.description = f"QuickSave ({payment_channel})"
+                    if saved_card:
+                        brand = (saved_card.card_brand or "CARD").upper()
+                        last4 = saved_card.card_last4_digits or "****"
+                        transaction.description = f"QuickSave ({brand} •••• {last4})"
+                        transaction.paystack_auth_code = saved_card.authorization_code
+                    else:
+                        transaction.description = f"QuickSave ({payment_channel})"
+                        transaction.paystack_auth_code = paystack_auth_code
+
                     transaction.status = "confirmed"
-                    transaction.paystack_auth_code = paystack_auth_code
                     transaction.paystack_reference = reference
                     transaction.save()
 
