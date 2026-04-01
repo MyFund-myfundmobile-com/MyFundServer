@@ -4345,7 +4345,7 @@ def process_withdrawal_to_local_bank(request):
                 )
 
             # Lock user row for update to prevent concurrent modifications
-            user_locked = User.objects.select_for_update().get(id=user.id)
+            user_locked = type(user).objects.select_for_update().get(id=user.id)
 
             # Re-check balance inside transaction after locking
             if source_account == "savings":
@@ -4678,14 +4678,9 @@ def process_withdrawal_to_local_bank(request):
 @permission_classes([IsAuthenticated])
 def cancel_scheduled_withdrawal(request):
     user = request.user
-    data = request.data
-
-    print("✅ STEP 1: Received cancel scheduled withdrawal request:", data)
-
-    transaction_id = data.get("transaction_id")
+    transaction_id = request.data.get("transaction_id")
 
     if not transaction_id:
-        print("❌ transaction_id not provided.")
         return Response(
             {"error": "Transaction ID is required."},
             status=status.HTTP_400_BAD_REQUEST,
@@ -4693,58 +4688,67 @@ def cancel_scheduled_withdrawal(request):
 
     try:
         with transaction.atomic():
-            # Lock the withdrawal request and user for update
-            withdrawal_request = WithdrawalsRequestToAdmin.objects.select_for_update().get(
+            # 1) Lock the pending transaction first
+            pending_transaction = Transaction.objects.select_for_update().get(
                 transaction_id=transaction_id,
                 user=user,
-                withdrawal_type="scheduled",  # Only allow canceling scheduled withdrawals
-                is_approved=False,  # Only allow canceling pending withdrawals
+                status="pending",
             )
 
-            # Lock the user row
-            user_locked = User.objects.select_for_update().get(id=user.id)
+            # Must truly be a scheduled withdrawal
+            if not pending_transaction.scheduled_date:
+                return Response(
+                    {"error": "This is not a scheduled withdrawal."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
-            print(
-                f"✅ STEP 2: Found scheduled withdrawal request for transaction {transaction_id}"
+            user_locked = type(user).objects.select_for_update().get(id=user.id)
+
+            # Use original amount safely
+            original_amount = (
+                pending_transaction.total_amount or pending_transaction.amount
             )
+            refund_amount = original_amount * Decimal("0.99")
+            service_charge = original_amount * Decimal("0.01")
 
-            # Calculate refund amount (99% of original amount)
-            refund_amount = withdrawal_request.amount * Decimal("0.99")
-            service_charge = withdrawal_request.amount * Decimal("0.01")
-
-            print(
-                f"✅ STEP 3: Refund amount: {refund_amount}, Service charge: {service_charge}"
-            )
-
-            # Credit the user's savings account with 99% of the amount
-            if hasattr(user_locked, "savings"):
-                user_locked.savings += refund_amount
-                user_locked.save()
-                print(f"✅ STEP 4: Credited {refund_amount} to user's savings account")
-            else:
+            # Refund to savings
+            if not hasattr(user_locked, "savings"):
                 return Response(
                     {"error": "User savings account not found."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            # Update the withdrawal request to mark it as cancelled
-            withdrawal_request.is_approved = (
-                True  # Mark as "processed" but in cancelled state
-            )
-            withdrawal_request.save()
-            print("✅ STEP 5: Updated withdrawal request status")
+            user_locked.savings += refund_amount
+            user_locked.save(update_fields=["savings"])
 
-            # ✅ STEP 6: DELETE the original pending transaction instead of updating it
-            try:
-                original_transaction = Transaction.objects.get(
-                    transaction_id=transaction_id, user=user, status="pending"
+            # 2) Mark matching withdrawal request as cancelled if found
+            withdrawal_request = (
+                WithdrawalsRequestToAdmin.objects.select_for_update()
+                .filter(
+                    transaction_id=transaction_id,
+                    user=user,
+                    withdrawal_type="scheduled",
+                    is_approved=False,
                 )
-                original_transaction.delete()  # Remove the pending transaction
-                print("✅ STEP 6: Deleted original pending transaction")
-            except Transaction.DoesNotExist:
-                print("⚠️ Original transaction not found, continuing...")
+                .first()
+            )
 
-            # ✅ STEP 7: Create a new credit transaction for the 99% refund to savings
+            if withdrawal_request:
+                if hasattr(withdrawal_request, "is_cancelled"):
+                    withdrawal_request.is_cancelled = True
+                    withdrawal_request.save(update_fields=["is_cancelled"])
+                elif hasattr(withdrawal_request, "status"):
+                    withdrawal_request.status = "cancelled"
+                    withdrawal_request.save(update_fields=["status"])
+                else:
+                    # fallback only if your model has neither status nor is_cancelled
+                    withdrawal_request.is_approved = True
+                    withdrawal_request.save(update_fields=["is_approved"])
+
+            # 3) Delete the pending scheduled transaction so it cannot be processed later
+            pending_transaction.delete()
+
+            # 4) Create refund transaction
             refund_transaction_id = "".join(
                 random.choices(string.ascii_uppercase + string.digits, k=20)
             )
@@ -4755,57 +4759,57 @@ def cancel_scheduled_withdrawal(request):
                 transaction_type="credit",
                 status="confirmed",
                 amount=refund_amount,
-                description=f"[Refund] Cancelled Withdrawal",
+                total_amount=refund_amount,
+                service_charge=Decimal("0.00"),
+                description="[Refund] Cancelled Scheduled Withdrawal",
                 source="SAVINGS",
             )
-            print("✅ STEP 7: Created refund transaction record")
 
-            # ✅ STEP 8: Create a debit transaction for the 1% service charge
+            # 5) Create service charge transaction
             if service_charge > 0:
-                service_charge_transaction_id = "".join(
+                charge_transaction_id = "".join(
                     random.choices(string.ascii_uppercase + string.digits, k=20)
                 )
 
                 Transaction.objects.create(
                     user=user_locked,
-                    transaction_id=service_charge_transaction_id,
+                    transaction_id=charge_transaction_id,
                     transaction_type="debit",
                     status="confirmed",
                     amount=service_charge,
-                    description=f"[Charge] Cancelled Withdrawal",
+                    total_amount=service_charge,
+                    service_charge=Decimal("0.00"),
+                    description="[Charge] Cancelled Scheduled Withdrawal",
                     source="SAVINGS",
                 )
-                print("✅ STEP 8: Created service charge transaction record")
 
-            # --- Send email to user ---
+            # 6) Notify user
             subject = "Scheduled Withdrawal Cancelled"
             user_message = (
                 f"Hi {user_locked.first_name},<br><br>"
-                f"Your scheduled withdrawal of ₦{withdrawal_request.amount:,.2f} has been successfully cancelled. "
-                f"₦{refund_amount:,.2f} has been refunded to your Savings account (1% service charge of ₦{service_charge:,.2f} applied).<br><br>"
-                "Thank you for using MyFund.<br><br>"
+                f"Your scheduled withdrawal of ₦{original_amount:,.2f} has been successfully cancelled. "
+                f"₦{refund_amount:,.2f} has been refunded to your Savings account "
+                f"(1% service charge of ₦{service_charge:,.2f} applied).<br><br>"
+                f"Thank you for using MyFund.<br><br>"
             )
-            from_email = "MyFund <info@myfundmobile.com>"
-            recipient_list = [user_locked.email]
 
             send_generic_email(
                 subject=subject,
                 message=user_message,
-                from_email=from_email,
-                recipient_list=recipient_list,
+                from_email="MyFund <info@myfundmobile.com>",
+                recipient_list=[user_locked.email],
             )
-            print("✅ STEP 9: Sent cancellation email to user")
 
-            # --- Send push notification to user ---
             send_push_notification(
                 user=user_locked,
                 title="Withdrawal Cancelled ✅",
-                message="Hi {user_locked.first_name}, your scheduled withdrawal has been cancelled. ₦{:,.2f} has been refunded to your Savings account.".format(
-                    float(refund_amount)
+                message=(
+                    f"Hi {user_locked.first_name}, your scheduled withdrawal has been cancelled. "
+                    f"₦{refund_amount:,.2f} has been refunded to your Savings account."
                 ),
                 data={
                     "refund_amount": str(refund_amount),
-                    "original_amount": str(withdrawal_request.amount),
+                    "original_amount": str(original_amount),
                     "service_charge": str(service_charge),
                     "transaction_id": transaction_id,
                     "type": "Withdrawal_Cancellation",
@@ -4813,27 +4817,24 @@ def cancel_scheduled_withdrawal(request):
                 },
                 notif_type="SUCCESS",
             )
-            print("✅ STEP 10: Sent push notification to user")
 
         return Response(
             {
                 "message": "Scheduled withdrawal cancelled successfully.",
                 "refund_amount": float(refund_amount),
                 "service_charge": float(service_charge),
-                "original_amount": float(withdrawal_request.amount),
+                "original_amount": float(original_amount),
                 "new_savings_balance": float(user_locked.savings),
             },
             status=status.HTTP_200_OK,
         )
 
-    except WithdrawalsRequestToAdmin.DoesNotExist:
-        print("❌ Withdrawal request not found or already processed")
+    except Transaction.DoesNotExist:
         return Response(
             {"error": "Scheduled withdrawal not found or already processed."},
             status=status.HTTP_404_NOT_FOUND,
         )
     except Exception as e:
-        print("❌ Exception occurred during cancellation:")
         print(f"❌ ERROR: {str(e)}")
         import traceback
 
