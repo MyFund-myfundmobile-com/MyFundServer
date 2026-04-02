@@ -4414,14 +4414,18 @@ def process_withdrawal_to_local_bank(request):
                 transaction_id=transaction_id,
                 transaction_type="debit",
                 status="pending",
-                amount=net_amount,  # Amount after charge deduction
-                service_charge=charge_amount,  # Charge deducted
-                total_amount=amount,  # Original amount requested
-                description=f"{source_account.capitalize()} > Bank . . .",
+                amount=net_amount,
+                service_charge=charge_amount,
+                total_amount=amount,
+                description=(
+                    f"{source_account.capitalize()} > Wallet . . ."
+                    if withdrawal_type == "scheduled" and source_account in ["savings", "investment"]
+                    else f"{source_account.capitalize()} > Bank . . ."
+                ),
                 scheduled_date=processing_date.date() if processing_date else None,
             )
-            print("✅ STEP 9: Transaction record created with charge details.")
 
+            print("✅ STEP 9: Transaction record created with charge details.")
             # --- Send email to user (dynamically based on withdrawal_type & source) ---
             subject = "Withdrawal Request Received"
 
@@ -4485,7 +4489,7 @@ def process_withdrawal_to_local_bank(request):
                 # ✅ Scheduled withdrawal — NO CHARGES
                 push_title = "Withdrawal Scheduled 📅"
                 push_message = (
-                    f"Hi {user_locked.first_name},<br><br>"
+                    f"Hi {user_locked.first_name},"
                     f"has been scheduled successfully. "
                     f"No charges apply. Your wallet will be credited on "
                     f"{processing_date.strftime('%A, %B %d, %Y')}."
@@ -4761,7 +4765,7 @@ def cancel_scheduled_withdrawal(request):
                 amount=refund_amount,
                 total_amount=refund_amount,
                 service_charge=Decimal("0.00"),
-                description="[Refund] Cancelled Scheduled Withdrawal",
+                description="[Refund] Cancelled Withdrawal",
                 source="SAVINGS",
             )
 
@@ -4779,18 +4783,18 @@ def cancel_scheduled_withdrawal(request):
                     amount=service_charge,
                     total_amount=service_charge,
                     service_charge=Decimal("0.00"),
-                    description="[Charge] Cancelled Scheduled Withdrawal",
+                    description="[Charge] Cancelled Withdrawal",
                     source="SAVINGS",
                 )
 
             # 6) Notify user
             subject = "Scheduled Withdrawal Cancelled"
             user_message = (
-                f"Hi {user_locked.first_name},<br><br>"
+                f"Hi {user_locked.first_name},"
                 f"Your scheduled withdrawal of ₦{original_amount:,.2f} has been successfully cancelled. "
                 f"₦{refund_amount:,.2f} has been refunded to your Savings account "
                 f"(1% service charge of ₦{service_charge:,.2f} applied).<br><br>"
-                f"Thank you for using MyFund.<br><br>"
+                f"Thank you for using MyFund."
             )
 
             send_generic_email(
