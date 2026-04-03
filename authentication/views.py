@@ -4419,7 +4419,8 @@ def process_withdrawal_to_local_bank(request):
                 total_amount=amount,
                 description=(
                     f"{source_account.capitalize()} > Wallet . . ."
-                    if withdrawal_type == "scheduled" and source_account in ["savings", "investment"]
+                    if withdrawal_type == "scheduled"
+                    and source_account in ["savings", "investment"]
                     else f"{source_account.capitalize()} > Bank . . ."
                 ),
                 scheduled_date=processing_date.date() if processing_date else None,
@@ -4435,8 +4436,8 @@ def process_withdrawal_to_local_bank(request):
                 # ✅ Scheduled withdrawals — NO CHARGES, NO BANK PROCESSING
                 user_message_body = (
                     f"Hi {user_locked.first_name},<br><br>"
-                    f"has been successfully scheduled.<br><br>"
-                    f"<strong>No charges apply</strong> to scheduled withdrawals.<br>"
+                    f"Your withdrawal has been successfully scheduled.<br><br>"
+                    f"<strong>No charges apply</strong> to scheduled withdrawals.<br><br>"
                     f"The funds will be automatically credited to your MyFund wallet on "
                     f"<strong>{processing_date.strftime('%A, %B %d, %Y')}</strong>.<br><br>"
                     f"Once credited, you can withdraw from your wallet to your bank account at no cost."
@@ -8139,7 +8140,7 @@ def send_email(request):
             message=body,  # CHANGED FROM 'message' TO ''
             recipient_list=cleaned_recipients,
             from_email=sender,
-            use_celery_threshold=30,
+            use_celery_threshold=0,
         )
 
         logger.info(f"📧 send_generic_email result: {result}")
