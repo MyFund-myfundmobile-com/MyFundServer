@@ -1935,3 +1935,148 @@ def send_second_batch_ambassador_emails(test_mode=True, only_email=None):
 
     logger.info(f"Second batch ambassador email summary: {summary}")
     return summary
+
+
+from decimal import Decimal
+import random
+import string
+
+from django.contrib.auth import get_user_model
+from django.db import transaction
+from django.utils import timezone
+
+from authentication.models import (
+    TargetSavings,
+    Transaction,
+    TargetSavingsCompletion,
+)
+from authentication.utils import send_push_notification, send_generic_email
+
+
+def manual_complete_target_and_credit_wallet(user_email, target_id):
+    User = get_user_model()
+
+    with transaction.atomic():
+        user = User.objects.select_for_update().get(email=user_email)
+        target = TargetSavings.objects.select_for_update().get(
+            id=target_id,
+            user=user,
+        )
+
+        existing_payout = Transaction.objects.filter(
+            user=user,
+            transaction_type="credit",
+            description=f"Target savings completion payout for target #{target.id}",
+        ).exists()
+
+        existing_completion = TargetSavingsCompletion.objects.filter(
+            target_savings=target
+        ).exists()
+
+        print("existing_payout:", existing_payout)
+        print("existing_completion:", existing_completion)
+
+        if existing_payout or existing_completion:
+            print("⚠️ Already processed. No action taken.")
+            return {
+                "success": False,
+                "message": "Already processed",
+                "wallet": str(user.wallet),
+            }
+
+        completed_amount = target.current_amount
+        bonus = Decimal("0.00")
+        total_amount = completed_amount + bonus
+        today = timezone.now().date()
+        was_on_time = today <= target.end_date
+
+        old_wallet = user.wallet
+        user.wallet += total_amount
+        user.save(update_fields=["wallet"])
+
+        # keep target visibly closed out like your real completion flow
+        target.current_amount = Decimal("0.00")
+        target.is_active = False
+        target.save(update_fields=["current_amount", "is_active"])
+
+        transaction_id = "".join(
+            random.choices(string.ascii_uppercase + string.digits, k=20)
+        )
+
+        payout_tx = Transaction.objects.create(
+            user=user,
+            transaction_id=transaction_id,
+            transaction_type="credit",
+            status="confirmed",
+            amount=total_amount,
+            description=f"Target savings completion payout for target #{target.id}",
+            service_charge=Decimal("0.00"),
+            total_amount=total_amount,
+            target_savings=target,
+            source="WALLET",
+        )
+
+        completion = TargetSavingsCompletion.objects.create(
+            user=user,
+            target_savings=target,
+            completed_amount=completed_amount,
+            bonus_amount=bonus,
+            total_amount=total_amount,
+            completed_date=today,
+            was_on_time=was_on_time,
+            status="SUCCESS",
+        )
+
+        first_name = user.first_name or "there"
+
+        send_push_notification(
+            user=user,
+            title="Target Completed 🎯",
+            message=(
+                f"Congrats {first_name}! Your target savings has been completed "
+                f"and ₦{total_amount:,.2f} has been credited to your wallet."
+            ),
+            data={
+                "amount": str(total_amount),
+                "completed_amount": str(completed_amount),
+                "bonus_amount": str(bonus),
+                "target_id": str(target.id),
+                "transaction_id": transaction_id,
+                "type": "TARGET_COMPLETED",
+                "status": "success",
+            },
+            notif_type="SUCCESS",
+        )
+
+        send_generic_email(
+            subject=f"🎉 Congrats! {target.name} Plan Completed! ✅",
+            message=(
+                f"Hi {first_name},<br><br>"
+                f"Congratulations! You've successfully completed your {target.name} Target Savings plan.<br><br>"
+                f"<strong>Completed Amount:</strong> ₦{completed_amount:,.2f}<br>"
+                f"<strong>Bonus:</strong> ₦{bonus:,.2f}<br>"
+                f"<strong>Total Credited:</strong> ₦{total_amount:,.2f}<br><br>"
+                f"The funds have been added to your MyFund wallet and are now available for use.<br><br>"
+                f"Well done and keep up the great savings habit! 🚀<br><br>"
+                f"<em>MyFund Team</em>"
+            ),
+            from_email="MyFund <info@myfundmobile.com>",
+            recipient_list=[user.email],
+        )
+
+        print("✅ FIXED")
+        print("old wallet:", old_wallet)
+        print("new wallet:", user.wallet)
+        print("credited:", total_amount)
+        print("transaction_id:", payout_tx.transaction_id)
+        print("completion_id:", completion.id)
+
+        return {
+            "success": True,
+            "message": "Target completed successfully",
+            "old_wallet": str(old_wallet),
+            "new_wallet": str(user.wallet),
+            "credited": str(total_amount),
+            "transaction_id": payout_tx.transaction_id,
+            "completion_id": completion.id,
+        }
