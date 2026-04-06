@@ -906,6 +906,7 @@ class AmbassadorMonthlyReportSerializer(serializers.ModelSerializer):
     from rest_framework import serializers
 
 
+from rest_framework import serializers
 from .models import AmbassadorMonthlyReport
 
 
@@ -913,12 +914,20 @@ class AmbassadorMonthlyReportSerializer(serializers.ModelSerializer):
     class Meta:
         model = AmbassadorMonthlyReport
         fields = "__all__"
-        read_only_fields = ("user",)
+        read_only_fields = ("user", "status", "submitted_at")
+
+    def validate_month(self, value):
+        if len(value) != 7 or value[4] != "-":
+            raise serializers.ValidationError("Month must be in YYYY-MM format.")
+        return value
 
     def validate(self, attrs):
         request = self.context.get("request")
         user = request.user
         month = attrs.get("month")
+
+        if not getattr(user, "is_ambassador", False):
+            raise serializers.ValidationError("Only ambassadors can submit reports.")
 
         already_exists = AmbassadorMonthlyReport.objects.filter(
             user=user,
@@ -939,21 +948,8 @@ class AmbassadorMonthlyReportSerializer(serializers.ModelSerializer):
         validated_data["user"] = request.user
 
         report = AmbassadorMonthlyReport(**validated_data)
-
-        # Copy submitted values into approved values by default
-        report.signups_approved = report.signups_submitted
-        report.confirmed_approved = report.confirmed_submitted
-        report.savings_approved = report.savings_submitted
-        report.attendance_approved = report.attendance_submitted
-        report.others_approved = report.others_submitted
-        report.coursera_approved = report.coursera_submitted
-        report.social_media_approved = report.social_media_submitted
-        report.abroad_confirmed_approved = report.abroad_confirmed_submitted
-        report.events_approved = report.events_submitted
-
-        # Calculate points + stipend immediately
+        report.copy_submitted_to_approved_defaults()
         report.recalculate_points()
-
         report.save()
         return report
 

@@ -2542,6 +2542,7 @@ class AmbassadorPointConfigAdmin(admin.ModelAdmin):
         "confirmed_points",
         "savings_points_per_10000",
         "savings_points_cap",
+        "reshares_points",
         "updated_at",
     )
 
@@ -2578,6 +2579,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
         "social_media_points_awarded",
         "abroad_points_awarded",
         "events_points_awarded",
+        "reshares_points_awarded",
         "others_points_awarded",
         "total_points_awarded",
         "stipend_amount",
@@ -2612,6 +2614,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
                     "social_media_submitted",
                     "abroad_confirmed_submitted",
                     "events_submitted",
+                    "reshares_submitted",
                     "notes",
                 )
             },
@@ -2624,6 +2627,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
                     "social_media_evidence",
                     "abroad_signups_evidence",
                     "events_evidence",
+                    "reshares_evidence",
                 )
             },
         ),
@@ -2640,6 +2644,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
                     "social_media_approved",
                     "abroad_confirmed_approved",
                     "events_approved",
+                    "reshares_approved",
                 )
             },
         ),
@@ -2655,6 +2660,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
                     "social_media_points_awarded",
                     "abroad_points_awarded",
                     "events_points_awarded",
+                    "reshares_points_awarded",
                     "others_points_awarded",
                     "total_points_awarded",
                 )
