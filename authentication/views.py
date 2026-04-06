@@ -5468,43 +5468,65 @@ def get_top_savers(request):
     current_month = now.month
     current_year = now.year
 
-    # Use cache lock to ensure only one update runs at a time
     cache_key = f"top_savers_update_{current_year}_{current_month}"
     lock_key = f"top_savers_lock_{current_year}_{current_month}"
 
-    # Check if update is already running
     is_updating = cache.get(lock_key)
-
-    # Check if we have recent data (updated in last 5 minutes)
     last_update = cache.get(cache_key)
 
+    logger.info(
+        "get_top_savers called | month=%s year=%s last_update=%s is_updating=%s user=%s",
+        current_month,
+        current_year,
+        last_update,
+        bool(is_updating),
+        request.user.email,
+    )
+
     if not last_update and not is_updating:
-        # Set lock to prevent multiple simultaneous updates
-        cache.set(lock_key, True, timeout=60)  # Lock for 60 seconds max
+        cache.set(lock_key, True, timeout=60)
 
-        # Start background update but don't wait
+        logger.info(
+            "No cached top savers data found. Starting background update for %s/%s",
+            current_month,
+            current_year,
+        )
+
         update_top_savers()
-
-        # Mark update time
-        cache.set(cache_key, now.isoformat(), timeout=180)  # Cache for 5 minutes
+        cache.set(cache_key, now.isoformat(), timeout=180)
 
         logger.info("Started background top savers update")
 
-    # Fetch precomputed top savers (even if stale)
+    else:
+        logger.info(
+            "Skipping background top savers update | reason=%s",
+            "already_updating" if is_updating else "cached_recent_data_exists",
+        )
+
     top_savers = (
         TopSaverHistory.objects.filter(month=current_month, year=current_year)
         .select_related("user")
         .order_by("rank")[:50]
     )
 
+    logger.info(
+        "Fetched %s TopSaverHistory rows for %s/%s",
+        len(top_savers),
+        current_month,
+        current_year,
+    )
+
     if not top_savers:
+        logger.warning(
+            "No TopSaverHistory rows found for %s/%s",
+            current_month,
+            current_year,
+        )
         return Response(
             {
                 "top_savers": [],
                 "current_user": {},
-                "updating": bool(
-                    is_updating
-                ),  # Let frontend know data is being updated
+                "updating": bool(is_updating),
             }
         )
 
@@ -5517,6 +5539,13 @@ def get_top_savers(request):
         round((current_user_history.total_savings / top_amount) * 100, 1)
         if current_user_history
         else 0
+    )
+
+    logger.info(
+        "Returning top savers response | top_amount=%s current_user_in_board=%s current_user_percentage=%s",
+        top_amount,
+        bool(current_user_history),
+        current_percentage,
     )
 
     return Response(
@@ -5545,8 +5574,8 @@ def get_top_savers(request):
                 "profile_picture": getattr(request.user.profile_picture, "url", ""),
                 "percentage": current_percentage,
             },
-            "updating": bool(is_updating),  # Indicate if fresh data is being computed
-            "last_update": last_update,  # When data was last refreshed
+            "updating": bool(is_updating),
+            "last_update": last_update,
         }
     )
 
@@ -7248,12 +7277,24 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                                 transaction_id=reference,
                                 paystack_auth_code=paystack_auth_code,
                                 paystack_reference=reference,
+                                source="CARD",
+                                credited_to="SAVINGS",
                             )
 
+                        transaction.transaction_type = "credit"
                         transaction.status = "confirmed"
                         transaction.paystack_auth_code = paystack_auth_code
                         transaction.paystack_reference = reference
-                        transaction.save()
+                        transaction.credited_to = "SAVINGS"
+                        transaction.save(
+                            update_fields=[
+                                "transaction_type",
+                                "status",
+                                "paystack_auth_code",
+                                "paystack_reference",
+                                "credited_to",
+                            ]
+                        )
 
                         user.savings += amount
                         user.update_total_savings_and_investment_this_month()
@@ -7307,12 +7348,24 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                                 transaction_id=reference,
                                 paystack_auth_code=paystack_auth_code,
                                 paystack_reference=reference,
+                                source="CARD",
+                                credited_to="INVESTMENT",
                             )
 
+                        transaction.transaction_type = "credit"
                         transaction.status = "confirmed"
                         transaction.paystack_auth_code = paystack_auth_code
                         transaction.paystack_reference = reference
-                        transaction.save()
+                        transaction.credited_to = "INVESTMENT"
+                        transaction.save(
+                            update_fields=[
+                                "transaction_type",
+                                "status",
+                                "paystack_auth_code",
+                                "paystack_reference",
+                                "credited_to",
+                            ]
+                        )
 
                         user.investment += amount
                         user.update_total_savings_and_investment_this_month()
@@ -7488,8 +7541,14 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         transaction.transaction_type = "credit"
                         transaction.status = "confirmed"
                         transaction.description = f"AutoSave ({freq})"
+                        transaction.credited_to = "SAVINGS"
                         transaction.save(
-                            update_fields=["transaction_type", "status", "description"]
+                            update_fields=[
+                                "transaction_type",
+                                "status",
+                                "description",
+                                "credited_to",
+                            ]
                         )
 
                         user.savings += amount
@@ -7518,11 +7577,18 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             transaction.transaction_type = "credit"
                             transaction.status = "confirmed"
                             transaction.description = f"{base_desc} (Card)"
+
+                            if base_desc.lower().startswith("autosave"):
+                                transaction.credited_to = "SAVINGS"
+                            elif base_desc.lower().startswith("autoinvest"):
+                                transaction.credited_to = "INVESTMENT"
+
                             transaction.save(
                                 update_fields=[
                                     "transaction_type",
                                     "status",
                                     "description",
+                                    "credited_to",
                                 ]
                             )
 

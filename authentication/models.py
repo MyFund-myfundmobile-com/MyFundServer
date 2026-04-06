@@ -2035,6 +2035,19 @@ class Transaction(models.Model):
         null=True,
         help_text="Where the transaction funds came from",
     )
+
+    credited_to = models.CharField(
+        max_length=20,
+        choices=[
+            ("SAVINGS", "Savings"),
+            ("INVESTMENT", "Investment"),
+            ("WALLET", "Wallet"),
+        ],
+        blank=True,
+        null=True,
+        db_index=True,
+        help_text="Where the transaction amount was credited to",
+    )
     scheduled_date = models.DateField(
         null=True,
         blank=True,
@@ -2124,13 +2137,10 @@ class Transaction(models.Model):
 
     class Meta:
         indexes = [
-            models.Index(fields=["date", "status", "transaction_type"]),  # ✅ Critical
-            models.Index(
-                fields=["user", "date", "status"]
-            ),  # ✅ For user-specific queries
-            models.Index(
-                fields=["source", "transaction_type", "status", "date"]
-            ),  # ✅ For MAS
+            models.Index(fields=["date", "status", "transaction_type"]),
+            models.Index(fields=["user", "date", "status"]),
+            models.Index(fields=["source", "transaction_type", "status", "date"]),
+            models.Index(fields=["credited_to", "transaction_type", "status", "date"]),
         ]
 
 
