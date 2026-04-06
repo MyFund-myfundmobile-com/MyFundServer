@@ -1875,3 +1875,124 @@ def credit_employee_wallet_allowance(email, amount, credited_by="Admin"):
         "transaction_id": tx.transaction_id,
         "wallet_balance": str(user.wallet),
     }
+
+
+from datetime import timedelta
+from decimal import Decimal
+from django.db import transaction
+from django.db.models import Sum
+from django.utils import timezone
+
+from .models import (
+    CustomUser,
+    AmbassadorMonthlyReport,
+    AmbassadorAttendanceSubmission,
+    Transaction,
+)
+
+
+def autosubmit_missing_ambassador_reports_for_previous_month():
+    """
+    Auto-submit ambassador monthly reports for the PREVIOUS month
+    using PREFILLED METRICS ONLY.
+
+    Manual / evidence-based fields are forced to 0.
+    Safe to run multiple times because it skips users who already have a report.
+    """
+    now = timezone.now()
+
+    current_month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    previous_month_end = current_month_start - timedelta(seconds=1)
+    previous_month_start = previous_month_end.replace(
+        day=1, hour=0, minute=0, second=0, microsecond=0
+    )
+
+    target_month_key = previous_month_start.strftime("%Y-%m")
+    year = previous_month_start.year
+    month = previous_month_start.month
+
+    ambassadors = CustomUser.objects.filter(
+        is_ambassador=True,
+        is_active=True,
+    )
+
+    created_count = 0
+    skipped_count = 0
+    errors = []
+
+    for user in ambassadors:
+        try:
+            if AmbassadorMonthlyReport.objects.filter(
+                user=user,
+                month=target_month_key,
+            ).exists():
+                skipped_count += 1
+                continue
+
+            # 1. Signups for previous month
+            signups_submitted = CustomUser.objects.filter(
+                referral=user,
+                date_joined__gte=previous_month_start,
+                date_joined__lte=previous_month_end,
+            ).count()
+
+            # 2. Confirmed referrals for previous month
+            confirmed_submitted = CustomUser.objects.filter(
+                referral=user,
+                referral_reward_confirmed_at__gte=previous_month_start,
+                referral_reward_confirmed_at__lte=previous_month_end,
+                referral_reward_granted=True,
+            ).count()
+
+            # 3. Attendance count for previous month
+            attendance_submitted = AmbassadorAttendanceSubmission.objects.filter(
+                user=user,
+                month=target_month_key,
+            ).count()
+
+            # 4. Savings + Investment credited this month
+            savings_submitted = Transaction.objects.filter(
+                user=user,
+                date__year=year,
+                date__month=month,
+                status="confirmed",
+                transaction_type="credit",
+                credited_to__in=["SAVINGS", "INVESTMENT"],
+            ).aggregate(total=Sum("amount")).get("total") or Decimal("0.00")
+
+            # 5. Others
+            # Keep zero unless you later connect this to a real backend source
+            others_submitted = 0
+
+            with transaction.atomic():
+                report = AmbassadorMonthlyReport.objects.create(
+                    user=user,
+                    month=target_month_key,
+                    signups_submitted=signups_submitted,
+                    confirmed_submitted=confirmed_submitted,
+                    savings_submitted=savings_submitted,
+                    attendance_submitted=attendance_submitted,
+                    others_submitted=others_submitted,
+                    # manual / optional fields forced to zero on system autosubmit
+                    coursera_submitted=0,
+                    social_media_submitted=0,
+                    abroad_confirmed_submitted=0,
+                    events_submitted=0,
+                    notes="Auto-submitted by system using prefilled metrics only.",
+                )
+
+                report.copy_submitted_to_approved_defaults()
+                report.recalculate_points()
+                report.save()
+
+            created_count += 1
+
+        except Exception as e:
+            errors.append(f"{user.email}: {str(e)}")
+
+    return {
+        "month": target_month_key,
+        "created": created_count,
+        "skipped": skipped_count,
+        "errors": errors,
+    }
