@@ -2691,10 +2691,10 @@ class AmbassadorPointConfig(models.Model):
     )
 
     coursera_points = models.DecimalField(
-        max_digits=6, decimal_places=2, default=Decimal("5.00")
+        max_digits=6, decimal_places=2, default=Decimal("2.00")
     )
     social_media_points = models.DecimalField(
-        max_digits=6, decimal_places=2, default=Decimal("5.00")
+        max_digits=6, decimal_places=2, default=Decimal("2.00")
     )
     abroad_confirmed_points = models.DecimalField(
         max_digits=6, decimal_places=2, default=Decimal("10.00")
@@ -2702,8 +2702,11 @@ class AmbassadorPointConfig(models.Model):
     myfund_event_points = models.DecimalField(
         max_digits=6, decimal_places=2, default=Decimal("5.00")
     )
+    reshares_points = models.DecimalField(
+        max_digits=6, decimal_places=2, default=Decimal("0.05")
+    )
     other_points = models.DecimalField(
-        max_digits=6, decimal_places=2, default=Decimal("10.00")
+        max_digits=6, decimal_places=2, default=Decimal("5.00")
     )
 
     updated_at = models.DateTimeField(auto_now=True)
@@ -2752,6 +2755,7 @@ class AmbassadorMonthlyReport(models.Model):
     social_media_submitted = models.PositiveIntegerField(default=0)
     abroad_confirmed_submitted = models.PositiveIntegerField(default=0)
     events_submitted = models.PositiveIntegerField(default=0)
+    reshares_submitted = models.PositiveIntegerField(default=0)
     notes = models.TextField(blank=True, null=True)
 
     # evidence
@@ -2765,6 +2769,9 @@ class AmbassadorMonthlyReport(models.Model):
         upload_to="ambassador_reports/", blank=True, null=True
     )
     events_evidence = models.ImageField(
+        upload_to="ambassador_reports/", blank=True, null=True
+    )
+    reshares_evidence = models.ImageField(
         upload_to="ambassador_reports/", blank=True, null=True
     )
 
@@ -2781,6 +2788,7 @@ class AmbassadorMonthlyReport(models.Model):
     social_media_approved = models.PositiveIntegerField(default=0)
     abroad_confirmed_approved = models.PositiveIntegerField(default=0)
     events_approved = models.PositiveIntegerField(default=0)
+    reshares_approved = models.PositiveIntegerField(default=0)
 
     # points breakdown
     signup_points_awarded = models.DecimalField(
@@ -2805,6 +2813,9 @@ class AmbassadorMonthlyReport(models.Model):
         max_digits=8, decimal_places=2, default=Decimal("0.00")
     )
     events_points_awarded = models.DecimalField(
+        max_digits=8, decimal_places=2, default=Decimal("0.00")
+    )
+    reshares_points_awarded = models.DecimalField(
         max_digits=8, decimal_places=2, default=Decimal("0.00")
     )
     others_points_awarded = models.DecimalField(
@@ -2881,6 +2892,9 @@ class AmbassadorMonthlyReport(models.Model):
         events_points = Decimal(str(self.events_approved or 0)) * Decimal(
             str(config.myfund_event_points or 0)
         )
+        reshares_points = Decimal(str(self.reshares_approved or 0)) * Decimal(
+            str(config.reshares_points or 0)
+        )
         others_points = Decimal(str(self.others_approved or 0)) * Decimal(
             str(config.other_points or 0)
         )
@@ -2893,6 +2907,7 @@ class AmbassadorMonthlyReport(models.Model):
         self.social_media_points_awarded = social_media_points
         self.abroad_points_awarded = abroad_points
         self.events_points_awarded = events_points
+        self.reshares_points_awarded = reshares_points
         self.others_points_awarded = others_points
 
         self.total_points_awarded = (
@@ -2904,6 +2919,7 @@ class AmbassadorMonthlyReport(models.Model):
             + social_media_points
             + abroad_points
             + events_points
+            + reshares_points
             + others_points
         )
 
@@ -2922,6 +2938,7 @@ class AmbassadorMonthlyReport(models.Model):
         self.social_media_approved = self.social_media_submitted
         self.abroad_confirmed_approved = self.abroad_confirmed_submitted
         self.events_approved = self.events_submitted
+        self.reshares_approved = self.reshares_submitted
 
 
 class AmbassadorAttendanceSubmission(models.Model):
