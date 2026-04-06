@@ -37,11 +37,16 @@ app.conf.task_routes = {
     "authentication.tasks.process_target_savings_deductions": {"queue": "default"},
     "authentication.tasks.retry_failed_deductions": {"queue": "default"},
     "authentication.tasks.check_completed_targets": {"queue": "default"},
-    "authentication.tasks.refund_contributions_if_goal_not_reached": {"queue": "default"},
+    "authentication.tasks.refund_contributions_if_goal_not_reached": {
+        "queue": "default"
+    },
     "authentication.tasks.process_due_scheduled_withdrawals": {"queue": "default"},
     "authentication.tasks.send_birthday_greetings": {"queue": "default"},
     "authentication.tasks.reward_top_savers_of_month": {"queue": "default"},
     "authentication.tasks.process_quarterly_payouts_task": {"queue": "default"},
+    "authentication.tasks.autosubmit_missing_ambassador_reports_task": {
+        "queue": "default"
+    },
 }
 
 # Default queue for unspecified tasks
@@ -99,6 +104,10 @@ app.conf.beat_schedule = {
     "process-scheduled-withdrawals-daily": {
         "task": "authentication.tasks.process_due_scheduled_withdrawals",
         "schedule": crontab(hour=11, minute=0),
+    },
+    "autosubmit-missing-ambassador-reports-monthly": {
+        "task": "authentication.tasks.autosubmit_missing_ambassador_reports_task",
+        "schedule": crontab(minute=5, hour=0, day_of_month=1),
     },
 }
 
