@@ -56,9 +56,11 @@ def refund_contributions_if_goal_not_reached():
             transactions_to_create.append(
                 Transaction(
                     user=user,
-                    transaction_type="CREDIT",
+                    transaction_type="credit",
+                    status="confirmed",
                     amount=target.current_amount,
-                    source="TARGET_REFUND",
+                    source="WALLET",
+                    credited_to="WALLET",
                     description=f"Refund for incomplete target '{target.name}'",
                 )
             )
@@ -489,6 +491,7 @@ def release_quarterly_roi(test_mode=True):
                     user=user,
                     transaction_type="credit",
                     source="WALLET",
+                    credited_to="WALLET",
                     status="confirmed",
                     amount=total_payout,
                     service_charge=Decimal("0.00"),
@@ -1050,197 +1053,6 @@ def send_bulk_email_task(self, emails, from_email, batch_size=45, delay_seconds=
 
     logger.info(f"📊 Done: {sent}/{total} sent")
     return {"sent": sent, "failed": len(failed)}
-
-
-from datetime import date
-from decimal import Decimal
-from celery import shared_task
-from django.db import transaction
-from django.utils import timezone
-from django.db.models import Sum, Q
-
-from authentication.models import CustomUser, ROITransaction, Transaction
-from authentication.utils import send_generic_email, send_push_notification
-
-
-@shared_task(bind=True)
-def backfill_q3_2025_roi_from_transactions(self, email=None, test_only=False):
-    """
-    Backfill and payout Q3 2025 ROI by recalculating balances from Transaction history.
-    - Savings ROI: 13% annual
-    - Investment ROI: 20% annual
-    - Includes QuickSave, AutoSave, QuickInvest, AutoInvest confirmed transactions only
-      (based on description field)
-    - Prevents duplicate payouts for normal users
-    - Always processes test accounts
-    - Credits wallets, creates ROITransaction & Transaction records
-    - Sends email via Celery & push notification
-    """
-
-    Q3_START = date(2025, 7, 1)
-    Q3_END = date(2025, 9, 30)
-    quarter_label = "Q3 2025"
-
-    TEST_EMAILS = [
-        "tolulopeahmed@gmail.com",
-        "info@myfundmobile.com",
-        "company@myfundmobile.com",
-        "valueplusrecords@gmail.com",
-        "valuepluspublishing@gmail.com",
-    ]
-
-    users = CustomUser.objects.filter(is_active=True)
-    if test_only:
-        users = users.filter(email__in=TEST_EMAILS)
-    elif email:
-        users = users.filter(email=email)
-
-    if not users.exists():
-        print("[INFO] No users found for the given filter.")
-        return
-
-    for user in users:
-        # Skip if ROI already paid (except test accounts)
-        if user.email not in TEST_EMAILS:
-            if ROITransaction.objects.filter(
-                user=user,
-                accrued_date__gte=Q3_START,
-                accrued_date__lte=Q3_END,
-                roi_type__in=["SAVINGS", "INVESTMENT"],
-            ).exists():
-                print(f"[SKIP] ROI already paid for {user.email}")
-                continue
-
-        # Define queries based on description for savings and investment
-        savings_q = Q(description__icontains="QuickSave") | Q(
-            description__icontains="AutoSave"
-        )
-        investment_q = Q(description__icontains="QuickInvest") | Q(
-            description__icontains="AutoInvest"
-        )
-
-        # Savings: credits minus debits
-        savings_credits = Transaction.objects.filter(
-            user=user,
-            transaction_type="credit",
-            status="confirmed",
-            date__date__gte=Q3_START,
-            date__date__lte=Q3_END,
-        ).filter(savings_q).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
-        savings_debits = Transaction.objects.filter(
-            user=user,
-            transaction_type="debit",
-            status="confirmed",
-            date__date__gte=Q3_START,
-            date__date__lte=Q3_END,
-        ).filter(savings_q).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
-        savings_balance_q3 = (savings_credits - savings_debits).quantize(
-            Decimal("0.01")
-        )
-
-        # Investment: credits minus debits
-        investment_credits = Transaction.objects.filter(
-            user=user,
-            transaction_type="credit",
-            status="confirmed",
-            date__date__gte=Q3_START,
-            date__date__lte=Q3_END,
-        ).filter(investment_q).aggregate(total=Sum("amount"))["total"] or Decimal(
-            "0.00"
-        )
-        investment_debits = Transaction.objects.filter(
-            user=user,
-            transaction_type="debit",
-            status="confirmed",
-            date__date__gte=Q3_START,
-            date__date__lte=Q3_END,
-        ).filter(investment_q).aggregate(total=Sum("amount"))["total"] or Decimal(
-            "0.00"
-        )
-        investment_balance_q3 = (investment_credits - investment_debits).quantize(
-            Decimal("0.01")
-        )
-
-        # Compute ROI
-        savings_roi = (savings_balance_q3 * Decimal("0.13") / Decimal("4")).quantize(
-            Decimal("0.01")
-        )
-        investment_roi = (
-            investment_balance_q3 * Decimal("0.2") / Decimal("4")
-        ).quantize(Decimal("0.01"))
-        total_payout = (savings_roi + investment_roi).quantize(Decimal("0.01"))
-
-        if total_payout <= 0:
-            print(f"[SKIP] Total payout is zero for {user.email}")
-            continue
-
-        with transaction.atomic():
-            if savings_roi > 0:
-                ROITransaction.objects.create(
-                    user=user,
-                    amount=savings_roi,
-                    roi_type="SAVINGS",
-                    accrued_date=Q3_END,
-                    payout_date=timezone.now().date(),
-                    is_paid_out=True,
-                )
-            if investment_roi > 0:
-                ROITransaction.objects.create(
-                    user=user,
-                    amount=investment_roi,
-                    roi_type="INVESTMENT",
-                    accrued_date=Q3_END,
-                    payout_date=timezone.now().date(),
-                    is_paid_out=True,
-                )
-
-            user.savings += savings_roi
-            user.investment += investment_roi
-            user.save(update_fields=["savings", "investment"])
-
-            Transaction.objects.create(
-                user=user,
-                transaction_type="credit",
-                source="ROI_Q3_2025",
-                status="confirmed",
-                amount=total_payout,
-                service_charge=Decimal("0.00"),
-                total_amount=total_payout,
-                description=f"Dividends: {quarter_label} ROI",
-            )
-
-        # --- FORCE EMAIL VIA CELERY ---
-        send_generic_email(
-            subject=f"🎉 ₦{total_payout:,.2f} Has Been Credited to Your Wallet",
-            message=(
-                f"<p>Hi {user.first_name},</p>"
-                f"<p>Your quarterly ROI has been added to your MyFund Wallet as dividends for <b>{quarter_label}</b>.</p>"
-                f"<p><b>Total ROI credited:</b> ₦{total_payout:,.2f}<br>"
-                f"<b>Savings ROI:</b> ₦{savings_roi:,.2f}<br>"
-                f"<b>Investment ROI:</b> ₦{investment_roi:,.2f}</p>"
-                f"<p>This payout covers your earnings for {quarter_label}.</p>"
-                f"<p>Thank you for using MyFund.</p>"
-                f"<p>The MyFund Team</p>"
-            ),
-            recipient_list=[user.email],
-            from_email="MyFund <info@myfundmobile.com>",
-            use_celery_threshold=0,  # <--- force Celery even for single user
-        )
-
-        # Push notification
-        send_push_notification(
-            user=user,
-            title=f"🎉 ₦{total_payout:,.2f} Has Been Added to Your Wallet",
-            message=(
-                f"{user.first_name}, a total of ₦{total_payout:,.2f} has been credited to your Wallet as dividends for {quarter_label}.\n"
-                f"Savings: ₦{savings_roi:,.2f} + Investment: ₦{investment_roi:,.2f}\n"
-                f"Keep growing your funds to earn more in the next quarter! 🚀"
-            ),
-        )
-
-        print(f"[Q3 2025 ROI BACKFILL] {user.email} → ₦{total_payout:,.2f}")
-
-    return f"✅ Backfill completed for {users.count()} user(s)."
 
 
 from celery import shared_task
@@ -2080,3 +1892,16 @@ def manual_complete_target_and_credit_wallet(user_email, target_id):
             "transaction_id": payout_tx.transaction_id,
             "completion_id": completion.id,
         }
+
+
+from celery import shared_task
+from authentication.utils import credit_employee_wallet_allowance
+
+
+@shared_task
+def credit_employee_wallet_allowance_task(email, amount, credited_by="Admin"):
+    return credit_employee_wallet_allowance(
+        email=email,
+        amount=amount,
+        credited_by=credited_by,
+    )
