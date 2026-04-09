@@ -2180,33 +2180,53 @@ def set_default_card(request):
 from django.db import transaction, IntegrityError
 
 
+from django.db import transaction
+
+
 def save_or_update_card_from_paystack_auth(user, authorization):
     """
-    Save or update a reusable Paystack card for the current user.
+    Save or update a card from Paystack authorization payload.
 
-    Handles:
-    - missing account_name/card_owner_name safely
-    - same-user updates by signature or authorization_code
-    - duplicate physical cards across different users after old DB uniqueness is removed
+    IMPORTANT:
+    For MyFund's first-time card verification flow, if Paystack returns a usable
+    authorization_code, we treat the card as reusable for our saved-card flow.
     """
     if not authorization:
+        print("⚠️ save_or_update_card_from_paystack_auth: authorization payload missing")
         return None
 
     authorization_code = (authorization.get("authorization_code") or "").strip()
     signature = (authorization.get("signature") or "").strip()
-    reusable = bool(authorization.get("reusable", False))
 
-    # No reusable auth code = nothing useful to save for autosave/autoinvest
-    if not authorization_code or not reusable:
+    print("========== SAVE CARD DEBUG ==========")
+    print("user:", getattr(user, "email", None))
+    print("authorization_code:", authorization_code)
+    print("signature:", signature)
+    print("raw reusable from paystack:", authorization.get("reusable"))
+    print("brand:", authorization.get("brand"))
+    print("last4:", authorization.get("last4"))
+    print("bin:", authorization.get("bin"))
+    print("exp_month:", authorization.get("exp_month"))
+    print("exp_year:", authorization.get("exp_year"))
+    print("bank:", authorization.get("bank"))
+
+    # No authorization code means nothing useful for autosave/autoinvest
+    if not authorization_code:
+        print("⚠️ Card not saved: authorization_code missing")
         return None
 
     owner_name = (
         authorization.get("account_name")
-        or getattr(user, "full_name", "")
         or f"{getattr(user, 'first_name', '')} {getattr(user, 'last_name', '')}".strip()
-        or user.email
+        or getattr(user, "full_name", "")
+        or getattr(user, "email", "")
         or "MyFund User"
     ).strip()
+
+    # KEY FIX:
+    # If Paystack returned an authorization code, keep the card reusable
+    # for MyFund saved-card flows.
+    reusable = True
 
     card_defaults = {
         "authorization_code": authorization_code,
@@ -2222,14 +2242,14 @@ def save_or_update_card_from_paystack_auth(user, authorization):
         "expiry_year": str(authorization.get("exp_year") or "").strip(),
         "bank_name": (authorization.get("bank") or "").strip(),
         "country_code": (authorization.get("country_code") or "NG").strip(),
-        "reusable": True,
+        "reusable": reusable,
         "is_active": True,
     }
 
     with transaction.atomic():
         existing_card = None
 
-        # 1) First: look for same user's existing card by signature
+        # 1. Same user + signature
         if signature:
             existing_card = (
                 Card.all_objects.select_for_update()
@@ -2237,7 +2257,7 @@ def save_or_update_card_from_paystack_auth(user, authorization):
                 .first()
             )
 
-        # 2) Then: same user's existing card by authorization code
+        # 2. Same user + authorization code
         if not existing_card:
             existing_card = (
                 Card.all_objects.select_for_update()
@@ -2245,7 +2265,7 @@ def save_or_update_card_from_paystack_auth(user, authorization):
                 .first()
             )
 
-        # 3) Then: same user's fallback by card fingerprint
+        # 3. Same user + fingerprint fallback
         if not existing_card:
             existing_card = (
                 Card.all_objects.select_for_update()
@@ -2263,57 +2283,35 @@ def save_or_update_card_from_paystack_auth(user, authorization):
             for field, value in card_defaults.items():
                 setattr(existing_card, field, value)
 
+            existing_card.is_active = True
+            existing_card.reusable = True
+
             has_other_default = (
-                Card.all_objects.filter(user=user, is_default=True, is_active=True)
+                Card.all_objects.filter(user=user, is_active=True, is_default=True)
                 .exclude(id=existing_card.id)
                 .exists()
             )
-            existing_card.is_default = not has_other_default
-            existing_card.is_active = True
-            existing_card.reusable = True
+            if not has_other_default:
+                existing_card.is_default = True
+
             existing_card.save()
+            print(
+                f"✅ Existing card updated successfully for {user.email} | card_id={existing_card.id}"
+            )
             return existing_card
 
         is_first_card = not Card.all_objects.filter(user=user, is_active=True).exists()
 
-        try:
-            new_card = Card.all_objects.create(
-                user=user,
-                is_default=is_first_card,
-                **card_defaults,
-            )
-            return new_card
+        new_card = Card.all_objects.create(
+            user=user,
+            is_default=is_first_card,
+            **card_defaults,
+        )
 
-        except IntegrityError:
-            # Defensive fallback in case live DB still has stale uniqueness constraints
-            fallback_card = (
-                Card.all_objects.select_for_update()
-                .filter(
-                    user=user,
-                    card_first6_digits=card_defaults["card_first6_digits"],
-                    card_last4_digits=card_defaults["card_last4_digits"],
-                    expiry_month=card_defaults["expiry_month"],
-                    expiry_year=card_defaults["expiry_year"],
-                )
-                .first()
-            )
-
-            if fallback_card:
-                for field, value in card_defaults.items():
-                    setattr(fallback_card, field, value)
-
-                has_other_default = (
-                    Card.all_objects.filter(user=user, is_default=True, is_active=True)
-                    .exclude(id=fallback_card.id)
-                    .exists()
-                )
-                fallback_card.is_default = not has_other_default
-                fallback_card.is_active = True
-                fallback_card.reusable = True
-                fallback_card.save()
-                return fallback_card
-
-            raise
+        print(
+            f"✅ New card saved successfully for {user.email} | card_id={new_card.id}"
+        )
+        return new_card
 
 
 class TransactionCreateView(generics.CreateAPIView):
