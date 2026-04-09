@@ -2177,75 +2177,143 @@ def set_default_card(request):
     )
 
 
+from django.db import transaction, IntegrityError
+
+
 def save_or_update_card_from_paystack_auth(user, authorization):
     """
-    Save or update a reusable card from Paystack authorization payload.
+    Save or update a reusable Paystack card for the current user.
+
+    Handles:
+    - missing account_name/card_owner_name safely
+    - same-user updates by signature or authorization_code
+    - duplicate physical cards across different users after old DB uniqueness is removed
     """
     if not authorization:
         return None
 
-    authorization_code = authorization.get("authorization_code")
-    signature = authorization.get("signature")
+    authorization_code = (authorization.get("authorization_code") or "").strip()
+    signature = (authorization.get("signature") or "").strip()
     reusable = bool(authorization.get("reusable", False))
 
-    if not authorization_code:
+    # No reusable auth code = nothing useful to save for autosave/autoinvest
+    if not authorization_code or not reusable:
         return None
+
+    owner_name = (
+        authorization.get("account_name")
+        or getattr(user, "full_name", "")
+        or f"{getattr(user, 'first_name', '')} {getattr(user, 'last_name', '')}".strip()
+        or user.email
+        or "MyFund User"
+    ).strip()
 
     card_defaults = {
         "authorization_code": authorization_code,
-        "signature": signature,
-        "card_type": authorization.get("channel"),
-        "card_brand": authorization.get("brand"),
-        "card_first6_digits": authorization.get("bin"),
-        "card_last4_digits": authorization.get("last4"),
-        "card_owner_name": authorization.get("account_name") or user.first_name or "",
-        "expiry_month": str(authorization.get("exp_month") or ""),
-        "expiry_year": str(authorization.get("exp_year") or ""),
-        "bank_name": authorization.get("bank"),
-        "country_code": authorization.get("country_code") or "NG",
-        "reusable": reusable,
+        "signature": signature or None,
+        "card_type": (
+            authorization.get("card_type") or authorization.get("channel") or ""
+        ).strip(),
+        "card_brand": (authorization.get("brand") or "").strip(),
+        "card_first6_digits": (authorization.get("bin") or "").strip(),
+        "card_last4_digits": (authorization.get("last4") or "").strip(),
+        "card_owner_name": owner_name,
+        "expiry_month": str(authorization.get("exp_month") or "").strip(),
+        "expiry_year": str(authorization.get("exp_year") or "").strip(),
+        "bank_name": (authorization.get("bank") or "").strip(),
+        "country_code": (authorization.get("country_code") or "NG").strip(),
+        "reusable": True,
         "is_active": True,
     }
 
-    existing_card = None
+    with transaction.atomic():
+        existing_card = None
 
-    # First try matching by signature for same physical card
-    if signature:
-        existing_card = Card.all_objects.filter(
-            user=user,
-            signature=signature,
-        ).first()
+        # 1) First: look for same user's existing card by signature
+        if signature:
+            existing_card = (
+                Card.all_objects.select_for_update()
+                .filter(user=user, signature=signature)
+                .first()
+            )
 
-    # Fallback: match by authorization code
-    if not existing_card and authorization_code:
-        existing_card = Card.all_objects.filter(
-            user=user,
-            authorization_code=authorization_code,
-        ).first()
+        # 2) Then: same user's existing card by authorization code
+        if not existing_card:
+            existing_card = (
+                Card.all_objects.select_for_update()
+                .filter(user=user, authorization_code=authorization_code)
+                .first()
+            )
 
-    if existing_card:
-        for field, value in card_defaults.items():
-            setattr(existing_card, field, value)
+        # 3) Then: same user's fallback by card fingerprint
+        if not existing_card:
+            existing_card = (
+                Card.all_objects.select_for_update()
+                .filter(
+                    user=user,
+                    card_first6_digits=card_defaults["card_first6_digits"],
+                    card_last4_digits=card_defaults["card_last4_digits"],
+                    expiry_month=card_defaults["expiry_month"],
+                    expiry_year=card_defaults["expiry_year"],
+                )
+                .first()
+            )
 
-        # Keep current default if already set, otherwise make default if no default exists
-        if (
-            not Card.all_objects.filter(user=user, is_default=True, is_active=True)
-            .exclude(id=existing_card.id)
-            .exists()
-        ):
-            existing_card.is_default = True
+        if existing_card:
+            for field, value in card_defaults.items():
+                setattr(existing_card, field, value)
 
-        existing_card.save()
-        return existing_card
+            has_other_default = (
+                Card.all_objects.filter(user=user, is_default=True, is_active=True)
+                .exclude(id=existing_card.id)
+                .exists()
+            )
+            existing_card.is_default = not has_other_default
+            existing_card.is_active = True
+            existing_card.reusable = True
+            existing_card.save()
+            return existing_card
 
-    is_first_card = not Card.all_objects.filter(user=user, is_active=True).exists()
+        is_first_card = not Card.all_objects.filter(user=user, is_active=True).exists()
 
-    new_card = Card.all_objects.create(
-        user=user,
-        is_default=is_first_card,
-        **card_defaults,
-    )
-    return new_card
+        try:
+            new_card = Card.all_objects.create(
+                user=user,
+                is_default=is_first_card,
+                **card_defaults,
+            )
+            return new_card
+
+        except IntegrityError:
+            # Defensive fallback in case live DB still has stale uniqueness constraints
+            fallback_card = (
+                Card.all_objects.select_for_update()
+                .filter(
+                    user=user,
+                    card_first6_digits=card_defaults["card_first6_digits"],
+                    card_last4_digits=card_defaults["card_last4_digits"],
+                    expiry_month=card_defaults["expiry_month"],
+                    expiry_year=card_defaults["expiry_year"],
+                )
+                .first()
+            )
+
+            if fallback_card:
+                for field, value in card_defaults.items():
+                    setattr(fallback_card, field, value)
+
+                has_other_default = (
+                    Card.all_objects.filter(user=user, is_default=True, is_active=True)
+                    .exclude(id=fallback_card.id)
+                    .exists()
+                )
+                fallback_card.is_default = not has_other_default
+                fallback_card.is_active = True
+                fallback_card.reusable = True
+                fallback_card.save()
+                return fallback_card
+
+            raise
 
 
 class TransactionCreateView(generics.CreateAPIView):
@@ -2435,7 +2503,7 @@ def quicksave(request):
                 transaction_type="credit",
                 status="confirmed",
                 amount=amount,
-                description=f"QuickSave (Instant - {saved_card.card_brand.upper()} •••• {saved_card.card_last4_digits})",
+                description=f"QuickSave (Card)",
                 transaction_id=reference,
                 paystack_auth_code=saved_card.authorization_code,
                 paystack_reference=reference,
@@ -7414,10 +7482,10 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     if saved_card:
                         brand = (saved_card.card_brand or "CARD").upper()
                         last4 = saved_card.card_last4_digits or "****"
-                        transaction.description = f"QuickSave ({brand} •••• {last4})"
+                        transaction.description = f"QuickSave (Card)"
                         transaction.paystack_auth_code = saved_card.authorization_code
                     else:
-                        transaction.description = f"QuickSave ({payment_channel})"
+                        transaction.description = f"QuickSave (Transfer)"
                         transaction.paystack_auth_code = paystack_auth_code
 
                     transaction.status = "confirmed"

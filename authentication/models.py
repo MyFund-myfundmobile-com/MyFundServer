@@ -1235,15 +1235,25 @@ class Card(models.Model):
         related_name="owned_cards",
     )
 
-    authorization_code = models.CharField(max_length=255, null=True, blank=True)
+    authorization_code = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        db_index=True,
+    )
+
+    card_owner_name = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        default="",
+    )
     signature = models.CharField(max_length=255, null=True, blank=True, db_index=True)
 
     card_type = models.CharField(max_length=50, null=True, blank=True)
     card_brand = models.CharField(max_length=50, null=True, blank=True)
     card_first6_digits = models.CharField(max_length=6, null=True, blank=True)
     card_last4_digits = models.CharField(max_length=4, null=True, blank=True)
-    card_owner_name = models.CharField(max_length=255, null=True, blank=True)
-
     expiry_month = models.CharField(max_length=2, null=True, blank=True)
     expiry_year = models.CharField(max_length=4, null=True, blank=True)
 
