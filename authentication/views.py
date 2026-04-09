@@ -7237,21 +7237,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     try:
                         print("========== CARD SAVE DEBUG ==========")
                         print("email:", email)
-                        print("authorization:", authorization)
-                        print(
-                            "authorization_code:",
-                            authorization.get("authorization_code"),
-                        )
-                        print("signature:", authorization.get("signature"))
-                        print("reusable:", authorization.get("reusable", False))
-                        print("last4:", authorization.get("last4", ""))
-                        print(
-                            "brand:",
-                            authorization.get(
-                                "brand", authorization.get("card_type", "")
-                            ),
-                        )
-                        print("bank:", authorization.get("bank", ""))
+                        print("authorization payload:", authorization)
 
                         saved_card = save_or_update_card_from_paystack_auth(
                             user, authorization
@@ -7259,12 +7245,32 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
 
                         if saved_card:
                             print(
-                                f"✅ CARD SAVED/UPDATED: id={saved_card.id}, auth={saved_card.authorization_code}, last4={saved_card.card_last4_digits}, reusable={saved_card.reusable}"
+                                f"✅ CARD SAVED/UPDATED: id={saved_card.id}, auth={saved_card.authorization_code}, last4={saved_card.card_last4_digits}, reusable={saved_card.reusable}, active={saved_card.is_active}"
                             )
                         else:
                             print(
-                                "⚠️ Card not saved because authorization_code is missing or authorization payload is invalid"
+                                "⚠️ Card save helper returned None. authorization_code may be missing."
                             )
+
+                    except Exception as e:
+                        print(f"❌ Error saving card: {str(e)}", flush=True)
+                        try:
+                            subject = "[Webhook Warning] Card Save Failed"
+                            message = (
+                                f"Failed to save/update card for user {email}: {str(e)}<br><br>"
+                                f"Authorization payload: {authorization}"
+                            )
+                            send_generic_email(
+                                subject=subject,
+                                message=message,
+                                from_email="MyFund <info@myfundmobile.com>",
+                                recipient_list=[
+                                    "info@myfundmobile.com",
+                                    "sammy@myfundmobile.com",
+                                ],
+                            )
+                        except Exception:
+                            pass
 
                     except Exception as e:
                         print(f"❌ Error saving card: {str(e)}")
