@@ -29,7 +29,7 @@ from django.contrib.auth import logout
 from django.shortcuts import render, redirect
 from django.core.exceptions import ObjectDoesNotExist
 from django.utils import timezone
-from authentication.models import CustomUser
+from authentication.models import CustomUser, AmbassadorAttendanceSubmission
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from .serializers import UserProfileUpdateSerializer
@@ -223,7 +223,7 @@ def confirm_otp(request):
             admin_emails = [
                 "tolulopeahmed@gmail.com",
                 "ceo@myfundmobile.com",
-                "lioness@myfundmobile.com",
+                "janet.adegbenro@gmail.com",
             ]
             admin_users = CustomUser.objects.filter(email__in=admin_emails)
             for admin_user in admin_users:
@@ -2080,19 +2080,8 @@ class UserBankAccountListView(generics.ListAPIView):
         return BankAccount.objects.filter(user=self.request.user)
 
 
-class CardListCreateView(generics.ListCreateAPIView):
-    queryset = Card.objects.all()
-    serializer_class = CardSerializer
-    permission_classes = [IsAuthenticated]
-
-    def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
-
-
-class CardDetailView(generics.RetrieveUpdateDestroyAPIView):
-    queryset = Card.objects.all()
-    serializer_class = CardSerializer
-    permission_classes = [IsAuthenticated]
+from rest_framework import generics
+from .serializers import CardSerializer
 
 
 class UserCardListView(generics.ListAPIView):
@@ -2100,18 +2089,236 @@ class UserCardListView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return Card.objects.filter(user=self.request.user)
+        return (
+            Card.objects.filter(
+                user=self.request.user,
+                is_active=True,
+                reusable=True,
+            )
+            .exclude(
+                authorization_code__isnull=True,
+            )
+            .exclude(
+                authorization_code="",
+            )
+            .order_by("-is_default", "-created_at")
+        )
 
 
-class DeleteCardView(generics.DestroyAPIView):
-    queryset = Card.objects.all()
-    serializer_class = CardSerializer
-    permission_classes = [IsAuthenticated]
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def remove_card(request):
+    card_id = request.data.get("card_id")
 
-    def destroy(self, request, *args, **kwargs):
-        card = self.get_object()
-        card.delete()
-        return Response(status=status.HTTP_204_NO_CONTENT)
+    if not card_id:
+        return Response(
+            {"error": "card_id is required."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        card = Card.objects.get(id=card_id, user=request.user)
+    except Card.DoesNotExist:
+        return Response(
+            {"error": "Card not found."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    # Soft delete
+    card.is_active = False
+    card.is_default = False
+    card.save()
+
+    # Assign new default if needed
+    replacement = (
+        Card.objects.filter(user=request.user, is_active=True, reusable=True)
+        .order_by("-created_at")
+        .first()
+    )
+
+    if (
+        replacement
+        and not Card.objects.filter(
+            user=request.user, is_active=True, is_default=True
+        ).exists()
+    ):
+        replacement.is_default = True
+        replacement.save()
+
+    return Response(
+        {"message": "Card removed successfully."},
+        status=status.HTTP_200_OK,
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def set_default_card(request):
+    card_id = request.data.get("card_id")
+
+    if not card_id:
+        return Response(
+            {"error": "card_id is required."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        card = Card.objects.get(
+            id=card_id,
+            user=request.user,
+            is_active=True,
+            reusable=True,
+        )
+    except Card.DoesNotExist:
+        return Response(
+            {"error": "Card not found."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    card.is_default = True
+    card.save()
+
+    return Response(
+        {"message": "Default card updated successfully."},
+        status=status.HTTP_200_OK,
+    )
+
+
+from django.db import transaction, IntegrityError
+
+
+from django.db import transaction
+
+
+def save_or_update_card_from_paystack_auth(user, authorization):
+    """
+    Save or update a card from Paystack authorization payload.
+
+    IMPORTANT:
+    For MyFund's first-time card verification flow, if Paystack returns a usable
+    authorization_code, we treat the card as reusable for our saved-card flow.
+    """
+    if not authorization:
+        print("⚠️ save_or_update_card_from_paystack_auth: authorization payload missing")
+        return None
+
+    authorization_code = (authorization.get("authorization_code") or "").strip()
+    signature = (authorization.get("signature") or "").strip()
+
+    print("========== SAVE CARD DEBUG ==========")
+    print("user:", getattr(user, "email", None))
+    print("authorization_code:", authorization_code)
+    print("signature:", signature)
+    print("raw reusable from paystack:", authorization.get("reusable"))
+    print("brand:", authorization.get("brand"))
+    print("last4:", authorization.get("last4"))
+    print("bin:", authorization.get("bin"))
+    print("exp_month:", authorization.get("exp_month"))
+    print("exp_year:", authorization.get("exp_year"))
+    print("bank:", authorization.get("bank"))
+
+    # No authorization code means nothing useful for autosave/autoinvest
+    if not authorization_code:
+        print("⚠️ Card not saved: authorization_code missing")
+        return None
+
+    owner_name = (
+        authorization.get("account_name")
+        or f"{getattr(user, 'first_name', '')} {getattr(user, 'last_name', '')}".strip()
+        or getattr(user, "full_name", "")
+        or getattr(user, "email", "")
+        or "MyFund User"
+    ).strip()
+
+    # KEY FIX:
+    # If Paystack returned an authorization code, keep the card reusable
+    # for MyFund saved-card flows.
+    reusable = True
+
+    card_defaults = {
+        "authorization_code": authorization_code,
+        "signature": signature or None,
+        "card_type": (
+            authorization.get("card_type") or authorization.get("channel") or ""
+        ).strip(),
+        "card_brand": (authorization.get("brand") or "").strip(),
+        "card_first6_digits": (authorization.get("bin") or "").strip(),
+        "card_last4_digits": (authorization.get("last4") or "").strip(),
+        "card_owner_name": owner_name,
+        "expiry_month": str(authorization.get("exp_month") or "").strip(),
+        "expiry_year": str(authorization.get("exp_year") or "").strip(),
+        "bank_name": (authorization.get("bank") or "").strip(),
+        "country_code": (authorization.get("country_code") or "NG").strip(),
+        "reusable": reusable,
+        "is_active": True,
+    }
+
+    with transaction.atomic():
+        existing_card = None
+
+        # 1. Same user + signature
+        if signature:
+            existing_card = (
+                Card.all_objects.select_for_update()
+                .filter(user=user, signature=signature)
+                .first()
+            )
+
+        # 2. Same user + authorization code
+        if not existing_card:
+            existing_card = (
+                Card.all_objects.select_for_update()
+                .filter(user=user, authorization_code=authorization_code)
+                .first()
+            )
+
+        # 3. Same user + fingerprint fallback
+        if not existing_card:
+            existing_card = (
+                Card.all_objects.select_for_update()
+                .filter(
+                    user=user,
+                    card_first6_digits=card_defaults["card_first6_digits"],
+                    card_last4_digits=card_defaults["card_last4_digits"],
+                    expiry_month=card_defaults["expiry_month"],
+                    expiry_year=card_defaults["expiry_year"],
+                )
+                .first()
+            )
+
+        if existing_card:
+            for field, value in card_defaults.items():
+                setattr(existing_card, field, value)
+
+            existing_card.is_active = True
+            existing_card.reusable = True
+
+            has_other_default = (
+                Card.all_objects.filter(user=user, is_active=True, is_default=True)
+                .exclude(id=existing_card.id)
+                .exists()
+            )
+            if not has_other_default:
+                existing_card.is_default = True
+
+            existing_card.save()
+            print(
+                f"✅ Existing card updated successfully for {user.email} | card_id={existing_card.id}"
+            )
+            return existing_card
+
+        is_first_card = not Card.all_objects.filter(user=user, is_active=True).exists()
+
+        new_card = Card.all_objects.create(
+            user=user,
+            is_default=is_first_card,
+            **card_defaults,
+        )
+
+        print(
+            f"✅ New card saved successfully for {user.email} | card_id={new_card.id}"
+        )
+        return new_card
 
 
 class TransactionCreateView(generics.CreateAPIView):
@@ -2178,74 +2385,72 @@ paystack_secret_key = os.environ.get(
 )
 
 # views.py
+from decimal import Decimal
+from rest_framework import status
+import requests
+from django.conf import settings
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
-import requests
-from django.conf import settings
+
+# make sure these are already imported in your file
+# from .models import Card, Transaction
+# from .utils import send_generic_email
 
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def quicksave(request):
     """
-    QuickSave with automatic instant payment if user has saved card,
-    otherwise falls back to regular payment flow
+    QuickSave flow:
+    1. If card_id is sent, try instant charge with saved card
+    2. If no card_id is sent, fall back to normal Paystack popup/webview flow
     """
     amount = request.data.get("amount")
     payment_channels = request.data.get("channels", ["card"])
-    use_saved_card = request.data.get(
-        "use_saved_card", True
-    )  # Auto use saved card by default
-    card_id = request.data.get("card_id")  # Optional: specific card to use
+    card_id = request.data.get("card_id")
 
     if amount is None:
-        return Response({"error": "amount required"}, status=400)
+        return Response(
+            {"error": "amount required"}, status=status.HTTP_400_BAD_REQUEST
+        )
 
-    if float(amount) < 100:
-        return Response({"error": "Amount cannot be less than ₦100"}, status=400)
+    try:
+        amount = Decimal(str(amount))
+    except Exception:
+        return Response(
+            {"error": "Invalid amount supplied"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
-    # Convert amount to kobo and to int
-    amount_kobo = int(float(amount) * 100)
+    if amount < Decimal("100"):
+        return Response(
+            {"error": "Amount cannot be less than ₦100"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    amount_kobo = int(amount * 100)
 
     # ===================================
-    # CHECK FOR SAVED CARD
+    # CHECK FOR SAVED CARD ONLY IF card_id IS PROVIDED
     # ===================================
     saved_card = None
 
-    if use_saved_card:
-        if card_id:
-            # Use specific card
-            try:
-                saved_card = Card.objects.get(
-                    id=card_id, user=request.user, is_active=True, reusable=True
-                )
-            except Card.DoesNotExist:
-                return Response(
-                    {
-                        "error": "Selected card not found or not available for instant payment"
-                    },
-                    status=404,
-                )
-        else:
-            return Response(
-                {"error": "'card_id' required for instant card payment"}, status=400
+    if card_id:
+        try:
+            saved_card = Card.objects.get(
+                id=card_id,
+                user=request.user,
+                is_active=True,
+                reusable=True,
             )
-        #     # Use default card
-        #     saved_card = Card.objects.filter(
-        #         user=request.user,
-        #         is_default=True,
-        #         is_active=True,
-        #         reusable=True
-        #     ).first()
-
-        #     # If no default, get the most recent card
-        #     if not saved_card:
-        #         saved_card = Card.objects.filter(
-        #             user=request.user,
-        #             is_active=True,
-        #             reusable=True
-        #         ).order_by('-created_at').first()
+        except Card.DoesNotExist:
+            return Response(
+                {
+                    "error": "Selected card not found or not available for instant payment"
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
 
     # ===================================
     # INSTANT PAYMENT WITH SAVED CARD
@@ -2272,154 +2477,180 @@ def quicksave(request):
                 },
                 timeout=30,
             )
-
-            if resp.status_code != 200:
-                # If instant charge fails, fall back to regular payment
-                print(f"Instant charge failed: {resp.text}")
-                return Response({"error": f"Instant card charge failed"}, status=400)
-            else:
-                data = resp.json()
-
-                if data.get("status") and data["data"]["status"] == "success":
-                    # Instant payment successful!
-                    reference = data["data"]["reference"]
-
-                    # Create completed transaction
-                    transaction = Transaction.objects.create(
-                        user=request.user,
-                        transaction_type="credit",
-                        status="confirmed",
-                        amount=Decimal(amount),
-                        description=f"QuickSave (Instant - {saved_card.card_brand.upper()} •••• {saved_card.card_last4_digits})",
-                        transaction_id=reference,
-                        paystack_auth_code=saved_card.authorization_code,
-                    )
-
-                    # Update user's savings balance
-                    request.user.savings += int(amount)
-                    request.user.update_total_savings_and_investment_this_month()
-                    request.user.save()
-
-                    # Send success email
-                    try:
-                        subject = "QuickSave Successful! ✅"
-                        message = (
-                            f"Well done {request.user.first_name},<br><br>"
-                            f"Your <b>QuickSave</b> of <b>₦{amount:,.2f}</b> was successful and has been added to your SAVINGS account.<br><br>"
-                            f"Payment Method: {saved_card.card_brand.upper()} •••• {saved_card.card_last4_digits}<br>"
-                            f"Transaction ID: {reference}<br><br>"
-                            f"Keep growing your funds.🥂"
-                        )
-                        from_email = "MyFund <info@myfundmobile.com>"
-                        recipient_list = [request.user.email]
-
-                        send_generic_email(
-                            subject=subject,
-                            message=message,
-                            from_email=from_email,
-                            recipient_list=recipient_list,
-                        )
-                    except Exception as e:
-                        print(f"Failed to send email: {str(e)}")
-
-                    return Response(
-                        {
-                            "status": "success",
-                            "payment_method": "instant",
-                            "message": "QuickSave successful! Amount added to your savings.",
-                            "amount": float(amount),
-                            "reference": reference,
-                            "card_used": {
-                                "brand": saved_card.card_brand,
-                                "last4": saved_card.card_last4_digits,
-                                "bank": saved_card.bank_name,
-                            },
-                            "new_balance": float(request.user.savings),
-                        }
-                    )
-
         except requests.RequestException as e:
             print(f"Instant payment request failed: {str(e)}")
-            return Response({"error": f"Instant payment request failed"}, status=400)
-    else:
-        # ===================================
-        # REGULAR PAYMENT FLOW (No saved card or instant payment failed)
-        # ===================================
-        payload = {
-            "email": request.user.email,
-            "amount": amount_kobo,
-            "channels": payment_channels,
-            "metadata": {
-                "user_id": request.user.id,
-                "transaction_type": "quicksave",
-            },
-        }
+            return Response(
+                {"error": "Instant payment request failed"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
-            resp = requests.post(
-                "https://api.paystack.co/transaction/initialize",
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}",
-                    "Content-Type": "application/json",
-                },
-                timeout=30,
-            )
-        except requests.RequestException as e:
-            return Response(
-                {"error": f"Payment initialization failed: {str(e)}"}, status=500
-            )
+            data = resp.json()
+        except Exception:
+            data = {}
 
-        # Check if request to Paystack was successful
-        if resp.status_code != 200:
-            error_message = resp.json().get("message", "Payment initialization failed")
-            return Response({"error": error_message}, status=400)
-
-        data = resp.json()
-
-        if not data.get("status"):
+        if resp.status_code != 200 or not data.get("status"):
+            print(f"Instant charge failed: {resp.text}")
             return Response(
                 {
-                    "error": f"Payment initialization failed: {data.get('message', 'Unknown error')}"
+                    "error": data.get("message", "Instant card charge failed"),
                 },
-                status=400,
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-        reference = data["data"]["reference"]
-        access_code = data["data"]["access_code"]
-        authorization_data = data["data"].get("authorization", {})
-        authorization_code = authorization_data.get("authorization_code")
-        reusable = authorization_data.get("reusable", False)
-        card_brand = authorization_data.get("brand", "")
-        card_last4 = authorization_data.get("last4", "")
+        charge_data = data.get("data", {})
+        charge_status = charge_data.get("status")
+        reference = charge_data.get("reference")
 
-        # Create pending transaction
-        Transaction.objects.create(
-            user=request.user,
-            transaction_type="credit",
-            status="pending",
-            amount=Decimal(amount),
-            description="QuickSave",
-            transaction_id=reference,
-            paystack_access_code=access_code,
-            paystack_auth_code=authorization_code,
-        )
+        if charge_status == "success":
+            Transaction.objects.create(
+                user=request.user,
+                transaction_type="credit",
+                status="confirmed",
+                amount=amount,
+                description=f"QuickSave (Card)",
+                transaction_id=reference,
+                paystack_auth_code=saved_card.authorization_code,
+                paystack_reference=reference,
+            )
+
+            request.user.savings += amount
+            request.user.update_total_savings_and_investment_this_month()
+            request.user.save()
+
+            try:
+                subject = "QuickSave Successful! ✅"
+                message = (
+                    f"Well done {request.user.first_name},<br><br>"
+                    f"Your <b>QuickSave</b> of <b>₦{amount:,.2f}</b> was successful and has been added to your SAVINGS account.<br><br>"
+                    f"Payment Method: {saved_card.card_brand.upper()} •••• {saved_card.card_last4_digits}<br>"
+                    f"Transaction ID: {reference}<br><br>"
+                    f"Keep growing your funds.🥂"
+                )
+                send_generic_email(
+                    subject=subject,
+                    message=message,
+                    from_email="MyFund <info@myfundmobile.com>",
+                    recipient_list=[request.user.email],
+                )
+            except Exception as e:
+                print(f"Failed to send email: {str(e)}")
+
+            return Response(
+                {
+                    "status": "success",
+                    "payment_method": "instant",
+                    "message": "QuickSave successful! Amount added to your savings.",
+                    "amount": float(amount),
+                    "reference": reference,
+                    "card_used": {
+                        "brand": saved_card.card_brand,
+                        "last4": saved_card.card_last4_digits,
+                        "bank": saved_card.bank_name,
+                    },
+                    "new_balance": float(request.user.savings),
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        if charge_status in [
+            "send_otp",
+            "send_pin",
+            "send_phone",
+            "send_birthday",
+            "pending",
+        ]:
+            return Response(
+                {
+                    "error": "This saved card requires additional authentication. Please pay through the secure payment page instead."
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         return Response(
             {
-                "status": "transaction_initiated",
-                "payment_method": "popup",
-                "message": "Authorization of QuickSave transaction on Paystack required",
-                "authorization_url": data["data"]["authorization_url"],
-                "access_code": access_code,
-                "reference": reference,
-                # ✅ NEW: Return authorization info to frontend
-                "authorization_code": authorization_code,
-                "reusable": reusable,
-                "card_brand": card_brand,
-                "card_last4": card_last4,
-            }
+                "error": charge_data.get(
+                    "gateway_response", "Instant card charge failed"
+                )
+            },
+            status=status.HTTP_400_BAD_REQUEST,
         )
+
+    # ===================================
+    # REGULAR PAYMENT FLOW (FIRST TIME / NO card_id)
+    # ===================================
+    payload = {
+        "email": request.user.email,
+        "amount": amount_kobo,
+        "channels": payment_channels,
+        "metadata": {
+            "user_id": request.user.id,
+            "transaction_type": "quicksave",
+        },
+    }
+
+    try:
+        resp = requests.post(
+            "https://api.paystack.co/transaction/initialize",
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}",
+                "Content-Type": "application/json",
+            },
+            timeout=30,
+        )
+    except requests.RequestException as e:
+        return Response(
+            {"error": f"Payment initialization failed: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    try:
+        data = resp.json()
+    except Exception:
+        return Response(
+            {"error": "Invalid response from payment gateway"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    if resp.status_code != 200:
+        return Response(
+            {"error": data.get("message", "Payment initialization failed")},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if not data.get("status"):
+        return Response(
+            {
+                "error": f"Payment initialization failed: {data.get('message', 'Unknown error')}"
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    reference = data["data"]["reference"]
+    access_code = data["data"]["access_code"]
+
+    Transaction.objects.create(
+        user=request.user,
+        transaction_type="credit",
+        status="pending",
+        amount=amount,
+        description="QuickSave",
+        transaction_id=reference,
+        paystack_access_code=access_code,
+    )
+
+    return Response(
+        {
+            "status": "transaction_initiated",
+            "payment_method": "popup",
+            "message": "Authorization of QuickSave transaction on Paystack required",
+            "authorization_url": data["data"]["authorization_url"],
+            "access_code": access_code,
+            "reference": reference,
+        },
+        status=status.HTTP_200_OK,
+    )
 
 
 import time
@@ -2652,16 +2883,25 @@ def deactivate_autosave(request):
     if not frequency:
         return Response(
             {
-                "error": "Frequency Missing: Please, provide the frequency of the autosave."
+                "error": "Frequency Missing: Please provide the frequency of the autosave."
             },
             status=status.HTTP_400_BAD_REQUEST,
         )
 
     try:
-        # Find all active AutoSaves for the user with the given frequency
         active_autosaves = AutoSave.objects.filter(
-            user=user, frequency=frequency, active=True
+            user=user,
+            frequency=frequency,
+            active=True,
         )
+
+        if not active_autosaves.exists():
+            user.autosave_enabled = False
+            user.save(update_fields=["autosave_enabled"])
+            return Response(
+                {"message": "No active AutoSave found for this frequency."},
+                status=status.HTTP_200_OK,
+            )
 
         headers = {
             "Authorization": f"Bearer {paystack_secret_key}",
@@ -2669,48 +2909,41 @@ def deactivate_autosave(request):
         }
 
         for autosave in active_autosaves:
-
-            # print(f"autosave: {autosave}")
-
-            if autosave.paystack_sub_id and autosave.paystack_sub_token:
-                # Prepare the data for the request
+            # If Paystack subscription exists, disable it first
+            if autosave.paystack_sub_code and autosave.paystack_sub_token:
                 data = {
                     "code": autosave.paystack_sub_code,
                     "token": autosave.paystack_sub_token,
                 }
 
-                # Log the data being sent
-                # print("Disabling subscription with data:", autosave.paystack_trans_ref)
-
-                # Make the API request
                 deactivate_response = requests.post(
                     "https://api.paystack.co/subscription/disable",
                     json=data,
                     headers=headers,
+                    timeout=30,
                 )
+                deactivate_response.raise_for_status()
 
-                # Check for successful response
-                deactivate_response.raise_for_status()  # Raises an HTTPError for bad responses
+            # Whether or not Paystack details exist, make sure record is no longer active
+            autosave.active = False
+            autosave.save(update_fields=["active"])
+            autosave.delete()
 
-                # Deactivate the AutoSave
-                autosave.active = False
-                autosave.save()
-                autosave.delete()
-            else:
-                autosave.delete()
-                return Response(
-                    {
-                        "error": "Paystack subscription details are missing for one or more AutoSaves"
-                    },
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                )
+        # Check if user still has any active autosave left
+        still_has_active_autosave = AutoSave.objects.filter(
+            user=user,
+            active=True,
+        ).exists()
 
-        user.autosave_enabled = False
-        user.save()
+        user.autosave_enabled = still_has_active_autosave
+        user.save(update_fields=["autosave_enabled"])
 
-        # Send a confirmation email
         subject = "AutoSave Deactivated!"
-        message = f"Hi {user.first_name},<br><br>Your {frequency} AutoSave(s) have been deactivated. <br><br>Keep growing your funds.🥂"
+        message = (
+            f"Hi {user.first_name},<br><br>"
+            f"Your {frequency} AutoSave has been deactivated successfully."
+            f"<br><br>Keep growing your funds.🥂"
+        )
         from_email = "MyFund <info@myfundmobile.com>"
         recipient_list = [user.email]
 
@@ -2721,12 +2954,19 @@ def deactivate_autosave(request):
             recipient_list=recipient_list,
         )
 
-        # Return a success response indicating that AutoSave has been deactivated
-        return Response({"message": "AutoSave deactivated"}, status=status.HTTP_200_OK)
+        return Response(
+            {"message": "AutoSave deactivated"},
+            status=status.HTTP_200_OK,
+        )
 
     except requests.RequestException as e:
         return Response(
             {"error": f"Failed to deactivate subscription on Paystack: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+    except Exception as e:
+        return Response(
+            {"error": str(e)},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
@@ -2779,56 +3019,70 @@ def get_autosave_status(request):
     )
 
 
+from decimal import Decimal
+from rest_framework import status
+import requests
+from django.conf import settings
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+
+# make sure these are already imported in your file
+# from .models import Card, Transaction
+# from .utils import send_generic_email
+
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def quickinvest(request):
     """
-    QuickInvest with automatic instant payment if user has saved card,
-    otherwise falls back to regular payment flow
+    QuickInvest flow:
+    1. If card_id is sent, try instant charge with saved card
+    2. If no card_id is sent, fall back to normal Paystack popup/webview flow
     """
     amount = request.data.get("amount")
     payment_channels = request.data.get("channels", ["card"])
-    use_saved_card = request.data.get(
-        "use_saved_card", True
-    )  # Auto use saved card by default
-    card_id = request.data.get("card_id")  # Optional: specific card to use
+    card_id = request.data.get("card_id")
 
     if amount is None:
-        return Response({"error": "amount required"}, status=400)
+        return Response(
+            {"error": "amount required"}, status=status.HTTP_400_BAD_REQUEST
+        )
 
-    if float(amount) < 100000:
-        return Response({"error": "Amount cannot be less than ₦100,000"}, status=400)
+    try:
+        amount = Decimal(str(amount))
+    except Exception:
+        return Response(
+            {"error": "Invalid amount supplied"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
-    # Convert amount to kobo and to int
-    amount_kobo = int(float(amount) * 100)
+    if amount < Decimal("100000"):
+        return Response(
+            {"error": "Amount cannot be less than ₦100,000"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
-    # ===================================
-    # CHECK FOR SAVED CARD
-    # ===================================
+    amount_kobo = int(amount * 100)
+
     saved_card = None
 
-    if use_saved_card:
-        if card_id:
-            # Use specific card
-            try:
-                saved_card = Card.objects.get(
-                    id=card_id, user=request.user, is_active=True, reusable=True
-                )
-            except Card.DoesNotExist:
-                return Response(
-                    {
-                        "error": "Selected card not found or not available for instant payment"
-                    },
-                    status=404,
-                )
-        else:
+    if card_id:
+        try:
+            saved_card = Card.objects.get(
+                id=card_id,
+                user=request.user,
+                is_active=True,
+                reusable=True,
+            )
+        except Card.DoesNotExist:
             return Response(
-                {"error": "'card_id' required for instant card payment"}, status=400
+                {
+                    "error": "Selected card not found or not available for instant payment"
+                },
+                status=status.HTTP_404_NOT_FOUND,
             )
 
-    # ===================================
-    # INSTANT PAYMENT WITH SAVED CARD
-    # ===================================
     if saved_card:
         payload = {
             "authorization_code": saved_card.authorization_code,
@@ -2837,7 +3091,7 @@ def quickinvest(request):
             "metadata": {
                 "user_id": request.user.id,
                 "transaction_type": "quickinvest",
-                # "card_id": saved_card.id,
+                "card_id": saved_card.id,
             },
         }
 
@@ -2851,154 +3105,175 @@ def quickinvest(request):
                 },
                 timeout=30,
             )
-
-            if resp.status_code != 200:
-                # If instant charge fails, fall back to regular payment
-                print(f"Instant charge failed: {resp.text}")
-                return Response({"error": f"Instant card charge failed"}, status=400)
-            else:
-                data = resp.json()
-
-                if data.get("status") and data["data"]["status"] == "success":
-                    # Instant payment successful!
-                    reference = data["data"]["reference"]
-
-                    # Create completed transaction
-                    transaction = Transaction.objects.create(
-                        user=request.user,
-                        transaction_type="credit",
-                        status="confirmed",
-                        amount=Decimal(amount),
-                        description=f"QuickInvest (Instant - {saved_card.card_brand.upper()} •••• {saved_card.card_last4_digits})",
-                        transaction_id=reference,
-                        paystack_auth_code=saved_card.authorization_code,
-                    )
-
-                    # Update user's investment balance
-                    request.user.investment += int(amount)
-                    request.user.update_total_savings_and_investment_this_month()
-                    request.user.save()
-
-                    # Send success email
-                    try:
-                        subject = "QuickInvest Successful! 🎉"
-                        message = (
-                            f"Well done {request.user.first_name},<br><br>"
-                            f"Your <b>QuickInvest</b> of <b>₦{amount:,.2f}</b> was successful and has been added to your INVESTMENT account.<br><br>"
-                            f"Payment Method: {saved_card.card_brand.upper()} •••• {saved_card.card_last4_digits}<br>"
-                            f"Transaction ID: {reference}<br><br>"
-                            f"Keep growing your funds.🥂"
-                        )
-                        from_email = "MyFund <info@myfundmobile.com>"
-                        recipient_list = [request.user.email]
-
-                        send_generic_email(
-                            subject=subject,
-                            message=message,
-                            from_email=from_email,
-                            recipient_list=recipient_list,
-                        )
-                    except Exception as e:
-                        print(f"Failed to send email: {str(e)}")
-
-                    return Response(
-                        {
-                            "status": "success",
-                            "payment_method": "instant",
-                            "message": "QuickInvest successful! Amount added to your investments.",
-                            "amount": float(amount),
-                            "reference": reference,
-                            "card_used": {
-                                "brand": saved_card.card_brand,
-                                "last4": saved_card.card_last4_digits,
-                                "bank": saved_card.bank_name,
-                            },
-                            "new_balance": float(request.user.investment),
-                        }
-                    )
-
         except requests.RequestException as e:
             print(f"Instant payment request failed: {str(e)}")
-            return Response({"error": f"Instant payment request failed"}, status=400)
-    else:
-        # ===================================
-        # REGULAR PAYMENT FLOW (No saved card or instant payment failed)
-        # ===================================
-        payload = {
-            "email": request.user.email,
-            "amount": amount_kobo,
-            "channels": payment_channels,
-            "metadata": {
-                "user_id": request.user.id,
-                "transaction_type": "quickinvest",
-            },
-        }
+            return Response(
+                {"error": "Instant payment request failed"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
-            resp = requests.post(
-                "https://api.paystack.co/transaction/initialize",
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}",
-                    "Content-Type": "application/json",
-                },
-                timeout=30,
-            )
-        except requests.RequestException as e:
+            data = resp.json()
+        except Exception:
+            data = {}
+
+        if resp.status_code != 200 or not data.get("status"):
+            print(f"Instant charge failed: {resp.text}")
             return Response(
-                {"error": f"Payment initialization failed: {str(e)}"}, status=500
+                {"error": data.get("message", "Instant card charge failed")},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Check if request to Paystack was successful
-        if resp.status_code != 200:
-            error_message = resp.json().get("message", "Payment initialization failed")
-            return Response({"error": error_message}, status=400)
+        charge_data = data.get("data", {})
+        charge_status = charge_data.get("status")
+        reference = charge_data.get("reference")
 
-        data = resp.json()
+        if charge_status == "success":
+            Transaction.objects.create(
+                user=request.user,
+                transaction_type="credit",
+                status="confirmed",
+                amount=amount,
+                description=f"QuickInvest (Instant - {saved_card.card_brand.upper()} •••• {saved_card.card_last4_digits})",
+                transaction_id=reference,
+                paystack_auth_code=saved_card.authorization_code,
+                paystack_reference=reference,
+            )
 
-        if not data.get("status"):
+            request.user.investment += amount
+            request.user.update_total_savings_and_investment_this_month()
+            request.user.save()
+
+            try:
+                subject = "QuickInvest Successful! 🎉"
+                message = (
+                    f"Well done {request.user.first_name},<br><br>"
+                    f"Your <b>QuickInvest</b> of <b>₦{amount:,.2f}</b> was successful and has been added to your INVESTMENT account.<br><br>"
+                    f"Payment Method: {saved_card.card_brand.upper()} •••• {saved_card.card_last4_digits}<br>"
+                    f"Transaction ID: {reference}<br><br>"
+                    f"Keep growing your funds.🥂"
+                )
+                send_generic_email(
+                    subject=subject,
+                    message=message,
+                    from_email="MyFund <info@myfundmobile.com>",
+                    recipient_list=[request.user.email],
+                )
+            except Exception as e:
+                print(f"Failed to send email: {str(e)}")
+
             return Response(
                 {
-                    "error": f"Payment initialization failed: {data.get('message', 'Unknown error')}"
+                    "status": "success",
+                    "payment_method": "instant",
+                    "message": "QuickInvest successful! Amount added to your investments.",
+                    "amount": float(amount),
+                    "reference": reference,
+                    "card_used": {
+                        "brand": saved_card.card_brand,
+                        "last4": saved_card.card_last4_digits,
+                        "bank": saved_card.bank_name,
+                    },
+                    "new_balance": float(request.user.investment),
                 },
-                status=400,
+                status=status.HTTP_200_OK,
             )
 
-        reference = data["data"]["reference"]
-        access_code = data["data"]["access_code"]
-        authorization_data = data["data"].get("authorization", {})
-        authorization_code = authorization_data.get("authorization_code")
-        reusable = authorization_data.get("reusable", False)
-        card_brand = authorization_data.get("brand", "")
-        card_last4 = authorization_data.get("last4", "")
-
-        # Create pending transaction
-        Transaction.objects.create(
-            user=request.user,
-            transaction_type="credit",
-            status="pending",
-            amount=Decimal(amount),
-            description="QuickInvest",
-            transaction_id=reference,
-            paystack_access_code=access_code,
-            paystack_auth_code=authorization_code,
-        )
+        if charge_status in [
+            "send_otp",
+            "send_pin",
+            "send_phone",
+            "send_birthday",
+            "pending",
+        ]:
+            return Response(
+                {
+                    "error": "This saved card requires additional authentication. Please pay through the secure payment page instead."
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         return Response(
             {
-                "status": "transaction_initiated",
-                "payment_method": "popup",
-                "message": "Authorization of QuickInvest transaction on Paystack required",
-                "authorization_url": data["data"]["authorization_url"],
-                "access_code": access_code,
-                "reference": reference,
-                # ✅ NEW: Return authorization info to frontend
-                "authorization_code": authorization_code,
-                "reusable": reusable,
-                "card_brand": card_brand,
-                "card_last4": card_last4,
-            }
+                "error": charge_data.get(
+                    "gateway_response", "Instant card charge failed"
+                )
+            },
+            status=status.HTTP_400_BAD_REQUEST,
         )
+
+    payload = {
+        "email": request.user.email,
+        "amount": amount_kobo,
+        "channels": payment_channels,
+        "metadata": {
+            "user_id": request.user.id,
+            "transaction_type": "quickinvest",
+        },
+    }
+
+    try:
+        resp = requests.post(
+            "https://api.paystack.co/transaction/initialize",
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}",
+                "Content-Type": "application/json",
+            },
+            timeout=30,
+        )
+    except requests.RequestException as e:
+        return Response(
+            {"error": f"Payment initialization failed: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    try:
+        data = resp.json()
+    except Exception:
+        return Response(
+            {"error": "Invalid response from payment gateway"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    if resp.status_code != 200:
+        return Response(
+            {"error": data.get("message", "Payment initialization failed")},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if not data.get("status"):
+        return Response(
+            {
+                "error": f"Payment initialization failed: {data.get('message', 'Unknown error')}"
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    reference = data["data"]["reference"]
+    access_code = data["data"]["access_code"]
+
+    Transaction.objects.create(
+        user=request.user,
+        transaction_type="credit",
+        status="pending",
+        amount=amount,
+        description="QuickInvest",
+        transaction_id=reference,
+        paystack_access_code=access_code,
+    )
+
+    return Response(
+        {
+            "status": "transaction_initiated",
+            "payment_method": "popup",
+            "message": "Authorization of QuickInvest transaction on Paystack required",
+            "authorization_url": data["data"]["authorization_url"],
+            "access_code": access_code,
+            "reference": reference,
+        },
+        status=status.HTTP_200_OK,
+    )
 
 
 from .models import AutoInvest
@@ -3949,7 +4224,7 @@ def withdraw_to_local_bank(request):
             admin_emails = [
                 "tolulopeahmed@gmail.com",
                 "ceo@myfundmobile.com",
-                "lioness@myfundmobile.com",
+                "janet.adegbenro@gmail.com",
             ]
             admin_users = CustomUser.objects.filter(email__in=admin_emails)
 
@@ -4143,7 +4418,7 @@ def process_withdrawal_to_local_bank(request):
                 )
 
             # Lock user row for update to prevent concurrent modifications
-            user_locked = User.objects.select_for_update().get(id=user.id)
+            user_locked = type(user).objects.select_for_update().get(id=user.id)
 
             # Re-check balance inside transaction after locking
             if source_account == "savings":
@@ -4212,14 +4487,19 @@ def process_withdrawal_to_local_bank(request):
                 transaction_id=transaction_id,
                 transaction_type="debit",
                 status="pending",
-                amount=net_amount,  # Amount after charge deduction
-                service_charge=charge_amount,  # Charge deducted
-                total_amount=amount,  # Original amount requested
-                description=f"{source_account.capitalize()} > Bank . . .",
+                amount=net_amount,
+                service_charge=charge_amount,
+                total_amount=amount,
+                description=(
+                    f"{source_account.capitalize()} > Wallet . . ."
+                    if withdrawal_type == "scheduled"
+                    and source_account in ["savings", "investment"]
+                    else f"{source_account.capitalize()} > Bank . . ."
+                ),
                 scheduled_date=processing_date.date() if processing_date else None,
             )
-            print("✅ STEP 9: Transaction record created with charge details.")
 
+            print("✅ STEP 9: Transaction record created with charge details.")
             # --- Send email to user (dynamically based on withdrawal_type & source) ---
             subject = "Withdrawal Request Received"
 
@@ -4229,8 +4509,8 @@ def process_withdrawal_to_local_bank(request):
                 # ✅ Scheduled withdrawals — NO CHARGES, NO BANK PROCESSING
                 user_message_body = (
                     f"Hi {user_locked.first_name},<br><br>"
-                    f"has been successfully scheduled.<br><br>"
-                    f"<strong>No charges apply</strong> to scheduled withdrawals.<br>"
+                    f"Your withdrawal has been successfully scheduled.<br><br>"
+                    f"<strong>No charges apply</strong> to scheduled withdrawals.<br><br>"
                     f"The funds will be automatically credited to your MyFund wallet on "
                     f"<strong>{processing_date.strftime('%A, %B %d, %Y')}</strong>.<br><br>"
                     f"Once credited, you can withdraw from your wallet to your bank account at no cost."
@@ -4283,7 +4563,7 @@ def process_withdrawal_to_local_bank(request):
                 # ✅ Scheduled withdrawal — NO CHARGES
                 push_title = "Withdrawal Scheduled 📅"
                 push_message = (
-                    f"Hi {user_locked.first_name},<br><br>"
+                    f"Hi {user_locked.first_name},"
                     f"has been scheduled successfully. "
                     f"No charges apply. Your wallet will be credited on "
                     f"{processing_date.strftime('%A, %B %d, %Y')}."
@@ -4388,7 +4668,7 @@ def process_withdrawal_to_local_bank(request):
             admin_recipient_list = [
                 "company@myfundmobile.com",
                 "tolulopeahmed@gmail.com",
-                "lioness@myfundmobile.com",
+                "janet.adegbenro@gmail.com",
             ]
 
             send_generic_email(
@@ -4403,7 +4683,7 @@ def process_withdrawal_to_local_bank(request):
             admin_emails = [
                 "tolulopeahmed@gmail.com",
                 "ceo@myfundmobile.com",
-                "lioness@myfundmobile.com",
+                "janet.adegbenro@gmail.com",
             ]
             admin_users = CustomUser.objects.filter(email__in=admin_emails)
 
@@ -4476,14 +4756,9 @@ def process_withdrawal_to_local_bank(request):
 @permission_classes([IsAuthenticated])
 def cancel_scheduled_withdrawal(request):
     user = request.user
-    data = request.data
-
-    print("✅ STEP 1: Received cancel scheduled withdrawal request:", data)
-
-    transaction_id = data.get("transaction_id")
+    transaction_id = request.data.get("transaction_id")
 
     if not transaction_id:
-        print("❌ transaction_id not provided.")
         return Response(
             {"error": "Transaction ID is required."},
             status=status.HTTP_400_BAD_REQUEST,
@@ -4491,58 +4766,67 @@ def cancel_scheduled_withdrawal(request):
 
     try:
         with transaction.atomic():
-            # Lock the withdrawal request and user for update
-            withdrawal_request = WithdrawalsRequestToAdmin.objects.select_for_update().get(
+            # 1) Lock the pending transaction first
+            pending_transaction = Transaction.objects.select_for_update().get(
                 transaction_id=transaction_id,
                 user=user,
-                withdrawal_type="scheduled",  # Only allow canceling scheduled withdrawals
-                is_approved=False,  # Only allow canceling pending withdrawals
+                status="pending",
             )
 
-            # Lock the user row
-            user_locked = User.objects.select_for_update().get(id=user.id)
+            # Must truly be a scheduled withdrawal
+            if not pending_transaction.scheduled_date:
+                return Response(
+                    {"error": "This is not a scheduled withdrawal."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
-            print(
-                f"✅ STEP 2: Found scheduled withdrawal request for transaction {transaction_id}"
+            user_locked = type(user).objects.select_for_update().get(id=user.id)
+
+            # Use original amount safely
+            original_amount = (
+                pending_transaction.total_amount or pending_transaction.amount
             )
+            refund_amount = original_amount * Decimal("0.99")
+            service_charge = original_amount * Decimal("0.01")
 
-            # Calculate refund amount (99% of original amount)
-            refund_amount = withdrawal_request.amount * Decimal("0.99")
-            service_charge = withdrawal_request.amount * Decimal("0.01")
-
-            print(
-                f"✅ STEP 3: Refund amount: {refund_amount}, Service charge: {service_charge}"
-            )
-
-            # Credit the user's savings account with 99% of the amount
-            if hasattr(user_locked, "savings"):
-                user_locked.savings += refund_amount
-                user_locked.save()
-                print(f"✅ STEP 4: Credited {refund_amount} to user's savings account")
-            else:
+            # Refund to savings
+            if not hasattr(user_locked, "savings"):
                 return Response(
                     {"error": "User savings account not found."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            # Update the withdrawal request to mark it as cancelled
-            withdrawal_request.is_approved = (
-                True  # Mark as "processed" but in cancelled state
-            )
-            withdrawal_request.save()
-            print("✅ STEP 5: Updated withdrawal request status")
+            user_locked.savings += refund_amount
+            user_locked.save(update_fields=["savings"])
 
-            # ✅ STEP 6: DELETE the original pending transaction instead of updating it
-            try:
-                original_transaction = Transaction.objects.get(
-                    transaction_id=transaction_id, user=user, status="pending"
+            # 2) Mark matching withdrawal request as cancelled if found
+            withdrawal_request = (
+                WithdrawalsRequestToAdmin.objects.select_for_update()
+                .filter(
+                    transaction_id=transaction_id,
+                    user=user,
+                    withdrawal_type="scheduled",
+                    is_approved=False,
                 )
-                original_transaction.delete()  # Remove the pending transaction
-                print("✅ STEP 6: Deleted original pending transaction")
-            except Transaction.DoesNotExist:
-                print("⚠️ Original transaction not found, continuing...")
+                .first()
+            )
 
-            # ✅ STEP 7: Create a new credit transaction for the 99% refund to savings
+            if withdrawal_request:
+                if hasattr(withdrawal_request, "is_cancelled"):
+                    withdrawal_request.is_cancelled = True
+                    withdrawal_request.save(update_fields=["is_cancelled"])
+                elif hasattr(withdrawal_request, "status"):
+                    withdrawal_request.status = "cancelled"
+                    withdrawal_request.save(update_fields=["status"])
+                else:
+                    # fallback only if your model has neither status nor is_cancelled
+                    withdrawal_request.is_approved = True
+                    withdrawal_request.save(update_fields=["is_approved"])
+
+            # 3) Delete the pending scheduled transaction so it cannot be processed later
+            pending_transaction.delete()
+
+            # 4) Create refund transaction
             refund_transaction_id = "".join(
                 random.choices(string.ascii_uppercase + string.digits, k=20)
             )
@@ -4553,57 +4837,57 @@ def cancel_scheduled_withdrawal(request):
                 transaction_type="credit",
                 status="confirmed",
                 amount=refund_amount,
-                description=f"[Refund] Cancelled Withdrawal",
+                total_amount=refund_amount,
+                service_charge=Decimal("0.00"),
+                description="[Refund] Cancelled Withdrawal",
                 source="SAVINGS",
             )
-            print("✅ STEP 7: Created refund transaction record")
 
-            # ✅ STEP 8: Create a debit transaction for the 1% service charge
+            # 5) Create service charge transaction
             if service_charge > 0:
-                service_charge_transaction_id = "".join(
+                charge_transaction_id = "".join(
                     random.choices(string.ascii_uppercase + string.digits, k=20)
                 )
 
                 Transaction.objects.create(
                     user=user_locked,
-                    transaction_id=service_charge_transaction_id,
+                    transaction_id=charge_transaction_id,
                     transaction_type="debit",
                     status="confirmed",
                     amount=service_charge,
-                    description=f"[Charge] Cancelled Withdrawal",
+                    total_amount=service_charge,
+                    service_charge=Decimal("0.00"),
+                    description="[Charge] Cancelled Withdrawal",
                     source="SAVINGS",
                 )
-                print("✅ STEP 8: Created service charge transaction record")
 
-            # --- Send email to user ---
+            # 6) Notify user
             subject = "Scheduled Withdrawal Cancelled"
             user_message = (
-                f"Hi {user_locked.first_name},<br><br>"
-                f"Your scheduled withdrawal of ₦{withdrawal_request.amount:,.2f} has been successfully cancelled. "
-                f"₦{refund_amount:,.2f} has been refunded to your Savings account (1% service charge of ₦{service_charge:,.2f} applied).<br><br>"
-                "Thank you for using MyFund.<br><br>"
+                f"Hi {user_locked.first_name},"
+                f"Your scheduled withdrawal of ₦{original_amount:,.2f} has been successfully cancelled. "
+                f"₦{refund_amount:,.2f} has been refunded to your Savings account "
+                f"(1% service charge of ₦{service_charge:,.2f} applied).<br><br>"
+                f"Thank you for using MyFund."
             )
-            from_email = "MyFund <info@myfundmobile.com>"
-            recipient_list = [user_locked.email]
 
             send_generic_email(
                 subject=subject,
                 message=user_message,
-                from_email=from_email,
-                recipient_list=recipient_list,
+                from_email="MyFund <info@myfundmobile.com>",
+                recipient_list=[user_locked.email],
             )
-            print("✅ STEP 9: Sent cancellation email to user")
 
-            # --- Send push notification to user ---
             send_push_notification(
                 user=user_locked,
                 title="Withdrawal Cancelled ✅",
-                message="Hi {user_locked.first_name}, your scheduled withdrawal has been cancelled. ₦{:,.2f} has been refunded to your Savings account.".format(
-                    float(refund_amount)
+                message=(
+                    f"Hi {user_locked.first_name}, your scheduled withdrawal has been cancelled. "
+                    f"₦{refund_amount:,.2f} has been refunded to your Savings account."
                 ),
                 data={
                     "refund_amount": str(refund_amount),
-                    "original_amount": str(withdrawal_request.amount),
+                    "original_amount": str(original_amount),
                     "service_charge": str(service_charge),
                     "transaction_id": transaction_id,
                     "type": "Withdrawal_Cancellation",
@@ -4611,27 +4895,24 @@ def cancel_scheduled_withdrawal(request):
                 },
                 notif_type="SUCCESS",
             )
-            print("✅ STEP 10: Sent push notification to user")
 
         return Response(
             {
                 "message": "Scheduled withdrawal cancelled successfully.",
                 "refund_amount": float(refund_amount),
                 "service_charge": float(service_charge),
-                "original_amount": float(withdrawal_request.amount),
+                "original_amount": float(original_amount),
                 "new_savings_balance": float(user_locked.savings),
             },
             status=status.HTTP_200_OK,
         )
 
-    except WithdrawalsRequestToAdmin.DoesNotExist:
-        print("❌ Withdrawal request not found or already processed")
+    except Transaction.DoesNotExist:
         return Response(
             {"error": "Scheduled withdrawal not found or already processed."},
             status=status.HTTP_404_NOT_FOUND,
         )
     except Exception as e:
-        print("❌ Exception occurred during cancellation:")
         print(f"❌ ERROR: {str(e)}")
         import traceback
 
@@ -5260,43 +5541,65 @@ def get_top_savers(request):
     current_month = now.month
     current_year = now.year
 
-    # Use cache lock to ensure only one update runs at a time
     cache_key = f"top_savers_update_{current_year}_{current_month}"
     lock_key = f"top_savers_lock_{current_year}_{current_month}"
 
-    # Check if update is already running
     is_updating = cache.get(lock_key)
-
-    # Check if we have recent data (updated in last 5 minutes)
     last_update = cache.get(cache_key)
 
+    logger.info(
+        "get_top_savers called | month=%s year=%s last_update=%s is_updating=%s user=%s",
+        current_month,
+        current_year,
+        last_update,
+        bool(is_updating),
+        request.user.email,
+    )
+
     if not last_update and not is_updating:
-        # Set lock to prevent multiple simultaneous updates
-        cache.set(lock_key, True, timeout=60)  # Lock for 60 seconds max
+        cache.set(lock_key, True, timeout=60)
 
-        # Start background update but don't wait
+        logger.info(
+            "No cached top savers data found. Starting background update for %s/%s",
+            current_month,
+            current_year,
+        )
+
         update_top_savers()
-
-        # Mark update time
-        cache.set(cache_key, now.isoformat(), timeout=180)  # Cache for 5 minutes
+        cache.set(cache_key, now.isoformat(), timeout=180)
 
         logger.info("Started background top savers update")
 
-    # Fetch precomputed top savers (even if stale)
+    else:
+        logger.info(
+            "Skipping background top savers update | reason=%s",
+            "already_updating" if is_updating else "cached_recent_data_exists",
+        )
+
     top_savers = (
         TopSaverHistory.objects.filter(month=current_month, year=current_year)
         .select_related("user")
         .order_by("rank")[:50]
     )
 
+    logger.info(
+        "Fetched %s TopSaverHistory rows for %s/%s",
+        len(top_savers),
+        current_month,
+        current_year,
+    )
+
     if not top_savers:
+        logger.warning(
+            "No TopSaverHistory rows found for %s/%s",
+            current_month,
+            current_year,
+        )
         return Response(
             {
                 "top_savers": [],
                 "current_user": {},
-                "updating": bool(
-                    is_updating
-                ),  # Let frontend know data is being updated
+                "updating": bool(is_updating),
             }
         )
 
@@ -5309,6 +5612,13 @@ def get_top_savers(request):
         round((current_user_history.total_savings / top_amount) * 100, 1)
         if current_user_history
         else 0
+    )
+
+    logger.info(
+        "Returning top savers response | top_amount=%s current_user_in_board=%s current_user_percentage=%s",
+        top_amount,
+        bool(current_user_history),
+        current_percentage,
     )
 
     return Response(
@@ -5337,8 +5647,8 @@ def get_top_savers(request):
                 "profile_picture": getattr(request.user.profile_picture, "url", ""),
                 "percentage": current_percentage,
             },
-            "updating": bool(is_updating),  # Indicate if fresh data is being computed
-            "last_update": last_update,  # When data was last refreshed
+            "updating": bool(is_updating),
+            "last_update": last_update,
         }
     )
 
@@ -5438,7 +5748,7 @@ class KYCUpdateView(generics.UpdateAPIView):
         admin_emails = [
             "tolulopeahmed@gmail.com",
             "ceo@myfundmobile.com",
-            "lioness@myfundmobile.com",
+            "janet.adegbenro@gmail.com",
         ]
 
         admin_users = CustomUser.objects.filter(email__in=admin_emails)
@@ -5756,7 +6066,7 @@ def initiate_bank_transfer(request):
                 admin_emails = [
                     "tolulopeahmed@gmail.com",
                     "ceo@myfundmobile.com",
-                    "lioness@myfundmobile.com",
+                    "janet.adegbenro@gmail.com",
                 ]
                 admin_users = CustomUser.objects.filter(email__in=admin_emails)
 
@@ -6760,7 +7070,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
 
                 print("CHANNEL:", payment_channel)
                 print("RECEIVER ACCOUNT:", receiver_account_number)
-
+                print("FULL PAYSTACK EVENT:", event)
                 # --------------------------------------------------
                 # DVA / bank transfer intent-based handling
                 # --------------------------------------------------
@@ -6928,79 +7238,54 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     )
                     return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
-                if user and authorization and authorization.get("reusable", False):
+                saved_card = None
+
+                if user and authorization:
                     try:
-                        authorization_code = authorization.get("authorization_code")
-                        signature = authorization.get("signature")
+                        print("========== CARD SAVE DEBUG ==========")
+                        print("email:", email)
+                        print("authorization payload:", authorization)
 
-                        if authorization_code:
-                            card_exists = Card.objects.filter(
-                                authorization_code=authorization_code
-                            ).exists()
+                        saved_card = save_or_update_card_from_paystack_auth(
+                            user, authorization
+                        )
 
-                            if signature and not card_exists:
-                                card_exists = Card.objects.filter(
-                                    signature=signature
-                                ).exists()
+                        if saved_card:
+                            print(
+                                f"✅ CARD SAVED/UPDATED: id={saved_card.id}, auth={saved_card.authorization_code}, last4={saved_card.card_last4_digits}, reusable={saved_card.reusable}, active={saved_card.is_active}"
+                            )
+                        else:
+                            print(
+                                "⚠️ Card save helper returned None. authorization_code may be missing."
+                            )
 
-                            if not card_exists:
-                                is_first_card = not Card.objects.filter(
-                                    user=user, is_active=True
-                                ).exists()
+                    except Exception as e:
+                        print(f"❌ Error saving card: {str(e)}", flush=True)
+                        try:
+                            subject = "[Webhook Warning] Card Save Failed"
+                            message = (
+                                f"Failed to save/update card for user {email}: {str(e)}<br><br>"
+                                f"Authorization payload: {authorization}"
+                            )
+                            send_generic_email(
+                                subject=subject,
+                                message=message,
+                                from_email="MyFund <info@myfundmobile.com>",
+                                recipient_list=[
+                                    "info@myfundmobile.com",
+                                    "sammy@myfundmobile.com",
+                                ],
+                            )
+                        except Exception:
+                            pass
 
-                                card = Card.objects.create(
-                                    user=user,
-                                    authorization_code=authorization_code,
-                                    signature=signature,
-                                    card_type=authorization.get("card_type", ""),
-                                    card_last4_digits=authorization.get("last4", ""),
-                                    expiry_month=authorization.get("exp_month", ""),
-                                    expiry_year=authorization.get("exp_year", ""),
-                                    card_first6_digits=authorization.get("bin", ""),
-                                    bank_name=authorization.get("bank", ""),
-                                    card_brand=authorization.get(
-                                        "brand", authorization.get("card_type", "")
-                                    ),
-                                    country_code=authorization.get(
-                                        "country_code", "NG"
-                                    ),
-                                    reusable=True,
-                                    is_default=is_first_card,
-                                    is_active=True,
-                                )
-
-                                try:
-                                    subject = "Payment Card Saved Successfully! 💳"
-                                    message = (
-                                        f"Hi {user.first_name},<br><br>"
-                                        f"Your <b>{card.card_brand.upper()}</b> card ending in "
-                                        f"<b>{card.card_last4_digits}</b> has been securely saved "
-                                        f"for faster future payments.<br><br>"
-                                        f"You can now use QuickSave instantly without entering card details again!<br><br>"
-                                        f"Bank: {card.bank_name}<br>"
-                                        f"Card Type: {card.card_brand.upper()}<br><br>"
-                                        f"Keep growing your funds.🥂"
-                                    )
-                                    card_save_from_email = (
-                                        "MyFund <info@myfundmobile.com>"
-                                    )
-                                    card_save_recipient_list = [user.email]
-
-                                    send_generic_email(
-                                        subject=subject,
-                                        message=message,
-                                        from_email=card_save_from_email,
-                                        recipient_list=card_save_recipient_list,
-                                    )
-                                except Exception as email_error:
-                                    print(
-                                        f"Failed to send card saved notification: {str(email_error)}"
-                                    )
                     except Exception as e:
                         print(f"❌ Error saving card: {str(e)}")
                         try:
                             subject = "[Webhook Warning] Card Save Failed"
-                            message = f"Failed to save card for user {email}: {str(e)}"
+                            message = (
+                                f"Failed to save/update card for user {email}: {str(e)}"
+                            )
                             error_from_email = "MyFund <info@myfundmobile.com>"
                             error_recipient_list = [
                                 "info@myfundmobile.com",
@@ -7071,12 +7356,24 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                                 transaction_id=reference,
                                 paystack_auth_code=paystack_auth_code,
                                 paystack_reference=reference,
+                                source="CARD",
+                                credited_to="SAVINGS",
                             )
 
+                        transaction.transaction_type = "credit"
                         transaction.status = "confirmed"
                         transaction.paystack_auth_code = paystack_auth_code
                         transaction.paystack_reference = reference
-                        transaction.save()
+                        transaction.credited_to = "SAVINGS"
+                        transaction.save(
+                            update_fields=[
+                                "transaction_type",
+                                "status",
+                                "paystack_auth_code",
+                                "paystack_reference",
+                                "credited_to",
+                            ]
+                        )
 
                         user.savings += amount
                         user.update_total_savings_and_investment_this_month()
@@ -7130,12 +7427,24 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                                 transaction_id=reference,
                                 paystack_auth_code=paystack_auth_code,
                                 paystack_reference=reference,
+                                source="CARD",
+                                credited_to="INVESTMENT",
                             )
 
+                        transaction.transaction_type = "credit"
                         transaction.status = "confirmed"
                         transaction.paystack_auth_code = paystack_auth_code
                         transaction.paystack_reference = reference
-                        transaction.save()
+                        transaction.credited_to = "INVESTMENT"
+                        transaction.save(
+                            update_fields=[
+                                "transaction_type",
+                                "status",
+                                "paystack_auth_code",
+                                "paystack_reference",
+                                "credited_to",
+                            ]
+                        )
 
                         user.investment += amount
                         user.update_total_savings_and_investment_this_month()
@@ -7177,13 +7486,20 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
 
                         print("AutoInvest Successfully Credited your Account.")
                         return
-
+                # Updated
                 elif transaction and transaction.description.lower().startswith(
                     "quicksave"
                 ):
-                    transaction.description = f"QuickSave ({payment_channel})"
+                    if saved_card:
+                        brand = (saved_card.card_brand or "CARD").upper()
+                        last4 = saved_card.card_last4_digits or "****"
+                        transaction.description = f"QuickSave (Card)"
+                        transaction.paystack_auth_code = saved_card.authorization_code
+                    else:
+                        transaction.description = f"QuickSave (Transfer)"
+                        transaction.paystack_auth_code = paystack_auth_code
+
                     transaction.status = "confirmed"
-                    transaction.paystack_auth_code = paystack_auth_code
                     transaction.paystack_reference = reference
                     transaction.save()
 
@@ -7304,8 +7620,14 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         transaction.transaction_type = "credit"
                         transaction.status = "confirmed"
                         transaction.description = f"AutoSave ({freq})"
+                        transaction.credited_to = "SAVINGS"
                         transaction.save(
-                            update_fields=["transaction_type", "status", "description"]
+                            update_fields=[
+                                "transaction_type",
+                                "status",
+                                "description",
+                                "credited_to",
+                            ]
                         )
 
                         user.savings += amount
@@ -7334,11 +7656,18 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             transaction.transaction_type = "credit"
                             transaction.status = "confirmed"
                             transaction.description = f"{base_desc} (Card)"
+
+                            if base_desc.lower().startswith("autosave"):
+                                transaction.credited_to = "SAVINGS"
+                            elif base_desc.lower().startswith("autoinvest"):
+                                transaction.credited_to = "INVESTMENT"
+
                             transaction.save(
                                 update_fields=[
                                     "transaction_type",
                                     "status",
                                     "description",
+                                    "credited_to",
                                 ]
                             )
 
@@ -7956,7 +8285,7 @@ def send_email(request):
             message=body,  # CHANGED FROM 'message' TO ''
             recipient_list=cleaned_recipients,
             from_email=sender,
-            use_celery_threshold=30,
+            use_celery_threshold=0,
         )
 
         logger.info(f"📧 send_generic_email result: {result}")
@@ -9916,6 +10245,13 @@ class TopReferralsAPIView(APIView):
             return pic
         return None
 
+    def get_user_monthly_attendance_count(self, user_obj, start_of_month):
+        current_month = start_of_month.strftime("%Y-%m")
+        return AmbassadorAttendanceSubmission.objects.filter(
+            user=user_obj,
+            month=current_month,
+        ).count()
+
     def send_rank_notification(self, user, old_rank, new_rank):
         """Sends consistent email + push notifications for rank changes."""
         if new_rank < old_rank:
@@ -10011,6 +10347,9 @@ class TopReferralsAPIView(APIView):
                     "profile_picture": self.get_profile_pic_url(ref_user),
                     "monthly_signups": stat["monthly_signups"],
                     "monthly_confirmed": stat["monthly_confirmed"],
+                    "monthly_attendance": self.get_user_monthly_attendance_count(
+                        ref_user, start_of_month
+                    ),
                     "is_hired_referrer": ref_user.is_hired_referrer,
                     "is_ambassador": getattr(ref_user, "is_ambassador", False),
                 }
@@ -10052,6 +10391,9 @@ class TopReferralsAPIView(APIView):
             "profile_picture": self.get_profile_pic_url(user),
             "monthly_signups": my_signups.count(),
             "monthly_confirmed": my_confirmed.count(),
+            "monthly_attendance": self.get_user_monthly_attendance_count(
+                user, start_of_month
+            ),
             "is_ambassador": getattr(user, "is_ambassador", False),
             "rank": next(
                 (
@@ -10244,3 +10586,45 @@ class AmbassadorMonthlyReportStatusView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+from rest_framework.decorators import (
+    api_view,
+    permission_classes,
+    authentication_classes,
+)
+from rest_framework.permissions import AllowAny
+from rest_framework.response import Response
+from rest_framework import status
+from django.utils import timezone
+
+from .models import AmbassadorAttendanceSubmission
+from .serializers import AmbassadorAttendanceSubmissionSerializer
+
+
+@api_view(["POST"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def submit_ambassador_attendance(request):
+    serializer = AmbassadorAttendanceSubmissionSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    submission = serializer.save()
+
+    current_month = submission.attendance_date.strftime("%B %Y")
+    current_month_key = submission.attendance_date.strftime("%Y-%m")
+
+    monthly_count = AmbassadorAttendanceSubmission.objects.filter(
+        user=submission.user,
+        month=current_month_key,
+    ).count()
+
+    return Response(
+        {
+            "message": f"Attendance recorded successfully for {current_month}.",
+            "attendance_count_this_month": monthly_count,
+            "points_for_this_attendance": 0.5,
+            "attendance_date": submission.attendance_date.strftime("%Y-%m-%d"),
+            "weekly_submission_saved": True,
+        },
+        status=status.HTTP_201_CREATED,
+    )

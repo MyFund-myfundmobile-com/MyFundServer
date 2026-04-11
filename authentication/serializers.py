@@ -906,6 +906,7 @@ class AmbassadorMonthlyReportSerializer(serializers.ModelSerializer):
     from rest_framework import serializers
 
 
+from rest_framework import serializers
 from .models import AmbassadorMonthlyReport
 
 
@@ -913,12 +914,20 @@ class AmbassadorMonthlyReportSerializer(serializers.ModelSerializer):
     class Meta:
         model = AmbassadorMonthlyReport
         fields = "__all__"
-        read_only_fields = ("user",)
+        read_only_fields = ("user", "status", "submitted_at")
+
+    def validate_month(self, value):
+        if len(value) != 7 or value[4] != "-":
+            raise serializers.ValidationError("Month must be in YYYY-MM format.")
+        return value
 
     def validate(self, attrs):
         request = self.context.get("request")
         user = request.user
         month = attrs.get("month")
+
+        if not getattr(user, "is_ambassador", False):
+            raise serializers.ValidationError("Only ambassadors can submit reports.")
 
         already_exists = AmbassadorMonthlyReport.objects.filter(
             user=user,
@@ -939,20 +948,63 @@ class AmbassadorMonthlyReportSerializer(serializers.ModelSerializer):
         validated_data["user"] = request.user
 
         report = AmbassadorMonthlyReport(**validated_data)
-
-        # Copy submitted values into approved values by default
-        report.signups_approved = report.signups_submitted
-        report.confirmed_approved = report.confirmed_submitted
-        report.savings_approved = report.savings_submitted
-        report.attendance_approved = report.attendance_submitted
-        report.others_approved = report.others_submitted
-        report.coursera_approved = report.coursera_submitted
-        report.social_media_approved = report.social_media_submitted
-        report.abroad_confirmed_approved = report.abroad_confirmed_submitted
-        report.events_approved = report.events_submitted
-
-        # Calculate points + stipend immediately
+        report.copy_submitted_to_approved_defaults()
         report.recalculate_points()
-
         report.save()
         return report
+
+
+from django.utils import timezone
+from .models import AmbassadorAttendanceSubmission, CustomUser
+
+from datetime import datetime
+from rest_framework import serializers
+from .models import AmbassadorAttendanceSubmission, CustomUser
+
+
+class AmbassadorAttendanceSubmissionSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    attendance_date = serializers.DateField(input_formats=["%Y-%m-%d"])
+    takeaway = serializers.CharField()
+    recommendation = serializers.CharField()
+
+    def validate_email(self, value):
+        email = value.strip().lower()
+
+        try:
+            user = CustomUser.objects.get(email=email, is_ambassador=True)
+        except CustomUser.DoesNotExist:
+            raise serializers.ValidationError(
+                "No ambassador account was found with that email address."
+            )
+
+        self.context["attendance_user"] = user
+        return email
+
+    def validate(self, attrs):
+        user = self.context["attendance_user"]
+        attendance_date = attrs["attendance_date"]
+
+        month = attendance_date.strftime("%Y-%m")
+        week_key = attendance_date.strftime("%Y-W%U")
+
+        already_submitted = AmbassadorAttendanceSubmission.objects.filter(
+            user=user,
+            week_key=week_key,
+        ).exists()
+
+        if already_submitted:
+            raise serializers.ValidationError(
+                {
+                    "message": "Attendance has already been submitted for this week with this email address."
+                }
+            )
+
+        attrs["user"] = user
+        attrs["week_key"] = week_key
+        attrs["month"] = month
+        attrs["email"] = attrs["email"].strip().lower()
+        return attrs
+
+    def create(self, validated_data):
+        return AmbassadorAttendanceSubmission.objects.create(**validated_data)

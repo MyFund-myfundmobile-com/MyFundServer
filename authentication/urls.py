@@ -6,14 +6,11 @@ from django.urls import re_path
 from django.contrib import admin
 from rest_framework.routers import DefaultRouter
 from .views import (
-    CardListCreateView,
-    CardDetailView,
     KYCUpdateView,
     get_user_by_email,
     KYCApprovalViewSet,
     BuyPropertyView,
     UserTransactionListView,
-    UserCardListView,
     AccountBalancesAPIView,
     TopReferralsAPIView,
     delete_my_account,
@@ -25,6 +22,7 @@ from .views import (
     get_all_users,
     unsubscribe_user,
     resubscribe_user,
+    set_default_card,
     target_savings_total,
     CurrentMonthFinancialView,
     FinancialHistoryView,
@@ -41,8 +39,9 @@ from .views import (
     initiate_dva_quicksave,
     initiate_dva_quickinvest,
     requery_my_dva_payments,
-    AmbassadorMonthlyReportCreateView, 
+    AmbassadorMonthlyReportCreateView,
     AmbassadorMonthlyReportStatusView,
+    submit_ambassador_attendance,
 )
 from django.views.decorators.csrf import csrf_exempt
 from authentication.views import CustomGraphQLView
@@ -107,10 +106,9 @@ urlpatterns = [
         "bank-accounts/get-bank-accounts/", views.get_user_banks, name="get_user_banks"
     ),
     # Card-related APIs
-    path("add-card/", CardListCreateView.as_view(), name="card-list-create"),
-    path("cards/<int:pk>/", CardDetailView.as_view(), name="card-detail"),
-    path("get-cards/", UserCardListView.as_view(), name="user-card-list"),
-    path("cards/<int:pk>/delete/", views.DeleteCardView.as_view(), name="delete-card"),
+    path("cards/", views.UserCardListView.as_view(), name="user_cards"),
+    path("cards/remove/", views.remove_card, name="remove_card"),
+    path("cards/set-default/", views.set_default_card, name="set_default_card"),
     # Accounts-related APIs
     path(
         "get-account-balances/",
@@ -370,9 +368,20 @@ urlpatterns = [
     path("admin/send-push/", send_admin_push_notification, name="send_admin_push"),
     path("push/save-token/", save_expo_push_token, name="save_push_token"),
     path("top-referrals/", TopReferralsAPIView.as_view(), name="top-referrals"),
-
     # Ambassadors
-    path("ambassador-report/", AmbassadorMonthlyReportCreateView.as_view(), name="ambassador-report"),
-    path("ambassador-report/status/", AmbassadorMonthlyReportStatusView.as_view(), name="ambassador-report-status"),
-
+    path(
+        "ambassador-report/",
+        AmbassadorMonthlyReportCreateView.as_view(),
+        name="ambassador-report",
+    ),
+    path(
+        "ambassador-report/status/",
+        AmbassadorMonthlyReportStatusView.as_view(),
+        name="ambassador-report-status",
+    ),
+    path(
+        "attendance/submit/",
+        submit_ambassador_attendance,
+        name="submit_ambassador_attendance",
+    ),
 ]

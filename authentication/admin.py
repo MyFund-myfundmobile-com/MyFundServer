@@ -969,8 +969,10 @@ class CustomUserAdmin(UserAdmin):
                         # Create transaction record (WITHOUT metadata)
                         Transaction.objects.create(
                             user=user,
-                            transaction_type="CREDIT",
-                            source="QUARTERLY_ROI_PAYOUT",
+                            transaction_type="credit",
+                            status="confirmed",
+                            source="WALLET",
+                            credited_to="WALLET",
                             amount=total_payout,
                             description=f"Quarterly ROI payout - Savings: ₦{savings_roi_total:,.2f}, Investments: ₦{investment_roi_total:,.2f}",
                         )
@@ -1486,9 +1488,19 @@ class InvestTransferRequestAdmin(admin.ModelAdmin):
             if transaction:
                 # ✅ Update transaction status
                 transaction.status = "confirmed"
+                transaction.transaction_type = "credit"
                 transaction.date = timezone.now()
                 transaction.description = "QuickInvest (Transfer)"
-                transaction.save()
+                transaction.credited_to = "INVESTMENT"
+                transaction.save(
+                    update_fields=[
+                        "status",
+                        "transaction_type",
+                        "date",
+                        "description",
+                        "credited_to",
+                    ]
+                )
             else:
                 # ❌ Log error if transaction is not found
                 print(
@@ -1762,7 +1774,13 @@ class CardAdmin(admin.ModelAdmin):
         "is_default",
     )
     list_filter = ("is_default",)
-    search_fields = ("user__email", "bank_name", "card_number")  # Add search options
+    search_fields = (
+        "user__email",
+        "bank_name",
+        "card_last4_digits",
+        "card_brand",
+        "authorization_code",
+    )
 
 
 class AutoSaveAdmin(admin.ModelAdmin):
@@ -1859,16 +1877,21 @@ class TransactionAdmin(admin.ModelAdmin):
         # A. Update Transaction Status
         txn.status = "confirmed"
         txn.date = timezone.now()
-        # Keep original description but append (Manual Approval) if you want to track it
-        txn.save()
 
-        # B. Update User Balances
         amount = txn.amount
         is_investment = (
             "invest" in txn.description.lower()
             or txn.transaction_type.lower() == "investment"
         )
 
+        if is_investment:
+            txn.credited_to = "INVESTMENT"
+        else:
+            txn.credited_to = "SAVINGS"
+
+        txn.save(update_fields=["status", "date", "credited_to"])
+
+        # B. Update User Balances
         if is_investment:
             user.investment += int(amount)
             folder_name = "Investment"
@@ -2519,6 +2542,7 @@ class AmbassadorPointConfigAdmin(admin.ModelAdmin):
         "confirmed_points",
         "savings_points_per_10000",
         "savings_points_cap",
+        "reshares_points",
         "updated_at",
     )
 
@@ -2555,6 +2579,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
         "social_media_points_awarded",
         "abroad_points_awarded",
         "events_points_awarded",
+        "reshares_points_awarded",
         "others_points_awarded",
         "total_points_awarded",
         "stipend_amount",
@@ -2589,6 +2614,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
                     "social_media_submitted",
                     "abroad_confirmed_submitted",
                     "events_submitted",
+                    "reshares_submitted",
                     "notes",
                 )
             },
@@ -2601,6 +2627,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
                     "social_media_evidence",
                     "abroad_signups_evidence",
                     "events_evidence",
+                    "reshares_evidence",
                 )
             },
         ),
@@ -2617,6 +2644,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
                     "social_media_approved",
                     "abroad_confirmed_approved",
                     "events_approved",
+                    "reshares_approved",
                 )
             },
         ),
@@ -2632,6 +2660,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
                     "social_media_points_awarded",
                     "abroad_points_awarded",
                     "events_points_awarded",
+                    "reshares_points_awarded",
                     "others_points_awarded",
                     "total_points_awarded",
                 )

@@ -741,73 +741,119 @@ def authenticate_user_by_email_or_phone(username: str, password: str) -> CustomU
 
 
 from django.db.models import Sum, F, DecimalField, Q, Window
-from django.db.models.functions import Coalesce, Rank
+from django.db.models.functions import Coalesce, RowNumber
 from django.db import transaction
 from django.db import connection
+from django.core.cache import cache
 
 
 def _update_top_savers_worker():
-    """
-    Worker function that performs the actual top savers update.
-    Runs in a separate thread.
-    """
-    # Close the existing database connection to avoid threading issues
     connection.close()
 
-    try:
-        now = timezone.now()
-        current_month = now.month
-        current_year = now.year
+    now = timezone.now()
+    current_month = now.month
+    current_year = now.year
+    lock_key = f"top_savers_lock_{current_year}_{current_month}"
 
+    try:
         logger.info(f"Starting top savers update for {current_month}/{current_year}")
 
-        # Aggregate total savings per user
         user_amounts = (
             Transaction.objects.filter(
                 date__month=current_month,
                 date__year=current_year,
-            )
-            .filter(
-                Q(status="confirmed", transaction_type="credit")
-                | Q(description__in=["AutoSave (Confirmed)", "AutoInvest (Confirmed)"])
+                status="confirmed",
+                transaction_type="credit",
+                credited_to__in=["SAVINGS", "INVESTMENT"],
             )
             .values("user_id")
-            .annotate(total=Coalesce(Sum("amount"), 0, output_field=DecimalField()))
+            .annotate(
+                total=Coalesce(
+                    Sum("amount"),
+                    Decimal("0.00"),
+                    output_field=DecimalField(max_digits=14, decimal_places=2),
+                )
+            )
             .filter(total__gt=0)
-            .annotate(rank=Window(expression=Rank(), order_by=F("total").desc()))
+            .annotate(
+                rank=Window(
+                    expression=RowNumber(),
+                    order_by=[F("total").desc(), F("user_id").asc()],
+                )
+            )
             .order_by("rank")
         )
 
         ranked = list(user_amounts)
+
         if not ranked:
             logger.info("No users to rank for this month")
             return
 
-        top_amount = ranked[0]["total"] or 1
         user_ids = [r["user_id"] for r in ranked]
-        users = {u.id: u for u in CustomUser.objects.filter(id__in=user_ids)}
+        users = {
+            u.id: u
+            for u in CustomUser.objects.filter(id__in=user_ids).only(
+                "id", "first_name", "last_name", "email"
+            )
+        }
 
-        # Prepare bulk upsert
+        logger.info("Top savers ranking inputs for %s/%s:", current_month, current_year)
+        for r in ranked:
+            user = users.get(r["user_id"])
+            if not user:
+                logger.warning(
+                    "Top saver ranking skipped unknown user_id=%s total=%s rank=%s",
+                    r["user_id"],
+                    r["total"],
+                    r["rank"],
+                )
+                continue
+
+            logger.info(
+                "TopSaver candidate -> rank=%s user_id=%s name=%s email=%s total_saved=%s",
+                r["rank"],
+                user.id,
+                f"{user.first_name} {user.last_name}".strip(),
+                user.email,
+                r["total"],
+            )
+
         updated_count = 0
         with transaction.atomic():
+            TopSaverHistory.objects.filter(
+                month=current_month,
+                year=current_year,
+            ).delete()
+
+            history_objects = []
+
             for r in ranked:
                 user = users.get(r["user_id"])
                 if not user:
                     continue
-                TopSaverHistory.objects.update_or_create(
-                    month=current_month,
-                    year=current_year,
-                    rank=r["rank"],
-                    defaults={"user": user, "total_savings": r["total"]},
+
+                history_objects.append(
+                    TopSaverHistory(
+                        user=user,
+                        month=current_month,
+                        year=current_year,
+                        rank=r["rank"],
+                        total_savings=r["total"],
+                    )
                 )
                 updated_count += 1
+
+            if history_objects:
+                TopSaverHistory.objects.bulk_create(history_objects)
 
         logger.info(f"Successfully updated {updated_count} top savers")
 
     except Exception as exc:
         logger.error(f"Error updating top savers: {str(exc)}", exc_info=True)
     finally:
-        # Close database connection after thread completes
+        cache.delete(lock_key)
+        logger.info("Cleared top savers lock for %s/%s", current_month, current_year)
         connection.close()
 
 
@@ -1549,6 +1595,8 @@ def approve_quicksave_credit(
     transaction.date = timezone.now().date()
     transaction.time = timezone.now().time()
     transaction.description = description
+    transaction.source = source
+    transaction.credited_to = "SAVINGS"
 
     if paystack_reference:
         transaction.paystack_reference = paystack_reference
@@ -1563,6 +1611,8 @@ def approve_quicksave_credit(
             "date",
             "time",
             "description",
+            "source",
+            "credited_to",
             "paystack_reference",
             "paystack_auth_code",
         ]
@@ -1701,3 +1751,248 @@ def send_ambassador_status_notification(user, became_ambassador=True):
 
     except Exception as e:
         logger.error(f"Ambassador notification error for {user.email}: {e}")
+
+
+from django.utils import timezone
+from .models import AmbassadorAttendanceSubmission
+
+
+def get_user_monthly_attendance_count(user):
+    now = timezone.now()
+    current_month = now.strftime("%Y-%m")
+    return AmbassadorAttendanceSubmission.objects.filter(
+        user=user,
+        month=current_month,
+    ).count()
+
+
+from decimal import Decimal
+import uuid
+from django.db import transaction
+from django.contrib.auth import get_user_model
+from django.utils import timezone
+
+from .models import Transaction
+
+
+def credit_employee_wallet_allowance(email, amount, credited_by="Admin"):
+    User = get_user_model()
+
+    amount = Decimal(str(amount))
+
+    if amount <= 0:
+        return {
+            "success": False,
+            "message": "Amount must be greater than 0.",
+        }
+
+    with transaction.atomic():
+        try:
+            user = User.objects.select_for_update().get(email__iexact=email.strip())
+        except User.DoesNotExist:
+            return {
+                "success": False,
+                "message": f"No user found with email: {email}",
+            }
+
+        # 1. Credit wallet
+        user.wallet = (user.wallet or Decimal("0")) + amount
+        user.save(update_fields=["wallet"])
+
+        # 2. Create transaction record
+        tx = Transaction.objects.create(
+            user=user,
+            transaction_id=str(uuid.uuid4()),
+            transaction_type="credit",
+            status="confirmed",
+            amount=amount,
+            source="WALLET",
+            credited_to="WALLET",
+            description="Staff Allowance Credit",
+            date=timezone.now().date(),
+            time=timezone.now().time(),
+        )
+
+    # 3. Send user push
+    try:
+        send_push_notification(
+            user=user,
+            title="Allowance Credited ✅",
+            message=(
+                f"Hi {user.first_name}, your staff allowance of ₦{amount:,.2f} "
+                f"has been credited to your MyFund Wallet successfully."
+            ),
+            data={
+                "amount": str(amount),
+                "transaction_id": tx.transaction_id,
+                "type": "STAFF_ALLOWANCE",
+                "destination": "WALLET",
+            },
+            notif_type="CREDIT",
+        )
+    except Exception as e:
+        print(f"User push failed: {e}")
+
+    # 4. Send admin push copy
+    try:
+        send_admin_push_notification(
+            title="💰 Staff Allowance Credited",
+            message=(
+                f"{getattr(user, 'full_name', '') or user.email} was credited "
+                f"₦{amount:,.2f} to Wallet (Allowance)."
+            ),
+            data={
+                "amount": str(amount),
+                "user_email": user.email,
+                "transaction_id": tx.transaction_id,
+                "type": "ADMIN_ALERT",
+            },
+            notif_type="ADMIN_ALERT",
+        )
+    except Exception as e:
+        print(f"Admin push failed: {e}")
+
+    # 5. Send email
+    try:
+        send_generic_email(
+            subject="Staff Allowance Credited ✅",
+            message=(
+                f"Hi {user.first_name},<br><br>"
+                f"Your staff allowance of <b>₦{amount:,.2f}</b> has been credited "
+                f"to your MyFund Wallet successfully.<br><br>"
+                f"You can log in to view your updated wallet balance.<br><br>"
+                f"MyFund Team"
+            ),
+            from_email="MyFund <info@myfundmobile.com>",
+            recipient_list=[user.email],
+        )
+    except Exception as e:
+        print(f"Email failed: {e}")
+
+    return {
+        "success": True,
+        "message": f"₦{amount:,.2f} credited successfully to {user.email}",
+        "transaction_id": tx.transaction_id,
+        "wallet_balance": str(user.wallet),
+    }
+
+
+from datetime import timedelta
+from decimal import Decimal
+from django.db import transaction
+from django.db.models import Sum
+from django.utils import timezone
+
+from .models import (
+    CustomUser,
+    AmbassadorMonthlyReport,
+    AmbassadorAttendanceSubmission,
+    Transaction,
+)
+
+
+def autosubmit_missing_ambassador_reports_for_previous_month():
+    """
+    Auto-submit ambassador monthly reports for the PREVIOUS month
+    using PREFILLED METRICS ONLY.
+
+    Manual / evidence-based fields are forced to 0.
+    Safe to run multiple times because it skips users who already have a report.
+    """
+    now = timezone.now()
+
+    current_month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    previous_month_end = current_month_start - timedelta(seconds=1)
+    previous_month_start = previous_month_end.replace(
+        day=1, hour=0, minute=0, second=0, microsecond=0
+    )
+
+    target_month_key = previous_month_start.strftime("%Y-%m")
+    year = previous_month_start.year
+    month = previous_month_start.month
+
+    ambassadors = CustomUser.objects.filter(
+        is_ambassador=True,
+        is_active=True,
+    )
+
+    created_count = 0
+    skipped_count = 0
+    errors = []
+
+    for user in ambassadors:
+        try:
+            if AmbassadorMonthlyReport.objects.filter(
+                user=user,
+                month=target_month_key,
+            ).exists():
+                skipped_count += 1
+                continue
+
+            # 1. Signups for previous month
+            signups_submitted = CustomUser.objects.filter(
+                referral=user,
+                date_joined__gte=previous_month_start,
+                date_joined__lte=previous_month_end,
+            ).count()
+
+            # 2. Confirmed referrals for previous month
+            confirmed_submitted = CustomUser.objects.filter(
+                referral=user,
+                referral_reward_confirmed_at__gte=previous_month_start,
+                referral_reward_confirmed_at__lte=previous_month_end,
+                referral_reward_granted=True,
+            ).count()
+
+            # 3. Attendance count for previous month
+            attendance_submitted = AmbassadorAttendanceSubmission.objects.filter(
+                user=user,
+                month=target_month_key,
+            ).count()
+
+            # 4. Savings + Investment credited this month
+            savings_submitted = Transaction.objects.filter(
+                user=user,
+                date__year=year,
+                date__month=month,
+                status="confirmed",
+                transaction_type="credit",
+                credited_to__in=["SAVINGS", "INVESTMENT"],
+            ).aggregate(total=Sum("amount")).get("total") or Decimal("0.00")
+
+            # 5. Others
+            # Keep zero unless you later connect this to a real backend source
+            others_submitted = 0
+
+            with transaction.atomic():
+                report = AmbassadorMonthlyReport.objects.create(
+                    user=user,
+                    month=target_month_key,
+                    signups_submitted=signups_submitted,
+                    confirmed_submitted=confirmed_submitted,
+                    savings_submitted=savings_submitted,
+                    attendance_submitted=attendance_submitted,
+                    others_submitted=others_submitted,
+                    # manual / optional fields forced to zero on system autosubmit
+                    coursera_submitted=0,
+                    social_media_submitted=0,
+                    abroad_confirmed_submitted=0,
+                    events_submitted=0,
+                    notes="Auto-submitted by system using prefilled metrics only.",
+                )
+
+                report.copy_submitted_to_approved_defaults()
+                report.recalculate_points()
+                report.save()
+
+            created_count += 1
+
+        except Exception as e:
+            errors.append(f"{user.email}: {str(e)}")
+
+    return {
+        "month": target_month_key,
+        "created": created_count,
+        "skipped": skipped_count,
+        "errors": errors,
+    }

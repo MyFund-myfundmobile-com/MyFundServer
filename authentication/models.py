@@ -125,7 +125,6 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     bank_accounts = models.ManyToManyField(
         "BankAccount", related_name="owners", blank=True
     )
-    cards = models.ManyToManyField("Card", related_name="owners", blank=True)
 
     savings = models.DecimalField(max_digits=11, decimal_places=2, default=0)
     investment = models.DecimalField(max_digits=11, decimal_places=2, default=0)
@@ -1216,7 +1215,6 @@ class CardManager(models.Manager):
     """Custom manager to exclude cards without valid authorization codes"""
 
     def get_queryset(self):
-        """Override to exclude cards without authorization_code"""
         return (
             super()
             .get_queryset()
@@ -1227,19 +1225,76 @@ class CardManager(models.Manager):
         )
 
     def all_including_invalid(self):
-        """Get all cards including those without authorization codes"""
         return super().get_queryset()
 
 
 class Card(models.Model):
     user = models.ForeignKey(
-        get_user_model(), on_delete=models.CASCADE, related_name="owned_cards"
+        get_user_model(),
+        on_delete=models.CASCADE,
+        related_name="owned_cards",
     )
-    bank_name = models.CharField(max_length=100)
+
+    authorization_code = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        db_index=True,
+    )
+
+    card_owner_name = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        default="",
+    )
+    signature = models.CharField(max_length=255, null=True, blank=True, db_index=True)
+
+    card_type = models.CharField(max_length=50, null=True, blank=True)
+    card_brand = models.CharField(max_length=50, null=True, blank=True)
+    card_first6_digits = models.CharField(max_length=6, null=True, blank=True)
+    card_last4_digits = models.CharField(max_length=4, null=True, blank=True)
+    expiry_month = models.CharField(max_length=2, null=True, blank=True)
+    expiry_year = models.CharField(max_length=4, null=True, blank=True)
+
+    bank_name = models.CharField(max_length=100, null=True, blank=True)
+    country_code = models.CharField(max_length=10, null=True, blank=True, default="NG")
+
+    reusable = models.BooleanField(default=False)
     is_default = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    objects = CardManager()
+    all_objects = models.Manager()
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["user", "is_active", "is_default"]),
+            models.Index(fields=["user", "is_active", "reusable"]),
+            models.Index(fields=["authorization_code"]),
+            models.Index(fields=["signature"]),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.is_default and self.user_id:
+            Card.all_objects.filter(user=self.user, is_default=True).exclude(
+                id=self.id
+            ).update(is_default=False)
+
+        if not self.is_active:
+            self.is_default = False
+
+        super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.user.email}'s Card ({self.bank_name})"
+        brand = (self.card_brand or self.card_type or "Card").upper()
+        last4 = self.card_last4_digits or "****"
+        bank = self.bank_name or "Unknown Bank"
+        return f"{self.user.email} - {brand} •••• {last4} ({bank})"
 
 
 # Update the models to use settings.AUTH_USER_MODEL
@@ -1990,6 +2045,19 @@ class Transaction(models.Model):
         null=True,
         help_text="Where the transaction funds came from",
     )
+
+    credited_to = models.CharField(
+        max_length=20,
+        choices=[
+            ("SAVINGS", "Savings"),
+            ("INVESTMENT", "Investment"),
+            ("WALLET", "Wallet"),
+        ],
+        blank=True,
+        null=True,
+        db_index=True,
+        help_text="Where the transaction amount was credited to",
+    )
     scheduled_date = models.DateField(
         null=True,
         blank=True,
@@ -2079,13 +2147,10 @@ class Transaction(models.Model):
 
     class Meta:
         indexes = [
-            models.Index(fields=["date", "status", "transaction_type"]),  # ✅ Critical
-            models.Index(
-                fields=["user", "date", "status"]
-            ),  # ✅ For user-specific queries
-            models.Index(
-                fields=["source", "transaction_type", "status", "date"]
-            ),  # ✅ For MAS
+            models.Index(fields=["date", "status", "transaction_type"]),
+            models.Index(fields=["user", "date", "status"]),
+            models.Index(fields=["source", "transaction_type", "status", "date"]),
+            models.Index(fields=["credited_to", "transaction_type", "status", "date"]),
         ]
 
 
@@ -2632,14 +2697,14 @@ class AmbassadorPointConfig(models.Model):
     )
 
     attendance_points = models.DecimalField(
-        max_digits=6, decimal_places=2, default=Decimal("1.00")
+        max_digits=6, decimal_places=2, default=Decimal("0.50")
     )
 
     coursera_points = models.DecimalField(
-        max_digits=6, decimal_places=2, default=Decimal("5.00")
+        max_digits=6, decimal_places=2, default=Decimal("2.00")
     )
     social_media_points = models.DecimalField(
-        max_digits=6, decimal_places=2, default=Decimal("5.00")
+        max_digits=6, decimal_places=2, default=Decimal("2.00")
     )
     abroad_confirmed_points = models.DecimalField(
         max_digits=6, decimal_places=2, default=Decimal("10.00")
@@ -2647,8 +2712,11 @@ class AmbassadorPointConfig(models.Model):
     myfund_event_points = models.DecimalField(
         max_digits=6, decimal_places=2, default=Decimal("5.00")
     )
+    reshares_points = models.DecimalField(
+        max_digits=6, decimal_places=2, default=Decimal("0.05")
+    )
     other_points = models.DecimalField(
-        max_digits=6, decimal_places=2, default=Decimal("10.00")
+        max_digits=6, decimal_places=2, default=Decimal("5.00")
     )
 
     updated_at = models.DateTimeField(auto_now=True)
@@ -2697,6 +2765,7 @@ class AmbassadorMonthlyReport(models.Model):
     social_media_submitted = models.PositiveIntegerField(default=0)
     abroad_confirmed_submitted = models.PositiveIntegerField(default=0)
     events_submitted = models.PositiveIntegerField(default=0)
+    reshares_submitted = models.PositiveIntegerField(default=0)
     notes = models.TextField(blank=True, null=True)
 
     # evidence
@@ -2710,6 +2779,9 @@ class AmbassadorMonthlyReport(models.Model):
         upload_to="ambassador_reports/", blank=True, null=True
     )
     events_evidence = models.ImageField(
+        upload_to="ambassador_reports/", blank=True, null=True
+    )
+    reshares_evidence = models.ImageField(
         upload_to="ambassador_reports/", blank=True, null=True
     )
 
@@ -2726,6 +2798,7 @@ class AmbassadorMonthlyReport(models.Model):
     social_media_approved = models.PositiveIntegerField(default=0)
     abroad_confirmed_approved = models.PositiveIntegerField(default=0)
     events_approved = models.PositiveIntegerField(default=0)
+    reshares_approved = models.PositiveIntegerField(default=0)
 
     # points breakdown
     signup_points_awarded = models.DecimalField(
@@ -2750,6 +2823,9 @@ class AmbassadorMonthlyReport(models.Model):
         max_digits=8, decimal_places=2, default=Decimal("0.00")
     )
     events_points_awarded = models.DecimalField(
+        max_digits=8, decimal_places=2, default=Decimal("0.00")
+    )
+    reshares_points_awarded = models.DecimalField(
         max_digits=8, decimal_places=2, default=Decimal("0.00")
     )
     others_points_awarded = models.DecimalField(
@@ -2826,6 +2902,9 @@ class AmbassadorMonthlyReport(models.Model):
         events_points = Decimal(str(self.events_approved or 0)) * Decimal(
             str(config.myfund_event_points or 0)
         )
+        reshares_points = Decimal(str(self.reshares_approved or 0)) * Decimal(
+            str(config.reshares_points or 0)
+        )
         others_points = Decimal(str(self.others_approved or 0)) * Decimal(
             str(config.other_points or 0)
         )
@@ -2838,6 +2917,7 @@ class AmbassadorMonthlyReport(models.Model):
         self.social_media_points_awarded = social_media_points
         self.abroad_points_awarded = abroad_points
         self.events_points_awarded = events_points
+        self.reshares_points_awarded = reshares_points
         self.others_points_awarded = others_points
 
         self.total_points_awarded = (
@@ -2849,6 +2929,7 @@ class AmbassadorMonthlyReport(models.Model):
             + social_media_points
             + abroad_points
             + events_points
+            + reshares_points
             + others_points
         )
 
@@ -2867,3 +2948,28 @@ class AmbassadorMonthlyReport(models.Model):
         self.social_media_approved = self.social_media_submitted
         self.abroad_confirmed_approved = self.abroad_confirmed_submitted
         self.events_approved = self.events_submitted
+        self.reshares_approved = self.reshares_submitted
+
+
+class AmbassadorAttendanceSubmission(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="ambassador_attendance_submissions",
+    )
+    email = models.EmailField()
+    attendance_date = models.DateField(null=True, blank=True)
+    takeaway = models.TextField()
+    recommendation = models.TextField()
+
+    month = models.CharField(max_length=7, db_index=True)  # YYYY-MM
+    week_key = models.CharField(max_length=20, db_index=True)  # e.g. 2026-W13
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ["user", "week_key"]
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.user.email} - {self.week_key} - {self.attendance_date}"
