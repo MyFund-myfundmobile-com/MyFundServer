@@ -387,25 +387,26 @@ CELERY_TASK_ROUTES = {
 
 # ===== EMAIL CONFIGURATION =====
 EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
-DEFAULT_FROM_EMAIL = "MyFund <message@myfundmobile.com>"
+# DEFAULT_FROM_EMAIL = "MyFund <message@myfundmobile.com>"
+DEFAULT_FROM_EMAIL = "MyFund <auth@myfundmobile.com>"
 
 # SSL (Implicit SSL)
-EMAIL_HOST = "myfundmobile.com"
-EMAIL_PORT = 465
-EMAIL_USE_SSL = True
-EMAIL_USE_TLS = False
-EMAIL_TIMEOUT = 20
-
-# # TLS (Explicit SSL)
 # EMAIL_HOST = "myfundmobile.com"
-# EMAIL_PORT = 587
-# EMAIL_USE_SSL = False
-# EMAIL_USE_TLS = True
+# EMAIL_PORT = 465
+# EMAIL_USE_SSL = True
+# EMAIL_USE_TLS = False
 # EMAIL_TIMEOUT = 20
 
+# # TLS (Explicit SSL)
+EMAIL_HOST = "mail.privateemail.com"
+EMAIL_PORT = 587
+EMAIL_USE_SSL = False
+EMAIL_USE_TLS = True
+EMAIL_TIMEOUT = 20
 
-EMAIL_HOST_USER = "info@myfundmobile.com"
-EMAIL_HOST_PASSWORD = "Reproduction1..."
+
+EMAIL_HOST_USER = "auth@myfundmobile.com"
+EMAIL_HOST_PASSWORD = "AdminSecure123..."
 
 
 AUTHENTICATION_BACKENDS = [
