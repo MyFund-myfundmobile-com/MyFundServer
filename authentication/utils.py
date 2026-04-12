@@ -2,7 +2,7 @@ import requests
 from .models import PushNotifications, TopSaverHistory, Transaction
 from .models import PushNotifications
 from django.utils import timezone
-from django.core.mail import send_mail
+from django.core.mail import EmailMultiAlternatives
 from django.template.loader import render_to_string
 from django.utils.html import strip_tags
 import threading
@@ -399,21 +399,22 @@ def send_generic_email(
     logger.info(f"📧 Personalization complete. Payloads: {len(payloads)}")
 
     # ---------- INLINE SEND (≤30 recipients) ----------
-    if total_valid <= use_celery_threshold:
+    if use_celery_threshold == 0 or total_valid <= use_celery_threshold:
         logger.info(f"📧 Using INLINE send for {total_valid} recipients")
         sent_count = 0
         failed_emails = []
 
         for p in payloads:
             try:
-                send_mail(
+                email = EmailMultiAlternatives(
                     subject=p["subject"],
-                    message=p["plain_message"],
+                    body=p["plain_message"],
                     from_email=from_email,
-                    recipient_list=[p["to"]],
-                    html_message=p["html_message"],
-                    fail_silently=False,
+                    to=[p["to"]],
                 )
+                email.attach_alternative(p["html_message"], "text/html")
+                email.send(fail_silently=False)
+
                 sent_count += 1
                 logger.info(f"✅ Email sent to {p['to']}")
             except Exception as e:
