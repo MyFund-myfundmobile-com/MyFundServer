@@ -93,7 +93,7 @@ ALLOWED_HOSTS = [
     "0.0.0.0",
 ]
 
-SECURE_SSL_REDIRECT = False  # Disable forced HTTPS redirect
+SECURE_SSL_REDIRECT = False  # Disable forced HTTPS redirect@
 SESSION_COOKIE_SECURE = False  # Prevent forcing HTTPS for cookies
 CSRF_COOKIE_SECURE = False  # Prevent CSRF issues with HTTPS
 

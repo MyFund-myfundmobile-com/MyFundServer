@@ -7,7 +7,7 @@ urlpatterns = [
     # ========================================================================
     # PRIORITY 1: Critical Dashboard Data
     # ========================================================================
-    path('dashboard/summary', 
+    path('dashboard/summary/', 
          admin_views.dashboard_summary, 
          name='admin_dashboard_summary'),
     

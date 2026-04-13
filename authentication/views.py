@@ -635,17 +635,17 @@ class CustomObtainAuthToken(ObtainAuthToken):
         try:
             username = request.data.get("username", "").strip().lower()
             password = request.data.get("password", "")
-
+            
             # Check if this is an admin login request
             is_admin_endpoint = request.path.startswith("/api/admin/login/")
+            is_ambassador_endpoint = request.path.startswith("/api/ambassador/login/")
 
-            # First, check if user exists by email or phone
+            # 🔍 Find user
             try:
                 user = CustomUser.objects.get(
                     Q(email__iexact=username) | Q(phone_number__iexact=username)
                 )
             except CustomUser.DoesNotExist:
-                # User not found - email/phone doesn't exist
                 return Response(
                     {
                         "status": "email_not_found",
@@ -655,98 +655,105 @@ class CustomObtainAuthToken(ObtainAuthToken):
                     status=status.HTTP_404_NOT_FOUND,
                 )
 
-            # User exists, now check password
+            # ❌ Wrong password
             if not user.check_password(password):
-                # Correct email but wrong password
                 return Response(
                     {
                         "status": "wrong_password",
-                        "message": "The password for this email/phone number is incorrect. Please check and try again",
+                        "message": "Incorrect password. Please try again.",
                         "suggestion": "forgot_password",
                     },
                     status=status.HTTP_401_UNAUTHORIZED,
                 )
 
-            # 🔒 Admin endpoint: verify user has admin privileges
+            # 🔒 Admin check
             if is_admin_endpoint:
                 if not (user.is_staff or user.is_superuser):
                     return Response(
                         {
                             "status": "forbidden",
-                            "message": "You do not have permission to access the admin portal.",
+                            "message": "You do not have admin access.",
                         },
                         status=status.HTTP_403_FORBIDDEN,
                     )
 
-            # 🚫 Block banned users
+            # 🔒 Ambassador check
+            if is_ambassador_endpoint:
+                if not getattr(user, "is_ambassador", False):
+                    return Response(
+                        {
+                            "status": "forbidden",
+                            "message": "You are not registered as an ambassador.",
+                        },
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+
+            # 🚫 Banned user
             if getattr(user, "is_banned", False):
                 return Response(
                     {
                         "status": "banned",
-                        "message": (
-                            "Your account has been disabled due to some suspicious activities detected.\n\n"
-                            "Contact support at care@myfundmobile.com for review."
-                        ),
+                        "message": "Your account has been disabled. Contact support.",
                     },
                     status=status.HTTP_403_FORBIDDEN,
                 )
 
-            # If user is inactive: send OTP (skip for admin endpoint)
+            # ⚠️ Inactive user
             if not user.is_active:
-                # For admin endpoint, don't allow inactive accounts at all
                 if is_admin_endpoint:
                     return Response(
                         {
                             "status": "inactive",
-                            "message": "Your admin account is inactive. Please contact support.",
+                            "message": "Admin account inactive.",
                         },
                         status=status.HTTP_403_FORBIDDEN,
                     )
-
+                
                 # For regular users, send OTP
                 from authentication.views import send_otp_for_user
 
-                try:
-                    send_otp_for_user(user)
-                except Exception as e:
-                    logger.exception(
-                        "Failed to send OTP during login for %s: %s", user.email, str(e)
-                    )
-                    return Response(
-                        {"detail": "Failed to send OTP. Try again later."},
-                        status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    )
+                send_otp_for_user(user)
 
                 return Response(
                     {
                         "status": "inactive",
-                        "message": "Account not verified. A new OTP has been sent to your email.",
+                        "message": "Account not verified. OTP sent.",
                         "next_step": "enter_otp",
                         "email": user.email,
                     },
                     status=status.HTTP_403_FORBIDDEN,
                 )
 
-            # ✅ Active user: generate tokens
+            # ✅ SUCCESS
             tokens = self.get_tokens_for_user(user)
+
             return Response(tokens)
 
         except Exception as e:
-            logger.error(f"Login error for {request.data.get('username')}: {str(e)}")
+            logger.error(f"Login error: {str(e)}")
             return Response(
-                {"error": "An unexpected error occurred. Please try again."},
+                {"error": "Something went wrong."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
     @staticmethod
     def get_tokens_for_user(user):
         refresh = RefreshToken.for_user(user)
+
+        # 👇 DETERMINE ROLE
+        if user.is_superuser or user.is_staff:
+            role = "admin"
+        elif getattr(user, "is_ambassador", False):
+            role = "ambassador"
+        else:
+            role = "user"
+
         return {
             "refresh": str(refresh),
             "access": str(refresh.access_token),
             "user_id": user.id,
+            "role": role,  # 🔥 IMPORTANT
         }
-
 
 from rest_framework.permissions import AllowAny
 
