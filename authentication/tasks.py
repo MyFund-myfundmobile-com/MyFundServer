@@ -4,9 +4,10 @@ from django.utils import timezone
 from .models import TargetSavings
 import logging
 from django.db import models
-from .utils import send_generic_email, send_push_notification
+from .utils import send_generic_email, send_push_notification, create_transaction
 from datetime import timedelta
 from django.conf import settings
+from .utils import create_transaction
 
 logger = logging.getLogger(__name__)
 
@@ -43,27 +44,20 @@ def refund_contributions_if_goal_not_reached():
             if target.current_amount <= 0:
                 continue
 
-            # Collect user update
             user = target.user
-            user.wallet = models.F("wallet") + Decimal(target.current_amount)
-            users_to_update.append(user)
 
-            # Collect target update
+            create_transaction(
+                user=user,
+                amount=target.current_amount,
+                transaction_type="credit",
+                status="confirmed",
+                source="WALLET",
+                credited_to="WALLET",
+                description=f"Refund for incomplete target '{target.name}'",
+            )
+
             target.is_cancelled = True
             targets_to_update.append(target)
-
-            # Collect transaction to create
-            transactions_to_create.append(
-                Transaction(
-                    user=user,
-                    transaction_type="credit",
-                    status="confirmed",
-                    amount=target.current_amount,
-                    source="WALLET",
-                    credited_to="WALLET",
-                    description=f"Refund for incomplete target '{target.name}'",
-                )
-            )
 
             # Collect notification data
             notifications_to_send.append(
@@ -81,19 +75,11 @@ def refund_contributions_if_goal_not_reached():
             logger.error(f"Error processing target {target.id}: {e}")
 
     # Bulk operations
-    if users_to_update:
-        CustomUser.objects.bulk_update(users_to_update, ["wallet"], batch_size=500)
-        logger.info(f"✅ Updated wallets for {len(users_to_update)} users")
-
     if targets_to_update:
         TargetSavings.objects.bulk_update(
             targets_to_update, ["is_cancelled"], batch_size=500
         )
         logger.info(f"✅ Marked {len(targets_to_update)} targets as cancelled")
-
-    if transactions_to_create:
-        Transaction.objects.bulk_create(transactions_to_create, batch_size=500)
-        logger.info(f"✅ Created {len(transactions_to_create)} transaction records")
 
     # Send notifications asynchronously
     for notification in notifications_to_send:
@@ -482,20 +468,14 @@ def release_quarterly_roi(test_mode=True):
 
             with db_transaction.atomic():
                 # 1. Credit wallet
-                user.wallet = models.F("wallet") + total_payout
-                user.save(update_fields=["wallet"])
-                user.refresh_from_db(fields=["wallet"])
-
-                # 2. Transaction record
-                Transaction.objects.create(
+                create_transaction(
                     user=user,
+                    amount=total_payout,
                     transaction_type="credit",
                     source="WALLET",
                     credited_to="WALLET",
                     status="confirmed",
-                    amount=total_payout,
                     service_charge=Decimal("0.00"),
-                    total_amount=total_payout,
                     description=f"Dividends: {QUARTER_LABEL} ROI",
                 )
 
@@ -1249,19 +1229,13 @@ def apply_withholding_tax_q1_2026(test_mode=True):
 
             with db_transaction.atomic():
                 # 1. Debit wallet
-                user.wallet = models.F("wallet") - wht_amount
-                user.save(update_fields=["wallet"])
-                user.refresh_from_db(fields=["wallet"])
-
-                # 2. Transaction record
-                Transaction.objects.create(
+                create_transaction(
                     user=user,
+                    amount=wht_amount,
                     transaction_type="debit",
                     source="WALLET",
                     status="confirmed",
-                    amount=wht_amount,
                     service_charge=Decimal("0.00"),
-                    total_amount=wht_amount,
                     description=f"WHT: {QUARTER_LABEL} Dividends",
                 )
 

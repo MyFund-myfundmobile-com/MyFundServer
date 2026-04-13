@@ -1572,6 +1572,11 @@ from .models import Transaction
 from .utils import send_generic_email, send_push_notification
 
 
+from decimal import Decimal
+from django.db import transaction as db_transaction
+from django.utils import timezone
+
+
 def approve_quicksave_credit(
     *,
     user,
@@ -1579,82 +1584,184 @@ def approve_quicksave_credit(
     transaction_id,
     description="QuickSave (Transfer)",
     source="BANK_TRANSFER",
-    paystack_reference=None,
-    paystack_auth_code=None,
 ):
-    transaction = Transaction.objects.filter(
-        user=user,
-        transaction_id=transaction_id,
-        status="pending",
-    ).first()
+    amount = Decimal(str(amount))
 
-    if not transaction:
-        return False, f"Pending transaction {transaction_id} not found."
+    with db_transaction.atomic():
+        locked_user = type(user).objects.select_for_update().get(pk=user.pk)
 
-    transaction.status = "confirmed"
-    transaction.transaction_type = "credit"
-    transaction.date = timezone.now().date()
-    transaction.time = timezone.now().time()
-    transaction.description = description
-    transaction.source = source
-    transaction.credited_to = "SAVINGS"
+        tx = (
+            Transaction.objects.select_for_update()
+            .filter(
+                user=locked_user,
+                transaction_id=transaction_id,
+                status="pending",
+            )
+            .first()
+        )
 
-    if paystack_reference:
-        transaction.paystack_reference = paystack_reference
+        if not tx:
+            return False, f"Pending transaction {transaction_id} not found."
 
-    if paystack_auth_code:
-        transaction.paystack_auth_code = paystack_auth_code
+        previous_balance = locked_user.savings or Decimal("0.00")
+        new_balance = previous_balance + amount
 
-    transaction.save(
-        update_fields=[
-            "status",
-            "transaction_type",
-            "date",
-            "time",
-            "description",
-            "source",
-            "credited_to",
-            "paystack_reference",
-            "paystack_auth_code",
-        ]
-    )
+        locked_user.savings = new_balance
+        locked_user.save(update_fields=["savings"])
 
-    user.savings = (user.savings or Decimal("0")) + Decimal(str(amount))
+        tx.status = "confirmed"
+        tx.description = description
+        tx.source = source
+        tx.credited_to = "SAVINGS"
+        tx.amount = amount
+        tx.service_charge = Decimal("0.00")
+        tx.total_amount = amount
+        tx.balance_before = previous_balance
+        tx.balance_after = new_balance
+        tx.save(
+            update_fields=[
+                "status",
+                "description",
+                "source",
+                "credited_to",
+                "amount",
+                "service_charge",
+                "total_amount",
+                "balance_before",
+                "balance_after",
+            ]
+        )
 
-    if user.referral:
-        user.confirm_referral_rewards(is_referrer=False)
+    if locked_user.referral:
+        locked_user.confirm_referral_rewards(is_referrer=False)
 
-    user.update_total_savings_and_investment_this_month()
-    user.save()
+    locked_user.update_total_savings_and_investment_this_month()
 
     send_generic_email(
         subject="QuickSave Updated! ✅",
         message=(
-            f"Hi {user.first_name},<br><br>"
-            f"Your QuickSave deposit of ₦{Decimal(str(amount)):,.2f} "
+            f"Hi {locked_user.first_name},<br><br>"
+            f"Your QuickSave deposit of ₦{amount:,.2f} "
             f"has been confirmed and added to your Savings account."
         ),
         from_email="MyFund <info@myfundmobile.com>",
-        recipient_list=[user.email],
+        recipient_list=[locked_user.email],
     )
 
     send_push_notification(
-        user=user,
+        user=locked_user,
         title="QuickSave Approved ✅",
         message=(
-            f"Hi {user.first_name}, your transfer of "
-            f"₦{Decimal(str(amount)):,.2f} has been added to your Savings account."
+            f"Hi {locked_user.first_name}, your transfer of "
+            f"₦{amount:,.2f} has been added to your Savings account."
         ),
         data={
             "amount": str(amount),
-            "transaction_id": transaction_id,
+            "transaction_id": tx.transaction_id,
             "type": "QuickSave",
             "source": source,
+            "status": "confirmed",
         },
         notif_type="CREDIT",
     )
 
     return True, "QuickSave approved successfully."
+
+
+from decimal import Decimal
+from django.db import transaction as db_transaction
+from django.utils import timezone
+
+
+def approve_quickinvest_credit(
+    *,
+    user,
+    amount,
+    transaction_id,
+    description="QuickInvest (Transfer)",
+    source="BANK_TRANSFER",
+):
+    amount = Decimal(str(amount))
+
+    with db_transaction.atomic():
+        locked_user = type(user).objects.select_for_update().get(pk=user.pk)
+
+        tx = (
+            Transaction.objects.select_for_update()
+            .filter(
+                user=locked_user,
+                transaction_id=transaction_id,
+                status="pending",
+            )
+            .first()
+        )
+
+        if not tx:
+            return False, f"Pending transaction {transaction_id} not found."
+
+        previous_balance = locked_user.investment or Decimal("0.00")
+        new_balance = previous_balance + amount
+
+        locked_user.investment = new_balance
+        locked_user.save(update_fields=["investment"])
+
+        tx.status = "confirmed"
+        tx.description = description
+        tx.source = source
+        tx.credited_to = "INVESTMENT"
+        tx.amount = amount
+        tx.service_charge = Decimal("0.00")
+        tx.total_amount = amount
+        tx.balance_before = previous_balance
+        tx.balance_after = new_balance
+        tx.save(
+            update_fields=[
+                "status",
+                "description",
+                "source",
+                "credited_to",
+                "amount",
+                "service_charge",
+                "total_amount",
+                "balance_before",
+                "balance_after",
+            ]
+        )
+
+    if locked_user.referral:
+        locked_user.confirm_referral_rewards(is_referrer=False)
+
+    locked_user.update_total_savings_and_investment_this_month()
+
+    send_generic_email(
+        subject="QuickInvest Updated! ✅",
+        message=(
+            f"Hi {locked_user.first_name},<br><br>"
+            f"Your QuickInvest deposit of ₦{amount:,.2f} "
+            f"has been confirmed and added to your Investment account."
+        ),
+        from_email="MyFund <info@myfundmobile.com>",
+        recipient_list=[locked_user.email],
+    )
+
+    send_push_notification(
+        user=locked_user,
+        title="QuickInvest Approved ✅",
+        message=(
+            f"Hi {locked_user.first_name}, your transfer of "
+            f"₦{amount:,.2f} has been added to your Investment account."
+        ),
+        data={
+            "amount": str(amount),
+            "transaction_id": tx.transaction_id,
+            "type": "QuickInvest",
+            "source": source,
+            "status": "confirmed",
+        },
+        notif_type="CREDIT",
+    )
+
+    return True, "QuickInvest approved successfully."
 
 
 import requests
@@ -1997,3 +2104,78 @@ def autosubmit_missing_ambassador_reports_for_previous_month():
         "skipped": skipped_count,
         "errors": errors,
     }
+
+
+from decimal import Decimal
+from django.db import transaction as db_transaction
+from .models import Transaction
+
+
+def create_transaction(
+    *,
+    user,
+    amount,
+    transaction_type,
+    status="confirmed",
+    source=None,
+    credited_to=None,
+    description="",
+    service_charge=0,
+    reference=None,
+):
+    from decimal import Decimal
+    from django.db import transaction as db_transaction
+
+    amount = Decimal(str(amount))
+    service_charge = Decimal(str(service_charge or 0))
+
+    # 🔍 Determine which balance we are touching
+    if credited_to == "SAVINGS" or source == "SAVINGS":
+        balance_field = "savings"
+    elif credited_to == "INVESTMENT" or source == "INVESTMENT":
+        balance_field = "investment"
+    elif credited_to == "WALLET" or source == "WALLET":
+        balance_field = "wallet"
+    else:
+        raise ValueError("Cannot determine balance source")
+
+    previous_balance = getattr(user, balance_field)
+
+    # 💰 Compute new balance
+    if transaction_type == "credit":
+        new_balance = previous_balance + amount
+    else:
+        total_deduction = amount + service_charge
+        new_balance = previous_balance - total_deduction
+
+    # ✅ NOW log correctly
+    print("\n=== CREATE TRANSACTION DEBUG ===")
+    print("User:", user.id)
+    print("Type:", transaction_type)
+    print("Account:", balance_field)
+    print("Amount:", amount)
+    print("Before:", previous_balance)
+    print("After:", new_balance)
+    print("================================\n")
+
+    with db_transaction.atomic():
+        setattr(user, balance_field, new_balance)
+        user.save(update_fields=[balance_field])
+
+        tx = Transaction.objects.create(
+            user=user,
+            amount=amount,
+            transaction_type=transaction_type,
+            status=status,
+            source=source,
+            credited_to=credited_to,
+            description=description,
+            service_charge=service_charge,
+            balance_before=previous_balance,
+            balance_after=new_balance,
+            transaction_id=reference if reference else None,
+        )
+
+        print("✅ TX SAVED:", tx.balance_before, tx.balance_after)
+
+    return tx

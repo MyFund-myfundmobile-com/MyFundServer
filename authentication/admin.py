@@ -53,7 +53,9 @@ from .utils import (
     recreate_user_dva,
     requery_dedicated_account,
     approve_quicksave_credit,
+    approve_quickinvest_credit,
     send_ambassador_status_notification,
+    create_transaction,
 )
 from decimal import Decimal
 
@@ -77,6 +79,8 @@ class TransactionInline(admin.TabularInline):
         "amount",
         "service_charge",
         "total_amount",
+        "balance_before",
+        "balance_after",
         "date",
         "time",
         "description",
@@ -86,6 +90,8 @@ class TransactionInline(admin.TabularInline):
         "transaction_id",
         "date",
         "time",
+        "balance_before",
+        "balance_after",
     )
 
 
@@ -1480,80 +1486,30 @@ class InvestTransferRequestAdmin(admin.ModelAdmin):
             user = transfer_request.user
             transaction_id = transfer_request.transaction_id
 
-            # ✅ Check for existing pending transaction using transaction_id
-            transaction = Transaction.objects.filter(
-                user=user, transaction_id=transaction_id, status="pending"
-            ).first()
+            ok, msg = approve_quickinvest_credit(
+                user=user,
+                amount=transfer_request.amount,
+                transaction_id=transaction_id,
+                description="QuickInvest (Transfer)",
+                source="BANK_TRANSFER",
+            )
 
-            if transaction:
-                # ✅ Update transaction status
-                transaction.status = "confirmed"
-                transaction.transaction_type = "credit"
-                transaction.date = timezone.now()
-                transaction.description = "QuickInvest (Transfer)"
-                transaction.credited_to = "INVESTMENT"
-                transaction.save(
-                    update_fields=[
-                        "status",
-                        "transaction_type",
-                        "date",
-                        "description",
-                        "credited_to",
-                    ]
-                )
-            else:
-                # ❌ Log error if transaction is not found
-                print(
-                    f"❌ ERROR: Pending transaction {transaction_id} not found for {user.email}"
-                )
+            if not ok:
                 self.message_user(
                     request,
-                    f"Pending transaction {transaction_id} not found for {user.email}!",
+                    f"{msg} for {user.email}",
                     level="error",
                 )
-                continue  # Skip processing this request
+                continue
 
-            # ✅ Approve the transfer request
             transfer_request.is_approved = True
-            transfer_request.save()
-
-            # ✅ Update user's investment
-            user.investment += int(transfer_request.amount)
-            user.save()
-
-            # Call the confirm_referral_rewards method here
-            is_referrer = True
-            user.confirm_referral_rewards(is_referrer=is_referrer)
-
-            # After processing an investment transfer transaction
-            user.update_total_savings_and_investment_this_month()
-
-            # ✅ Send Approval Email
-            subject = "QuickInvest Updated! ✔"
-            message = f"Hi {user.first_name},\n\nYour investment transfer of ₦{transfer_request.amount} has been processed successfully and added to your investments!\n\nKeep growing your funds! \n\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
-            send_mail(subject, message, "MyFund <info@myfundmobile.com>", [user.email])
-
-            send_push_notification(
-                user=user,
-                title="QuickInvest Approved ✅",
-                message="Hi {}, your transfer of ₦{:,} has been added to your Investment account. Check to confirm.".format(
-                    user.first_name, int(transfer_request.amount)
-                ),
-                data={
-                    "amount": str(transfer_request.amount),
-                    "transaction_id": transaction_id,
-                    "type": "QuickInvest",
-                },
-                notif_type="CREDIT",
-            )
+            transfer_request.save(update_fields=["is_approved"])
 
         self.message_user(
             request,
             "Selected investment transfers approved successfully!",
             level="success",
         )
-
-    approve_invest_transfer.short_description = "Approve selected investment transfers"
 
 
 from django.contrib import admin
@@ -1681,11 +1637,30 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
                     transaction = Transaction.objects.get(
                         user=user, transaction_id=transaction_id
                     )
+
+                    # Capture balance snapshot at approval time
+                    source = (
+                        withdrawal.source_account.lower()
+                    )  # "savings", "investment", "wallet"
+                    if source == "savings":
+                        balance_before = (
+                            user.savings + withdrawal.total_amount
+                        )  # already debited when scheduled
+                        balance_after = user.savings
+                    elif source == "investment":
+                        balance_before = user.investment + withdrawal.total_amount
+                        balance_after = user.investment
+                    else:
+                        balance_before = user.wallet + withdrawal.total_amount
+                        balance_after = user.wallet
+
                     transaction.status = "confirmed"
                     transaction.description = (
                         f"Withdrawal: Sent ₦{withdrawal.amount:,.2f} "
                         f"(Fee: ₦{withdrawal.charge_amount:,.2f})"
                     )
+                    transaction.balance_before = balance_before
+                    transaction.balance_after = balance_after
                     transaction.save()
 
                     approved_count += 1
@@ -1889,20 +1864,29 @@ class TransactionAdmin(admin.ModelAdmin):
         else:
             txn.credited_to = "SAVINGS"
 
-        txn.save(update_fields=["status", "date", "credited_to"])
-
         # B. Update User Balances
         if is_investment:
-            user.investment += int(amount)
+            create_transaction(
+                user=user,
+                amount=amount,
+                transaction_type="credit",
+                source="CARD",
+                credited_to="INVESTMENT",
+                description=txn.description or "QuickInvest",
+                reference=txn.transaction_id,
+            )
             folder_name = "Investment"
-            notif_title = "QuickInvest Approved ✅"
         else:
-            user.savings += int(amount)
+            create_transaction(
+                user=user,
+                amount=amount,
+                transaction_type="credit",
+                source="CARD",
+                credited_to="SAVINGS",
+                description=txn.description or "QuickSave",
+                reference=txn.transaction_id,
+            )
             folder_name = "Savings"
-            notif_title = "QuickSave Approved ✅"
-
-        user.update_total_savings_and_investment_this_month()
-        user.save()
 
         # C. Trigger Referral Rewards (If applicable)
         # This checks if the user has a referrer and grants bonuses for the first deposit
