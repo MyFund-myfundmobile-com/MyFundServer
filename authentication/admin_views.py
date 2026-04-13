@@ -179,273 +179,98 @@ def get_monthly_advanced_metrics(months=12):
     return results
 
 
-@api_view(['GET'])
+@api_view(["GET"])
 @permission_classes([IsAdminUser])
 def dashboard_summary(request):
-    """
-    Optimized dashboard endpoint - Target: 2-5 seconds
-    """
+    cache_key = "dashboard_summary_v2"  # ✅ real caching
+    cached = cache.get(cache_key)
+    if cached:
+        return Response(cached)
+
+    now = timezone.now()
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    # ================= USER AGGREGATES =================
+    user_stats = CustomUser.objects.filter(is_deleted=False).aggregate(
+        total_users=Count("id"),
+        total_savings=Coalesce(Sum("savings"), Value(0), output_field=DecimalField()),
+        total_investments=Coalesce(Sum("investment"), Value(0), output_field=DecimalField()),
+        new_users_this_month=Count("id", filter=Q(date_joined__gte=month_start)),
+        referral_signups=Count("id", filter=Q(referral_id__isnull=False)),
+        influencer_signups=Count("id", filter=Q(is_ambassador=True)),
+    )
+
+    # ================= TRANSACTION STATS =================
+    tx_stats = Transaction.objects.filter(date__gte=month_start).aggregate(
+        total_tx=Count("id"),
+        failed_tx=Count("id", filter=Q(status="failed")),
+        mas_users=Count(
+            "user",
+            distinct=True,
+            filter=Q(
+                source__in=["SAVINGS", "INVESTMENT"],
+                transaction_type="credit",
+                status="confirmed",
+            ),
+        ),
+        mas_amount=Coalesce(
+            Sum(
+                "amount",
+                filter=Q(
+                    source__in=["SAVINGS", "INVESTMENT"],
+                    transaction_type="credit",
+                    status="confirmed",
+                ),
+            ),
+            Value(0),
+            output_field=DecimalField(),
+        ),
+    )
+
+    total_users = user_stats["total_users"]
+
+    failure_rate = (
+        tx_stats["failed_tx"] / tx_stats["total_tx"] * 100
+        if tx_stats["total_tx"]
+        else 0
+    )
+
+    referrals_pct = (
+        user_stats["referral_signups"] / total_users * 100 if total_users else 0
+    )
+    influencers_pct = (
+        user_stats["influencer_signups"] / total_users * 100 if total_users else 0
+    )
+
     advanced_metrics_monthly = get_monthly_advanced_metrics(12)
 
-    cache_key = f"dashboard:summary:{timezone.now().strftime('%Y-%m-%d:%H:%M')}"
-    cached_data = cache.get(cache_key)
-    if cached_data:
-        return Response(cached_data)
-
-    try:
-        admin_user = request.user
-        now = timezone.now()
-        
-        # Time boundaries
-        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        yesterday_start = today_start - timedelta(days=1)
-        week_start = today_start - timedelta(days=7)
-        last_week_start = week_start - timedelta(days=7)
-        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        last_month_start = month_start - relativedelta(months=1)
-        thirty_days_ago = now - timedelta(days=30)
-        sixty_days_ago = now - timedelta(days=60)
-
-        # ============================================================
-        # SINGLE OPTIMIZED USER QUERY (FIXED)
-        # ============================================================
-        user_aggregation = CustomUser.objects.filter(
-            is_deleted=False
-        ).aggregate(
-            # Total balances
-            total_savings=Coalesce(Sum('savings'), Value(0), output_field=DecimalField()),
-            total_investments=Coalesce(Sum('investment'), Value(0), output_field=DecimalField()),
-            
-            # User counts
-            total_users=Count('id'),
-            new_users_today=Count('id', filter=Q(date_joined__gte=today_start)),
-            new_users_yesterday=Count('id', filter=Q(
-                date_joined__gte=yesterday_start, 
-                date_joined__lt=today_start
-            )),
-            new_users_this_week=Count('id', filter=Q(date_joined__gte=week_start)),
-            new_users_last_week=Count('id', filter=Q(
-                date_joined__gte=last_week_start, 
-                date_joined__lt=week_start
-            )),
-            new_users_this_month=Count('id', filter=Q(date_joined__gte=month_start)),
-            new_users_last_month=Count('id', filter=Q(
-                date_joined__gte=last_month_start, 
-                date_joined__lt=month_start
-            )),
-            
-            # Growth multipliers
-            referral_signups=Count('id', filter=Q(referral_id__isnull=False)),
-            influencer_signups=Count('id', filter=Q(is_ambassador=True)),
-            
-            # Investor vs Saver counts - FIXED
-            investor_heavy_count=Count('id', filter=Q(
-                savings__gt=0,
-                investment__gt=F('savings')
-            )),
-            savings_heavy_count=Count('id', filter=Q(
-                savings__gt=0,
-                investment__lte=F('savings')
-            )),
-            
-            # FUM (Funds Under Management) - FIXED with output_field
-            fum=Coalesce(
-                Sum(
-                    ExpressionWrapper(
-                        F('savings') + F('investment'),
-                        output_field=DecimalField(max_digits=15, decimal_places=2)
-                    )
-                ),
-                Value(0),
-                output_field=DecimalField(max_digits=15, decimal_places=2)
-            ),
-        )
-
-        # ============================================================
-        # SINGLE OPTIMIZED TRANSACTION QUERY
-        # ============================================================
-        transaction_stats = Transaction.objects.filter(
-            date__gte=thirty_days_ago
-        ).aggregate(
-            # Transaction health
-            total_transactions=Count('id'),
-            failed_transactions=Count('id', filter=Q(status='failed')),
-            
-            # Monthly Active Savers (MAS)
-            mas_users=Count(
-                'user',
-                distinct=True,
-                filter=Q(
-                    date__gte=month_start,
-                    source__in=['SAVINGS', 'INVESTMENT'],
-                    transaction_type='credit',
-                    status='confirmed'
-                )
-            ),
-            mas_amount=Coalesce(
-                Sum(
-                    'amount',
-                    filter=Q(
-                        date__gte=month_start,
-                        source__in=['SAVINGS', 'INVESTMENT'],
-                        transaction_type='credit',
-                        status='confirmed'
-                    )
-                ),
-                Value(0),
-                output_field=DecimalField(max_digits=15, decimal_places=2)
-            ),
-            
-            # Active users (for churn calculation)
-            active_users_30d=Count('user', distinct=True),
-        )
-
-        # ============================================================
-        # ACTIVATION RATE (Optimized)
-        # ============================================================
-        new_users_this_month_qs = CustomUser.objects.filter(
-            date_joined__gte=month_start,
-            is_deleted=False
-        )
-        
-        new_users_count = new_users_this_month_qs.count()
-        
-        if new_users_count > 0:
-            activated_count = Transaction.objects.filter(
-                user__in=new_users_this_month_qs,
-                transaction_type='credit',
-                status='confirmed',
-                source__in=['SAVINGS', 'INVESTMENT']
-            ).values('user').distinct().count()
-            
-            activation_rate = (activated_count / new_users_count * 100)
-        else:
-            activation_rate = 0
-
-        # ============================================================
-        # RETENTION RATE (Optimized)
-        # ============================================================
-        cohort_users_qs = CustomUser.objects.filter(
-            date_joined__gte=sixty_days_ago,
-            date_joined__lt=thirty_days_ago,
-            is_deleted=False
-        )
-        
-        cohort_count = cohort_users_qs.count()
-        
-        if cohort_count > 0:
-            retained_count = Transaction.objects.filter(
-                user__in=cohort_users_qs,
-                date__gte=thirty_days_ago,
-                transaction_type='credit',
-                status='confirmed'
-            ).values('user').distinct().count()
-            
-            retention_rate = (retained_count / cohort_count * 100)
-        else:
-            retention_rate = 0
-
-        # ============================================================
-        # PREVIOUS MONTH DATA (Single Query)
-        # ============================================================
-        prev_month_totals = MonthlySavings.objects.filter(
-            month=last_month_start.month,
-            year=last_month_start.year
-        ).aggregate(
-            prev_savings=Coalesce(Sum('savings'), Value(0), output_field=DecimalField()),
-            prev_investments=Coalesce(Sum('investment'), Value(0), output_field=DecimalField())
-        )
-
-        # ============================================================
-        # CALCULATIONS
-        # ============================================================
-        total_users = user_aggregation['total_users']
-        
-        # Growth rates
-        savings_growth = calculate_growth_rate(
-            user_aggregation['total_savings'],
-            prev_month_totals['prev_savings']
-        )
-        investments_growth = calculate_growth_rate(
-            user_aggregation['total_investments'],
-            prev_month_totals['prev_investments']
-        )
-
-        # Transaction failure rate
-        failure_rate = (
-            transaction_stats['failed_transactions'] / transaction_stats['total_transactions'] * 100
-            if transaction_stats['total_transactions'] else 0
-        )
-
-        # Churn rate
-        inactive_users = total_users - transaction_stats['active_users_30d']
-        churn_rate = (inactive_users / total_users * 100) if total_users else 0
-
-        # Referral & Influencer percentages
-        referrals_pct = (
-            user_aggregation['referral_signups'] / total_users * 100
-        ) if total_users else 0
-        
-        influencers_pct = (
-            user_aggregation['influencer_signups'] / total_users * 100
-        ) if total_users else 0
-
-        # ============================================================
-        # BUILD RESPONSE
-        # ============================================================
-        response_data = {
-            "user_info": {
-                "first_name": admin_user.first_name,
-                "profile_picture": admin_user.profile_picture.url if admin_user.profile_picture else "",
-                "wealth_stage": calculate_wealth_stage(admin_user)
+    response_data = {
+        "current_month": {
+            "total_savings": float(user_stats["total_savings"]),
+            "total_investments": float(user_stats["total_investments"]),
+        },
+        "user_statistics": {
+            "total_users": total_users,
+            "new_users_this_month": user_stats["new_users_this_month"],
+        },
+        "advanced_metrics": {
+            "monthly_active_savers": {
+                "users": tx_stats["mas_users"],
+                "total_amount": float(tx_stats["mas_amount"]),
             },
-            "current_month": {
-                "total_savings": float(user_aggregation['total_savings'] or 0),
-                "total_investments": float(user_aggregation['total_investments'] or 0),
-                "savings_growth_rate": savings_growth,
-                "investments_growth_rate": investments_growth
+            "transaction_failure_rate": round(failure_rate, 2),
+            "growth_multipliers": {
+                "referrals_pct": round(referrals_pct, 2),
+                "influencers_pct": round(influencers_pct, 2),
             },
-            "user_statistics": {
-                "total_users": user_aggregation['total_users'],
-                "new_users_today": user_aggregation['new_users_today'],
-                "new_users_yesterday": user_aggregation['new_users_yesterday'],
-                "new_users_this_week": user_aggregation['new_users_this_week'],
-                "new_users_last_week": user_aggregation['new_users_last_week'],
-                "new_users_this_month": user_aggregation['new_users_this_month'],
-                "new_users_last_month": user_aggregation['new_users_last_month'],
-            },
-            "advanced_metrics": {
-                "monthly_active_savers": {
-                    "users": transaction_stats['mas_users'],
-                    "total_amount": float(transaction_stats['mas_amount'] or 0)
-                },
-                "activation_rate": round(activation_rate, 2),
-                "retention_30d": round(retention_rate, 2),
-                "investors_vs_savers": {
-                    "investor_heavy": user_aggregation['investor_heavy_count'],
-                    "savings_heavy": user_aggregation['savings_heavy_count']
-                },
-                "transaction_failure_rate": round(failure_rate, 2),
-                "growth_multipliers": {
-                    "referrals_pct": round(referrals_pct, 2),
-                    "influencers_pct": round(influencers_pct, 2)
-                },
-                "financial_health": {
-                    "fum": float(user_aggregation['fum'] or 0),
-                    "churn_rate": round(churn_rate, 2)
-                }
-            },
-            "advanced_metrics_monthly": advanced_metrics_monthly,
-        }
+        },
+        "advanced_metrics_monthly": advanced_metrics_monthly,
+    }
 
-        # ✅ Cache for 2 minutes
-        cache.set(cache_key, response_data, 120)
-        return Response(response_data)
+    cache.set(cache_key, response_data, 120)
+    return Response(response_data)
 
-    except Exception as e:
-        import traceback
-        print(traceback.format_exc())
-        return Response({"error": str(e)}, status=500)
+
 
 
 # ============================================================================
