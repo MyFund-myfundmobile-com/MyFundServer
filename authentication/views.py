@@ -635,7 +635,7 @@ class CustomObtainAuthToken(ObtainAuthToken):
         try:
             username = request.data.get("username", "").strip().lower()
             password = request.data.get("password", "")
-            
+
             # Check if this is an admin login request
             is_admin_endpoint = request.path.startswith("/api/admin/login/")
             is_ambassador_endpoint = request.path.startswith("/api/ambassador/login/")
@@ -708,7 +708,7 @@ class CustomObtainAuthToken(ObtainAuthToken):
                         },
                         status=status.HTTP_403_FORBIDDEN,
                     )
-                
+
                 # For regular users, send OTP
                 from authentication.views import send_otp_for_user
 
@@ -754,6 +754,7 @@ class CustomObtainAuthToken(ObtainAuthToken):
             "user_id": user.id,
             "role": role,  # 🔥 IMPORTANT
         }
+
 
 from rest_framework.permissions import AllowAny
 
@@ -4857,7 +4858,7 @@ def cancel_scheduled_withdrawal(request):
 
             send_push_notification(
                 user=user_locked,
-                title="Withdrawal Cancelled ✅",
+                title="Scheduled Withdrawal Cancelled ✅",
                 message=(
                     f"₦{refund_amount:,.2f} refunded to your Savings "
                     f"(₦{service_charge:,.2f} charge applied)."
