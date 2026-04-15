@@ -1655,10 +1655,10 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
                         balance_after = user.wallet
 
                     transaction.status = "confirmed"
-                    transaction.description = (
-                        f"Withdrawal: Sent ₦{withdrawal.amount:,.2f} "
-                        f"(Fee: ₦{withdrawal.charge_amount:,.2f})"
-                    )
+                    destination = "Bank"
+                    source_display = withdrawal.source_account.capitalize()
+
+                    transaction.description = f"{source_display} > {destination}"
                     transaction.balance_before = balance_before
                     transaction.balance_after = balance_after
                     transaction.save()
