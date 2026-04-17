@@ -4345,18 +4345,40 @@ def process_withdrawal_to_local_bank(request):
 
     VALID_SOURCES = ["savings", "investment", "wallet"]
     if source_account not in VALID_SOURCES:
-        return Response({"error": "Invalid source account."}, status=400)
-
-    if not target_bank_account_id:
         return Response(
-            {"error": '"target_bank_account_id" was NOT provided.'},
+            {"error": "Invalid source account."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    VALID_WITHDRAWAL_TYPES = ["immediate", "scheduled"]
+    if withdrawal_type not in VALID_WITHDRAWAL_TYPES:
+        return Response(
+            {"error": "Invalid withdrawal type."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if withdrawal_type == "scheduled" and source_account == "wallet":
+        return Response(
+            {"error": "Wallet withdrawals cannot be scheduled."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if withdrawal_type == "immediate" and target_bank_account_id in [None, "", "null"]:
+        return Response(
+            {
+                "error": '"target_bank_account_id" is required for immediate withdrawals.'
+            },
             status=status.HTTP_400_BAD_REQUEST,
         )
 
     try:
-        target_bank_account_id = int(target_bank_account_id)
-        amount = Decimal(amount)
-        print("✅ STEP 2: Parsed target_bank_account_id and amount.")
+        if withdrawal_type == "immediate":
+            target_bank_account_id = int(target_bank_account_id)
+        else:
+            target_bank_account_id = None
+
+        amount = Decimal(str(amount))
+        print("✅ STEP 2: Parsed withdrawal input successfully.")
     except (ValueError, TypeError, InvalidOperation) as e:
         print(f"❌ STEP 2 ERROR: {e}")
         return Response(
@@ -4388,28 +4410,27 @@ def process_withdrawal_to_local_bank(request):
                 {"error": "Insufficient wallet balance."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-    else:
-        return Response(
-            {"error": "Invalid source account."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
 
-    try:
-        target_bank_account = BankAccount.objects.get(
-            id=target_bank_account_id,
-            user=user,
-        )
-        print("✅ STEP 5: Target bank account validated.")
-    except BankAccount.DoesNotExist:
-        return Response(
-            {"error": "Target bank account not found."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+    target_bank_account = None
+    if withdrawal_type == "immediate":
+        try:
+            target_bank_account = BankAccount.objects.get(
+                id=target_bank_account_id,
+                user=user,
+            )
+            print("✅ STEP 3: Target bank account validated.")
+        except BankAccount.DoesNotExist:
+            return Response(
+                {"error": "Target bank account not found."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+    else:
+        print("✅ STEP 3: Scheduled withdrawal selected. No bank account required.")
 
     transaction_id = "".join(
         random.choices(string.ascii_uppercase + string.digits, k=20)
     )
-    print("✅ STEP 6: Generated transaction_id")
+    print("✅ STEP 4: Generated transaction_id")
 
     current_datetime = datetime.now()
     processing_date = None
@@ -4421,8 +4442,6 @@ def process_withdrawal_to_local_bank(request):
 
     try:
         with transaction.atomic():
-            User = get_user_model()
-
             from .utils import calculate_withdrawal_charges
 
             if withdrawal_type == "scheduled":
@@ -4441,7 +4460,7 @@ def process_withdrawal_to_local_bank(request):
                 if not hasattr(user_locked, "savings") or user_locked.savings < amount:
                     return Response(
                         {"error": "Insufficient savings balance."},
-                        status=400,
+                        status=status.HTTP_400_BAD_REQUEST,
                     )
                 previous_balance = user_locked.savings
                 new_balance = user_locked.savings - amount
@@ -4454,7 +4473,7 @@ def process_withdrawal_to_local_bank(request):
                 ):
                     return Response(
                         {"error": "Insufficient investment balance."},
-                        status=400,
+                        status=status.HTTP_400_BAD_REQUEST,
                     )
                 previous_balance = user_locked.investment
                 new_balance = user_locked.investment - amount
@@ -4464,16 +4483,18 @@ def process_withdrawal_to_local_bank(request):
                 if not hasattr(user_locked, "wallet") or user_locked.wallet < amount:
                     return Response(
                         {"error": "Insufficient wallet balance."},
-                        status=400,
+                        status=status.HTTP_400_BAD_REQUEST,
                     )
                 previous_balance = user_locked.wallet
                 new_balance = user_locked.wallet - amount
                 source_choice = "WALLET"
 
             else:
-                return Response({"error": "Invalid source account."}, status=400)
+                return Response(
+                    {"error": "Invalid source account."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
-            # debit balance first
             if source_account == "savings":
                 user_locked.savings = new_balance
                 user_locked.save(update_fields=["savings"])
@@ -4485,10 +4506,10 @@ def process_withdrawal_to_local_bank(request):
                 user_locked.save(update_fields=["wallet"])
 
             print(
-                f"✅ STEP 7: Amount {amount} deducted from user's {source_account} balance."
+                f"✅ STEP 5: Amount {amount} deducted from user's {source_account} balance."
             )
             print(
-                f"✅ Charge Rate: {rate*100}%, Charge Amount: ₦{charge_amount}, Net Amount: ₦{net_amount}"
+                f"✅ Charge Rate: {rate * 100}%, Charge Amount: ₦{charge_amount}, Net Amount: ₦{net_amount}"
             )
 
             withdrawal = WithdrawalsRequestToAdmin.objects.create(
@@ -4499,22 +4520,26 @@ def process_withdrawal_to_local_bank(request):
                 total_amount=amount,
                 transaction_id=transaction_id,
                 source_account=source_account,
-                target_bank=target_bank_account.bank_name,
-                target_account_number=target_bank_account.account_number,
+                target_bank=(
+                    target_bank_account.bank_name if target_bank_account else None
+                ),
+                target_account_number=(
+                    target_bank_account.account_number if target_bank_account else None
+                ),
                 withdrawal_type=withdrawal_type,
                 scheduled_processing_date=(
                     processing_date.date() if processing_date else None
                 ),
                 is_approved=False,
             )
-            print("✅ STEP 8: Withdrawal record created.")
+            print("✅ STEP 6: Withdrawal record created.")
 
             Transaction.objects.create(
                 user=user_locked,
                 transaction_id=transaction_id,
                 transaction_type="debit",
                 status="pending",
-                amount=net_amount,
+                amount=amount,
                 service_charge=charge_amount,
                 total_amount=amount,
                 source=source_choice,
@@ -4523,25 +4548,22 @@ def process_withdrawal_to_local_bank(request):
                 description=(
                     f"{source_account.capitalize()} > Wallet . . ."
                     if withdrawal_type == "scheduled"
-                    and source_account in ["savings", "investment"]
                     else f"{source_account.capitalize()} > Bank . . ."
                 ),
                 scheduled_date=processing_date.date() if processing_date else None,
             )
-            print("✅ STEP 9: Transaction record created.")
-
-        # ── Everything committed — now fire all notifications in background ──
+            print("✅ STEP 7: Transaction record created.")
 
         charge_percentage_display = f"{rate * 100}%" if rate > 0 else "0%"
 
-        # ── User email ──
         if withdrawal_type == "scheduled" and processing_date:
             user_message_body = (
                 f"Your withdrawal has been successfully scheduled.<br><br>"
                 f"<strong>No charges apply</strong> to scheduled withdrawals.<br><br>"
                 f"The funds will be automatically credited to your MyFund wallet on "
                 f"<strong>{processing_date.strftime('%A, %B %d, %Y')}</strong>.<br><br>"
-                f"Once credited, you can withdraw from your wallet to your bank account at no cost."
+                f"You do not need to add a bank account for a scheduled withdrawal. "
+                f"When the due date arrives, the money will first land in your wallet."
             )
         elif withdrawal_type == "immediate" and source_account == "wallet":
             user_message_body = (
@@ -4574,7 +4596,6 @@ def process_withdrawal_to_local_bank(request):
             recipient_list=[user_locked.email],
         )
 
-        # ── User push notification ──
         if withdrawal_type == "scheduled" and processing_date:
             push_title = "Withdrawal Scheduled 📅"
             push_message = (
@@ -4631,13 +4652,12 @@ def process_withdrawal_to_local_bank(request):
             },
             notif_type=notif_type_name,
         )
-        print("✅ STEP 10: User push notification queued.")
+        print("✅ STEP 8: User push notification queued.")
 
-        # ── Admin email ──
         admin_message = f"""
         Hi Admin,<br><br>
         A new withdrawal request has been submitted. The user's account has already been debited.
-        Please review and process the payment.<br><br>
+        Please review and process the request.<br><br>
 
         User: {user_locked.first_name} {user_locked.last_name}<br>
         Email: {user_locked.email}<br>
@@ -4650,11 +4670,6 @@ def process_withdrawal_to_local_bank(request):
         • Charge Amount: ₦{charge_amount:,.2f}<br>
         • Amount to Send: ₦{net_amount:,.2f}<br><br>
 
-        🏦 BANK DETAILS:<br>
-        • Target Bank: {target_bank_account.bank_name}<br>
-        • Account Name: {target_bank_account.account_name}<br>
-        • Account Number: {target_bank_account.account_number}<br><br>
-
         📋 REQUEST DETAILS:<br>
         • Withdrawal Type: {withdrawal_type.capitalize()}<br>
         • Request Date: {withdrawal.created_at.strftime('%Y-%m-%d %H:%M:%S')}<br>
@@ -4664,11 +4679,18 @@ def process_withdrawal_to_local_bank(request):
             admin_message += (
                 f"• Scheduled Processing Date: "
                 f"{processing_date.strftime('%A, %B %d, %Y')}<br>"
+                f"<br>⚠️ This is a scheduled withdrawal. No bank transfer is required now. "
+                f"Funds should be credited to the user's wallet on the due date."
             )
+        else:
+            admin_message += f"""
+            🏦 BANK DETAILS:<br>
+            • Target Bank: {target_bank_account.bank_name}<br>
+            • Account Name: {target_bank_account.account_name}<br>
+            • Account Number: {target_bank_account.account_number}<br><br>
 
-        admin_message += (
-            f"<br>⚠️ Please send exactly ₦{net_amount:,.2f} to the bank account above."
-        )
+            ⚠️ Please send exactly ₦{net_amount:,.2f} to the bank account above.
+            """
 
         _bg(
             send_generic_email,
@@ -4682,7 +4704,6 @@ def process_withdrawal_to_local_bank(request):
             ],
         )
 
-        # ── Admin push notifications ──
         admin_emails = [
             "tolulopeahmed@gmail.com",
             "ceo@myfundmobile.com",
@@ -4694,9 +4715,15 @@ def process_withdrawal_to_local_bank(request):
             if hasattr(admin_user, "expo_push_tokens") and admin_user.expo_push_tokens:
                 admin_push_message = (
                     f"{user_locked.first_name} {user_locked.last_name} wants to withdraw "
-                    f"₦{amount:,.2f} from {source_account.capitalize()}\n"
+                    f"₦{amount:,.2f} from {source_account.capitalize()}.\n"
                 )
-                if withdrawal_type == "immediate" and source_account != "wallet":
+
+                if withdrawal_type == "scheduled" and processing_date:
+                    admin_push_message += (
+                        f"Scheduled for {processing_date.strftime('%A, %B %d, %Y')}. "
+                        f"Credit to wallet on due date."
+                    )
+                else:
                     admin_push_message += (
                         f"Charge: {charge_percentage_display}. Send ₦{net_amount:,.2f} to "
                         f"{target_bank_account.account_name} ({target_bank_account.account_number})."
@@ -4717,7 +4744,9 @@ def process_withdrawal_to_local_bank(request):
                         "amount": str(amount),
                         "net_amount": str(net_amount),
                         "source_account": source_account,
-                        "bank_name": target_bank_account.bank_name,
+                        "bank_name": (
+                            target_bank_account.bank_name if target_bank_account else ""
+                        ),
                         "withdrawal_type": withdrawal_type,
                         "type": "admin_withdrawal_alert",
                     },
@@ -4729,8 +4758,16 @@ def process_withdrawal_to_local_bank(request):
 
         return Response(
             {
-                "message": f"Withdrawal successful. ₦{net_amount:,.2f} will be processed to your bank account.",
+                "message": (
+                    f"Withdrawal scheduled successfully. ₦{amount:,.2f} will be credited to your wallet on "
+                    f"{processing_date.strftime('%A, %B %d, %Y')}."
+                    if withdrawal_type == "scheduled" and processing_date
+                    else f"Withdrawal successful. ₦{net_amount:,.2f} will be processed to your bank account."
+                ),
                 "transaction_id": transaction_id,
+                "scheduled_date": (
+                    processing_date.strftime("%Y-%m-%d") if processing_date else None
+                ),
                 "charge_details": {
                     "charge_percentage": f"{rate * 100}%",
                     "charge_amount": float(charge_amount),
