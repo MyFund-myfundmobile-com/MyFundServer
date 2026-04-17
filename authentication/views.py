@@ -4521,10 +4521,10 @@ def process_withdrawal_to_local_bank(request):
                 transaction_id=transaction_id,
                 source_account=source_account,
                 target_bank=(
-                    target_bank_account.bank_name if target_bank_account else None
+                    target_bank_account.bank_name if target_bank_account else ""
                 ),
                 target_account_number=(
-                    target_bank_account.account_number if target_bank_account else None
+                    target_bank_account.account_number if target_bank_account else ""
                 ),
                 withdrawal_type=withdrawal_type,
                 scheduled_processing_date=(
@@ -4532,6 +4532,7 @@ def process_withdrawal_to_local_bank(request):
                 ),
                 is_approved=False,
             )
+
             print("✅ STEP 6: Withdrawal record created.")
 
             Transaction.objects.create(
@@ -4786,7 +4787,7 @@ def process_withdrawal_to_local_bank(request):
         traceback.print_exc()
         return Response(
             {
-                "error": "An error occurred while processing your request. Please try again."
+                "error": f"An error occurred while processing your request: {str(e)}"
             },
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
