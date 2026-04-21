@@ -6362,9 +6362,7 @@ def _create_dva_intent(user, amount, purpose):
         transaction_id=transaction_id,
     )
 
-    description = (
-        "QuickSave (Pending)" if purpose == "SAVINGS" else "QuickInvest (Pending)"
-    )
+    description = "QuickSave . . ." if purpose == "SAVINGS" else "QuickInvest . . ."
 
     transaction = Transaction.objects.create(
         user=user,
