@@ -47,7 +47,7 @@ from django.views.decorators.csrf import csrf_exempt
 from authentication.views import CustomGraphQLView
 from authentication.schema import schema  # Adjust the import path
 from graphql_jwt.decorators import jwt_cookie
-
+from .ai_views import admin_ai_chat
 
 router = DefaultRouter()
 router.register(r"bank-accounts", views.BankAccountViewSet, basename="bank-account")
@@ -60,7 +60,11 @@ urlpatterns = [
     path("resend-otp/", views.resend_otp, name="resend-otp"),
     path("login/", views.CustomObtainAuthToken.as_view(), name="login"),
     path("admin/login/", views.CustomObtainAuthToken.as_view(), name="admin-login"),
-    path("ambassador/login/", views.CustomObtainAuthToken.as_view(), name="ambassador-login"),
+    path(
+        "ambassador/login/",
+        views.CustomObtainAuthToken.as_view(),
+        name="ambassador-login",
+    ),
     path("logout/", views.LogoutView.as_view(), name="logout"),
     path(
         "test-email/", views.test_email, name="test-email"
@@ -384,4 +388,6 @@ urlpatterns = [
         submit_ambassador_attendance,
         name="submit_ambassador_attendance",
     ),
+    # AI
+    path("admin-ai-chat/", admin_ai_chat, name="admin_ai_chat"),
 ]
