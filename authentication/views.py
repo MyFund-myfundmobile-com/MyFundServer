@@ -4094,7 +4094,6 @@ def withdraw_to_local_bank(request):
         transaction_id = f"withdrawal-{reference_code}"
 
         try:
-            # determine current source balance before any debit
             if source_account == "savings":
                 previous_balance = user.savings
                 new_balance = user.savings - amount
@@ -4108,7 +4107,6 @@ def withdraw_to_local_bank(request):
                 new_balance = user.wallet - amount
                 source_choice = "WALLET"
 
-            # create pending placeholder transaction FIRST
             transaction_details = Transaction.objects.create(
                 user=user,
                 transaction_type="debit",
@@ -4130,7 +4128,6 @@ def withdraw_to_local_bank(request):
             print("Paystack API Response:", paystack_response)
 
             if paystack_response.get("status"):
-                # ── Paystack succeeded: debit user and enrich SAME transaction ──
                 if source_account == "savings":
                     user.savings = new_balance
                     user.save(update_fields=["savings"])
@@ -4152,18 +4149,42 @@ def withdraw_to_local_bank(request):
                     ]
                 )
 
-                # ── Fire email + push in background ──
                 _bg(
                     send_generic_email,
-                    subject=f"Withdrawal Successful: ₦{amount}",
+                    subject=f"Withdrawal Successful: ₦{amount:,.2f}",
                     message=(
                         f"Hi {user.first_name},<br><br>"
-                        f"Your withdrawal of ₦{amount} from your {source_account} account "
-                        f"has been sent to {target_bank_account.bank_name}.<br><br>"
+                        f"Your withdrawal request of <strong>₦{amount:,.2f}</strong> from your "
+                        f"{source_account.capitalize()} account has been processed successfully.<br><br>"
+                        f"<strong>Amount credited to your bank account:</strong> ₦{withdrawal_amount:,.2f}<br>"
+                        f"<strong>Charge deducted:</strong> ₦{service_charge:,.2f}<br>"
+                        f"<strong>Bank:</strong> {target_bank_account.bank_name}<br>"
+                        f"<strong>Account:</strong> {target_bank_account.account_name} - {target_bank_account.account_number}<br><br>"
                         "Thank you for using MyFund! 🥂<br><br>"
                     ),
                     from_email="MyFund <info@myfundmobile.com>",
                     recipient_list=[user.email],
+                )
+
+                _bg(
+                    send_push_notification,
+                    user=user,
+                    title="Withdrawal Successful ✅",
+                    message=(
+                        f"Your withdrawal request of ₦{amount:,.2f} has been processed. "
+                        f"₦{withdrawal_amount:,.2f} was credited to your bank account after "
+                        f"₦{service_charge:,.2f} charge."
+                    ),
+                    data={
+                        "amount": str(amount),
+                        "net_amount": str(withdrawal_amount),
+                        "charge_amount": str(service_charge),
+                        "transaction_id": transaction_id,
+                        "source_account": source_account,
+                        "type": "Withdrawal",
+                        "status": "confirmed",
+                    },
+                    notif_type="SUCCESS",
                 )
 
                 return Response(
@@ -4180,7 +4201,6 @@ def withdraw_to_local_bank(request):
                     status=200,
                 )
 
-            # ── Paystack failed: manual fallback; still debit now and enrich SAME transaction ──
             if source_account == "savings":
                 user.savings = new_balance
                 user.save(update_fields=["savings"])
@@ -4218,14 +4238,19 @@ def withdraw_to_local_bank(request):
                 is_approved=False,
             )
 
-            # ── Fire all notifications in background ──
             _bg(
                 send_push_notification,
                 user=user,
                 title="Withdrawal Processing... ⏳",
-                message="Your withdrawal request has been received and will be processed shortly. You'll get a confirmation by mail once it's completed.",
+                message=(
+                    f"Your withdrawal request of ₦{amount:,.2f} has been received. "
+                    f"₦{withdrawal_amount:,.2f} will be sent to your bank account after "
+                    f"₦{service_charge:,.2f} charge."
+                ),
                 data={
                     "amount": str(amount),
+                    "net_amount": str(withdrawal_amount),
+                    "charge_amount": str(service_charge),
                     "transaction_id": transaction_id,
                     "source_account": source_account,
                     "type": "Withdrawal",
@@ -4236,11 +4261,15 @@ def withdraw_to_local_bank(request):
 
             _bg(
                 send_generic_email,
-                subject=f"Withdrawal of ₦{amount} Processing...",
+                subject=f"Withdrawal of ₦{amount:,.2f} Processing...",
                 message=(
                     f"Hi {user.first_name},<br><br>"
-                    f"We've received your request to withdraw ₦{amount}. "
-                    f"It'll be processed within the hour.<br><br>"
+                    f"We've received your withdrawal request of <strong>₦{amount:,.2f}</strong>.<br><br>"
+                    f"<strong>Amount to be credited to your bank account:</strong> ₦{withdrawal_amount:,.2f}<br>"
+                    f"<strong>Charge deducted:</strong> ₦{service_charge:,.2f}<br>"
+                    f"<strong>Bank:</strong> {target_bank_account.bank_name}<br>"
+                    f"<strong>Account:</strong> {target_bank_account.account_name} - {target_bank_account.account_number}<br><br>"
+                    "It'll be processed within the hour.<br><br>"
                     "Thank you for using MyFund!<br><br>"
                 ),
                 from_email="MyFund <info@myfundmobile.com>",
@@ -4249,10 +4278,12 @@ def withdraw_to_local_bank(request):
 
             _bg(
                 send_generic_email,
-                subject=f"[CHECK] {user.first_name} Wants to Withdraw ₦{amount}",
+                subject=f"[CHECK] {user.first_name} Wants to Withdraw ₦{amount:,.2f}",
                 message=(
                     f"User: {user.first_name} {user.last_name}<br>"
-                    f"Amount: ₦{amount:,.2f}<br>"
+                    f"Requested Amount: ₦{amount:,.2f}<br>"
+                    f"Charge Amount: ₦{service_charge:,.2f}<br>"
+                    f"Amount to Send: ₦{withdrawal_amount:,.2f}<br>"
                     f"Bank: {target_bank_account.bank_name} ({target_bank_account.account_number})<br>"
                     f"Transaction ID: {transaction_id}<br>"
                     "Reason: automatic Paystack withdrawal failed; manual processing required.<br>"
@@ -4261,7 +4292,6 @@ def withdraw_to_local_bank(request):
                 recipient_list=["admin@myfundmobile.com"],
             )
 
-            # ── Admin push notifications in background ──
             admin_emails = [
                 "tolulopeahmed@gmail.com",
                 "ceo@myfundmobile.com",
@@ -4377,7 +4407,9 @@ def process_withdrawal_to_local_bank(request):
         else:
             target_bank_account_id = None
 
-        amount = Decimal(str(amount))
+        amount = Decimal(str(amount)).quantize(
+            Decimal("0.00"), rounding=ROUND_HALF_EVEN
+        )
         print("✅ STEP 2: Parsed withdrawal input successfully.")
     except (ValueError, TypeError, InvalidOperation) as e:
         print(f"❌ STEP 2 ERROR: {e}")
@@ -4560,6 +4592,7 @@ def process_withdrawal_to_local_bank(request):
         if withdrawal_type == "scheduled" and processing_date:
             user_message_body = (
                 f"Your withdrawal has been successfully scheduled.<br><br>"
+                f"<strong>Requested Amount:</strong> ₦{amount:,.2f}<br>"
                 f"<strong>No charges apply</strong> to scheduled withdrawals.<br><br>"
                 f"The funds will be automatically credited to your MyFund wallet on "
                 f"<strong>{processing_date.strftime('%A, %B %d, %Y')}</strong>.<br><br>"
@@ -4568,19 +4601,23 @@ def process_withdrawal_to_local_bank(request):
             )
         elif withdrawal_type == "immediate" and source_account == "wallet":
             user_message_body = (
-                f"Your withdrawal request of ₦{amount:,.2f} from your Wallet to "
+                f"Your withdrawal request of <strong>₦{amount:,.2f}</strong> from your Wallet to "
                 f"{target_bank_account.bank_name} "
                 f"({target_bank_account.account_name} - {target_bank_account.account_number}) "
                 f"has been successfully submitted.<br><br>"
+                f"<strong>Amount to be credited to your bank account:</strong> ₦{net_amount:,.2f}<br>"
+                f"<strong>Charge deducted:</strong> ₦{charge_amount:,.2f}<br><br>"
                 f"The funds will be processed to your bank account shortly."
             )
         elif withdrawal_type == "immediate":
             user_message_body = (
-                f"Your immediate withdrawal request of ₦{amount:,.2f} from your "
+                f"Your immediate withdrawal request of <strong>₦{amount:,.2f}</strong> from your "
                 f"{source_account.capitalize()} account to "
                 f"{target_bank_account.bank_name} "
                 f"({target_bank_account.account_name} - {target_bank_account.account_number}) "
-                f"has been successfully submitted and will be processed shortly."
+                f"has been successfully submitted and will be processed shortly.<br><br>"
+                f"<strong>Amount to be credited to your bank account:</strong> ₦{net_amount:,.2f}<br>"
+                f"<strong>Charge deducted:</strong> ₦{charge_amount:,.2f}"
             )
         else:
             user_message_body = f"Your withdrawal request of ₦{amount:,.2f} has been received successfully."
@@ -4600,7 +4637,7 @@ def process_withdrawal_to_local_bank(request):
         if withdrawal_type == "scheduled" and processing_date:
             push_title = "Withdrawal Scheduled 📅"
             push_message = (
-                f"Hi {user_locked.first_name}, your withdrawal has been scheduled successfully. "
+                f"Hi {user_locked.first_name}, your withdrawal of ₦{amount:,.2f} has been scheduled successfully. "
                 f"No charges apply. Your wallet will be credited on "
                 f"{processing_date.strftime('%A, %B %d, %Y')}."
             )
@@ -4610,8 +4647,9 @@ def process_withdrawal_to_local_bank(request):
         elif withdrawal_type == "immediate" and source_account == "wallet":
             push_title = "Withdrawal Submitted 💸"
             push_message = (
-                f"Your wallet withdrawal of ₦{int(amount):,} has been submitted successfully. "
-                f"No charges apply. Funds will be processed shortly."
+                f"Your withdrawal request of ₦{amount:,.2f} has been submitted successfully. "
+                f"₦{net_amount:,.2f} will be credited to your bank account after "
+                f"₦{charge_amount:,.2f} charge."
             )
             notif_status = "pending"
             notif_type_name = "PENDING"
@@ -4619,8 +4657,9 @@ def process_withdrawal_to_local_bank(request):
         elif withdrawal_type == "immediate":
             push_title = "Withdrawal Request Received ⏳"
             push_message = (
-                f"Your withdrawal of ₦{int(amount):,} from your {source_account.capitalize()} "
-                f"account has been received and will be processed shortly."
+                f"Your withdrawal request of ₦{amount:,.2f} from your {source_account.capitalize()} "
+                f"account has been received. ₦{net_amount:,.2f} will be credited to your bank account "
+                f"after ₦{charge_amount:,.2f} charge."
             )
             notif_status = "pending"
             notif_type_name = "PENDING"
@@ -4628,7 +4667,7 @@ def process_withdrawal_to_local_bank(request):
         else:
             push_title = "Withdrawal Update"
             push_message = (
-                f"Your withdrawal request of ₦{int(amount):,} has been received."
+                f"Your withdrawal request of ₦{amount:,.2f} has been received."
             )
             notif_status = "pending"
             notif_type_name = "INFO"
@@ -4763,7 +4802,7 @@ def process_withdrawal_to_local_bank(request):
                     f"Withdrawal scheduled successfully. ₦{amount:,.2f} will be credited to your wallet on "
                     f"{processing_date.strftime('%A, %B %d, %Y')}."
                     if withdrawal_type == "scheduled" and processing_date
-                    else f"Withdrawal successful. ₦{net_amount:,.2f} will be processed to your bank account."
+                    else f"Withdrawal successful. Requested amount: ₦{amount:,.2f}. Amount to be credited to bank: ₦{net_amount:,.2f}."
                 ),
                 "transaction_id": transaction_id,
                 "scheduled_date": (
@@ -4786,9 +4825,7 @@ def process_withdrawal_to_local_bank(request):
 
         traceback.print_exc()
         return Response(
-            {
-                "error": f"An error occurred while processing your request: {str(e)}"
-            },
+            {"error": f"An error occurred while processing your request: {str(e)}"},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
