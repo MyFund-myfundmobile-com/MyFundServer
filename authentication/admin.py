@@ -1815,20 +1815,31 @@ class TransactionAdmin(admin.ModelAdmin):
     # --- 1. THE DROPDOWN ACTION ---
     @admin.action(description="Force Confirm Selected Pending Transactions")
     def force_confirm_transactions(self, request, queryset):
-        count = 0
-        # Only process transactions that are currently pending
-        for txn in queryset.filter(status="pending"):
-            self._confirm_transaction_logic(txn)
-            count += 1
+        confirmed_count = 0
 
-        if count > 0:
+        for txn in queryset.filter(status="pending"):
+            try:
+                ok, msg = self._confirm_transaction_logic(txn)
+                if ok:
+                    confirmed_count += 1
+            except Exception as e:
+                self.message_user(
+                    request,
+                    f"Error confirming {txn.transaction_id}: {str(e)}",
+                    level=messages.ERROR,
+                )
+
+        if confirmed_count:
             self.message_user(
                 request,
-                f"Successfully confirmed {count} transactions, updated balances, and sent notifications.",
+                f"Successfully confirmed {confirmed_count} transaction(s), updated balances, and sent notifications.",
+                level=messages.SUCCESS,
             )
         else:
             self.message_user(
-                request, "No pending transactions were selected.", level="warning"
+                request,
+                "No pending transactions were confirmed.",
+                level=messages.WARNING,
             )
 
     # --- 2. THE MANUAL SAVE LOGIC ---
@@ -1841,85 +1852,102 @@ class TransactionAdmin(admin.ModelAdmin):
 
     # --- 3. THE CENTRAL BRAIN (Handles Balances, Referrals, and Notifications) ---
     def _confirm_transaction_logic(self, txn):
-        """Processes the entire confirmation workflow."""
-        user = txn.user
+        """Safely confirms an existing pending transaction and credits the right balance."""
+        from django.db import transaction as db_transaction
 
-        # Double-check protection: don't process if already confirmed in DB
-        txn_in_db = Transaction.objects.filter(id=txn.id).first()
-        if txn_in_db and txn_in_db.status == "confirmed":
-            return
-
-        # A. Update Transaction Status
-        txn.status = "confirmed"
-        txn.date = timezone.now()
-
-        amount = txn.amount
-        is_investment = (
-            "invest" in txn.description.lower()
-            or txn.transaction_type.lower() == "investment"
-        )
-
-        if is_investment:
-            txn.credited_to = "INVESTMENT"
-        else:
-            txn.credited_to = "SAVINGS"
-
-        # B. Update User Balances
-        if is_investment:
-            create_transaction(
-                user=user,
-                amount=amount,
-                transaction_type="credit",
-                source="CARD",
-                credited_to="INVESTMENT",
-                description=txn.description or "QuickInvest",
-                reference=txn.transaction_id,
+        with db_transaction.atomic():
+            txn = (
+                Transaction.objects.select_for_update()
+                .select_related("user")
+                .get(id=txn.id)
             )
-            folder_name = "Investment"
-        else:
-            create_transaction(
-                user=user,
-                amount=amount,
-                transaction_type="credit",
-                source="CARD",
-                credited_to="SAVINGS",
-                description=txn.description or "QuickSave",
-                reference=txn.transaction_id,
+            user = CustomUser.objects.select_for_update().get(id=txn.user_id)
+
+            if txn.status == "confirmed":
+                return False, "Already confirmed"
+
+            amount = txn.amount or Decimal("0.00")
+            description = txn.description or ""
+
+            is_investment = (
+                "invest" in description.lower()
+                or str(txn.credited_to).upper() == "INVESTMENT"
             )
-            folder_name = "Savings"
 
-        # C. Trigger Referral Rewards (If applicable)
-        # This checks if the user has a referrer and grants bonuses for the first deposit
-        if hasattr(user, "confirm_referral_rewards"):
-            user.confirm_referral_rewards(is_referrer=False)
+            if is_investment:
+                balance_before = user.investment
+                user.investment += amount
+                balance_after = user.investment
+                txn.credited_to = "INVESTMENT"
+                folder_name = "Investment"
+            else:
+                balance_before = user.savings
+                user.savings += amount
+                balance_after = user.savings
+                txn.credited_to = "SAVINGS"
+                folder_name = "Savings"
 
-        # D. Send Email Notification (Using your Generic Email Utility)
-        email_subject = f"{folder_name} Updated! ✅"
-        email_body = (
-            f"Hi {{first_name}},\n\n"
-            f"Your transfer of ₦{int(amount):,} has been processed successfully "
-            f"and added to your {folder_name} account.\n\n"
-            f"Keep growing your funds!\n\nMyFund Team"
-        )
-        send_generic_email(email_subject, email_body, [user.email])
+            user.save(update_fields=["savings", "investment"])
 
-        # E. Send Push Notification
+            txn.transaction_type = "credit"
+            txn.status = "confirmed"
+            txn.source = txn.source or "BANK_TRANSFER"
+            txn.total_amount = amount
+            txn.balance_before = balance_before
+            txn.balance_after = balance_after
+            txn.date = timezone.now().date()
+            txn.save(
+                update_fields=[
+                    "transaction_type",
+                    "status",
+                    "source",
+                    "credited_to",
+                    "total_amount",
+                    "balance_before",
+                    "balance_after",
+                    "date",
+                ]
+            )
+
         try:
-            from .utils import send_push_notification  # Adjust import path
+            if hasattr(user, "confirm_referral_rewards"):
+                user.refresh_from_db()
+                user.confirm_referral_rewards(is_referrer=False)
+        except Exception as e:
+            print(f"Referral confirmation failed: {e}")
 
+        try:
+            send_generic_email(
+                subject=f"{folder_name} Updated! ✅",
+                message=(
+                    f"Hi {user.first_name},<br><br>"
+                    f"Your transfer of ₦{amount:,.2f} has been processed successfully "
+                    f"and added to your {folder_name} account.<br><br>"
+                    f"Keep growing your funds!<br><br>"
+                    f"MyFund Team"
+                ),
+                recipient_list=[user.email],
+            )
+        except Exception as e:
+            print(f"Force confirm email failed: {e}")
+
+        try:
             send_push_notification(
                 user=user,
-                title=notif_title,
-                message=f"Hi {user.first_name}, your transfer of ₦{int(amount):,} has been added to your {folder_name} account.",
+                title=f"{folder_name} Updated! ✅",
+                message=f"Hi {user.first_name}, your transfer of ₦{amount:,.0f} has been added to your {folder_name} account.",
                 data={
                     "amount": str(amount),
                     "transaction_id": txn.transaction_id,
                     "type": folder_name,
+                    "status": "confirmed",
                 },
                 notif_type="CREDIT",
             )
         except Exception as e:
-            print(f"Push notification failed: {e}")
+            print(f"Force confirm push failed: {e}")
+
+        return True, "Confirmed"
 
     def is_referral_transaction(self, obj):
         return bool(obj.referral_email)
