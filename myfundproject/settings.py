@@ -97,6 +97,9 @@ ALLOWED_HOSTS = [
     "10.5.0.26",
     '10.5.6.65',
     '172.31.64.1',
+    '10.5.4.62',
+    '172.31.64.1',
+    '10.5.5.250',
 ]
 
 SECURE_SSL_REDIRECT = False  # Disable forced HTTPS redirect@
@@ -292,14 +295,18 @@ if ENVIRONMENT == "production":
     }
 else:
     DATABASES = {
-        "default": {
-            "ENGINE": "django.db.backends.sqlite3",
-            "NAME": BASE_DIR / "db.sqlite3",
-            "OPTIONS": {
-                "timeout": 20,  # Increase timeout value (in seconds)
-            },
-        }
+    "default": {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": os.getenv("DEV_DATABASE_NAME"),
+        "USER": os.getenv("DEV_DATABASE_USER"),
+        "PASSWORD": os.getenv("DEV_DATABASE_PASSWORD"),
+        "HOST": os.getenv("DEV_DATABASE_HOST"),
+        "PORT": os.getenv("DEV_DATABASE_PORT"),
+        "OPTIONS": {
+            "sslmode": "require",
+        },
     }
+}
 
 
 # Password validation
