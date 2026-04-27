@@ -22,6 +22,7 @@ from django.db import transaction
 import logging
 from django.db.models import F
 
+
 logger = logging.getLogger(__name__)
 
 
@@ -804,12 +805,9 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
 
     def confirm_referral_rewards(self, is_referrer):
         if self.referral and not self.referral_reward_granted:
-            # Check if current month is December 2024
             current_time = timezone.now()
-            # Check if it's December (any year)
             is_december_promo = current_time.month == 12 and current_time.year == 2025
 
-            # Set threshold based on month
             if is_december_promo:
                 savings_threshold = 5000
             else:
@@ -833,34 +831,70 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                     ]
                 )
 
-                # Confirm referred transaction
+                # Confirm referred user's pending transaction
                 referred_transaction = Transaction.objects.filter(
-                    user=self, transaction_type="credit", status="pending"
+                    user=self,
+                    transaction_type="credit",
+                    status="pending",
+                    description="Referral Reward",
                 ).first()
 
                 if referred_transaction:
+                    previous_balance = self.wallet
+                    new_balance = previous_balance + referred_transaction.amount
+
                     referred_transaction.status = "confirmed"
                     referred_transaction.description = "Referral Reward"
-                    referred_transaction.save()
+                    referred_transaction.credited_to = "WALLET"
+                    referred_transaction.balance_before = previous_balance
+                    referred_transaction.balance_after = new_balance
+                    referred_transaction.total_amount = referred_transaction.amount
+                    referred_transaction.save(
+                        update_fields=[
+                            "status",
+                            "description",
+                            "credited_to",
+                            "balance_before",
+                            "balance_after",
+                            "total_amount",
+                        ]
+                    )
 
-                    self.wallet += referred_transaction.amount
+                    self.wallet = new_balance
                     self.pending_referral_reward -= referred_transaction.amount
                     self.save(update_fields=["wallet", "pending_referral_reward"])
 
-                # Confirm referrer transaction
+                # Confirm referrer's pending transaction
                 referrer_transaction = Transaction.objects.filter(
                     user=self.referral,
                     referral_email=self.email,
                     transaction_type="credit",
                     status="pending",
+                    description="Referral Reward",
                 ).first()
 
                 if referrer_transaction:
+                    previous_balance = self.referral.wallet
+                    new_balance = previous_balance + referrer_transaction.amount
+
                     referrer_transaction.status = "confirmed"
                     referrer_transaction.description = "Referral Reward"
-                    referrer_transaction.save()
+                    referrer_transaction.credited_to = "WALLET"
+                    referrer_transaction.balance_before = previous_balance
+                    referrer_transaction.balance_after = new_balance
+                    referrer_transaction.total_amount = referrer_transaction.amount
+                    referrer_transaction.save(
+                        update_fields=[
+                            "status",
+                            "description",
+                            "credited_to",
+                            "balance_before",
+                            "balance_after",
+                            "total_amount",
+                        ]
+                    )
 
-                    self.referral.wallet += referrer_transaction.amount
+                    self.referral.wallet = new_balance
                     self.referral.pending_referral_reward -= referrer_transaction.amount
                     self.referral.save(
                         update_fields=["wallet", "pending_referral_reward"]
@@ -872,7 +906,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                     send_push_notification(
                         user=self,
                         title="Referral Reward Received! 🎉",
-                        message=f"You've got ₦{referred_transaction.amount:,.2f} for referring {self.referral.first_name}. Thank you for using MyFund!",
+                        message=f"You've got ₦{referred_transaction.amount:,.2f} for signing up on MyFund. Thank you for using MyFund!",
                         data={
                             "amount": str(referred_transaction.amount),
                             "transaction_id": referred_transaction.transaction_id,
@@ -2082,6 +2116,22 @@ class Transaction(models.Model):
         db_index=True,
     )
 
+    balance_before = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="User balance before this transaction",
+    )
+
+    balance_after = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="User balance after this transaction",
+    )
+
     # ✅ FIXED: Remove duplicate paystack_auth_code and keep only one
     paystack_auth_code = models.CharField(
         max_length=255, null=True, blank=True, default="", editable=False
@@ -2113,32 +2163,18 @@ class Transaction(models.Model):
     )
 
     def save(self, *args, **kwargs):
-        """
-        Calculate total_amount correctly based on transaction_type.
-        For withdrawals: total_amount = amount + service_charge (user sees total)
-        For deposits: total_amount = amount (no service charge)
-        """
-        try:
-            # Ensure both are Decimal
-            if isinstance(self.amount, (int, float)):
-                self.amount = Decimal(str(self.amount))
-            if isinstance(self.service_charge, (int, float)):
-                self.service_charge = Decimal(str(self.service_charge))
+        from decimal import Decimal
 
-            # For withdrawals (debits), total is amount + charge
-            if self.transaction_type == "debit":
-                self.total_amount = self.amount + self.service_charge
-            # For credits (deposits), total is just the amount (no charge)
-            else:
-                self.total_amount = self.amount
+        if isinstance(self.amount, (int, float)):
+            self.amount = Decimal(str(self.amount))
 
-        except (TypeError, InvalidOperation, DecimalException) as e:
-            raise ValueError(f"Invalid amount or service charge: {e}")
+        if isinstance(self.service_charge, (int, float)):
+            self.service_charge = Decimal(str(self.service_charge))
 
-        # Auto-set date/time if not provided
-        if not self.pk:  # New instance
-            self.date = timezone.now()
-            self.time = timezone.now().time()
+        if self.transaction_type == "debit":
+            self.total_amount = self.amount + self.service_charge
+        else:
+            self.total_amount = self.amount
 
         super().save(*args, **kwargs)
 

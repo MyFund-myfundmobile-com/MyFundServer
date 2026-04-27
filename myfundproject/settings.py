@@ -353,7 +353,7 @@ LOGGING = {
 
 LANGUAGE_CODE = "en-us"
 
-TIME_ZONE = "UTC"
+TIME_ZONE = "Africa/Lagos"
 
 USE_I18N = True
 
@@ -400,25 +400,26 @@ CELERY_TASK_ROUTES = {
 
 # ===== EMAIL CONFIGURATION =====
 EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
-DEFAULT_FROM_EMAIL = "MyFund <message@myfundmobile.com>"
+# DEFAULT_FROM_EMAIL = "MyFund <message@myfundmobile.com>"
+DEFAULT_FROM_EMAIL = "MyFund <auth@myfundmobile.com>"
 
 # SSL (Implicit SSL)
-EMAIL_HOST = "myfundmobile.com"
+EMAIL_HOST = "mail.privateemail.com"
 EMAIL_PORT = 465
 EMAIL_USE_SSL = True
 EMAIL_USE_TLS = False
-EMAIL_TIMEOUT = 20
+EMAIL_TIMEOUT = 30
 
 # # TLS (Explicit SSL)
-# EMAIL_HOST = "myfundmobile.com"
+# EMAIL_HOST = "mail.privateemail.com"
 # EMAIL_PORT = 587
 # EMAIL_USE_SSL = False
 # EMAIL_USE_TLS = True
-# EMAIL_TIMEOUT = 20
+# EMAIL_TIMEOUT = 30
 
 
-EMAIL_HOST_USER = "info@myfundmobile.com"
-EMAIL_HOST_PASSWORD = "Reproduction1..."
+EMAIL_HOST_USER = "auth@myfundmobile.com"
+EMAIL_HOST_PASSWORD = "AdminSecure123..."
 
 
 AUTHENTICATION_BACKENDS = [
@@ -450,3 +451,8 @@ if os.getenv("DJANGO_ENV") == "production":
     PAYSTACK_SECRET_KEY = os.getenv("PAYSTACK_KEY_LIVE")
 else:
     PAYSTACK_SECRET_KEY = os.getenv("PAYSTACK_KEY_TEST")
+
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-1.5-flash")
