@@ -2204,7 +2204,9 @@ def save_or_update_card_from_paystack_auth(user, authorization):
     - same-user updates by signature, authorization_code, or fingerprint
     """
     if not authorization:
-        print("⚠️ save_or_update_card_from_paystack_auth: authorization payload missing")
+        print(
+            "⚠️ save_or_update_card_from_paystack_auth: authorization payload missing"
+        )
         return None
 
     authorization_code = (authorization.get("authorization_code") or "").strip()
@@ -3677,14 +3679,12 @@ random_uuid = uuid.uuid4()
 def savings_to_investment(request):
     user = request.user
 
-    # Ensure user is authenticated
     if not user or not user.is_authenticated:
         return Response(
             {"error": "Authentication credentials were not provided."},
             status=status.HTTP_401_UNAUTHORIZED,
         )
 
-    # Validate and parse amount
     amount_raw = request.data.get("amount", None)
     if amount_raw is None:
         return Response(
@@ -3708,7 +3708,6 @@ def savings_to_investment(request):
 
     try:
         with transaction.atomic():
-            # Refresh user to get latest balance and lock row for update
             user = user.__class__.objects.select_for_update().get(pk=user.pk)
 
             if user.savings < amount:
@@ -3717,8 +3716,9 @@ def savings_to_investment(request):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            # Use full UUID for transaction IDs (no truncation)
             base_transaction_id = str(uuid.uuid4())[:16]
+            debit_transaction_id = base_transaction_id + "-D"
+            credit_transaction_id = base_transaction_id + "-C"
 
             create_transaction(
                 user=user,
@@ -3728,7 +3728,7 @@ def savings_to_investment(request):
                 source="SAVINGS",
                 description="Savings > Investment",
                 service_charge=0,
-                reference=base_transaction_id + "-D",
+                reference=debit_transaction_id,
             )
 
             create_transaction(
@@ -3739,52 +3739,54 @@ def savings_to_investment(request):
                 credited_to="INVESTMENT",
                 description="QuickInvest",
                 service_charge=0,
-                reference=base_transaction_id + "-C",
+                reference=credit_transaction_id,
             )
 
-            # Send push notification after successful transfer
-            send_push_notification(
-                user=user,
-                title="Savings > Investment Transfer ✅",
-                message=f"You have successfully transferred ₦{amount:,.0f} from your Savings to Investment.",
-                data={
-                    "amount": float(amount),
-                    "from": "savings",
-                    "to": "investment",
-                    "debit_transaction_id": debit_transaction_id,
-                    "credit_transaction_id": credit_transaction_id,
-                },
-                notif_type="TRANSACTION",
-            )
+            # Refresh to get updated balances after create_transaction mutations
+            user.refresh_from_db()
+
+            try:
+                send_push_notification(
+                    user=user,
+                    title="Savings > Investment Transfer ✅",
+                    message=f"You have successfully transferred ₦{amount:,.0f} from your Savings to Investment.",
+                    data={
+                        "amount": float(amount),
+                        "from": "savings",
+                        "to": "investment",
+                        "debit_transaction_id": debit_transaction_id,
+                        "credit_transaction_id": credit_transaction_id,
+                    },
+                    notif_type="TRANSACTION",
+                )
+            except Exception:
+                pass  # Don't let push notification failure roll back the transaction
 
             return Response(
                 {
                     "message": "Savings to investment transfer successful.",
                     "debit_transaction_id": debit_transaction_id,
                     "credit_transaction_id": credit_transaction_id,
+                    "newAccountBalances": {
+                        "savings": float(user.savings),
+                        "investment": float(user.investment),
+                        "wallet": float(user.wallet),
+                        "properties": float(user.properties),
+                    },
                 },
                 status=status.HTTP_200_OK,
             )
 
-    except Transaction.DoesNotExist:
-        return Response(
-            {"error": "User account not found."},
-            status=status.HTTP_404_NOT_FOUND,
-        )
     except IntegrityError:
         return Response(
             {"error": "Transaction ID conflict. Please try again."},
             status=status.HTTP_400_BAD_REQUEST,
         )
-
-    return Response(
-        {
-            "message": "Savings to investment transfer successful.",
-            "debit_transaction_id": debit_transaction_id,
-            "credit_transaction_id": credit_transaction_id,
-        },
-        status=status.HTTP_200_OK,
-    )
+    except Exception as e:
+        return Response(
+            {"error": str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
 
 @api_view(["POST"])
@@ -3792,27 +3794,17 @@ def savings_to_investment(request):
 def wallet_to_savings(request):
     user = request.user
 
-    # Ensure user is authenticated
-    if not user or not user.is_authenticated:
-        return Response(
-            {"error": "Authentication credentials were not provided."},
-            status=status.HTTP_401_UNAUTHORIZED,
-        )
-
-    # Validate and parse amount
     amount_raw = request.data.get("amount", None)
     if amount_raw is None:
         return Response(
-            {"error": "Amount is required."},
-            status=status.HTTP_400_BAD_REQUEST,
+            {"error": "Amount is required."}, status=status.HTTP_400_BAD_REQUEST
         )
 
     try:
         amount = Decimal(amount_raw)
     except (InvalidOperation, TypeError):
         return Response(
-            {"error": "Invalid amount format."},
-            status=status.HTTP_400_BAD_REQUEST,
+            {"error": "Invalid amount format."}, status=status.HTTP_400_BAD_REQUEST
         )
 
     if amount <= 0:
@@ -3823,7 +3815,6 @@ def wallet_to_savings(request):
 
     try:
         with transaction.atomic():
-            # Lock user record to prevent race conditions
             user = user.__class__.objects.select_for_update().get(pk=user.pk)
 
             if user.wallet < amount:
@@ -3832,7 +3823,6 @@ def wallet_to_savings(request):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            # Use full UUID for transaction IDs with clear suffixes
             base_transaction_id = str(uuid.uuid4())[:16]
 
             create_transaction(
@@ -3857,46 +3847,45 @@ def wallet_to_savings(request):
                 reference=base_transaction_id + "-C",
             )
 
-            # Send push notification after successful transfer
-            send_push_notification(
-                user=user,
-                title="Wallet > Savings Successful ✅",
-                message=f"You have successfully transferred ₦{amount:,.0f} from your Wallet to Savings. Well done!",
-                data={
-                    "amount": float(amount),
-                    "from": "wallet",
-                    "to": "savings",
-                    "transaction_id": base_transaction_id,
-                },
-                notif_type="TRANSACTION",
-            )
+            user.refresh_from_db()
+
+            try:
+                send_push_notification(
+                    user=user,
+                    title="Wallet > Savings Successful ✅",
+                    message=f"You have successfully transferred ₦{amount:,.0f} from your Wallet to Savings. Well done!",
+                    data={
+                        "amount": float(amount),
+                        "from": "wallet",
+                        "to": "savings",
+                        "transaction_id": base_transaction_id,
+                    },
+                    notif_type="TRANSACTION",
+                )
+            except Exception:
+                pass
 
             return Response(
                 {
                     "message": "Wallet to savings transfer successful.",
                     "transaction_id": base_transaction_id,
+                    "newAccountBalances": {
+                        "savings": float(user.savings),
+                        "investment": float(user.investment),
+                        "wallet": float(user.wallet),
+                        "properties": float(user.properties),
+                    },
                 },
                 status=status.HTTP_200_OK,
             )
 
-    except user.DoesNotExist:
-        return Response(
-            {"error": "User account not found."},
-            status=status.HTTP_404_NOT_FOUND,
-        )
     except IntegrityError:
         return Response(
             {"error": "Transaction ID conflict. Please try again."},
             status=status.HTTP_400_BAD_REQUEST,
         )
-
-    return Response(
-        {
-            "message": "Wallet to savings transfer successful.",
-            "transaction_id": base_transaction_id,
-        },
-        status=status.HTTP_200_OK,
-    )
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(["POST"])
@@ -3904,27 +3893,17 @@ def wallet_to_savings(request):
 def wallet_to_investment(request):
     user = request.user
 
-    # Ensure user is authenticated
-    if not user or not user.is_authenticated:
-        return Response(
-            {"error": "Authentication credentials were not provided."},
-            status=status.HTTP_401_UNAUTHORIZED,
-        )
-
-    # Validate and parse amount
     amount_raw = request.data.get("amount", None)
     if amount_raw is None:
         return Response(
-            {"error": "Amount is required."},
-            status=status.HTTP_400_BAD_REQUEST,
+            {"error": "Amount is required."}, status=status.HTTP_400_BAD_REQUEST
         )
 
     try:
         amount = Decimal(amount_raw)
     except (InvalidOperation, TypeError):
         return Response(
-            {"error": "Invalid amount format."},
-            status=status.HTTP_400_BAD_REQUEST,
+            {"error": "Invalid amount format."}, status=status.HTTP_400_BAD_REQUEST
         )
 
     if amount <= 0:
@@ -3935,7 +3914,6 @@ def wallet_to_investment(request):
 
     try:
         with transaction.atomic():
-            # Lock user record to prevent race conditions
             user = user.__class__.objects.select_for_update().get(pk=user.pk)
 
             if user.wallet < amount:
@@ -3944,7 +3922,6 @@ def wallet_to_investment(request):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            # Use full UUID as base transaction ID
             base_transaction_id = str(uuid.uuid4())[:16]
 
             create_transaction(
@@ -3969,46 +3946,45 @@ def wallet_to_investment(request):
                 reference=base_transaction_id + "-C",
             )
 
-            # Send push notification after successful transfer
-            send_push_notification(
-                user=user,
-                title="Wallet > Investment Successful ✅",
-                message=f"You have successfully transferred ₦{amount:,.0f} from your Wallet to Investment. Well done!",
-                data={
-                    "amount": float(amount),
-                    "from": "wallet",
-                    "to": "investment",
-                    "transaction_id": base_transaction_id,
-                },
-                notif_type="TRANSACTION",
-            )
+            user.refresh_from_db()
+
+            try:
+                send_push_notification(
+                    user=user,
+                    title="Wallet > Investment Successful ✅",
+                    message=f"You have successfully transferred ₦{amount:,.0f} from your Wallet to Investment. Well done!",
+                    data={
+                        "amount": float(amount),
+                        "from": "wallet",
+                        "to": "investment",
+                        "transaction_id": base_transaction_id,
+                    },
+                    notif_type="TRANSACTION",
+                )
+            except Exception:
+                pass
 
             return Response(
                 {
                     "message": "Wallet to investment transfer successful.",
                     "transaction_id": base_transaction_id,
+                    "newAccountBalances": {
+                        "savings": float(user.savings),
+                        "investment": float(user.investment),
+                        "wallet": float(user.wallet),
+                        "properties": float(user.properties),
+                    },
                 },
                 status=status.HTTP_200_OK,
             )
 
-    except user.DoesNotExist:
-        return Response(
-            {"error": "User account not found."},
-            status=status.HTTP_404_NOT_FOUND,
-        )
     except IntegrityError:
         return Response(
             {"error": "Transaction ID conflict. Please try again."},
             status=status.HTTP_400_BAD_REQUEST,
         )
-
-    return Response(
-        {
-            "message": "Wallet to investment transfer successful.",
-            "transaction_id": base_transaction_id,
-        },
-        status=status.HTTP_200_OK,
-    )
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 import uuid
@@ -6957,7 +6933,6 @@ from .utils import (
     approve_quicksave_credit,
     create_dedicated_account,
 )
-
 
 paystack_ips = ["52.31.139.75", "52.49.173.169", "52.214.14.220"]
 

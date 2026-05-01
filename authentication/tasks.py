@@ -1740,3 +1740,77 @@ def autosubmit_missing_ambassador_reports_task():
     result = autosubmit_missing_ambassador_reports_for_previous_month()
     logger.info(f"Ambassador autosubmit result: {result}")
     return result
+
+
+def send_batch_b_ambassador_email(test=True):
+    from authentication.utils import send_generic_email
+
+    subject = "🎉Congratulations! You’ve Been Selected for MyFund Ambassador Program"
+
+    message = """
+    <p>Hi {first_name},</p>
+
+    <p><strong>Congratulations!</strong></p>
+
+    <p>We’re excited to inform you that you have been selected for <strong>Batch B of the MyFund Ambassador Program (Cohort 3)</strong>.</p>
+
+    <p>After reviewing applications, your profile stood out, and we’re confident in your potential to grow, contribute, and make meaningful impact within the MyFund community.</p>
+
+    <p>As part of the next step, you are required to join the official ambassadors group where all updates, onboarding details, and activities will be shared.</p>
+
+    <p>
+    <a href="https://chat.whatsapp.com/K6ydqeE0zKuGX0Sek87tkW"
+        style="background:#4c28bc;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;display:inline-block;font-weight:600;">
+        Join Ambassadors Group
+    </a>
+    </p>
+
+    <p><strong>Onboarding Video:</strong></p>
+
+    <p>
+    <a href="https://youtu.be/bTb3I6GAmFA?feature=shared" target="_blank">
+        <img src="https://img.youtube.com/vi/bTb3I6GAmFA/maxresdefault.jpg"
+            alt="Watch onboarding video"
+            style="width:100%;max-width:500px;border-radius:12px;display:block;margin:auto;" />
+    </a>
+    </p>
+
+    <p style="text-align:center;">
+    <a href="https://youtu.be/bTb3I6GAmFA?feature=shared"
+        style="background:#4c28bc;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;display:inline-block;font-weight:600;">
+        ▶ Watch Onboarding Video
+    </a>
+    </p>
+
+    <p>Further details and the meeting link will be shared in the group.</p>
+
+    <p>We look forward to having you actively participate as we begin this journey together.</p>
+
+    <p>Welcome on board.</p>
+
+    <p>Best regards,<br>
+    Chubi<br>
+    DME, MyFund</p>
+    """
+
+    test_emails = [
+        "josephgideon95@gmail.com",
+        "valueplusrecords@gmail.com",
+        "janet.adegbenro@gmail.com",
+    ]
+
+    batch_b_emails = [
+        "ijiwandepaul2020@gmail.com",
+        "ozegesilverdiamond@gmail.com",
+        "annaliu352@gmail.com",
+        "owolabitt@yahoo.com",
+    ]
+
+    recipients = test_emails if test else batch_b_emails
+
+    return send_generic_email(
+        subject=subject,
+        message=message,
+        recipient_list=recipients,
+        use_celery_threshold=0,
+    )
