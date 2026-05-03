@@ -2568,17 +2568,34 @@ class AmbassadorPointConfigAdmin(admin.ModelAdmin):
 class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
     list_display = (
         "id",
-        "user",
-        "month",
-        "status",
+        "formatted_month",
+        "user_first_name",
         "total_points_awarded",
+        "rank",
+        "status",
         "stipend_amount",
         "stipend_paid",
         "submitted_at",
         "approved_at",
+        "user_email",
     )
-    list_filter = ("status", "month", "stipend_paid", "submitted_at")
-    search_fields = ("user__email", "user__first_name", "user__last_name", "month")
+
+    list_filter = (
+        "month",
+        "status",
+        "stipend_paid",
+    )
+
+    date_hierarchy = "submitted_at"
+    ordering = ("-month", "-submitted_at")
+
+    search_fields = (
+        "user__email",
+        "user__first_name",
+        "user__last_name",
+        "month",
+    )
+
     readonly_fields = (
         "submitted_at",
         "updated_at",
@@ -2689,36 +2706,156 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
         ),
     )
 
-    actions = ["approve_reports", "reject_reports", "recalculate_selected_reports"]
+    actions = [
+        "approve_reports",
+        "reject_reports",
+        "recalculate_selected_reports",
+    ]
+
+    def formatted_month(self, obj):
+        try:
+            return datetime.strptime(obj.month, "%Y-%m").strftime("%b %Y")
+        except:
+            return obj.month
+
+    formatted_month.short_description = "Month"
+    formatted_month.admin_order_field = "month"
+
+    def user_first_name(self, obj):
+        return obj.user.first_name or obj.user.email
+
+    user_first_name.short_description = "Name"
+    user_first_name.admin_order_field = "user__first_name"
+
+    def rank(self, obj):
+        queryset = AmbassadorMonthlyReport.objects.filter(month=obj.month).order_by(
+            "-stipend_amount", "-total_points_awarded", "submitted_at"
+        )
+
+        ids = list(queryset.values_list("id", flat=True))
+
+        try:
+            position = ids.index(obj.id) + 1
+        except ValueError:
+            return "-"
+
+        if 10 <= position % 100 <= 20:
+            suffix = "th"
+        else:
+            suffix = {1: "st", 2: "nd", 3: "rd"}.get(position % 10, "th")
+
+        return f"{position}{suffix}"
+
+    rank.short_description = "Rank"
+    rank.admin_order_field = "stipend_amount"
+
+    def user_email(self, obj):
+        return obj.user.email
+
+    user_email.short_description = "Email"
+    user_email.admin_order_field = "user__email"
 
     def credit_stipend_and_notify(self, report):
         user = report.user
-
-        if report.stipend_paid:
-            return False, "Stipend already paid for this report."
-
         stipend_amount = Decimal(report.stipend_amount or 0)
+
+        formatted_month = report.month
+        try:
+            formatted_month = datetime.strptime(report.month, "%Y-%m").strftime("%b %Y")
+        except:
+            pass
+
+        # -----------------------------
+        # CASE 1: ZERO PERFORMANCE
+        # -----------------------------
         if stipend_amount <= 0:
-            return False, "Stipend amount is zero. Nothing to pay."
+            send_generic_email(
+                subject="Ambassador Report Reviewed",
+                message=(
+                    f"Hi {user.first_name},<br><br>"
+                    f"Your ambassador report for {formatted_month} has been reviewed.<br><br>"
+                    f"No points were recorded for this period.<br><br>"
+                    f"Don't worry — a new month is a fresh opportunity to grow. "
+                    f"We're rooting for you to take action and earn more next time 💪<br><br>"
+                    "MyFund"
+                ),
+                from_email="MyFund <info@myfundmobile.com>",
+                recipient_list=[user.email],
+            )
+
+            send_push_notification(
+                user=user,
+                title="Ambassador Report Reviewed",
+                message="No activity recorded this month. You can bounce back next month 💪",
+                data={"report_id": report.id},
+                notif_type="SYSTEM",
+            )
+
+            return False, "No stipend — encouragement sent."
+
+        # -----------------------------
+        # CASE 2: LOW PERFORMANCE (< ₦1000)
+        # -----------------------------
+        if stipend_amount < 1000:
+            with db_transaction.atomic():
+                locked_user = type(user).objects.select_for_update().get(pk=user.pk)
+
+                locked_user.wallet = (
+                    locked_user.wallet or Decimal("0.00")
+                ) + stipend_amount
+                locked_user.save(update_fields=["wallet"])
+
+                Transaction.objects.create(
+                    user=locked_user,
+                    transaction_type="credit",
+                    status="confirmed",
+                    amount=stipend_amount,
+                    description=f"{formatted_month} Stipend",
+                    source="WALLET",
+                )
+
+                report.stipend_paid = True
+                report.save(update_fields=["stipend_paid"])
+
+            send_generic_email(
+                subject="Ambassador Stipend Credited",
+                message=(
+                    f"Hi {user.first_name},<br><br>"
+                    f"Your ambassador report for {formatted_month} has been reviewed.<br><br>"
+                    f"Stipend credited: ₦{stipend_amount:,.2f}<br><br>"
+                    f"Good effort 👍 — with a bit more consistency, you can earn much more next month.<br><br>"
+                    "MyFund"
+                ),
+                from_email="MyFund <info@myfundmobile.com>",
+                recipient_list=[user.email],
+            )
+
+            send_push_notification(
+                user=user,
+                title=f"{formatted_month} Stipend Credited ✅",
+                message=(
+                    f"Hi {user.first_name}, the stipends for {formatted_month} has been credited "
+                    f"to your wallet. Keep developing your community for more rewards next month. Well done."
+                ),
+                data={"report_id": report.id},
+                notif_type="SYSTEM",
+            )
+
+            return True, "Low stipend credited."
+
+        # -----------------------------
+        # CASE 3: NORMAL / HIGH PERFORMANCE
+        # -----------------------------
+        if report.stipend_paid:
+            return False, "Already paid."
 
         with db_transaction.atomic():
-            # lock user row safely
             locked_user = type(user).objects.select_for_update().get(pk=user.pk)
 
-            # credit wallet
             locked_user.wallet = (
                 locked_user.wallet or Decimal("0.00")
             ) + stipend_amount
             locked_user.save(update_fields=["wallet"])
-
-            # create confirmed credit transaction
-            formatted_month = report.month
-            try:
-                formatted_month = datetime.strptime(report.month, "%Y-%m").strftime(
-                    "%b %Y"
-                )
-            except Exception:
-                pass
 
             Transaction.objects.create(
                 user=locked_user,
@@ -2732,40 +2869,31 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
             report.stipend_paid = True
             report.save(update_fields=["stipend_paid"])
 
-        # email user
         send_generic_email(
             subject="Ambassador Stipend Credited ✅",
             message=(
                 f"Hi {user.first_name},<br><br>"
-                f"Your ambassador report for {report.month} has been approved and your stipend has been credited to your wallet.<br><br>"
-                f"Points awarded: {report.total_points_awarded}<br>"
-                f"Stipend credited: ₦{stipend_amount:,.2f}<br><br>"
-                "Thank you for representing MyFund.<br><br>"
+                f"Your ambassador report for {formatted_month} has been approved and your stipend has been credited.<br><br>"
+                f"Amount: ₦{stipend_amount:,.2f}<br><br>"
+                f"Great work — keep it up 🔥<br><br>"
                 "MyFund"
             ),
             from_email="MyFund <info@myfundmobile.com>",
             recipient_list=[user.email],
         )
 
-        # push user
         send_push_notification(
             user=user,
-            title="Ambassador Stipend Credited ✅",
+            title=f"{formatted_month} Stipend Credited ✅",
             message=(
-                f"Your stipend for {report.month} has been credited. "
-                f"₦{stipend_amount:,.2f} added to your wallet."
+                f"Hi {user.first_name}, the stipends for {formatted_month} has been credited "
+                f"to your wallet. Keep developing your community for more rewards next month. Well done."
             ),
-            data={
-                "report_id": report.id,
-                "month": report.month,
-                "type": "AMBASSADOR_STIPEND",
-                "points": float(report.total_points_awarded),
-                "stipend_amount": float(stipend_amount),
-            },
+            data={"report_id": report.id},
             notif_type="SYSTEM",
         )
 
-        return True, f"₦{stipend_amount:,.2f} credited successfully."
+        return True, "Credited successfully."
 
     def notify_user_rejected(self, report):
         user = report.user
@@ -2774,9 +2902,8 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
             subject="Ambassador Report Update",
             message=(
                 f"Hi {user.first_name},<br><br>"
-                f"Your ambassador report for {report.month} was reviewed but not approved.<br><br>"
-                f"Admin note: {report.admin_note or 'Please contact support for clarification.'}<br><br>"
-                "MyFund"
+                f"Your report for {report.month} was not approved.<br><br>"
+                f"{report.admin_note or ''}"
             ),
             from_email="MyFund <info@myfundmobile.com>",
             recipient_list=[user.email],
@@ -2785,23 +2912,19 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
         send_push_notification(
             user=user,
             title="Ambassador Report Not Approved",
-            message=f"Your report for {report.month} was reviewed. Please check the update.",
-            data={
-                "report_id": report.id,
-                "month": report.month,
-                "status": report.status,
-            },
+            message=f"Check your {report.month} report.",
+            data={"report_id": report.id},
             notif_type="SYSTEM",
         )
 
     def save_model(self, request, obj, form, change):
         old_status = None
-        old_stipend_paid = False
+        old_paid = False
 
         if change and obj.pk:
-            old_obj = AmbassadorMonthlyReport.objects.get(pk=obj.pk)
-            old_status = old_obj.status
-            old_stipend_paid = old_obj.stipend_paid
+            old = AmbassadorMonthlyReport.objects.get(pk=obj.pk)
+            old_status = old.status
+            old_paid = old.stipend_paid
 
         obj.recalculate_points()
 
@@ -2816,64 +2939,44 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
         if old_status != "rejected" and obj.status == "rejected":
             self.notify_user_rejected(obj)
 
-        if obj.status == "approved" and not old_stipend_paid and not obj.stipend_paid:
+        if obj.status == "approved" and not old_paid and not obj.stipend_paid:
             success, msg = self.credit_stipend_and_notify(obj)
-            if success:
-                self.message_user(request, msg, level=messages.SUCCESS)
-            else:
-                self.message_user(request, msg, level=messages.WARNING)
+            self.message_user(
+                request,
+                msg,
+                level=messages.SUCCESS if success else messages.WARNING,
+            )
 
-    @admin.action(description="✅ Approve selected ambassador reports")
+    @admin.action(description="✅ Approve selected reports")
     def approve_reports(self, request, queryset):
-        approved_count = 0
-        credited_count = 0
-
         for report in queryset:
-            if report.status != "approved":
-                report.status = "approved"
-                report.approved_by = request.user
-                report.approved_at = timezone.now()
-
+            report.status = "approved"
+            report.approved_by = request.user
+            report.approved_at = timezone.now()
             report.recalculate_points()
             report.save()
 
-            approved_count += 1
-
             if not report.stipend_paid:
-                success, _ = self.credit_stipend_and_notify(report)
-                if success:
-                    credited_count += 1
+                self.credit_stipend_and_notify(report)
 
-        self.message_user(
-            request,
-            f"{approved_count} report(s) approved. {credited_count} stipend(s) credited.",
-            level=messages.SUCCESS,
-        )
+        self.message_user(request, "Approved.", level=messages.SUCCESS)
 
-    @admin.action(description="❌ Reject selected ambassador reports")
+    @admin.action(description="❌ Reject selected reports")
     def reject_reports(self, request, queryset):
-        count = 0
         for report in queryset:
             report.status = "rejected"
             report.save()
             self.notify_user_rejected(report)
-            count += 1
 
-        self.message_user(
-            request, f"{count} report(s) rejected.", level=messages.WARNING
-        )
+        self.message_user(request, "Rejected.", level=messages.WARNING)
 
-    @admin.action(description="🔄 Recalculate selected ambassador reports")
+    @admin.action(description="🔄 Recalculate selected reports")
     def recalculate_selected_reports(self, request, queryset):
-        count = 0
         for report in queryset:
             report.recalculate_points()
             report.save()
-            count += 1
 
-        self.message_user(
-            request, f"{count} report(s) recalculated.", level=messages.SUCCESS
-        )
+        self.message_user(request, "Recalculated.", level=messages.SUCCESS)
 
 
 admin.site.register(DailyROIAccrual, DailyROIAccrualAdmin)

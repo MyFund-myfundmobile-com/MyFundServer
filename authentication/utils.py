@@ -2007,7 +2007,7 @@ def autosubmit_missing_ambassador_reports_for_previous_month():
     Manual / evidence-based fields are forced to 0.
     Safe to run multiple times because it skips users who already have a report.
     """
-    now = timezone.now()
+    now = timezone.localtime(timezone.now())
 
     current_month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     previous_month_end = current_month_start - timedelta(seconds=1)

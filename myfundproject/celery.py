@@ -120,5 +120,6 @@ app.conf.update(
     worker_prefetch_multiplier=1,  # Prevent task hoarding
     worker_max_tasks_per_child=100,  # Avoid memory leaks
     task_acks_late=True,  # Ack after task completes
-    timezone=settings.TIME_ZONE,
+    timezone="Africa/Lagos",
+    enable_utc=False,
 )

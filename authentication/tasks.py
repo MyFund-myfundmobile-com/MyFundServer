@@ -1814,3 +1814,140 @@ def send_batch_b_ambassador_email(test=True):
         recipient_list=recipients,
         use_celery_threshold=0,
     )
+
+
+from decimal import Decimal
+from django.db import transaction as db_transaction
+from django.utils import timezone
+from celery import shared_task
+
+from authentication.models import CustomUser, Transaction
+from authentication.utils import send_generic_email, send_push_notification
+
+
+def credit_team_wallets(
+    credits,
+    month_label="April 2026",
+    reason="MyFund Team Credit",
+    test=False,
+    test_email="company@myfundmobile.com",
+):
+    results = []
+
+    for item in credits:
+        original_email = item["email"].strip().lower()
+        amount = Decimal(str(item["amount"]))
+        name = item.get("name", "")
+
+        subject = f"🎉 ₦{amount:,.2f} Has Been Credited To Your Wallet"
+
+        message = f"""
+        <p>Hi {name or 'there'},</p>
+
+        <p>Your MyFund wallet has been credited with <strong>₦{amount:,.2f}</strong> for <strong>{month_label}</strong> as monthly allowance.</p>
+
+        <p>Thank you for your work and consistency.</p>
+
+        <p>— MyFund</p>
+        """
+
+        try:
+            user = CustomUser.objects.get(email__iexact=original_email)
+        except CustomUser.DoesNotExist:
+            results.append(
+                {
+                    "original_email": original_email,
+                    "used_email": test_email if test else original_email,
+                    "amount": str(amount),
+                    "status": "failed",
+                    "reason": "user_not_found",
+                    "test": test,
+                }
+            )
+            continue
+
+        balance_before = Decimal(str(user.wallet or 0))
+
+        if not test:
+            with db_transaction.atomic():
+                balance_after = balance_before + amount
+
+                user.wallet = balance_after
+                user.save(update_fields=["wallet"])
+
+                Transaction.objects.create(
+                    user=user,
+                    transaction_type="credit",
+                    status="confirmed",
+                    source="WALLET",
+                    credited_to="WALLET",
+                    amount=amount,
+                    total_amount=amount,
+                    service_charge=Decimal("0.00"),
+                    balance_before=balance_before,
+                    balance_after=balance_after,
+                    description=f"{month_label} Allowance",
+                    date=timezone.now(),
+                )
+        else:
+            balance_after = balance_before
+
+        recipient_email = test_email.strip().lower() if test else user.email
+
+        send_generic_email(
+            subject=subject,
+            message=message,
+            recipient_list=[recipient_email],
+        )
+
+        push_status = "skipped_test_mode" if test else "not_attempted"
+
+        if not test:
+            try:
+                send_push_notification(
+                    user=user,
+                    title=subject,
+                    message=f"₦{amount:,.2f} has been credited to your wallet for {month_label}.",
+                    data={
+                        "type": "wallet_credit",
+                        "amount": str(amount),
+                        "month": month_label,
+                    },
+                )
+                push_status = "sent"
+            except Exception as e:
+                push_status = f"failed: {str(e)}"
+
+        results.append(
+            {
+                "original_email": original_email,
+                "used_email": recipient_email,
+                "amount": str(amount),
+                "balance_before": str(balance_before),
+                "balance_after": str(balance_after),
+                "status": (
+                    "test_email_sent_no_credit" if test else "credited_email_sent"
+                ),
+                "push_status": push_status,
+                "test": test,
+            }
+        )
+
+    return results
+
+
+@shared_task
+def credit_team_wallets_task(
+    credits,
+    month_label="April 2026",
+    reason="MyFund Team Credit",
+    test=False,
+    test_email="company@myfundmobile.com",
+):
+    return credit_team_wallets(
+        credits=credits,
+        month_label=month_label,
+        reason=reason,
+        test=test,
+        test_email=test_email,
+    )
