@@ -5064,6 +5064,8 @@ def make_withdrawal_through_admin(user, amount, transaction_id):
 
 
 from decimal import Decimal, InvalidOperation
+import uuid
+
 from django.db import transaction as db_transaction
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
@@ -5128,23 +5130,31 @@ def wallet_transfer_view(request):
             status=status.HTTP_404_NOT_FOUND,
         )
 
+    # 🔥 FIX: generate transaction reference (THIS was your error)
+    transfer_reference = f"WALLET-{uuid.uuid4().hex[:12].upper()}"
+
     with db_transaction.atomic():
+        # debit sender
         create_transaction(
             user=sender,
             amount=amount,
             transaction_type="debit",
             source="WALLET",
             description=f"Sent to {target_user.first_name or target_user.email}",
+            reference=f"{transfer_reference}-D",
         )
 
+        # credit receiver
         create_transaction(
             user=target_user,
             amount=amount,
             transaction_type="credit",
             credited_to="WALLET",
             description=f"Received from {sender.first_name or sender.email}",
+            reference=f"{transfer_reference}-C",
         )
 
+    # Push notifications
     try:
         send_push_notification(
             user=target_user,
@@ -5167,6 +5177,7 @@ def wallet_transfer_view(request):
     except Exception:
         pass
 
+    # Emails
     send_generic_email(
         subject=f"You Sent ₦{amount:,.2f} to {target_user.first_name or target_user.email}",
         message=(
