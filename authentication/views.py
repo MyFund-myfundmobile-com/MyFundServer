@@ -10814,3 +10814,44 @@ def submit_ambassador_attendance(request):
         },
         status=status.HTTP_201_CREATED,
     )
+
+
+from .models import FinanceMetricSnapshot
+from .finance_metrics import calculate_finance_metrics
+
+
+class AdminFinanceMetricsView(generics.RetrieveAPIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        if not request.user.is_staff:
+            return Response({"detail": "Permission denied"}, status=403)
+
+        period_type = request.query_params.get("period_type", "monthly")
+        target_date = timezone.now().date()
+
+        snapshot = calculate_finance_metrics(
+            period_type=period_type,
+            target_date=target_date,
+            save=True,
+        )
+
+        return Response(
+            {
+                "period_type": snapshot.period_type,
+                "period_start": snapshot.period_start,
+                "period_end": snapshot.period_end,
+                "abrupt_withdrawal_revenue": snapshot.abrupt_withdrawal_revenue,
+                "float_gross_revenue": snapshot.float_gross_revenue,
+                "roi_payable_to_users": snapshot.roi_payable_to_users,
+                "float_net_profit": snapshot.float_net_profit,
+                "property_sales_revenue": snapshot.property_sales_revenue,
+                "rent_commission_revenue": snapshot.rent_commission_revenue,
+                "total_revenue": snapshot.total_revenue,
+                "total_expenses": snapshot.total_expenses,
+                "net_profit": snapshot.net_profit,
+                "profit_margin": snapshot.profit_margin,
+                "total_savings_balance": snapshot.total_savings_balance,
+                "total_investment_balance": snapshot.total_investment_balance,
+            }
+        )

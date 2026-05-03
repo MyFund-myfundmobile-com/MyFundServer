@@ -16,6 +16,7 @@ from .models import (
     TopSaverHistory,
     DailyROIAccrual,
     ROITransaction,
+    FinanceMetricSnapshot,
 )
 from django.core.mail import send_mail
 from django.urls import reverse
@@ -2977,6 +2978,46 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
             report.save()
 
         self.message_user(request, "Recalculated.", level=messages.SUCCESS)
+
+
+@admin.register(FinanceMetricSnapshot)
+class FinanceMetricSnapshotAdmin(admin.ModelAdmin):
+    list_display = (
+        "period_type",
+        "period_start",
+        "period_end",
+        "total_revenue",
+        "net_profit",
+        "profit_margin",
+        "abrupt_withdrawal_revenue",
+        "float_gross_revenue",
+        "roi_payable_to_users",
+        "float_net_profit",
+    )
+
+    list_filter = ("period_type", "period_start")
+    search_fields = ("period_type", "notes")
+    readonly_fields = (
+        "created_at",
+        "updated_at",
+    )
+
+    actions = ["refresh_selected_snapshots"]
+
+    @admin.action(description="Refresh selected finance snapshots")
+    def refresh_selected_snapshots(self, request, queryset):
+        from .finance_metrics import calculate_finance_metrics
+
+        count = 0
+        for snapshot in queryset:
+            calculate_finance_metrics(
+                period_type=snapshot.period_type,
+                target_date=snapshot.period_start,
+                save=True,
+            )
+            count += 1
+
+        self.message_user(request, f"{count} finance snapshot(s) refreshed.")
 
 
 admin.site.register(DailyROIAccrual, DailyROIAccrualAdmin)

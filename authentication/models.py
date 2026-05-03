@@ -22,7 +22,6 @@ from django.db import transaction
 import logging
 from django.db.models import F
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -1388,7 +1387,6 @@ from dateutil.relativedelta import relativedelta
 from django.utils import timezone
 from datetime import timedelta
 from decimal import Decimal
-
 
 logger = logging.getLogger(__name__)
 
@@ -3009,3 +3007,59 @@ class AmbassadorAttendanceSubmission(models.Model):
 
     def __str__(self):
         return f"{self.user.email} - {self.week_key} - {self.attendance_date}"
+
+
+class FinanceMetricSnapshot(models.Model):
+    PERIOD_CHOICES = (
+        ("daily", "Daily"),
+        ("monthly", "Monthly"),
+        ("yearly", "Yearly"),
+    )
+
+    period_type = models.CharField(
+        max_length=20, choices=PERIOD_CHOICES, default="monthly"
+    )
+    period_start = models.DateField(db_index=True)
+    period_end = models.DateField(db_index=True)
+
+    abrupt_withdrawal_revenue = models.DecimalField(
+        max_digits=14, decimal_places=2, default=0
+    )
+    float_gross_revenue = models.DecimalField(
+        max_digits=14, decimal_places=2, default=0
+    )
+    roi_payable_to_users = models.DecimalField(
+        max_digits=14, decimal_places=2, default=0
+    )
+    float_net_profit = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+
+    property_sales_revenue = models.DecimalField(
+        max_digits=14, decimal_places=2, default=0
+    )
+    rent_commission_revenue = models.DecimalField(
+        max_digits=14, decimal_places=2, default=0
+    )
+
+    total_revenue = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    total_expenses = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    net_profit = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    profit_margin = models.DecimalField(max_digits=7, decimal_places=2, default=0)
+
+    total_savings_balance = models.DecimalField(
+        max_digits=14, decimal_places=2, default=0
+    )
+    total_investment_balance = models.DecimalField(
+        max_digits=14, decimal_places=2, default=0
+    )
+
+    notes = models.TextField(blank=True, null=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ("period_type", "period_start", "period_end")
+        ordering = ["-period_start"]
+
+    def __str__(self):
+        return f"{self.period_type.title()} Finance Snapshot: {self.period_start} - {self.period_end}"

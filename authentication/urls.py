@@ -42,6 +42,7 @@ from .views import (
     AmbassadorMonthlyReportCreateView,
     AmbassadorMonthlyReportStatusView,
     submit_ambassador_attendance,
+    AdminFinanceMetricsView,
 )
 from django.views.decorators.csrf import csrf_exempt
 from authentication.views import CustomGraphQLView
@@ -390,4 +391,10 @@ urlpatterns = [
     ),
     # AI
     path("admin-ai-chat/", admin_ai_chat, name="admin_ai_chat"),
+    # AdminFinanceMetrics
+    path(
+        "admin/finance-metrics/",
+        AdminFinanceMetricsView.as_view(),
+        name="admin-finance-metrics",
+    ),
 ]
