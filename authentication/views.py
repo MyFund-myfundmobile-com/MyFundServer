@@ -5063,25 +5063,40 @@ def make_withdrawal_through_admin(user, amount, transaction_id):
         print(f"\n(Error) make_withdrawal_through_admin():  {e}\n")
 
 
-from decimal import Decimal
-
 from decimal import Decimal, InvalidOperation
-from django.core.mail import send_mail
+from django.db import transaction as db_transaction
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
-import uuid
+
+from authentication.models import CustomUser
+from authentication.utils import (
+    create_transaction,
+    send_generic_email,
+    send_push_notification,
+)
 
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def wallet_transfer_view(request):
-    from .utils import create_transaction
-
     sender = request.user
     data = request.data
-    target_email = data.get("recipient_email")
+
+    target_email = (data.get("recipient_email") or "").strip().lower()
+
+    if not target_email:
+        return Response(
+            {"error": "Recipient email is required."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if sender.email.lower() == target_email:
+        return Response(
+            {"error": "You cannot send money to yourself."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     try:
         amount = Decimal(str(data.get("amount")))
@@ -5097,84 +5112,90 @@ def wallet_transfer_view(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    # Check sender balance
-    if sender.wallet < amount:
+    sender_wallet = Decimal(str(sender.wallet or 0))
+
+    if sender_wallet < amount:
         return Response(
             {"error": "Insufficient balance in the wallet."},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    # Find recipient
     try:
-        target_user = CustomUser.objects.get(email=target_email)
+        target_user = CustomUser.objects.get(email__iexact=target_email)
     except CustomUser.DoesNotExist:
         return Response(
             {"error": "Target user not found."},
             status=status.HTTP_404_NOT_FOUND,
         )
 
-    # 🔥 SINGLE TRANSACTION BLOCK (atomic consistency)
-    with transaction.atomic():
-        # debit sender
+    with db_transaction.atomic():
         create_transaction(
             user=sender,
             amount=amount,
             transaction_type="debit",
             source="WALLET",
-            description=f"Sent to {target_user.first_name}",
+            description=f"Sent to {target_user.first_name or target_user.email}",
         )
 
-        # credit receiver
         create_transaction(
             user=target_user,
             amount=amount,
             transaction_type="credit",
             credited_to="WALLET",
-            description=f"Received from {sender.first_name}",
+            description=f"Received from {sender.first_name or sender.email}",
         )
 
-    # Push notification to recipient
-    send_push_notification(
-        user=target_user,
-        title="You've Received ₦{:,.2f} from {}".format(amount, sender.first_name),
-        message=f"{sender.first_name} just sent you ₦{amount}. Check your Wallet.",
-        data={"amount": str(amount), "from": sender.email},
-        notif_type="CREDIT",
-    )
+    try:
+        send_push_notification(
+            user=target_user,
+            title=f"You've Received ₦{amount:,.2f}",
+            message=f"{sender.first_name or 'Someone'} just sent you ₦{amount:,.2f}. Check your Wallet.",
+            data={"amount": str(amount), "from": sender.email},
+            notif_type="CREDIT",
+        )
+    except Exception:
+        pass
 
-    send_push_notification(
-        user=sender,
-        title="You sent ₦{:,.2f} to {}".format(amount, target_user.first_name),
-        message=f"You successfully sent ₦{amount} to {target_user.first_name}.",
-        data={"amount": str(amount), "to": target_user.email},
-        notif_type="DEBIT",
-    )
+    try:
+        send_push_notification(
+            user=sender,
+            title=f"You Sent ₦{amount:,.2f}",
+            message=f"You successfully sent ₦{amount:,.2f} to {target_user.first_name or target_user.email}.",
+            data={"amount": str(amount), "to": target_user.email},
+            notif_type="DEBIT",
+        )
+    except Exception:
+        pass
 
-    # Email to sender
     send_generic_email(
-        subject=f"You Sent ₦{amount} to {target_user.first_name}",
+        subject=f"You Sent ₦{amount:,.2f} to {target_user.first_name or target_user.email}",
         message=(
-            f"Hi {sender.first_name},<br><br>"
-            f"You have successfully transferred ₦{amount} to {target_user.first_name} ({target_user.email}).<br><br>"
+            f"Hi {sender.first_name or 'there'},<br><br>"
+            f"You have successfully transferred ₦{amount:,.2f} to "
+            f"{target_user.first_name or target_user.email} ({target_user.email}).<br><br>"
             f"Thank you for using MyFund!"
         ),
-        from_email="MyFund <info@myfundmobile.com>",
         recipient_list=[sender.email],
     )
 
-    # Email to receiver
     send_generic_email(
-        subject=f"You Received ₦{amount} from {sender.first_name}",
+        subject=f"You Received ₦{amount:,.2f} from {sender.first_name or 'a MyFund user'}",
         message=(
-            f"Hi {target_user.first_name},<br><br>"
-            f"You have received ₦{amount} from {sender.first_name} ({sender.email}).<br><br>"
+            f"Hi {target_user.first_name or 'there'},<br><br>"
+            f"You have received ₦{amount:,.2f} from "
+            f"{sender.first_name or sender.email} ({sender.email}).<br><br>"
             f"Thank you for using MyFund!"
         ),
-        from_email="MyFund <info@myfundmobile.com>",
         recipient_list=[target_user.email],
     )
 
-    return Response({"success": True})
+    return Response(
+        {
+            "success": True,
+            "message": "Wallet transfer successful.",
+        },
+        status=status.HTTP_200_OK,
+    )
 
 
 from rest_framework import generics, status
