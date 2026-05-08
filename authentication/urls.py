@@ -39,6 +39,7 @@ from .views import (
     initiate_dva_quicksave,
     initiate_dva_quickinvest,
     requery_my_dva_payments,
+    remove_dva_account,
     AmbassadorMonthlyReportCreateView,
     AmbassadorMonthlyReportStatusView,
     submit_ambassador_attendance,
@@ -240,6 +241,7 @@ urlpatterns = [
         requery_my_dva_payments,
         name="requery_my_dva_payments",
     ),
+    path("dva/remove/", remove_dva_account, name="remove_dva_account"),
     # PIN Management APIs
     path("update-myfundpin/", views.update_myfund_pin, name="update-myfundpin"),
     path("has-myfundpin/", views.has_myfund_pin, name="has-myfundpin"),

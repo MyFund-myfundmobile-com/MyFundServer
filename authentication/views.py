@@ -6647,6 +6647,46 @@ def initiate_dva_quickinvest(request):
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
+@api_view(["DELETE"])
+@permission_classes([IsAuthenticated])
+def remove_dva_account(request):
+    """
+    Allows a user to remove their own DVA from the app.
+    Clears local DVA fields only (does not call Paystack to deactivate).
+    """
+    user = request.user
+
+    if not user.dva_account_number:
+        return Response(
+            {"error": "You don't have a DVA account to remove."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Clear all DVA-related fields
+    user.dva_account_number = None
+    user.dva_account_name = None
+    user.dva_bank_name = None
+    user.dva_account_id = None
+    user.dva_assigned_at = None
+    user.paystack_identified = False
+    user.paystack_identification_status = None
+    user.paystack_identification_reason = None
+    user.save(update_fields=[
+        "dva_account_number",
+        "dva_account_name",
+        "dva_bank_name",
+        "dva_account_id",
+        "dva_assigned_at",
+        "paystack_identified",
+        "paystack_identification_status",
+        "paystack_identification_reason",
+    ])
+
+    return Response(
+        {"message": "Your virtual account has been removed successfully."},
+        status=status.HTTP_200_OK,
+    )
+
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
