@@ -224,6 +224,7 @@ def confirm_otp(request):
                 "tolulopeahmed@gmail.com",
                 "ceo@myfundmobile.com",
                 "janet.adegbenro@gmail.com",
+                "josephgideon95@gmail.com",
             ]
             admin_users = CustomUser.objects.filter(email__in=admin_emails)
             for admin_user in admin_users:
@@ -232,10 +233,11 @@ def confirm_otp(request):
                         send_push_notification(
                             user=admin_user,
                             title=f"🎉 New User Signup ({u.first_name})",
-                            message=f"{u.first_name} {u.last_name} ({u.email}) has just completed signup.",
+                            message=f"{u.first_name} {u.last_name} ({u.email}) - {u.phone_number} has just completed signup.",
                             data={
                                 "user_id": u.id,
                                 "email": u.email,
+                                "phone_number": u.phone_number,
                                 "type": "admin_signup_alert",
                             },
                             notif_type="ADMIN_ALERT",
