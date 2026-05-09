@@ -233,7 +233,7 @@ def confirm_otp(request):
                         send_push_notification(
                             user=admin_user,
                             title=f"🎉 New User Signup ({u.first_name})",
-                            message=f"{u.first_name} {u.last_name} ({u.email}) - {u.phone_number} has just completed signup.",
+                            message=f"{u.first_name} {u.last_name} ({u.email}) - {' '.join([u.phone_number[:4], u.phone_number[4:7], u.phone_number[7:]])} has just completed signup.",
                             data={
                                 "user_id": u.id,
                                 "email": u.email,
