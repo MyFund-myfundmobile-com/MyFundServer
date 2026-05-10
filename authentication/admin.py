@@ -1427,7 +1427,7 @@ class BankTransferRequestAdmin(admin.ModelAdmin):
         "user__last_name",
         "transaction_id",
     )
-    actions = ["approve_bank_transfer"]
+    actions = ["approve_bank_transfer", "mark_as_abandoned"]
 
     # ✅ DISPLAY HELPERS (must be class-level)
     def user_email(self, obj):
@@ -1471,6 +1471,29 @@ class BankTransferRequestAdmin(admin.ModelAdmin):
             request,
             "Selected bank transfers approved successfully!",
             level="success",
+        )
+
+    @admin.action(description="🧹 Mark selected pending transfers as abandoned")
+    def mark_as_abandoned(self, request, queryset):
+        cleaned_count = 0
+
+        for transfer_request in queryset.filter(is_approved=False):
+            transaction = Transaction.objects.filter(
+                user=transfer_request.user,
+                transaction_id=transfer_request.transaction_id,
+                status__iexact="pending",
+            ).first()
+
+            if transaction:
+                transaction.status = "abandoned"
+                transaction.description = "QuickSave (Abandoned)"
+                transaction.save(update_fields=["status", "description"])
+                cleaned_count += 1
+
+        self.message_user(
+            request,
+            f"{cleaned_count} abandoned QuickSave transfer(s) cleaned up.",
+            level=messages.SUCCESS,
         )
 
     approve_bank_transfer.short_description = "Approve selected bank transfers"

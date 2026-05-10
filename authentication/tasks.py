@@ -1951,3 +1951,35 @@ def credit_team_wallets_task(
         test=test,
         test_email=test_email,
     )
+
+
+from datetime import timedelta
+from django.utils import timezone
+from .models import BankTransferRequest, Transaction
+
+
+def cleanup_abandoned_manual_quicksaves():
+    cutoff = timezone.now() - timedelta(hours=24)
+
+    old_requests = BankTransferRequest.objects.filter(
+        is_approved=False,
+        created_at__lt=cutoff,
+    )
+
+    cleaned_count = 0
+
+    for req in old_requests:
+        transaction = Transaction.objects.filter(
+            user=req.user,
+            transaction_id=req.transaction_id,
+            status__iexact="pending",
+            description__icontains="QuickSave",
+        ).first()
+
+        if transaction:
+            transaction.status = "abandoned"
+            transaction.description = "QuickSave (Abandoned)"
+            transaction.save(update_fields=["status", "description"])
+            cleaned_count += 1
+
+    return cleaned_count

@@ -2367,6 +2367,9 @@ class UserTransactionListView(generics.ListAPIView):
                 description__icontains="QuickSave",
                 paystack_reference="",
             )
+            .exclude(
+                status__iexact="abandoned",
+            )
             .order_by("-date", "-time")
         )
 
