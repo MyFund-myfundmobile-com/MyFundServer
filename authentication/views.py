@@ -2357,6 +2357,9 @@ class UserTransactionListView(generics.ListAPIView):
 
         transactions = (
             Transaction.objects.filter(user=user)
+            # Hide abandoned transactions generally
+            .exclude(status__iexact="abandoned")
+            # Hide abandoned/unresolved QuickSave pending transfers
             .exclude(
                 status__iexact="pending",
                 description__icontains="QuickSave",
@@ -2367,8 +2370,16 @@ class UserTransactionListView(generics.ListAPIView):
                 description__icontains="QuickSave",
                 paystack_reference="",
             )
+            # Hide abandoned/unresolved QuickInvest pending transfers
             .exclude(
-                status__iexact="abandoned",
+                status__iexact="pending",
+                description__icontains="QuickInvest",
+                paystack_reference__isnull=True,
+            )
+            .exclude(
+                status__iexact="pending",
+                description__icontains="QuickInvest",
+                paystack_reference="",
             )
             .order_by("-date", "-time")
         )

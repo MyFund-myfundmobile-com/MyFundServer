@@ -1503,7 +1503,13 @@ class BankTransferRequestAdmin(admin.ModelAdmin):
 class InvestTransferRequestAdmin(admin.ModelAdmin):
     list_display = ("user", "amount", "is_approved", "created_at")
     list_filter = ("is_approved",)
-    actions = ["approve_invest_transfer", "reject_invest_transfer"]
+    search_fields = (
+        "user__email",
+        "user__first_name",
+        "user__last_name",
+        "transaction_id",
+    )
+    actions = ["approve_invest_transfer", "mark_as_abandoned"]
 
     def approve_invest_transfer(self, request, queryset):
         for transfer_request in queryset:
@@ -1534,6 +1540,33 @@ class InvestTransferRequestAdmin(admin.ModelAdmin):
             "Selected investment transfers approved successfully!",
             level="success",
         )
+
+    @admin.action(
+        description="🧹 Mark selected pending QuickInvest transfers as abandoned"
+    )
+    def mark_as_abandoned(self, request, queryset):
+        cleaned_count = 0
+
+        for transfer_request in queryset.filter(is_approved=False):
+            transaction = Transaction.objects.filter(
+                user=transfer_request.user,
+                transaction_id=transfer_request.transaction_id,
+                status__iexact="pending",
+            ).first()
+
+            if transaction:
+                transaction.status = "abandoned"
+                transaction.description = "QuickInvest (Abandoned)"
+                transaction.save(update_fields=["status", "description"])
+                cleaned_count += 1
+
+        self.message_user(
+            request,
+            f"{cleaned_count} abandoned QuickInvest transfer(s) cleaned up.",
+            level=messages.SUCCESS,
+        )
+
+    approve_invest_transfer.short_description = "Approve selected investment transfers"
 
 
 from django.contrib import admin
