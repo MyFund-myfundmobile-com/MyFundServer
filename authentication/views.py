@@ -2354,12 +2354,18 @@ class UserTransactionListView(generics.ListAPIView):
 
     def get_queryset(self):
         user = self.request.user
+
         transactions = (
             Transaction.objects.filter(user=user)
             .exclude(
-                status="pending",
-                source="DVA",
+                status__iexact="pending",
+                description__icontains="QuickSave",
                 paystack_reference__isnull=True,
+            )
+            .exclude(
+                status__iexact="pending",
+                description__icontains="QuickSave",
+                paystack_reference="",
             )
             .order_by("-date", "-time")
         )
