@@ -2354,7 +2354,16 @@ class UserTransactionListView(generics.ListAPIView):
 
     def get_queryset(self):
         user = self.request.user
-        transactions = Transaction.objects.filter(user=user).order_by("-date", "-time")
+        transactions = (
+            Transaction.objects.filter(user=user)
+            .exclude(
+                status="pending",
+                source="DVA",
+                paystack_reference__isnull=True,
+            )
+            .order_by("-date", "-time")
+        )
+
         return transactions
 
 
@@ -6649,6 +6658,7 @@ def initiate_dva_quickinvest(request):
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
+
 @api_view(["DELETE"])
 @permission_classes([IsAuthenticated])
 def remove_dva_account(request):
@@ -6673,16 +6683,18 @@ def remove_dva_account(request):
     user.paystack_identified = False
     user.paystack_identification_status = None
     user.paystack_identification_reason = None
-    user.save(update_fields=[
-        "dva_account_number",
-        "dva_account_name",
-        "dva_bank_name",
-        "dva_account_id",
-        "dva_assigned_at",
-        "paystack_identified",
-        "paystack_identification_status",
-        "paystack_identification_reason",
-    ])
+    user.save(
+        update_fields=[
+            "dva_account_number",
+            "dva_account_name",
+            "dva_bank_name",
+            "dva_account_id",
+            "dva_assigned_at",
+            "paystack_identified",
+            "paystack_identification_status",
+            "paystack_identification_reason",
+        ]
+    )
 
     return Response(
         {"message": "Your virtual account has been removed successfully."},
@@ -7119,6 +7131,162 @@ def paystack_webhook(request):
         )
 
 
+def process_dva_credit_from_paystack_event(event):
+    data = event.get("data", {}) or {}
+
+    reference = data.get("reference") or data.get("id")
+    payment_channel = data.get("channel")
+    email = (data.get("customer", {}) or {}).get("email")
+    amount = Decimal(data.get("amount", 0)) / 100
+
+    authorization = data.get("authorization", {}) or {}
+    receiver_account_number = authorization.get("receiver_bank_account_number")
+
+    if not reference or amount <= 0:
+        print("Invalid DVA webhook payload")
+        return False
+
+    # Prevent duplicate credit
+    existing = Transaction.objects.filter(
+        paystack_reference=reference,
+        status="confirmed",
+    ).exists()
+
+    if existing:
+        print("Duplicate DVA payment ignored")
+        return True
+
+    user = None
+
+    if receiver_account_number:
+        user = CustomUser.objects.filter(
+            dva_account_number=receiver_account_number
+        ).first()
+
+    if not user and email:
+        user = CustomUser.objects.filter(email=email).first()
+
+    if not user:
+        print(f"DVA user not found. Email={email}, Account={receiver_account_number}")
+        return False
+
+    intent = (
+        DvaDepositIntent.objects.filter(
+            user=user,
+            amount=amount,
+            status="pending",
+        )
+        .order_by("-created_at")
+        .first()
+    )
+
+    purpose = intent.purpose if intent else "SAVINGS"
+
+    transaction = None
+
+    if intent:
+        transaction = Transaction.objects.filter(
+            user=user,
+            transaction_id=intent.transaction_id,
+            status="pending",
+        ).first()
+
+    # If user paid without an active intent, create confirmed transaction anyway
+    if not transaction:
+        transaction = create_transaction(
+            user=user,
+            amount=amount,
+            transaction_type="credit",
+            status="confirmed",
+            source="DVA",
+            credited_to="INVESTMENT" if purpose == "INVESTMENT" else "SAVINGS",
+            description=(
+                "QuickInvest (Transfer)"
+                if purpose == "INVESTMENT"
+                else "QuickSave (Transfer)"
+            ),
+            service_charge=0,
+            reference=reference,
+        )
+
+        transaction.paystack_reference = reference
+        transaction.paystack_auth_code = authorization.get("authorization_code")
+        transaction.save(update_fields=["paystack_reference", "paystack_auth_code"])
+
+    else:
+        if purpose == "SAVINGS":
+            ok, msg = approve_quicksave_credit(
+                user=user,
+                amount=amount,
+                transaction_id=transaction.transaction_id,
+                description="QuickSave (Transfer)",
+                source="DVA",
+                paystack_reference=reference,
+                paystack_auth_code=authorization.get("authorization_code"),
+            )
+
+            if not ok:
+                print(f"QuickSave DVA approval failed: {msg}")
+                return False
+
+        else:
+            user.refresh_from_db()
+            balance_before = user.investment or Decimal("0.00")
+            balance_after = balance_before + amount
+
+            transaction.transaction_type = "credit"
+            transaction.status = "confirmed"
+            transaction.source = "DVA"
+            transaction.credited_to = "INVESTMENT"
+            transaction.description = "QuickInvest (Transfer)"
+            transaction.paystack_reference = reference
+            transaction.paystack_auth_code = authorization.get("authorization_code")
+            transaction.balance_before = balance_before
+            transaction.balance_after = balance_after
+            transaction.save()
+
+            user.investment = balance_after
+            user.update_total_savings_and_investment_this_month()
+            user.save()
+
+    if intent:
+        intent.status = "confirmed"
+        intent.paystack_reference = reference
+        intent.matched_account_number = receiver_account_number
+        intent.confirmed_at = timezone.now()
+        intent.save(
+            update_fields=[
+                "status",
+                "paystack_reference",
+                "matched_account_number",
+                "confirmed_at",
+            ]
+        )
+
+    send_push_notification(
+        user=user,
+        title=(
+            "QuickInvest Successful ✅"
+            if purpose == "INVESTMENT"
+            else "QuickSave Successful ✅"
+        ),
+        message=(
+            f"Hi {user.first_name}, your transfer of ₦{amount:,.2f} "
+            f"has been added to your {'Investment' if purpose == 'INVESTMENT' else 'Savings'} account."
+        ),
+        data={
+            "amount": str(amount),
+            "transaction_id": transaction.transaction_id,
+            "type": "QuickInvest" if purpose == "INVESTMENT" else "QuickSave",
+            "status": "confirmed",
+        },
+        notif_type="CREDIT",
+    )
+
+    print(f"✅ DVA {purpose} credited successfully for {user.email}")
+    return True
+
+
 from .utils import create_transaction
 
 
@@ -7168,156 +7336,10 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                 print("FULL PAYSTACK EVENT:", event)
 
                 # --------------------------------------------------
-                # DVA / bank transfer intent-based handling
+                # DVA / bank transfer handling
                 # --------------------------------------------------
                 if payment_channel in ["dedicated_nuban", "bank_transfer", "bank"]:
-                    user = None
-
-                    if receiver_account_number:
-                        user = CustomUser.objects.filter(
-                            dva_account_number=receiver_account_number
-                        ).first()
-
-                    if not user and email:
-                        user = CustomUser.objects.filter(email=email).first()
-
-                    if not user:
-                        print(
-                            f"User not found for DVA transfer. Email={email}, "
-                            f"Account={receiver_account_number}"
-                        )
-                        return
-
-                    existing = (
-                        Transaction.objects.filter(transaction_id=reference).first()
-                        or Transaction.objects.filter(
-                            paystack_reference=reference
-                        ).first()
-                    )
-                    if existing and existing.status == "confirmed":
-                        print("Duplicate DVA transfer ignored")
-                        return
-
-                    intent = (
-                        DvaDepositIntent.objects.filter(
-                            user=user,
-                            amount=amount,
-                            status="pending",
-                        )
-                        .order_by("-created_at")
-                        .first()
-                    )
-
-                    if not intent:
-                        print(
-                            f"No pending DVA intent found for {user.email} amount {amount}"
-                        )
-                        return
-
-                    transaction = Transaction.objects.filter(
-                        user=user,
-                        transaction_id=intent.transaction_id,
-                        status="pending",
-                    ).first()
-
-                    if not transaction:
-                        print(
-                            f"No pending transaction found for intent {intent.transaction_id}"
-                        )
-                        return
-
-                    if intent.purpose != "SAVINGS":
-                        # Snapshot investment balance before crediting
-                        user.refresh_from_db()
-                        balance_before = user.investment
-                        balance_after = balance_before + amount
-
-                        transaction.status = "confirmed"
-                        transaction.paystack_reference = reference
-                        transaction.paystack_auth_code = authorization.get(
-                            "authorization_code"
-                        )
-                        transaction.description = "QuickInvest (Transfer)"
-                        transaction.balance_before = balance_before
-                        transaction.balance_after = balance_after
-                        transaction.save(
-                            update_fields=[
-                                "status",
-                                "paystack_reference",
-                                "paystack_auth_code",
-                                "description",
-                                "balance_before",
-                                "balance_after",
-                            ]
-                        )
-
-                    intent.status = "confirmed"
-                    intent.paystack_reference = reference
-                    intent.matched_account_number = receiver_account_number
-                    intent.confirmed_at = timezone.now()
-                    intent.save(
-                        update_fields=[
-                            "status",
-                            "paystack_reference",
-                            "matched_account_number",
-                            "confirmed_at",
-                        ]
-                    )
-
-                    if intent.purpose == "SAVINGS":
-                        ok, msg = approve_quicksave_credit(
-                            user=user,
-                            amount=amount,
-                            transaction_id=transaction.transaction_id,
-                            description="QuickSave (Transfer)",
-                            source="DVA",
-                            paystack_reference=reference,
-                            paystack_auth_code=authorization.get("authorization_code"),
-                        )
-
-                        if not ok:
-                            print(f"QuickSave DVA approval failed: {msg}")
-                            return
-
-                    else:
-                        user.investment += amount
-
-                        send_push_notification(
-                            user=user,
-                            title="QuickInvest Approved ✅",
-                            message=(
-                                f"Hi {user.first_name}, your transfer of ₦{amount:,.2f} "
-                                f"has been added to your Investment account."
-                            ),
-                            data={
-                                "amount": str(amount),
-                                "transaction_id": transaction.transaction_id,
-                                "type": "QuickInvest",
-                            },
-                            notif_type="CREDIT",
-                        )
-
-                        send_generic_email(
-                            subject="QuickInvest Updated! ✅",
-                            message=(
-                                f"Hi {user.first_name},<br><br>"
-                                f"Your bank transfer of ₦{amount:,.2f} has been processed "
-                                f"successfully and added to your Investment account."
-                            ),
-                            from_email="MyFund <info@myfundmobile.com>",
-                            recipient_list=[user.email],
-                        )
-
-                    if intent.purpose != "SAVINGS":
-                        if user.referral:
-                            user.confirm_referral_rewards(is_referrer=False)
-
-                        user.update_total_savings_and_investment_this_month()
-                        user.save()
-
-                    print(
-                        f"✅ DVA {intent.purpose} credited successfully for {user.email}"
-                    )
+                    process_dva_credit_from_paystack_event(event)
                     return
 
                 # --------------------------------------------------
@@ -7964,6 +7986,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
 
             case "dedicated_account.credit":
                 print("Received dedicated_account.credit webhook")
+                print("DEDICATED ACCOUNT CREDIT PAYLOAD:", event)
                 return
 
             case "customeridentification.success":

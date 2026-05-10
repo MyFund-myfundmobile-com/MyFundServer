@@ -1584,6 +1584,8 @@ def approve_quicksave_credit(
     transaction_id,
     description="QuickSave (Transfer)",
     source="BANK_TRANSFER",
+    paystack_reference=None,
+    paystack_auth_code=None,
 ):
     amount = Decimal(str(amount))
 
@@ -1618,6 +1620,8 @@ def approve_quicksave_credit(
         tx.total_amount = amount
         tx.balance_before = previous_balance
         tx.balance_after = new_balance
+        tx.paystack_reference = paystack_reference
+        tx.paystack_auth_code = paystack_auth_code
         tx.save(
             update_fields=[
                 "status",
@@ -1629,6 +1633,8 @@ def approve_quicksave_credit(
                 "total_amount",
                 "balance_before",
                 "balance_after",
+                "paystack_reference",
+                "paystack_auth_code",
             ]
         )
 
@@ -1636,6 +1642,12 @@ def approve_quicksave_credit(
         locked_user.confirm_referral_rewards(is_referrer=False)
 
     locked_user.update_total_savings_and_investment_this_month()
+    locked_user.save(
+        update_fields=[
+            "total_savings_and_investments_this_month",
+            "updated_at",
+        ]
+    )
 
     send_generic_email(
         subject="QuickSave Updated! ✅",
@@ -1661,6 +1673,7 @@ def approve_quicksave_credit(
             "type": "QuickSave",
             "source": source,
             "status": "confirmed",
+            "paystack_reference": paystack_reference,
         },
         notif_type="CREDIT",
     )
