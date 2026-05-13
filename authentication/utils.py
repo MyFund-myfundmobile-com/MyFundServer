@@ -248,15 +248,20 @@ def send_admin_push_notification(
 import logging
 import re
 import time
+import os
+import resend
 from datetime import date
 from django.conf import settings
-from django.core.mail import send_mail
-from django.template.loader import render_to_string
-from django.utils.html import strip_tags
 from django.utils import timezone
+from django.utils.html import strip_tags
+from django.template.loader import render_to_string
+
 from .models import CustomUser, ROITransaction
 
 logger = logging.getLogger(__name__)
+
+# ===== RESEND INIT =====
+resend.api_key = os.environ.get("RESEND_API_KEY")
 
 
 def validate_email(email):
@@ -274,8 +279,9 @@ def send_generic_email(
     template="email/email.html",
 ):
     """
-    Smart, universal email sender with Namecheap-safe bulk sending.
+    Smart, universal email sender (RESEND VERSION - SMTP REMOVED)
     """
+
     logger.info(
         f"📧 START send_generic_email - Subject: '{subject}', Recipients: {len(recipient_list) if isinstance(recipient_list, list) else 'single'}"
     )
@@ -308,11 +314,12 @@ def send_generic_email(
 
     from_email = from_email or settings.DEFAULT_FROM_EMAIL
     total_valid = len(valid_recipients)
+
     logger.info(
         f"📧 Valid recipients: {total_valid}, Invalid skipped: {len(invalid_recipients)}"
     )
 
-    # ---------- Personalization ----------
+    # ---------- PERSONALIZATION (UNCHANGED) ----------
     def personalize(email_addr):
         try:
             user = CustomUser.objects.filter(email=email_addr).first()
@@ -360,6 +367,7 @@ def send_generic_email(
 
             p_subject = subject
             p_message = message
+
             for k, v in placeholders.items():
                 p_subject = p_subject.replace(k, v)
                 p_message = p_message.replace(k, v)
@@ -396,30 +404,35 @@ def send_generic_email(
             }
 
     payloads = [personalize(e) for e in valid_recipients]
+
     logger.info(f"📧 Personalization complete. Payloads: {len(payloads)}")
 
-    # ---------- INLINE SEND (≤30 recipients) ----------
+    # ---------- INLINE SEND (RESEND REPLACEMENT) ----------
     if use_celery_threshold == 0 or total_valid <= use_celery_threshold:
-        logger.info(f"📧 Using INLINE send for {total_valid} recipients")
+        logger.info(f"📧 Using INLINE Resend send for {total_valid} recipients")
+
         sent_count = 0
         failed_emails = []
 
         for p in payloads:
             try:
-                email = EmailMultiAlternatives(
-                    subject=p["subject"],
-                    body=p["plain_message"],
-                    from_email=from_email,
-                    to=[p["to"]],
+                # ===== RESEND (REPLACES SMTP COMPLETELY) =====
+                resend.Emails.send(
+                    {
+                        "from": from_email or "MyFund <noreply@myfundmobile.com>",
+                        "to": [p["to"]],
+                        "subject": p["subject"],
+                        "html": p["html_message"],
+                    }
                 )
-                email.attach_alternative(p["html_message"], "text/html")
-                email.send(fail_silently=False)
 
                 sent_count += 1
-                logger.info(f"✅ Email sent to {p['to']}")
+                logger.info(f"✅ Email sent via Resend to {p['to']}")
+
             except Exception as e:
-                logger.error(f"❌ Email failed for {p['to']}: {e}")
+                logger.error(f"❌ Resend failed for {p['to']}: {e}")
                 failed_emails.append(p["to"])
+
             time.sleep(1)
 
         return {
@@ -432,24 +445,27 @@ def send_generic_email(
             "invalid_emails": invalid_recipients,
         }
 
-    # ---------- CELERY BATCH SEND (>30 recipients) ----------
+    # ---------- CELERY BATCH SEND (UNCHANGED LOGIC) ----------
     logger.info(f"📧 Using CELERY batch send for {total_valid} recipients")
+
     try:
         from .tasks import send_bulk_email_task
 
-        # Namecheap-safe batching: 45 emails/hour
         BATCH_SIZE = 45
-        DELAY_BETWEEN_EMAILS = 72  # seconds (~50/hour)
+        DELAY_BETWEEN_EMAILS = 72
         num_batches = (total_valid + BATCH_SIZE - 1) // BATCH_SIZE
+
         batches = [
             payloads[i : i + BATCH_SIZE] for i in range(0, total_valid, BATCH_SIZE)
         ]
 
         for i, batch in enumerate(batches):
-            countdown_seconds = i * 900  # 15 minutes between batches
+            countdown_seconds = i * 900
+
             logger.info(
-                f"⏱ Scheduling batch {i+1}/{num_batches} to run in {countdown_seconds}s ({len(batch)} emails)"
+                f"⏱ Scheduling batch {i+1}/{num_batches} in {countdown_seconds}s ({len(batch)} emails)"
             )
+
             send_bulk_email_task.apply_async(
                 args=[batch, from_email],
                 kwargs={
@@ -464,8 +480,8 @@ def send_generic_email(
             "status": "queued",
             "total": total_valid,
             "invalid_skipped": len(invalid_recipients),
-            "method": "namecheap_safe_batches",
-            "note": f"Emails queued in safe batches (50/hr, ~12-14h total)",
+            "method": "resend_batched",
+            "note": "Emails queued in safe batches",
             "estimated_hours": f"{num_batches} hours",
         }
 

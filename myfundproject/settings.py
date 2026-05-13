@@ -97,14 +97,13 @@ SECURE_SSL_REDIRECT = False  # Disable forced HTTPS redirect@
 SESSION_COOKIE_SECURE = False  # Prevent forcing HTTPS for cookies
 CSRF_COOKIE_SECURE = False  # Prevent CSRF issues with HTTPS
 
-
+# Koyeb
 KOYEB_EXTERNAL_HOSTNAME = os.environ.get("KOYEB_PUBLIC_DOMAIN")
 if KOYEB_EXTERNAL_HOSTNAME:
     ALLOWED_HOSTS.append(KOYEB_EXTERNAL_HOSTNAME)
 
 
 # Application definition
-
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",
@@ -386,27 +385,11 @@ CELERY_TASK_ROUTES = {
 }
 
 # ===== EMAIL CONFIGURATION =====
-EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
-# DEFAULT_FROM_EMAIL = "MyFund <message@myfundmobile.com>"
-DEFAULT_FROM_EMAIL = "MyFund <auth@myfundmobile.com>"
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
 
-# SSL (Implicit SSL)
-EMAIL_HOST = "mail.privateemail.com"
-EMAIL_PORT = 465
-EMAIL_USE_SSL = True
-EMAIL_USE_TLS = False
-EMAIL_TIMEOUT = 30
+EMAIL_BACKEND = "django.core.mail.backends.dummy.EmailBackend"
 
-# # TLS (Explicit SSL)
-# EMAIL_HOST = "mail.privateemail.com"
-# EMAIL_PORT = 587
-# EMAIL_USE_SSL = False
-# EMAIL_USE_TLS = True
-# EMAIL_TIMEOUT = 30
-
-
-EMAIL_HOST_USER = "auth@myfundmobile.com"
-EMAIL_HOST_PASSWORD = "AdminSecure123..."
+DEFAULT_FROM_EMAIL = "MyFund <noreply@mg.myfundmobile.com>"
 
 
 AUTHENTICATION_BACKENDS = [

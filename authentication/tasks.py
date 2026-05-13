@@ -998,6 +998,17 @@ from django.core.mail import send_mail
 
 logger = logging.getLogger(__name__)
 
+from celery import shared_task
+import logging
+import time
+import os
+import resend
+
+logger = logging.getLogger(__name__)
+
+# ===== RESEND INIT =====
+resend.api_key = os.environ.get("RESEND_API_KEY")
+
 
 @shared_task(bind=True, max_retries=3, queue="email_queue")
 def send_bulk_email_task(self, emails, from_email, batch_size=45, delay_seconds=300):
@@ -1014,15 +1025,19 @@ def send_bulk_email_task(self, emails, from_email, batch_size=45, delay_seconds=
 
         for e in batch:
             try:
-                send_mail(
-                    subject=e["subject"],
-                    message=e["plain_message"],
-                    from_email=from_email,
-                    recipient_list=[e["to"]],
-                    html_message=e["html_message"],
-                    fail_silently=False,
+                # ===== RESEND REPLACEMENT (NO SMTP) =====
+                resend.Emails.send(
+                    {
+                        "from": from_email or "MyFund <noreply@myfundmobile.com>",
+                        "to": [e["to"]],
+                        "subject": e["subject"],
+                        "html": e["html_message"],
+                    }
                 )
+
                 sent += 1
+                logger.info(f"✅ Sent via Resend: {e['to']}")
+
             except Exception as ex:
                 failed.append({"email": e["to"], "error": str(ex)})
                 logger.error(f"❌ Failed {e['to']}: {ex}")
@@ -1032,7 +1047,13 @@ def send_bulk_email_task(self, emails, from_email, batch_size=45, delay_seconds=
             time.sleep(delay_seconds)
 
     logger.info(f"📊 Done: {sent}/{total} sent")
-    return {"sent": sent, "failed": len(failed)}
+
+    return {
+        "sent": sent,
+        "failed": len(failed),
+        "failed_emails": failed,
+        "total": total,
+    }
 
 
 from celery import shared_task
