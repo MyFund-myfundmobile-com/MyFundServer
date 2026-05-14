@@ -292,56 +292,52 @@ def generate_otp():
 
 def send_otp_email(user, otp):
     """
-    Sends the OTP email using Django's send_mail with a proper recipient_list.
-    Now always wrapped in MyFund's email/email.html template.
-    Raises on failure so callers can handle/log it.
+    Sends signup OTP email using Resend via send_generic_email.
     """
+
     subject = f"[OTP-{otp}] Did You Just Signup?"
 
-    # Inner content (can be plain text or HTML)
     inner_html = f"""
-    <p>Hi {user.first_name}, </p>
+    <p>Hi {user.first_name},</p>
 
-    <p>We heard you'd like a shiny new MyFund account. Use the One-Time-Password (OTP) below to complete your signup. This code is valid only for 20 minutes, so chop-chop!</p>
+    <p>
+    We heard you'd like a shiny new MyFund account.
+    Use the One-Time-Password (OTP) below to complete your signup.
+    This code is valid for 20 minutes.
+    </p>
 
-    <h1 style="text-align: center; font-size: 36px;">{otp}</h1>
+    <h1 style="text-align:center; font-size:36px;">
+        {otp}
+    </h1>
 
-    <p>If you did not request to create a MyFund account, kindly ignore this email. Otherwise, buckle up, you're in for a treat!</p>
+    <p>
+    If you did not request this, kindly ignore this email.
+    </p>
 
     <p>Cheers! 🥂</p>
     """
 
-    # Wrap in MyFund template
-    context = {
-        "subject": subject,
-        "message": inner_html,  # template should render {{ message|safe }}
-        "user": user,  # optional if your template uses it
-    }
-    html_message = render_to_string("email/email.html", context=context)
-    message_text = strip_tags(html_message)
-
-    from_email = getattr(
-        settings, "DEFAULT_FROM_EMAIL", "MyFund <info@mg.myfundmobile.com>"
-    )
-    recipient_list = [user.email]
-
     try:
-        send_mail(
-            subject,
-            message_text,
-            from_email,
-            recipient_list,
-            html_message=html_message,
-            fail_silently=False,
+        send_generic_email(
+            subject=subject,
+            message=inner_html,
+            recipient_list=[user.email],
+            from_email="MyFund <noreply@mg.myfundmobile.com>",
+            use_celery_threshold=0,
+            template="email/email.html",
         )
-        logger.info("OTP email sent to %s", user.email)
+
+        logger.info(f"✅ Signup OTP email sent to {user.email}")
+
     except Exception as exc:
-        logger.exception("Failed to send OTP email to %s: %s", user.email, str(exc))
+        logger.exception(f"❌ Failed to send signup OTP email to {user.email}: {exc}")
+
         try:
             user.otp = None
             user.save(update_fields=["otp"])
         except Exception:
             user.save()
+
         raise
 
 
