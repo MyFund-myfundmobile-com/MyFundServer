@@ -86,6 +86,7 @@ from .utils import create_paystack_customer, create_dedicated_account
 @permission_classes([AllowAny])
 def signup(request):
     phone_number = request.data.get("phone_number")
+
     if not phone_number:
         return Response(
             {"error": "Phone number is required"},
@@ -103,21 +104,14 @@ def signup(request):
 
     try:
         serializer = SignupSerializer(data=request.data, context={"request": request})
+
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        # --- Create inactive user ---
+        # -----------------------
+        # CREATE USER
+        # -----------------------
         user = serializer.save()
-
-        # Create Paystack customer
-        customer_code = create_paystack_customer(user)
-
-        if customer_code:
-            user.paystack_customer_code = customer_code
-            user.save()
-
-            # Create DVA
-            create_dedicated_account(user)
 
         user.phone_number = validated_phone
         user.how_did_you_hear = serializer.validated_data.get(
@@ -125,10 +119,26 @@ def signup(request):
         )
         user.is_active = False
 
-        # --- Generate OTP ---
+        # -----------------------
+        # PAYSTACK CUSTOMER
+        # -----------------------
+        customer_code = create_paystack_customer(user)
+        if customer_code:
+            user.paystack_customer_code = customer_code
+
+            # -----------------------
+            # DEDICATED VIRTUAL ACCOUNT (DVA)
+            # -----------------------
+            create_dedicated_account(user)
+
+        # -----------------------
+        # OTP GENERATION
+        # -----------------------
         otp = generate_otp()
         user.otp = otp
-        user.last_otp_sent_at = timezone.now()
+
+        if hasattr(user, "last_otp_sent_at"):
+            user.last_otp_sent_at = timezone.now()
 
         user.save(
             update_fields=[
@@ -136,20 +146,21 @@ def signup(request):
                 "how_did_you_hear",
                 "is_active",
                 "otp",
-                "last_otp_sent_at",
+                "paystack_customer_code",
                 "updated_at",
+                *(["last_otp_sent_at"] if hasattr(user, "last_otp_sent_at") else []),
             ]
         )
 
-        # --- Send OTP AFTER response (never block, never fail signup) ---
+        # -----------------------
+        # SEND OTP AFTER COMMIT
+        # -----------------------
         def send_otp_async():
-            # Email (best-effort)
             try:
                 send_otp_email(user, otp)
             except Exception as exc:
                 logger.warning(f"OTP email failed for {user.email}: {exc}")
 
-            # SMS should still attempt even if email fails
             try:
                 if user.phone_number:
                     send_otp_sms(user, otp)
@@ -164,8 +175,12 @@ def signup(request):
 
         return Response(response_data, status=status.HTTP_201_CREATED)
 
-    except Exception:
-        logger.exception("Unexpected error during signup")
+    except Exception as e:
+        logger.exception(f"Unexpected error during signup: {e}")
+        return Response(
+            {"error": "Signup failed. Try again later."},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
 
 import threading
@@ -176,26 +191,41 @@ import threading
 @permission_classes([AllowAny])
 def confirm_otp(request):
     serializer = ConfirmOTPSerializer(data=request.data)
+
     if not serializer.is_valid():
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+    email = serializer.validated_data.get("email", "").strip().lower()
     otp = serializer.validated_data["otp"]
 
+    if not email:
+        return Response(
+            {"message": "Email is required"}, status=status.HTTP_400_BAD_REQUEST
+        )
+
     try:
-        user = CustomUser.objects.get(otp=otp)
+        user = CustomUser.objects.get(email__iexact=email, otp=otp)
     except CustomUser.DoesNotExist:
         return Response({"message": "Invalid OTP."}, status=status.HTTP_400_BAD_REQUEST)
 
     if user.is_active:
-        return Response({"message": "Account already confirmed."}, status=400)
+        return Response(
+            {"message": "Account already confirmed."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
-    # --- Activate user immediately ---
+    # -----------------------
+    # ACTIVATE USER
+    # -----------------------
     user.is_active = True
     user.otp = None
     user.save(update_fields=["is_active", "otp"])
+
     logger.info("Account activated for %s", user.email)
 
-    # --- Background function for emails/pushes/referrals ---
+    # -----------------------
+    # BACKGROUND TASKS
+    # -----------------------
     def background_tasks(u):
         try:
             try:
@@ -207,51 +237,53 @@ def confirm_otp(request):
                 send_push_notification(
                     user=u,
                     title="Welcome to MyFund 🎉",
-                    message=f"Hi {u.first_name}, Welcome to MyFund! Your account is now active. Earn daily returns up to 20% p.a. Make a quicksave to get started!",
+                    message=f"Hi {u.first_name}, your account is now active!",
                     data={"type": "welcome"},
                     notif_type="SYSTEM",
                 )
             except Exception as e:
                 logger.warning(f"Welcome push failed: {e}")
+
             try:
                 if u.referral:
                     u.create_pending_referral_reward()
             except Exception as e:
                 logger.warning(f"Referral reward failed: {e}")
 
-            # Admin push
             admin_emails = [
                 "tolulopeahmed@gmail.com",
                 "ceo@myfundmobile.com",
                 "janet.adegbenro@gmail.com",
                 "josephgideon95@gmail.com",
             ]
+
             admin_users = CustomUser.objects.filter(email__in=admin_emails)
+
             for admin_user in admin_users:
                 try:
                     if getattr(admin_user, "expo_push_tokens", None):
                         send_push_notification(
                             user=admin_user,
                             title=f"🎉 New User Signup ({u.first_name})",
-                            message=f"{u.first_name} {u.last_name} ({u.email}) - {' '.join([u.phone_number[:4], u.phone_number[4:7], u.phone_number[7:]])} has just completed signup.",
+                            message=f"{u.first_name} {u.last_name} just signed up.",
                             data={
                                 "user_id": u.id,
                                 "email": u.email,
-                                "phone_number": u.phone_number,
                                 "type": "admin_signup_alert",
                             },
                             notif_type="ADMIN_ALERT",
                         )
-                        logger.info(f"Admin push sent to {admin_user.email}")
                 except Exception as e:
                     logger.warning(f"Admin push failed for {admin_user.email}: {e}")
-        except Exception as e:
-            logger.exception(f"Unexpected background error for {u.email}: {e}")
 
-    # Start background thread
+        except Exception as e:
+            logger.exception(f"Background error for {u.email}: {e}")
+
     threading.Thread(target=background_tasks, args=(user,), daemon=True).start()
 
-    return Response({"message": "Account confirmed successfully."}, status=200)
+    return Response(
+        {"message": "Account confirmed successfully."}, status=status.HTTP_200_OK
+    )
 
 
 def generate_otp():
@@ -7375,7 +7407,10 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     subject = "[Webhook Error] User NOT Found in DB"
                     message = f"No user found with email {email}."
                     from_email = "MyFund <info@mg.myfundmobile.com>"
-                    recipient_list = ["info@mg.myfundmobile.com", "sammy@myfundmobile.com"]
+                    recipient_list = [
+                        "info@mg.myfundmobile.com",
+                        "sammy@myfundmobile.com",
+                    ]
 
                     send_generic_email(
                         subject=subject,
