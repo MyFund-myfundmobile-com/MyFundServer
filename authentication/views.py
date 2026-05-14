@@ -183,6 +183,7 @@ def signup(request):
         )
 
 
+
 import threading
 
 
@@ -195,18 +196,18 @@ def confirm_otp(request):
     if not serializer.is_valid():
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-    email = serializer.validated_data.get("email", "").strip().lower()
     otp = serializer.validated_data["otp"]
 
-    if not email:
-        return Response(
-            {"message": "Email is required"}, status=status.HTTP_400_BAD_REQUEST
-        )
-
     try:
-        user = CustomUser.objects.get(email__iexact=email, otp=otp)
+        user = CustomUser.objects.get(otp=otp)
+
     except CustomUser.DoesNotExist:
-        return Response({"message": "Invalid OTP."}, status=status.HTTP_400_BAD_REQUEST)
+        logger.warning(f"Invalid OTP attempt: {otp}")
+
+        return Response(
+            {"message": "Invalid OTP."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     if user.is_active:
         return Response(
@@ -219,49 +220,62 @@ def confirm_otp(request):
     # -----------------------
     user.is_active = True
     user.otp = None
+
     user.save(update_fields=["is_active", "otp"])
 
-    logger.info("Account activated for %s", user.email)
+    logger.info(f"Account activated for {user.email}")
 
     # -----------------------
     # BACKGROUND TASKS
     # -----------------------
     def background_tasks(u):
         try:
+
+            # Welcome Email
             try:
                 u.send_welcome_email()
+
             except Exception as e:
                 logger.warning(f"Welcome email failed: {e}")
 
+            # Welcome Push
             try:
                 send_push_notification(
                     user=u,
                     title="Welcome to MyFund 🎉",
-                    message=f"Hi {u.first_name}, your account is now active!",
+                    message=f"Hi {u.first_name}, Welcome to MyFund! Your account is now active.",
                     data={"type": "welcome"},
                     notif_type="SYSTEM",
                 )
+
             except Exception as e:
                 logger.warning(f"Welcome push failed: {e}")
 
+            # Referral Reward
             try:
                 if u.referral:
                     u.create_pending_referral_reward()
+
             except Exception as e:
                 logger.warning(f"Referral reward failed: {e}")
 
+            # Admin Push Notifications
             admin_emails = [
                 "tolulopeahmed@gmail.com",
-                "ceo@myfundmobile.com",
+                "ceo@mg.myfundmobile.com",
                 "janet.adegbenro@gmail.com",
                 "josephgideon95@gmail.com",
             ]
 
-            admin_users = CustomUser.objects.filter(email__in=admin_emails)
+            admin_users = CustomUser.objects.filter(
+                email__in=admin_emails
+            )
 
             for admin_user in admin_users:
+
                 try:
                     if getattr(admin_user, "expo_push_tokens", None):
+
                         send_push_notification(
                             user=admin_user,
                             title=f"🎉 New User Signup ({u.first_name})",
@@ -273,16 +287,30 @@ def confirm_otp(request):
                             },
                             notif_type="ADMIN_ALERT",
                         )
+
+                        logger.info(
+                            f"Admin push sent to {admin_user.email}"
+                        )
+
                 except Exception as e:
-                    logger.warning(f"Admin push failed for {admin_user.email}: {e}")
+                    logger.warning(
+                        f"Admin push failed for {admin_user.email}: {e}"
+                    )
 
         except Exception as e:
-            logger.exception(f"Background error for {u.email}: {e}")
+            logger.exception(
+                f"Background error for {u.email}: {e}"
+            )
 
-    threading.Thread(target=background_tasks, args=(user,), daemon=True).start()
+    threading.Thread(
+        target=background_tasks,
+        args=(user,),
+        daemon=True,
+    ).start()
 
     return Response(
-        {"message": "Account confirmed successfully."}, status=status.HTTP_200_OK
+        {"message": "Account confirmed successfully."},
+        status=status.HTTP_200_OK,
     )
 
 
