@@ -276,13 +276,54 @@ def confirm_otp(request):
                 try:
                     if getattr(admin_user, "expo_push_tokens", None):
 
+                        from django.utils import timezone
+                        import calendar
+
+                        # -----------------------
+                        # FORMAT PHONE NUMBER
+                        # -----------------------
+                        formatted_phone = u.phone_number or "N/A"
+
+                        digits = "".join(filter(str.isdigit, formatted_phone))
+
+                        if len(digits) == 11:
+                            formatted_phone = f"{digits[:4]} {digits[4:7]} {digits[7:]}"
+
+
+                        # -----------------------
+                        # SIGNUP COUNTS
+                        # -----------------------
+                        today = timezone.now().date()
+
+                        today_signup_count = CustomUser.objects.filter(
+                            date_joined__date=today
+                        ).count()
+
+                        month_signup_count = CustomUser.objects.filter(
+                            date_joined__year=today.year,
+                            date_joined__month=today.month,
+                        ).count()
+
+                        current_month_name = calendar.month_name[today.month]
+
+
+                        # -----------------------
+                        # PUSH MESSAGE
+                        # -----------------------
                         send_push_notification(
                             user=admin_user,
                             title=f"🎉 New User Signup ({u.first_name})",
-                            message=f"{u.first_name} {u.last_name} just signed up.",
+                            message=(
+                                f"{u.first_name} {u.last_name}\n"
+                                f"{u.email}\n"
+                                f"{formatted_phone}\n\n"
+                                f"For today: {today_signup_count} users\n"
+                                f"For {current_month_name}: {month_signup_count}"
+                            ),
                             data={
                                 "user_id": u.id,
                                 "email": u.email,
+                                "phone_number": u.phone_number,
                                 "type": "admin_signup_alert",
                             },
                             notif_type="ADMIN_ALERT",
