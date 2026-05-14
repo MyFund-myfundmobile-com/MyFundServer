@@ -979,7 +979,7 @@ def process_scheduled_withdrawal(withdrawal):
     send_generic_email(
         user_subject,
         user_message,
-        "MyFund <info@myfundmobile.com>",
+        "MyFund <info@mg.myfundmobile.com>",
         [user.email],
     )
 
@@ -996,7 +996,7 @@ def process_scheduled_withdrawal(withdrawal):
     send_generic_email(
         admin_subject,
         admin_message,
-        "MyFund <info@myfundmobile.com>",
+        "MyFund <info@mg.myfundmobile.com>",
         ["tolulopeahmed@gmail.com"],
     )
 
@@ -1672,7 +1672,7 @@ def approve_quicksave_credit(
             f"Your QuickSave deposit of ₦{amount:,.2f} "
             f"has been confirmed and added to your Savings account."
         ),
-        from_email="MyFund <info@myfundmobile.com>",
+        from_email="MyFund <info@mg.myfundmobile.com>",
         recipient_list=[locked_user.email],
     )
 
@@ -1769,7 +1769,7 @@ def approve_quickinvest_credit(
             f"Your QuickInvest deposit of ₦{amount:,.2f} "
             f"has been confirmed and added to your Investment account."
         ),
-        from_email="MyFund <info@myfundmobile.com>",
+        from_email="MyFund <info@mg.myfundmobile.com>",
         recipient_list=[locked_user.email],
     )
 
@@ -1878,7 +1878,7 @@ def send_ambassador_status_notification(user, became_ambassador=True):
             send_generic_email(
                 subject=email_subject,
                 message=email_message,
-                from_email="MyFund <info@myfundmobile.com>",
+                from_email="MyFund <info@mg.myfundmobile.com>",
                 recipient_list=[user.email],
             )
         except Exception as email_error:
@@ -2000,7 +2000,7 @@ def credit_employee_wallet_allowance(email, amount, credited_by="Admin"):
                 f"You can log in to view your updated wallet balance.<br><br>"
                 f"MyFund Team"
             ),
-            from_email="MyFund <info@myfundmobile.com>",
+            from_email="MyFund <info@mg.myfundmobile.com>",
             recipient_list=[user.email],
         )
     except Exception as e:

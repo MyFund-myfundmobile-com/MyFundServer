@@ -521,7 +521,7 @@ def release_quarterly_roi(test_mode=True):
                     user.email,
                     f"Quarterly ROI Paid! ({QUARTER_LABEL})",
                     email_body,
-                    "MyFund <info@myfundmobile.com>",
+                    "MyFund <info@mg.myfundmobile.com>",
                 ],
                 countdown=processed
                 * 30,  # stagger: user 0 = now, user 1 = 72s, user 2 = 144s...
@@ -623,7 +623,7 @@ def reward_top_savers_of_month():
                 send_generic_email(
                     subject=f"🏆 Congrats! You are the #{rank} Top Saver for {prev_month_name}!",
                     message=email_message,
-                    from_email="MyFund <info@myfundmobile.com>",
+                    from_email="MyFund <info@mg.myfundmobile.com>",
                     recipient_list=[user.email],
                 )
                 logger.info(
@@ -652,7 +652,7 @@ def reward_top_savers_of_month():
                 send_generic_email(
                     subject=f"You're the #{rank} Top Saver for {prev_month_name}! 🚀",
                     message=email_message,
-                    from_email="MyFund <info@myfundmobile.com>",
+                    from_email="MyFund <info@mg.myfundmobile.com>",
                     recipient_list=[user.email],
                 )
                 logger.info(
@@ -696,7 +696,7 @@ def send_birthday_greetings():
             — The MyFund Team
             """
             send_generic_email(
-                subject, message, "MyFund <info@myfundmobile.com>", [user.email]
+                subject, message, "MyFund <info@mg.myfundmobile.com>", [user.email]
             )
 
             # 🎊 Push notification
@@ -1303,7 +1303,7 @@ def send_ambassador_report_notifications_task(self, report_id, user_id):
                 "It is now under review. We’ll notify you once it has been approved.<br><br>"
                 "Thank you for using MyFund.<br><br>"
             ),
-            from_email="MyFund <info@myfundmobile.com>",
+            from_email="MyFund <info@mg.myfundmobile.com>",
             recipient_list=[user.email],
         )
 
@@ -1328,8 +1328,8 @@ def send_ambassador_report_notifications_task(self, report_id, user_id):
                 f"{user.first_name} {user.last_name} ({user.email}) submitted an ambassador report for {report.month}. "
                 "Please review it in Django admin.<br><br>"
             ),
-            from_email="MyFund <info@myfundmobile.com>",
-            recipient_list=["info@myfundmobile.com", "company@myfundmobile.com"],
+            from_email="MyFund <info@mg.myfundmobile.com>",
+            recipient_list=["info@mg.myfundmobile.com", "company@myfundmobile.com"],
         )
 
         # ADMIN PUSH
@@ -1586,7 +1586,7 @@ def send_shortlisted_ambassador_emails(test_mode=True, only_email=None):
     from_email = getattr(
         settings,
         "DEFAULT_FROM_EMAIL",
-        "MyFund <info@myfundmobile.com>",
+        "MyFund <info@mg.myfundmobile.com>",
     )
 
     if only_email:
@@ -1673,7 +1673,7 @@ def send_second_batch_ambassador_emails(test_mode=True, only_email=None):
     from_email = getattr(
         settings,
         "DEFAULT_FROM_EMAIL",
-        "MyFund <info@myfundmobile.com>",
+        "MyFund <info@mg.myfundmobile.com>",
     )
 
     if only_email:

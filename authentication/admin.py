@@ -1105,7 +1105,7 @@ class CustomUserAdmin(UserAdmin):
                 send_generic_email(
                     subject=f"[TEST] Top Saver Notification - {prev_month_name}",
                     message=email_message,
-                    from_email="MyFund <info@myfundmobile.com>",
+                    from_email="MyFund <info@mg.myfundmobile.com>",
                     recipient_list=[user.email],
                 )
 
@@ -1751,7 +1751,7 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
                                 f"Transaction ID: {transaction_id}<br><br>"
                                 f"MyFund Team"
                             ),
-                            from_email="MyFund <info@myfundmobile.com>",
+                            from_email="MyFund <info@mg.myfundmobile.com>",
                             recipient_list=[user.email],
                         )
                     except Exception as email_error:
@@ -2836,7 +2836,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
                     f"We're rooting for you to take action and earn more next time 💪<br><br>"
                     "MyFund"
                 ),
-                from_email="MyFund <info@myfundmobile.com>",
+                from_email="MyFund <info@mg.myfundmobile.com>",
                 recipient_list=[user.email],
             )
 
@@ -2883,7 +2883,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
                     f"Good effort 👍 — with a bit more consistency, you can earn much more next month.<br><br>"
                     "MyFund"
                 ),
-                from_email="MyFund <info@myfundmobile.com>",
+                from_email="MyFund <info@mg.myfundmobile.com>",
                 recipient_list=[user.email],
             )
 
@@ -2935,7 +2935,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
                 f"Great work — keep it up 🔥<br><br>"
                 "MyFund"
             ),
-            from_email="MyFund <info@myfundmobile.com>",
+            from_email="MyFund <info@mg.myfundmobile.com>",
             recipient_list=[user.email],
         )
 
@@ -2962,7 +2962,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
                 f"Your report for {report.month} was not approved.<br><br>"
                 f"{report.admin_note or ''}"
             ),
-            from_email="MyFund <info@myfundmobile.com>",
+            from_email="MyFund <info@mg.myfundmobile.com>",
             recipient_list=[user.email],
         )
 

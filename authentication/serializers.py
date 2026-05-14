@@ -518,7 +518,7 @@ class CardSerializer(serializers.ModelSerializer):
 
     #         subject = "New Card Added Successfully"
     #         message = f"Well done {user.first_name},\n\nYour card has been successfully added to your account. \n\nKeep growing your funds.🥂\n\nMyFund"
-    #         from_email = "MyFund <info@myfundmobile.com>"
+    #         from_email = "MyFund <info@mg.myfundmobile.com>"
     #         recipient_list = [user.email]
 
     #         send_mail(subject, message, from_email, recipient_list, fail_silently=False)
