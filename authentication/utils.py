@@ -922,83 +922,97 @@ from decimal import Decimal
 
 def process_scheduled_withdrawal(withdrawal):
     """
-    Credits wallet for completed scheduled withdrawal
-    + sends push & email notifications
+    Safely processes a scheduled withdrawal:
+    - credits user wallet
+    - creates transaction log
+    - marks withdrawal as processed
+    - sends notifications
     """
+
+    # Prevent double-processing (extra safety layer)
+    if withdrawal.is_processed:
+        return
+
     user = withdrawal.user
-    amount = withdrawal.amount  # net amount
+    amount = Decimal(withdrawal.amount)
 
     with transaction.atomic():
-        # Lock user
+        # Lock user row
         user = CustomUser.objects.select_for_update().get(pk=user.pk)
 
-        # 1️⃣ Credit wallet
-        user.wallet += amount
-        user.save()
+        previous_wallet = user.wallet
 
-        # 2️⃣ Create credit transaction
+        # 1️⃣ Credit wallet
+        user.wallet = user.wallet + amount
+        user.save(update_fields=["wallet"])
+
+        # 2️⃣ Create transaction record
         Transaction.objects.create(
             user=user,
             transaction_type="credit",
             status="confirmed",
             amount=amount,
+            total_amount=amount,
             source="WALLET",
-            description="Scheduled withdrawal ✅",
+            credited_to="WALLET",
+            description="Scheduled withdrawal credited to wallet",
+            balance_before=previous_wallet,
+            balance_after=user.wallet,
+            transaction_id=f"SCHED-{withdrawal.transaction_id}",
         )
 
-        # 3️⃣ Mark withdrawal processed
-        withdrawal.is_approved = True
+        # 3️⃣ Mark withdrawal as processed (ONLY this flag)
         withdrawal.is_processed = True
-        withdrawal.save()
+        withdrawal.save(update_fields=["is_processed"])
 
-    # 4️⃣ Push notification (user)
-    send_push_notification(
-        user=user,
-        title="Withdrawal Ready 🎉",
-        message=(
-            f"Hi {user.first_name}, your scheduled withdrawal of ₦{amount:,.2f} is complete. "
-            "Your wallet has been credited and you can withdraw now with no charges."
-        ),
-        data={
-            "amount": str(amount),
-            "type": "ScheduledWithdrawalCompleted",
-        },
-        notif_type="CREDIT",
-    )
+    # 4️⃣ Push notification
+    try:
+        send_push_notification(
+            user=user,
+            title="Withdrawal Completed 🎉",
+            message=(
+                f"Your scheduled withdrawal of ₦{amount:,.2f} has been credited to your wallet."
+            ),
+            data={
+                "amount": str(amount),
+                "type": "scheduled_withdrawal_completed",
+            },
+            notif_type="SUCCESS",
+        )
+    except Exception as e:
+        print(f"Push notification failed: {e}")
 
     # 5️⃣ Email user
-    user_subject = "Scheduled Withdrawal Completed"
-    user_message = (
-        f"Hi {user.first_name},<br><br>"
-        f"Your scheduled withdrawal of ₦{amount:,.2f} has been completed successfully.<br>"
-        "The funds have been credited to your MyFund wallet and you can now withdraw "
-        "without any charges.<br><br>"
-        "Thank you for trusting MyFund."
-    )
+    try:
+        send_generic_email(
+            subject="Scheduled Withdrawal Completed",
+            message=(
+                f"Hi {user.first_name},<br><br>"
+                f"Your scheduled withdrawal of ₦{amount:,.2f} has been successfully credited to your wallet.<br><br>"
+                "You can now use or withdraw the funds anytime.<br><br>"
+                "Thank you for using MyFund."
+            ),
+            from_email="MyFund <info@mg.myfundmobile.com>",
+            recipient_list=[user.email],
+        )
+    except Exception as e:
+        print(f"Email failed: {e}")
 
-    send_generic_email(
-        user_subject,
-        user_message,
-        "MyFund <info@mg.myfundmobile.com>",
-        [user.email],
-    )
-
-    # 6️⃣ Email CEO
-    admin_subject = "[AUTO] Scheduled Withdrawal Completed"
-    admin_message = (
-        f"Scheduled withdrawal completed automatically.<br><br>"
-        f"User: {user.full_name} ({user.email})<br>"
-        f"Amount: ₦{amount:,.2f}<br>"
-        f"Source: {withdrawal.source_account}<br>"
-        f"Scheduled Date: {withdrawal.scheduled_processing_date}<br>"
-    )
-
-    send_generic_email(
-        admin_subject,
-        admin_message,
-        "MyFund <info@mg.myfundmobile.com>",
-        ["tolulopeahmed@gmail.com"],
-    )
+    # 6️⃣ Notify admin (optional but useful)
+    try:
+        send_generic_email(
+            subject="[AUTO] Scheduled Withdrawal Processed",
+            message=(
+                f"Scheduled withdrawal processed successfully.<br><br>"
+                f"User: {user.first_name} {user.last_name} ({user.email})<br>"
+                f"Amount credited: ₦{amount:,.2f}<br>"
+                f"Transaction ID: {withdrawal.transaction_id}<br>"
+            ),
+            from_email="MyFund <info@mg.myfundmobile.com>",
+            recipient_list=["tolulopeahmed@gmail.com"],
+        )
+    except Exception as e:
+        print(f"Admin email failed: {e}")
 
 
 from datetime import date
