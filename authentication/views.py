@@ -183,7 +183,6 @@ def signup(request):
         )
 
 
-
 import threading
 
 
@@ -267,9 +266,7 @@ def confirm_otp(request):
                 "josephgideon95@gmail.com",
             ]
 
-            admin_users = CustomUser.objects.filter(
-                email__in=admin_emails
-            )
+            admin_users = CustomUser.objects.filter(email__in=admin_emails)
 
             for admin_user in admin_users:
 
@@ -289,7 +286,6 @@ def confirm_otp(request):
                         if len(digits) == 11:
                             formatted_phone = f"{digits[:4]} {digits[4:7]} {digits[7:]}"
 
-
                         # -----------------------
                         # SIGNUP COUNTS
                         # -----------------------
@@ -306,19 +302,16 @@ def confirm_otp(request):
 
                         current_month_name = calendar.month_name[today.month]
 
-
                         # -----------------------
                         # PUSH MESSAGE
                         # -----------------------
                         send_push_notification(
                             user=admin_user,
-                            title=f"🎉 New User Signup ({u.first_name})",
+                            title=f"🎉 {u.first_name} Just Signed Up",
                             message=(
-                                f"{u.first_name} {u.last_name}\n"
-                                f"{u.email}\n"
-                                f"{formatted_phone}\n\n"
+                                f"{u.first_name} {u.last_name} - {u.email} - {formatted_phone}\n\n"
                                 f"For today: {today_signup_count} users\n"
-                                f"For {current_month_name}: {month_signup_count}"
+                                f"For {current_month_name}: {month_signup_count} users"
                             ),
                             data={
                                 "user_id": u.id,
@@ -329,19 +322,13 @@ def confirm_otp(request):
                             notif_type="ADMIN_ALERT",
                         )
 
-                        logger.info(
-                            f"Admin push sent to {admin_user.email}"
-                        )
+                        logger.info(f"Admin push sent to {admin_user.email}")
 
                 except Exception as e:
-                    logger.warning(
-                        f"Admin push failed for {admin_user.email}: {e}"
-                    )
+                    logger.warning(f"Admin push failed for {admin_user.email}: {e}")
 
         except Exception as e:
-            logger.exception(
-                f"Background error for {u.email}: {e}"
-            )
+            logger.exception(f"Background error for {u.email}: {e}")
 
     threading.Thread(
         target=background_tasks,
