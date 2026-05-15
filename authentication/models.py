@@ -2083,6 +2083,8 @@ class Transaction(models.Model):
         help_text="Where the transaction funds came from",
     )
 
+    source_channel = models.CharField(max_length=20, null=True, blank=True)
+
     credited_to = models.CharField(
         max_length=20,
         choices=[

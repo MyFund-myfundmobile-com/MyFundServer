@@ -2439,36 +2439,15 @@ class UserTransactionListView(generics.ListAPIView):
     def get_queryset(self):
         user = self.request.user
 
-        transactions = (
+        return (
             Transaction.objects.filter(user=user)
-            # Hide abandoned transactions generally
             .exclude(status__iexact="abandoned")
-            # Hide abandoned/unresolved QuickSave pending transfers
             .exclude(
                 status__iexact="pending",
-                description__icontains="QuickSave",
-                paystack_reference__isnull=True,
-            )
-            .exclude(
-                status__iexact="pending",
-                description__icontains="QuickSave",
-                paystack_reference="",
-            )
-            # Hide abandoned/unresolved QuickInvest pending transfers
-            .exclude(
-                status__iexact="pending",
-                description__icontains="QuickInvest",
-                paystack_reference__isnull=True,
-            )
-            .exclude(
-                status__iexact="pending",
-                description__icontains="QuickInvest",
-                paystack_reference="",
+                source_channel="CARD",
             )
             .order_by("-date", "-time")
         )
-
-        return transactions
 
 
 from .serializers import AccountBalancesSerializer
@@ -6155,6 +6134,7 @@ def initiate_bank_transfer(request):
             status="pending",
             amount=amount,
             description="QuickSave . . .",
+            source_channel="BANK_TRANSFER",
             transaction_id=transaction_id,
             balance_before=user.savings,
             balance_after=user.savings + amount,
@@ -6353,6 +6333,7 @@ def initiate_invest_transfer(request):
             transaction_id=transaction_id,
             balance_before=user.investment,
             balance_after=user.investment + amount,
+            source_channel="BANK_TRANSFER",
         )
 
         # 🔔 USER PUSH
@@ -6485,7 +6466,7 @@ def _create_dva_intent(user, amount, purpose):
         transaction_id=transaction_id,
     )
 
-    description = "QuickSave . . ." if purpose == "SAVINGS" else "QuickInvest . . ."
+    description = "QuickSave" if purpose == "SAVINGS" else "QuickInvest"
 
     transaction = Transaction.objects.create(
         user=user,
@@ -6495,6 +6476,7 @@ def _create_dva_intent(user, amount, purpose):
         amount=amount,
         description=description,
         transaction_id=transaction_id,
+        source_channel="DVA",
     )
 
     return intent, transaction
