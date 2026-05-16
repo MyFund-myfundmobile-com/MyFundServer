@@ -23,7 +23,6 @@ from .serializers import (
 import random
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
-from django.conf import settings
 from rest_framework.views import APIView
 from django.contrib.auth import logout
 from django.shortcuts import render, redirect
@@ -72,6 +71,7 @@ from .utils import (
 from rest_framework.exceptions import AuthenticationFailed
 import threading
 from .utils import create_transaction
+from django.conf import settings
 
 load_dotenv()
 
@@ -917,7 +917,6 @@ import logging
 import random
 from datetime import timedelta, datetime
 from django.utils import timezone
-from django.conf import settings
 from django.template.loader import render_to_string
 from django.utils.html import strip_tags
 from django.core.mail import send_mail
@@ -1310,7 +1309,6 @@ from rest_framework.decorators import api_view, permission_classes, parser_class
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from imagekitio import ImageKit
-from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
@@ -2490,7 +2488,6 @@ paystack_secret_key = os.environ.get(
 from decimal import Decimal
 from rest_framework import status
 import requests
-from django.conf import settings
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -2526,9 +2523,9 @@ def quicksave(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    if amount < Decimal("100"):
+    if amount < settings.MIN_DEPOSIT_AMOUNT:
         return Response(
-            {"error": "Amount cannot be less than ₦100"},
+            {"error": f"Amount cannot be less than ₦{settings.MIN_DEPOSIT_AMOUNT}"},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
@@ -2786,9 +2783,9 @@ def autosave(request):
 
     try:
         amount = int(amount)
-        if amount < 100:
+        if amount < settings.MIN_DEPOSIT_AMOUNT:
             return Response(
-                {"error": "Amount cannot be less than ₦100"},
+                {"error": f"Amount cannot be less than ₦{settings.MIN_DEPOSIT_AMOUNT}"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
     except ValueError:
@@ -3127,7 +3124,6 @@ def get_autosave_status(request):
 from decimal import Decimal
 from rest_framework import status
 import requests
-from django.conf import settings
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -6107,9 +6103,9 @@ def initiate_bank_transfer(request):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        if amount < 100:
+        if amount < 500:
             return Response(
-                {"error": "Amount must be greater than ₦100"},
+                {"error": "Amount must be greater than ₦500"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -6580,9 +6576,11 @@ def initiate_dva_quicksave(request):
 
         try:
             amount = Decimal(str(amount_raw))
-            if amount < 100:
+            if amount < settings.MIN_DEPOSIT_AMOUNT:
                 return Response(
-                    {"error": "Amount must be greater than ₦100"},
+                    {
+                        "error": f"Amount cannot be less than ₦{settings.MIN_DEPOSIT_AMOUNT}"
+                    },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
         except (InvalidOperation, ValueError, TypeError):
@@ -6673,9 +6671,11 @@ def initiate_dva_quickinvest(request):
 
         try:
             amount = Decimal(str(amount_raw))
-            if amount < 100:
+            if amount < settings.MIN_DEPOSIT_AMOUNT:
                 return Response(
-                    {"error": "Amount must be greater than ₦100"},
+                    {
+                        "error": f"Amount cannot be less than ₦{settings.MIN_DEPOSIT_AMOUNT}"
+                    },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
         except (InvalidOperation, ValueError, TypeError):
@@ -7130,7 +7130,6 @@ import json
 import hmac
 import hashlib
 
-from django.conf import settings
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from rest_framework import status
@@ -8512,7 +8511,6 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
-from django.conf import settings
 from .utils import send_generic_email
 import logging
 
@@ -10100,7 +10098,6 @@ from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIV
 from rest_framework.exceptions import ValidationError
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
-from django.conf import settings
 from django.db.models import Sum
 from decimal import Decimal
 import uuid

@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 
+from decimal import Decimal
 from pathlib import Path
 from datetime import timedelta
 import os
@@ -413,6 +414,9 @@ AUTHENTICATION_BACKENDS = [
 # SECURE_HSTS_SECONDS = 31536000  # 1 year
 # SECURE_HSTS_PRELOAD = True
 # SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+
+# UNIT ECONOMICS
+MIN_DEPOSIT_AMOUNT = Decimal("100")
 
 # settings.py
 import os
