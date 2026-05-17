@@ -1404,6 +1404,83 @@ def profile_picture_update(request):
         )
 
 
+import base64
+from django.core.files.base import ContentFile
+
+
+@api_view(["PATCH"])
+@permission_classes([IsAuthenticated])
+def profile_picture_update_base64(request):
+    user = request.user
+    image_base64 = request.data.get("image_base64")
+    filename = request.data.get("filename", "profile_image.jpg")
+    content_type = request.data.get("content_type", "image/jpeg")
+
+    if not image_base64:
+        return Response(
+            {"error": "No image data provided"}, status=status.HTTP_400_BAD_REQUEST
+        )
+
+    import time
+    import uuid
+
+    timestamp = int(time.time())
+    unique_id = str(uuid.uuid4())[:8]
+    ext = filename.split(".")[-1].lower()
+    if ext not in ["jpg", "jpeg", "png", "gif", "webp"]:
+        ext = "jpg"
+
+    final_filename = f"profile_{user.id}_{timestamp}_{unique_id}.{ext}"
+
+    try:
+        # Decode base64 to binary
+        # Remove data URL prefix if present
+        if "," in image_base64:
+            image_base64 = image_base64.split(",")[1]
+
+        image_data = base64.b64decode(image_base64)
+
+        # Upload to ImageKit
+        from imagekitio.models.UploadFileRequestOptions import UploadFileRequestOptions
+
+        upload_options = UploadFileRequestOptions()
+        upload_options.use_unique_file_name = False
+        upload_options.is_private_file = False
+
+        result = imagekit.upload(
+            file=image_base64,  # ImageKit accepts base64 directly
+            file_name=final_filename,
+            options=upload_options,
+        )
+
+        # Construct URL
+        base_url = "https://ik.imagekit.io/myfundmobile"
+        public_url = f"{base_url}/{final_filename}"
+
+        # Store the URL
+        user.profile_picture = public_url
+        user.save(update_fields=["profile_picture"])
+
+        logger.info(
+            f"Successfully uploaded profile picture via base64 for user {user.id}: {public_url}"
+        )
+
+        return Response(
+            {
+                "message": "Profile picture updated successfully",
+                "profile_picture": public_url,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    except Exception as e:
+        logger.error(f"ImageKit base64 upload failed for user {user.id}: {str(e)}")
+        return Response(
+            {"error": f"Upload failed: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
 from .serializers import SavingsGoalUpdateSerializer
 
 

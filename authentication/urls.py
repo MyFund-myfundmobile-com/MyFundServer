@@ -40,6 +40,7 @@ from .views import (
     initiate_dva_quickinvest,
     requery_my_dva_payments,
     remove_dva_account,
+    profile_picture_update_base64,
     AmbassadorMonthlyReportCreateView,
     AmbassadorMonthlyReportStatusView,
     submit_ambassador_attendance,
@@ -80,6 +81,11 @@ urlpatterns = [
     # Profile-related APIs
     path("get-user-profile/", views.get_user_profile, name="get-user-profile"),
     path("update-user-profile/", views.update_user_profile, name="update-user-profile"),
+    path(
+        "profile-picture-update-base64/",
+        profile_picture_update_base64,
+        name="profile_picture_update_base64",
+    ),
     path(
         "profile-picture-update/",
         views.profile_picture_update,
