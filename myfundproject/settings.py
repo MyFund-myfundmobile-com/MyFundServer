@@ -58,7 +58,8 @@ ALLOWED_HOSTS = [
     "127.0.0.1",
     "192.168.30.34",
     "10.0.101.10",
-    "myfund.onrender.com",
+    "myfundapi-myfund-07ce351a.koyeb.app",
+    ".koyeb.app",
     "localhost",
     "10.10.10.192",
     "192.168.10.60",
@@ -92,6 +93,7 @@ ALLOWED_HOSTS = [
     "192.168.20.99",
     "192.168.20.159",
     "0.0.0.0",
+    "*",  # temporarily for debugging
 ]
 
 SECURE_SSL_REDIRECT = False  # Disable forced HTTPS redirect@
