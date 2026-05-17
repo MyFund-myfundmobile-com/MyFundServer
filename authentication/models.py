@@ -74,7 +74,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     otp = models.CharField(max_length=6, blank=True, null=True)
     reset_token = models.CharField(max_length=64, null=True, blank=True)
     reset_token_expires = models.DateTimeField(null=True, blank=True)
-    profile_picture = models.CharField(max_length=200, null=True, blank=True)
+    profile_picture = models.CharField(max_length=1000, null=True, blank=True)
     is_confirmed = models.BooleanField(default=False)
     referral_reward_confirmed_at = models.DateTimeField(null=True, blank=True)
     is_subscribed = models.BooleanField(default=True)
@@ -550,10 +550,11 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
             str(self.investment)
         )
 
-        if self.profile_picture:
-            self.profile_picture = self.profile_picture.replace(
-                "https://myfund.onrender.com", "", 1
-            )
+        if self.profile_picture and "myfund.onrender.com" in self.profile_picture:
+            # Legacy URL cleanup: strip old Render domain to get the path,
+            # then repoint to ImageKit
+            path = self.profile_picture.replace("https://myfund.onrender.com", "")
+            self.profile_picture = f"https://ik.imagekit.io/myfundmobile{path}"
 
         super().save(*args, **kwargs)
 

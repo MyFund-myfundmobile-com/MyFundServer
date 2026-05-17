@@ -1301,6 +1301,7 @@ def update_user_profile(request):
         )
 
 
+import base64
 import time
 import logging
 from rest_framework import status
@@ -1309,6 +1310,7 @@ from rest_framework.decorators import api_view, permission_classes, parser_class
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from imagekitio import ImageKit
+from imagekitio.models.UploadFileRequestOptions import UploadFileRequestOptions
 
 logger = logging.getLogger(__name__)
 
@@ -1325,62 +1327,80 @@ imagekit = ImageKit(
 def profile_picture_update(request):
     user = request.user
     pic = request.FILES.get("profile_picture")
+
     if not pic:
         return Response(
             {"error": "No image file provided"}, status=status.HTTP_400_BAD_REQUEST
         )
 
-    # optional: enforce size/type here…
-
-    ext = pic.name.rsplit(".", 1)[-1]
-    filename = f"profile_{user.id}.{ext}"
-
-    try:
-        # upload to ImageKit
-        result = imagekit.upload_file(
-            file=pic.read(),  # 🔥 THIS IS KEY
-            file_name=filename,
-            options={
-                "folder": "/profile_pictures/",
-                "tags": [f"user_{user.id}"],
-                "use_unique_file_name": False,
-                "overwrite_file": True,
-                "overwrite_ai_tags": True,
-                "overwrite_tags": True,
-            },
+    if pic.size > 5 * 1024 * 1024:
+        return Response(
+            {"error": "Image too large. Max size is 5MB"},
+            status=status.HTTP_400_BAD_REQUEST,
         )
 
-        url = result["response"]["url"]
+    import time
+    import uuid
 
-        user.profile_picture = url
-        user.save()
+    timestamp = int(time.time())
+    unique_id = str(uuid.uuid4())[:8]
+    ext = pic.name.split(".")[-1].lower()
+    if ext not in ["jpg", "jpeg", "png", "gif", "webp"]:
+        ext = "jpg"
+
+    # IMPORTANT: Use the same format as working images (no folder, just filename)
+    filename = f"profile_{user.id}_{timestamp}_{unique_id}.{ext}"
+
+    try:
+        pic.seek(0)
+        file_content = pic.read()
+
+        import base64
+
+        encoded_string = base64.b64encode(file_content).decode("utf-8")
+
+        from imagekitio.models.UploadFileRequestOptions import UploadFileRequestOptions
+
+        upload_options = UploadFileRequestOptions()
+        # REMOVE the folder parameter entirely
+        upload_options.use_unique_file_name = False  # We're providing unique name
+        upload_options.is_private_file = False
+
+        result = imagekit.upload(
+            file=encoded_string,
+            file_name=filename,
+            options=upload_options,
+        )
+
+        # Construct URL at root level (same pattern as working images)
+        base_url = "https://ik.imagekit.io/myfundmobile"
+        public_url = f"{base_url}/{filename}"
+
+        # Store the URL
+        user.profile_picture = public_url
+        user.save(update_fields=["profile_picture"])
+
+        logger.info(
+            f"Successfully uploaded profile picture for user {user.id}: {public_url}"
+        )
 
         return Response(
             {
                 "message": "Profile picture updated successfully",
-                "profile_picture": url,
+                "profile_picture": public_url,
             },
             status=status.HTTP_200_OK,
         )
 
     except Exception as e:
-        logger.error("ImageKit upload failed: %s", e)
-        # fallback to local
-        from django.core.files.storage import FileSystemStorage
+        logger.error(f"ImageKit upload failed for user {user.id}: {str(e)}")
+        import traceback
 
-        fs = FileSystemStorage()
-        local_name = fs.save(filename, pic)
-        local_url = request.build_absolute_uri(fs.url(local_name))
-        user.profile_picture = local_url
-        user.save()
+        logger.error(traceback.format_exc())
 
         return Response(
-            {
-                "message": "Profile picture updated successfully!",
-                "profile_picture": local_url,
-                "warning": "Cloud upload failed, using local storage",
-            },
-            status=status.HTTP_200_OK,
+            {"error": f"Upload failed: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
 
