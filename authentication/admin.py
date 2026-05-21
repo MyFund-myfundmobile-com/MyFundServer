@@ -1785,21 +1785,41 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
         else:
             self.message_user(request, "No withdrawals were approved.")
 
-    def force_credit_wallet(self, request, queryset):
-        for w in queryset:
-            if w.is_processed:
-                continue
 
-            user = w.user
-            amount = w.total_amount
+def force_credit_wallet(self, request, queryset):
+    for w in queryset:
+        if w.is_processed:
+            continue
 
-            with db_transaction.atomic():
-                # 1. Credit wallet
-                user.wallet += amount
-                user.save()
+        user = w.user
+        amount = w.total_amount
 
-                # 2. Create transaction log
-                Transaction.objects.create(
+        with db_transaction.atomic():
+            # Capture balance before
+            balance_before = user.wallet
+
+            # 1. Credit wallet
+            user.wallet += amount
+            user.save()
+
+            # Balance after
+            balance_after = user.wallet
+
+            # 2. Get the existing transaction or create/update it properly
+            try:
+                transaction = Transaction.objects.get(
+                    user=user, transaction_id=w.transaction_id
+                )
+                # Update existing transaction to confirmed
+                transaction.status = "confirmed"
+                transaction.transaction_type = "credit"
+                transaction.balance_before = balance_before
+                transaction.balance_after = balance_after
+                transaction.description = f"Scheduled Withdrawal Credited to Wallet (Original: {w.source_account.capitalize()})"
+                transaction.save()
+            except Transaction.DoesNotExist:
+                # Create if doesn't exist
+                transaction = Transaction.objects.create(
                     user=user,
                     transaction_type="credit",
                     status="confirmed",
@@ -1807,29 +1827,48 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
                     total_amount=amount,
                     source="WALLET",
                     credited_to="WALLET",
-                    description="Credit Scheduled Withdrawal",
+                    description=f"Credit Scheduled Withdrawal from {w.source_account.capitalize()}",
                     transaction_id=f"ADMIN-FIX-{w.transaction_id}",
+                    balance_before=balance_before,
+                    balance_after=balance_after,
                 )
 
-                # 3. CRITICAL FIX → CLEAN FRONTEND STATE
-                w.is_processed = True
-                w.is_approved = True
-                w.withdrawal_type = "immediate"
-                w.scheduled_processing_date = None
-                w.status = "completed"
+            # 3. CRITICAL FIX → CLEAN FRONTEND STATE
+            w.is_processed = True
+            w.is_approved = True
+            w.withdrawal_type = "immediate"
+            w.scheduled_processing_date = None
+            w.status = "completed"  # Make sure this field exists on your model
 
-                w.save(
-                    update_fields=[
-                        "is_processed",
-                        "is_approved",
-                        "withdrawal_type",
-                        "scheduled_processing_date",
-                    ]
-                )
+            w.save(
+                update_fields=[
+                    "is_processed",
+                    "is_approved",
+                    "withdrawal_type",
+                    "scheduled_processing_date",
+                    "status",  # Add this
+                ]
+            )
 
-        self.message_user(
-            request, "Wallet credited and scheduled withdrawal fully cleared."
-        )
+            # 4. Send notification to user
+            send_push_notification(
+                user=user,
+                title="Scheduled Withdrawal Credited ✅",
+                message=(
+                    f"{user.first_name}, your scheduled withdrawal of ₦{amount:,.2f} "
+                    f"has been credited to your wallet."
+                ),
+                data={
+                    "amount": str(amount),
+                    "transaction_id": w.transaction_id,
+                    "status": "confirmed",
+                },
+                notif_type="CREDIT",
+            )
+
+    self.message_user(
+        request, "Wallet credited and scheduled withdrawal fully cleared."
+    )
 
 
 class BankAccountAdmin(admin.ModelAdmin):
