@@ -1573,6 +1573,7 @@ from django.contrib import admin
 from django.db import transaction as db_transaction
 from django.core.mail import send_mail
 from .models import WithdrawalsRequestToAdmin, Transaction
+from .utils import process_scheduled_withdrawal  # ADD THIS IF NOT PRESENT
 
 
 @admin.register(WithdrawalsRequestToAdmin)
@@ -1608,7 +1609,7 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
         "target_account_number",
     )
 
-    actions = ["approve_withdrawal"]
+    actions = ["approve_withdrawal", "force_credit_wallet"]
 
     # =========================
     # DISPLAY HELPERS (READ-ONLY)
@@ -1689,7 +1690,18 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
             try:
                 with db_transaction.atomic():
                     withdrawal.is_approved = True
-                    withdrawal.save(update_fields=["is_approved"])
+                    withdrawal.is_processed = True
+                    withdrawal.withdrawal_type = "immediate"
+                    withdrawal.scheduled_processing_date = None
+
+                    withdrawal.save(
+                        update_fields=[
+                            "is_approved",
+                            "is_processed",
+                            "withdrawal_type",
+                            "scheduled_processing_date",
+                        ]
+                    )
 
                     transaction = Transaction.objects.get(
                         user=user, transaction_id=transaction_id
@@ -1772,6 +1784,52 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
             )
         else:
             self.message_user(request, "No withdrawals were approved.")
+
+    def force_credit_wallet(self, request, queryset):
+        for w in queryset:
+            if w.is_processed:
+                continue
+
+            user = w.user
+            amount = w.total_amount
+
+            with db_transaction.atomic():
+                # 1. Credit wallet
+                user.wallet += amount
+                user.save()
+
+                # 2. Create transaction log
+                Transaction.objects.create(
+                    user=user,
+                    transaction_type="credit",
+                    status="confirmed",
+                    amount=amount,
+                    total_amount=amount,
+                    source="WALLET",
+                    credited_to="WALLET",
+                    description="Credit Scheduled Withdrawal",
+                    transaction_id=f"ADMIN-FIX-{w.transaction_id}",
+                )
+
+                # 3. CRITICAL FIX → CLEAN FRONTEND STATE
+                w.is_processed = True
+                w.is_approved = True
+                w.withdrawal_type = "immediate"
+                w.scheduled_processing_date = None
+                w.status = "completed"
+
+                w.save(
+                    update_fields=[
+                        "is_processed",
+                        "is_approved",
+                        "withdrawal_type",
+                        "scheduled_processing_date",
+                    ]
+                )
+
+        self.message_user(
+            request, "Wallet credited and scheduled withdrawal fully cleared."
+        )
 
 
 class BankAccountAdmin(admin.ModelAdmin):

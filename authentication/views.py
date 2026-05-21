@@ -1303,6 +1303,7 @@ def update_user_profile(request):
 
 import base64
 import time
+import uuid
 import logging
 from rest_framework import status
 from rest_framework.parsers import MultiPartParser, FormParser
@@ -1321,10 +1322,37 @@ imagekit = ImageKit(
 )
 
 
+def upload_to_imagekit(file_data, user_id, filename):
+    """Shared upload logic"""
+    timestamp = int(time.time())
+    unique_id = str(uuid.uuid4())[:8]
+    ext = filename.split(".")[-1].lower()
+    if ext not in ["jpg", "jpeg", "png", "gif", "webp"]:
+        ext = "jpg"
+
+    final_filename = f"profile_{user_id}_{timestamp}_{unique_id}.{ext}"
+
+    upload_options = UploadFileRequestOptions()
+    upload_options.use_unique_file_name = False
+    upload_options.is_private_file = False
+
+    result = imagekit.upload(
+        file=file_data,
+        file_name=final_filename,
+        options=upload_options,
+    )
+
+    base_url = "https://ik.imagekit.io/myfundmobile"
+    public_url = f"{base_url}/{final_filename}"
+
+    return public_url
+
+
 @api_view(["PATCH"])
 @permission_classes([IsAuthenticated])
 @parser_classes([MultiPartParser, FormParser])
 def profile_picture_update(request):
+    """iOS: Handles FormData upload"""
     user = request.user
     pic = request.FILES.get("profile_picture")
 
@@ -1339,50 +1367,17 @@ def profile_picture_update(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    import time
-    import uuid
-
-    timestamp = int(time.time())
-    unique_id = str(uuid.uuid4())[:8]
-    ext = pic.name.split(".")[-1].lower()
-    if ext not in ["jpg", "jpeg", "png", "gif", "webp"]:
-        ext = "jpg"
-
-    # IMPORTANT: Use the same format as working images (no folder, just filename)
-    filename = f"profile_{user.id}_{timestamp}_{unique_id}.{ext}"
-
     try:
         pic.seek(0)
         file_content = pic.read()
-
-        import base64
-
         encoded_string = base64.b64encode(file_content).decode("utf-8")
 
-        from imagekitio.models.UploadFileRequestOptions import UploadFileRequestOptions
+        public_url = upload_to_imagekit(encoded_string, user.id, pic.name)
 
-        upload_options = UploadFileRequestOptions()
-        # REMOVE the folder parameter entirely
-        upload_options.use_unique_file_name = False  # We're providing unique name
-        upload_options.is_private_file = False
-
-        result = imagekit.upload(
-            file=encoded_string,
-            file_name=filename,
-            options=upload_options,
-        )
-
-        # Construct URL at root level (same pattern as working images)
-        base_url = "https://ik.imagekit.io/myfundmobile"
-        public_url = f"{base_url}/{filename}"
-
-        # Store the URL
         user.profile_picture = public_url
         user.save(update_fields=["profile_picture"])
 
-        logger.info(
-            f"Successfully uploaded profile picture for user {user.id}: {public_url}"
-        )
+        logger.info(f"iOS upload success for user {user.id}: {public_url}")
 
         return Response(
             {
@@ -1394,76 +1389,36 @@ def profile_picture_update(request):
 
     except Exception as e:
         logger.error(f"ImageKit upload failed for user {user.id}: {str(e)}")
-        import traceback
-
-        logger.error(traceback.format_exc())
-
         return Response(
             {"error": f"Upload failed: {str(e)}"},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
 
-import base64
-from django.core.files.base import ContentFile
-
-
 @api_view(["PATCH"])
 @permission_classes([IsAuthenticated])
 def profile_picture_update_base64(request):
+    """Android: Handles base64 upload"""
     user = request.user
     image_base64 = request.data.get("image_base64")
     filename = request.data.get("filename", "profile_image.jpg")
-    content_type = request.data.get("content_type", "image/jpeg")
 
     if not image_base64:
         return Response(
             {"error": "No image data provided"}, status=status.HTTP_400_BAD_REQUEST
         )
 
-    import time
-    import uuid
-
-    timestamp = int(time.time())
-    unique_id = str(uuid.uuid4())[:8]
-    ext = filename.split(".")[-1].lower()
-    if ext not in ["jpg", "jpeg", "png", "gif", "webp"]:
-        ext = "jpg"
-
-    final_filename = f"profile_{user.id}_{timestamp}_{unique_id}.{ext}"
-
     try:
-        # Decode base64 to binary
         # Remove data URL prefix if present
         if "," in image_base64:
             image_base64 = image_base64.split(",")[1]
 
-        image_data = base64.b64decode(image_base64)
+        public_url = upload_to_imagekit(image_base64, user.id, filename)
 
-        # Upload to ImageKit
-        from imagekitio.models.UploadFileRequestOptions import UploadFileRequestOptions
-
-        upload_options = UploadFileRequestOptions()
-        upload_options.use_unique_file_name = False
-        upload_options.is_private_file = False
-
-        result = imagekit.upload(
-            file=image_base64,  # ImageKit accepts base64 directly
-            file_name=final_filename,
-            options=upload_options,
-        )
-
-        # Construct URL
-        base_url = "https://ik.imagekit.io/myfundmobile"
-        public_url = f"{base_url}/{final_filename}"
-
-        # Store the URL
         user.profile_picture = public_url
         user.save(update_fields=["profile_picture"])
 
-        logger.info(
-            f"Successfully uploaded profile picture via base64 for user {user.id}: {public_url}"
-        )
+        logger.info(f"Android base64 upload success for user {user.id}: {public_url}")
 
         return Response(
             {

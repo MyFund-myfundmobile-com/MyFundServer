@@ -825,11 +825,12 @@ from authentication.models import WithdrawalsRequestToAdmin
 from .utils import process_scheduled_withdrawal
 
 
-@shared_task
-def process_due_scheduled_withdrawals():
-    today = timezone.now().date()
+@shared_task(bind=True, max_retries=3)
+def process_due_scheduled_withdrawals(self):
 
-    withdrawals = WithdrawalsRequestToAdmin.objects.filter(
+    today = timezone.localdate()
+
+    withdrawals = WithdrawalsRequestToAdmin.objects.select_related("user").filter(
         withdrawal_type="scheduled",
         scheduled_processing_date__lte=today,
         is_processed=False,
@@ -838,10 +839,15 @@ def process_due_scheduled_withdrawals():
     for withdrawal in withdrawals:
         try:
             process_scheduled_withdrawal(withdrawal)
+
         except Exception as e:
+
             logger.error(
-                f"Failed to process scheduled withdrawal {withdrawal.id}: {str(e)}"
+                f"Failed scheduled withdrawal {withdrawal.transaction_id}: {str(e)}"
             )
+
+            # retry only THIS task run (not per item loop spam)
+            raise self.retry(exc=e, countdown=60)
 
 
 from celery import shared_task

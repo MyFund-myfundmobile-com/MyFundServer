@@ -918,6 +918,7 @@ def calculate_withdrawal_charges(amount: Decimal, source_account: str):
 from django.db import transaction
 from django.utils import timezone
 from decimal import Decimal
+from .models import WithdrawalsRequestToAdmin, CustomUser, Transaction
 
 
 def process_scheduled_withdrawal(withdrawal):
@@ -934,10 +935,17 @@ def process_scheduled_withdrawal(withdrawal):
         return
 
     user = withdrawal.user
-    amount = Decimal(withdrawal.amount)
+    amount = Decimal(withdrawal.total_amount or withdrawal.amount)
 
     with transaction.atomic():
-        # Lock user row
+
+        withdrawal = WithdrawalsRequestToAdmin.objects.select_for_update().get(
+            pk=withdrawal.pk
+        )
+
+        if withdrawal.is_processed:
+            return
+
         user = CustomUser.objects.select_for_update().get(pk=user.pk)
 
         previous_wallet = user.wallet
