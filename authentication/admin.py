@@ -1815,6 +1815,7 @@ def force_credit_wallet(self, request, queryset):
                 transaction.transaction_type = "credit"
                 transaction.balance_before = balance_before
                 transaction.balance_after = balance_after
+                transaction.is_processed = True  # ← ADD THIS
                 transaction.description = f"Scheduled Withdrawal Credited to Wallet (Original: {w.source_account.capitalize()})"
                 transaction.save()
             except Transaction.DoesNotExist:
@@ -1831,6 +1832,7 @@ def force_credit_wallet(self, request, queryset):
                     transaction_id=f"ADMIN-FIX-{w.transaction_id}",
                     balance_before=balance_before,
                     balance_after=balance_after,
+                    is_processed=True,  # ← ADD THIS
                 )
 
             # 3. CRITICAL FIX → CLEAN FRONTEND STATE
@@ -1838,7 +1840,7 @@ def force_credit_wallet(self, request, queryset):
             w.is_approved = True
             w.withdrawal_type = "immediate"
             w.scheduled_processing_date = None
-            w.status = "completed"  # Make sure this field exists on your model
+            w.status = "completed"
 
             w.save(
                 update_fields=[
@@ -1846,7 +1848,7 @@ def force_credit_wallet(self, request, queryset):
                     "is_approved",
                     "withdrawal_type",
                     "scheduled_processing_date",
-                    "status",  # Add this
+                    "status",
                 ]
             )
 

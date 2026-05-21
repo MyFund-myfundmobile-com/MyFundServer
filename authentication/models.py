@@ -2105,6 +2105,10 @@ class Transaction(models.Model):
     )
 
     transaction_type = models.CharField(max_length=20, choices=TRANSACTION_TYPES)
+    is_processed = models.BooleanField(
+        default=False,
+        help_text="For scheduled withdrawals - whether the scheduled withdrawal has been processed",
+    )
     status = models.CharField(
         max_length=20, choices=STATUS_TYPES, default="pending", db_index=True
     )
