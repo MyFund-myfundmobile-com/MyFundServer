@@ -9,7 +9,6 @@ from django.contrib.auth.hashers import make_password
 import logging
 from django.db.models import Q
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -543,14 +542,28 @@ class CardSerializer(serializers.ModelSerializer):
     #         )
 
 
-from .models import Transaction
+from .models import Transaction, WithdrawalsRequestToAdmin
 
 
 class TransactionSerializer(serializers.ModelSerializer):
+    # Add is_processed as a SerializerMethodField
+    is_processed = serializers.SerializerMethodField()
+
     class Meta:
         model = Transaction
         fields = "__all__"
         extra_kwargs = {"transaction_id": {"read_only": True}}
+
+    def get_is_processed(self, obj):
+        # Check if this transaction has a corresponding withdrawal request
+        try:
+            withdrawal = WithdrawalsRequestToAdmin.objects.get(
+                transaction_id=obj.transaction_id
+            )
+            return withdrawal.is_processed
+        except WithdrawalsRequestToAdmin.DoesNotExist:
+            # If no withdrawal request, it's not a scheduled withdrawal
+            return True  # Or False depending on your logic
 
 
 class QuickSaveSerializer(serializers.Serializer):

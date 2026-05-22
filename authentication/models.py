@@ -2412,6 +2412,7 @@ class WithdrawalsRequestToAdmin(models.Model):
     target_bank = models.CharField(max_length=100, default="")
     target_account_number = models.CharField(max_length=50, default="")
     target_account_name = models.CharField(max_length=255, blank=True, null=True)
+
     # Withdrawal type fields
     withdrawal_type = models.CharField(
         max_length=50,
@@ -2423,6 +2424,24 @@ class WithdrawalsRequestToAdmin(models.Model):
         null=True,
         blank=True,
         help_text="Date when scheduled withdrawal should be processed",
+    )
+
+    # ✅ ADDED STATUS FIELD
+    WITHDRAWAL_STATUS = (
+        ("pending", "Pending"),
+        ("processing", "Processing"),
+        ("completed", "Completed"),
+        ("failed", "Failed"),
+        ("cancelled", "Cancelled"),
+    )
+
+    status = models.CharField(
+        max_length=20,
+        choices=WITHDRAWAL_STATUS,
+        default="pending",
+        blank=True,
+        null=True,
+        help_text="Current status of the withdrawal request",
     )
 
     # Add a method to calculate net amount if needed
