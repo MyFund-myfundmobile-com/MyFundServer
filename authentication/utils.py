@@ -925,7 +925,7 @@ def process_scheduled_withdrawal(withdrawal):
     """
     Safely processes a scheduled withdrawal:
     - credits user wallet
-    - creates transaction log
+    - updates original transaction log
     - marks withdrawal as processed
     - sends notifications
     """
@@ -954,26 +954,43 @@ def process_scheduled_withdrawal(withdrawal):
         user.wallet = user.wallet + amount
         user.save(update_fields=["wallet"])
 
-        # 2️⃣ Create transaction record
-        Transaction.objects.create(
-            user=user,
-            transaction_type="credit",
-            status="confirmed",
-            amount=amount,
-            total_amount=amount,
-            source="WALLET",
-            credited_to="WALLET",
-            description="Scheduled withdrawal credited to wallet",
-            balance_before=previous_wallet,
-            balance_after=user.wallet,
-            transaction_id=f"SCHED-{withdrawal.transaction_id}",
-        )
+        # 2️⃣ UPDATE the original transaction instead of creating a new one
+        try:
+            original_tx = Transaction.objects.get(
+                user=user,
+                transaction_id=withdrawal.transaction_id,  # Use the original ID
+            )
+            original_tx.status = "confirmed"
+            original_tx.transaction_type = "credit"  # Change from debit to credit
+            original_tx.balance_before = previous_wallet
+            original_tx.balance_after = user.wallet
+            original_tx.description = f"Scheduled withdrawal credited to wallet (Original: {withdrawal.source_account})"
+            original_tx.save()
+            print(f"✅ Updated original transaction: {original_tx.transaction_id}")
+        except Transaction.DoesNotExist:
+            # Fallback: create new one if original doesn't exist (shouldn't happen)
+            Transaction.objects.create(
+                user=user,
+                transaction_type="credit",
+                status="confirmed",
+                amount=amount,
+                total_amount=amount,
+                source="WALLET",
+                credited_to="WALLET",
+                description="Scheduled withdrawal credited to wallet",
+                balance_before=previous_wallet,
+                balance_after=user.wallet,
+                transaction_id=withdrawal.transaction_id,  # Use original ID
+            )
+            print(
+                f"⚠️ Created new transaction (original missing): {withdrawal.transaction_id}"
+            )
 
-        # 3️⃣ Mark withdrawal as processed (ONLY this flag)
+        # 3️⃣ Mark withdrawal as processed
         withdrawal.is_processed = True
         withdrawal.save(update_fields=["is_processed"])
 
-    # 4️⃣ Push notification
+    # 4️⃣ Push notification (rest of your code remains the same)
     try:
         send_push_notification(
             user=user,
@@ -1006,7 +1023,7 @@ def process_scheduled_withdrawal(withdrawal):
     except Exception as e:
         print(f"Email failed: {e}")
 
-    # 6️⃣ Notify admin (optional but useful)
+    # 6️⃣ Notify admin
     try:
         send_generic_email(
             subject="[AUTO] Scheduled Withdrawal Processed",
