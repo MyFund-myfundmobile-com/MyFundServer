@@ -2227,6 +2227,82 @@ class PushNotifications(models.Model):
         return f"{self.title} - {self.user.email}"
 
 
+# Metrics MODEL #Metric MODEL
+
+
+class MetricSnapshot(models.Model):
+    PERIOD_TYPES = (
+        ("daily", "Daily"),
+        ("weekly", "Weekly"),
+        ("monthly", "Monthly"),
+    )
+
+    period_type = models.CharField(max_length=20, choices=PERIOD_TYPES)
+
+    snapshot_date = models.DateField(db_index=True)
+
+    total_users = models.PositiveIntegerField(default=0)
+
+    new_users = models.PositiveIntegerField(default=0)
+
+    active_users = models.PositiveIntegerField(default=0)
+
+    retention_rate = models.DecimalField(
+        max_digits=6,
+        decimal_places=2,
+        default=0,
+    )
+
+    ltv = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=0,
+    )
+
+    cac_proxy = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=0,
+    )
+
+    float_balance = models.DecimalField(
+        max_digits=18,
+        decimal_places=2,
+        default=0,
+    )
+
+    estimated_float_revenue = models.DecimalField(
+        max_digits=18,
+        decimal_places=2,
+        default=0,
+    )
+
+    total_deposits = models.DecimalField(
+        max_digits=18,
+        decimal_places=2,
+        default=0,
+    )
+
+    total_withdrawals = models.DecimalField(
+        max_digits=18,
+        decimal_places=2,
+        default=0,
+    )
+
+    metadata = models.JSONField(default=dict, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-snapshot_date"]
+        indexes = [
+            models.Index(fields=["period_type", "snapshot_date"]),
+        ]
+
+    def __str__(self):
+        return f"{self.period_type} metrics - {self.snapshot_date}"
+
+
 class AutoSave(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     card = models.ForeignKey(Card, on_delete=models.CASCADE, null=True, blank=True)

@@ -2010,3 +2010,38 @@ def cleanup_abandoned_manual_quicksaves():
             cleaned_count += 1
 
     return cleaned_count
+
+
+from celery import shared_task
+
+from authentication.metrics.services import (
+    generate_metric_snapshot,
+)
+
+from authentication.metrics.push import (
+    send_metrics_push,
+)
+
+
+@shared_task
+def daily_metrics_task():
+
+    snapshot = generate_metric_snapshot(period_type="daily")
+
+    send_metrics_push(snapshot)
+
+
+@shared_task
+def weekly_metrics_task():
+
+    snapshot = generate_metric_snapshot(period_type="weekly")
+
+    send_metrics_push(snapshot)
+
+
+@shared_task
+def monthly_metrics_task():
+
+    snapshot = generate_metric_snapshot(period_type="monthly")
+
+    send_metrics_push(snapshot)

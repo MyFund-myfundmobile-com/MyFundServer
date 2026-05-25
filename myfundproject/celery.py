@@ -111,6 +111,30 @@ app.conf.beat_schedule = {
     },
 }
 
+
+CELERY_BEAT_SCHEDULE = {
+    "daily-metrics-task": {
+        "task": "authentication.tasks.daily_metrics_task",
+        "schedule": crontab(hour=22, minute=0),
+    },
+    "weekly-metrics-task": {
+        "task": "authentication.tasks.weekly_metrics_task",
+        "schedule": crontab(
+            hour=9,
+            minute=0,
+            day_of_week="monday",
+        ),
+    },
+    "monthly-metrics-task": {
+        "task": "authentication.tasks.monthly_metrics_task",
+        "schedule": crontab(
+            hour=10,
+            minute=0,
+            day_of_month=1,
+        ),
+    },
+}
+
 # -----------------------------
 # Worker safety & performance
 # -----------------------------

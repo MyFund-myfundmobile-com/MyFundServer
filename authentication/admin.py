@@ -44,6 +44,11 @@ from django.utils.html import format_html
 from django.urls import reverse
 from django.contrib import messages
 from django.utils.html import format_html
+from authentication.tasks import (
+    daily_metrics_task,
+    weekly_metrics_task,
+    monthly_metrics_task,
+)
 
 from .utils import (
     send_push_notification,
@@ -3180,6 +3185,24 @@ class FinanceMetricSnapshotAdmin(admin.ModelAdmin):
             count += 1
 
         self.message_user(request, f"{count} finance snapshot(s) refreshed.")
+
+
+@admin.action(description="📊 Send Daily Metrics Now")
+def send_daily_metrics(modeladmin, request, queryset):
+
+    daily_metrics_task.delay()
+
+
+@admin.action(description="📈 Send Weekly Metrics Now")
+def send_weekly_metrics(modeladmin, request, queryset):
+
+    weekly_metrics_task.delay()
+
+
+@admin.action(description="💰 Send Monthly Metrics Now")
+def send_monthly_metrics(modeladmin, request, queryset):
+
+    monthly_metrics_task.delay()
 
 
 admin.site.register(DailyROIAccrual, DailyROIAccrualAdmin)

@@ -287,20 +287,62 @@ def confirm_otp(request):
                             formatted_phone = f"{digits[:4]} {digits[4:7]} {digits[7:]}"
 
                         # -----------------------
-                        # SIGNUP COUNTS
+                        # SIGNUP METRICS
                         # -----------------------
+                        from django.db.models import Count
+                        from datetime import timedelta
+
                         today = timezone.now().date()
 
+                        current_month_name = calendar.month_name[today.month]
+
+                        # TODAY SIGNUPS
                         today_signup_count = CustomUser.objects.filter(
-                            date_joined__date=today
+                            date_joined__date=today,
+                            is_active=True,
                         ).count()
 
+                        # CURRENT MONTH SIGNUPS
                         month_signup_count = CustomUser.objects.filter(
                             date_joined__year=today.year,
                             date_joined__month=today.month,
+                            is_active=True,
                         ).count()
 
-                        current_month_name = calendar.month_name[today.month]
+                        # TOTAL CONFIRMED USERS
+                        total_confirmed_users = CustomUser.objects.filter(
+                            is_active=True,
+                            is_deleted=False,
+                        ).count()
+
+                        # LAST MONTH CALCULATION
+                        if today.month == 1:
+                            previous_month = 12
+                            previous_year = today.year - 1
+                        else:
+                            previous_month = today.month - 1
+                            previous_year = today.year
+
+                        last_month_signup_count = CustomUser.objects.filter(
+                            date_joined__year=previous_year,
+                            date_joined__month=previous_month,
+                            is_active=True,
+                        ).count()
+
+                        # GROWTH %
+                        growth_percentage = 0
+
+                        if last_month_signup_count > 0:
+                            growth_percentage = round(
+                                (
+                                    (month_signup_count - last_month_signup_count)
+                                    / last_month_signup_count
+                                )
+                                * 100,
+                                1,
+                            )
+
+                        growth_prefix = "📈 +" if growth_percentage >= 0 else "📉 "
 
                         # -----------------------
                         # PUSH MESSAGE
@@ -309,17 +351,25 @@ def confirm_otp(request):
                             user=admin_user,
                             title=f"🎉 {u.first_name} Just Signed Up",
                             message=(
-                                f"{u.first_name} {u.last_name} - {u.email} - {formatted_phone}\n\n"
-                                f"For today: {today_signup_count} users\n"
-                                f"For {current_month_name}: {month_signup_count} users"
+                                f"{u.first_name} {u.last_name}\n"
+                                f"{u.email}\n"
+                                f"{formatted_phone}\n\n"
+                                f"Today: {today_signup_count} users\n"
+                                f"{current_month_name}: {month_signup_count} users\n"
+                                f"Total Confirmed: {total_confirmed_users:,}\n"
+                                f"vs Last Month: {growth_prefix}{growth_percentage}%"
                             ),
                             data={
                                 "user_id": u.id,
                                 "email": u.email,
                                 "phone_number": u.phone_number,
+                                "today_signups": today_signup_count,
+                                "month_signups": month_signup_count,
+                                "total_confirmed_users": total_confirmed_users,
+                                "growth_percentage": growth_percentage,
                                 "type": "admin_signup_alert",
                             },
-                            notif_type="ADMIN_ALERT",
+                            notif_type="ADMIN",
                         )
 
                         logger.info(f"Admin push sent to {admin_user.email}")
