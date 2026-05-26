@@ -6896,11 +6896,18 @@ def get_user_by_email(request):
     email = request.query_params.get("email", "")
     try:
         user = CustomUser.objects.get(email=email)
+        pic = user.profile_picture
+        if hasattr(pic, "url"):
+            pic = pic.url
+        elif not isinstance(pic, str):
+            pic = None
+
         user_data = {
             "first_name": user.first_name,
             "last_name": user.last_name,
             "email": user.email,
-            # Add any other user details you want to include
+            "profile_picture": pic or None,
+            "phone_number": user.phone_number or None,
         }
         return Response(user_data, status=status.HTTP_200_OK)
     except CustomUser.DoesNotExist:
@@ -10783,6 +10790,7 @@ class TopReferralsAPIView(APIView):
                     "first_name": ref_user.first_name,
                     "last_name": ref_user.last_name,
                     "email": ref_user.email,
+                    "phone_number": ref_user.phone_number or "",
                     "profile_picture": self.get_profile_pic_url(ref_user),
                     "monthly_signups": stat["monthly_signups"],
                     "monthly_confirmed": stat["monthly_confirmed"],
