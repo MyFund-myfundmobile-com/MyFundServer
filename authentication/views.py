@@ -79,6 +79,7 @@ logger = logging.getLogger(__name__)
 
 from django.db import transaction
 from .utils import create_paystack_customer, create_dedicated_account
+from django.core.cache import cache
 
 
 @api_view(["POST"])
@@ -101,6 +102,24 @@ def signup(request):
         )
 
     validated_phone = phone_check.get("formatted")
+
+    phone_key = f"signup_phone:{validated_phone}"
+    ip_key = f"signup_ip:{request.META.get('REMOTE_ADDR')}"
+
+    if cache.get(phone_key):
+        return Response(
+            {"error": "Please wait before trying again."},
+            status=429,
+        )
+
+    if cache.get(ip_key):
+        return Response(
+            {"error": "Too many signup attempts. Try again later."},
+            status=429,
+        )
+
+    cache.set(phone_key, True, timeout=120)
+    cache.set(ip_key, True, timeout=60)
 
     try:
         serializer = SignupSerializer(data=request.data, context={"request": request})
@@ -131,11 +150,11 @@ def signup(request):
             # -----------------------
             create_dedicated_account(user)
 
-        # -----------------------
         # OTP GENERATION
-        # -----------------------
         otp = generate_otp()
+
         user.otp = otp
+        user.otp_created_at = timezone.now()
 
         if hasattr(user, "last_otp_sent_at"):
             user.last_otp_sent_at = timezone.now()
@@ -146,10 +165,17 @@ def signup(request):
                 "how_did_you_hear",
                 "is_active",
                 "otp",
+                "otp_created_at",
                 "paystack_customer_code",
                 "updated_at",
                 *(["last_otp_sent_at"] if hasattr(user, "last_otp_sent_at") else []),
             ]
+        )
+
+        # CREATE DELIVERY LOG
+        otp_log = OTPDeliveryLog.objects.create(
+            user=user,
+            otp=otp,
         )
 
         # -----------------------
@@ -158,14 +184,23 @@ def signup(request):
         def send_otp_async():
             try:
                 send_otp_email(user, otp)
+
             except Exception as exc:
                 logger.warning(f"OTP email failed for {user.email}: {exc}")
 
-            try:
-                if user.phone_number:
-                    send_otp_sms(user, otp)
-            except Exception as exc:
-                logger.warning(f"OTP SMS failed for {user.phone_number}: {exc}")
+                otp_log.email_status = "failed"
+                otp_log.save(update_fields=["email_status"])
+
+                try:
+                    if user.phone_number:
+                        sms_success = send_otp_sms(user, otp)
+
+                        if sms_success:
+                            otp_log.sms_sent = True
+                            otp_log.save(update_fields=["sms_sent"])
+
+                except Exception as sms_exc:
+                    logger.warning(f"OTP SMS fallback failed: {sms_exc}")
 
         transaction.on_commit(send_otp_async)
 
@@ -198,7 +233,13 @@ def confirm_otp(request):
     otp = serializer.validated_data["otp"]
 
     try:
-        user = CustomUser.objects.get(otp=otp)
+        email = request.data.get("email", "").strip().lower()
+
+        user = CustomUser.objects.get(
+            email=email,
+            otp=otp,
+            is_active=False,
+        )
 
     except CustomUser.DoesNotExist:
         logger.warning(f"Invalid OTP attempt: {otp}")
@@ -208,9 +249,11 @@ def confirm_otp(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    if user.is_active:
+    if user.otp_created_at and timezone.now() > user.otp_created_at + timedelta(
+        minutes=20
+    ):
         return Response(
-            {"message": "Account already confirmed."},
+            {"message": "OTP has expired."},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
@@ -448,6 +491,7 @@ def send_otp_email(user, otp):
 
 
 def send_otp_sms(user, otp):
+    from django.core.cache import cache
     from authentication.utils import send_sms_via_payless
 
     phone_number = getattr(user, "phone_number", None)  # should already be +234...
@@ -463,6 +507,13 @@ def send_otp_sms(user, otp):
     )
 
     try:
+        sms_lock_key = f"sms_otp_lock:{phone_number}"
+
+        if cache.get(sms_lock_key):
+            logger.warning(f"SMS cooldown active for {phone_number}")
+            return False
+
+        cache.set(sms_lock_key, True, timeout=600)
         success = send_sms_via_payless(phone_number, message)
         if success:
             logger.info(f"📱 SMS OTP sent to {phone_number}")
@@ -480,7 +531,9 @@ def send_otp_for_user(user):
     attempt to send the OTP email, and return True on success or raise on failure.
     """
     otp = generate_otp()
+
     user.otp = otp
+    user.otp_created_at = timezone.now()
 
     # update last_otp_sent_at if you added the field previously
     if hasattr(user, "last_otp_sent_at"):
@@ -488,7 +541,7 @@ def send_otp_for_user(user):
 
     # Save fields atomically when possible
     try:
-        update_fields = ["otp", "updated_at"]
+        update_fields = ["otp", "otp_created_at", "updated_at"]
         if hasattr(user, "last_otp_sent_at"):
             update_fields.append("last_otp_sent_at")
         user.save(update_fields=update_fields)
@@ -498,19 +551,9 @@ def send_otp_for_user(user):
     # Try to send the email and raise if it fails so caller can handle it
     try:
         send_otp_email(user, otp)
-        logger.info("send_otp_for_user: OTP sent to %s", user.email)
-        return True
+
     except Exception as e:
-        logger.exception(
-            "send_otp_for_user: Failed to send OTP to %s: %s", user.email, str(e)
-        )
-        # Clear the OTP (avoid leaving an unused OTP in DB)
-        try:
-            user.otp = None
-            user.save(update_fields=["otp"])
-        except Exception:
-            user.save()
-        # raise to inform the caller
+        logger.warning(f"Email resend OTP failed: {e}")
         raise
 
 
@@ -846,14 +889,10 @@ class CustomObtainAuthToken(ObtainAuthToken):
                     )
 
                 # For regular users, send OTP
-                from authentication.views import send_otp_for_user
-
-                send_otp_for_user(user)
-
                 return Response(
                     {
                         "status": "inactive",
-                        "message": "Account not verified. OTP sent.",
+                        "message": "Account not verified.",
                         "next_step": "enter_otp",
                         "email": user.email,
                     },
@@ -1022,20 +1061,8 @@ def _send_otp(user, otp, purpose="signup"):
             logger.error(f"Error sending OTP email to {user.email}: {e}")
 
         # Send SMS OTP if phone is available
-        phone_number = getattr(user, "phone_number", None)
-        if phone_number:
-            sms_message = (
-                f"Hi {user.first_name}, your OTP for MyFund "
-                f"{'signup' if purpose=='signup' else 'password reset'} is {otp}. "
-                "Valid for 20 minutes."
-            )
-            try:
-                if send_sms_via_payless(phone_number, sms_message):
-                    logger.info(f"SMS OTP sent to {phone_number}")
-                else:
-                    logger.warning(f"Failed to send SMS OTP to {phone_number}")
-            except Exception as sms_err:
-                logger.error(f"Error sending SMS OTP to {phone_number}: {sms_err}")
+        # Password reset uses email only.
+        # No SMS fallback here intentionally.
 
         return True
 

@@ -72,6 +72,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     phone_number = models.CharField(max_length=15, unique=True)
     referral_reward_granted = models.BooleanField(default=False)
     otp = models.CharField(max_length=6, blank=True, null=True)
+    otp_created_at = models.DateTimeField(null=True, blank=True)
     reset_token = models.CharField(max_length=64, null=True, blank=True)
     reset_token_expires = models.DateTimeField(null=True, blank=True)
     profile_picture = models.CharField(max_length=1000, null=True, blank=True)
@@ -1098,6 +1099,39 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                 fields=["referral_id", "date_joined"]
             ),  # ✅ ADDED: For referral queries
         ]
+
+
+class OTPDeliveryLog(models.Model):
+    DELIVERY_STATUS_CHOICES = [
+        ("pending", "Pending"),
+        ("delivered", "Delivered"),
+        ("bounced", "Bounced"),
+        ("dropped", "Dropped"),
+        ("failed", "Failed"),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="otp_logs",
+    )
+
+    otp = models.CharField(max_length=6)
+
+    email_status = models.CharField(
+        max_length=20,
+        choices=DELIVERY_STATUS_CHOICES,
+        default="pending",
+    )
+
+    sms_sent = models.BooleanField(default=False)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.user.email} - {self.otp}"
 
 
 class MonthlySavings(models.Model):
