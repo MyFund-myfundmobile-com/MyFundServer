@@ -249,22 +249,44 @@ def confirm_otp(request):
     otp = serializer.validated_data["otp"]
 
     try:
-        email = request.data.get("email", "").strip().lower()
+        email = (request.data.get("email") or "").strip().lower()
 
-        user = CustomUser.objects.get(
-            email=email,
-            otp=otp,
+        user = CustomUser.objects.filter(
+            email__iexact=email,
             is_active=False,
-        )
+        ).first()
 
-    except CustomUser.DoesNotExist:
-        logger.warning(f"Invalid OTP attempt: {otp}")
+        if not user:
+            logger.warning(f"OTP attempt for non-existent/inactive user: {email}")
+            return Response(
+                {"message": "Invalid OTP."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # 🔥 OTP must exist
+        if not user.otp:
+            return Response(
+                {"message": "OTP expired. Please request a new one."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # normalize OTP comparison
+        if str(user.otp).strip() != str(otp).strip():
+            logger.warning(f"Invalid OTP attempt: {otp} for {email}")
+            return Response(
+                {"message": "Invalid OTP."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    except Exception as e:
+        logger.exception(f"OTP validation error: {e}")
 
         return Response(
             {"message": "Invalid OTP."},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+    # expiry check (SAFE PLACE)
     if user.otp_created_at and timezone.now() > user.otp_created_at + timedelta(
         minutes=20
     ):
@@ -274,12 +296,22 @@ def confirm_otp(request):
         )
 
     # -----------------------
-    # ACTIVATE USER
+    # ACTIVATE USER + CLEAN OTP
     # -----------------------
     user.is_active = True
-    user.otp = None
 
-    user.save(update_fields=["is_active", "otp"])
+    # 🔥 HARD CLEAR OTP STATE
+    user.otp = None
+    user.otp_created_at = None
+
+    if hasattr(user, "last_otp_sent_at"):
+        user.last_otp_sent_at = None
+
+    update_fields = ["is_active", "otp", "otp_created_at"]
+    if hasattr(user, "last_otp_sent_at"):
+        update_fields.append("last_otp_sent_at")
+
+    user.save(update_fields=update_fields)
 
     logger.info(f"Account activated for {user.email}")
 
@@ -288,15 +320,11 @@ def confirm_otp(request):
     # -----------------------
     def background_tasks(u):
         try:
-
-            # Welcome Email
             try:
                 u.send_welcome_email()
-
             except Exception as e:
                 logger.warning(f"Welcome email failed: {e}")
 
-            # Welcome Push
             try:
                 send_push_notification(
                     user=u,
@@ -305,136 +333,14 @@ def confirm_otp(request):
                     data={"type": "welcome"},
                     notif_type="SYSTEM",
                 )
-
             except Exception as e:
                 logger.warning(f"Welcome push failed: {e}")
 
-            # Referral Reward
             try:
                 if u.referral:
                     u.create_pending_referral_reward()
-
             except Exception as e:
                 logger.warning(f"Referral reward failed: {e}")
-
-            # Admin Push Notifications
-            admin_emails = [
-                "tolulopeahmed@gmail.com",
-                "ceo@mg.myfundmobile.com",
-                "janet.adegbenro@gmail.com",
-                "josephgideon95@gmail.com",
-            ]
-
-            admin_users = CustomUser.objects.filter(email__in=admin_emails)
-
-            for admin_user in admin_users:
-
-                try:
-                    if getattr(admin_user, "expo_push_tokens", None):
-
-                        from django.utils import timezone
-                        import calendar
-
-                        # -----------------------
-                        # FORMAT PHONE NUMBER
-                        # -----------------------
-                        formatted_phone = u.phone_number or "N/A"
-
-                        digits = "".join(filter(str.isdigit, formatted_phone))
-
-                        if len(digits) == 11:
-                            formatted_phone = f"{digits[:4]} {digits[4:7]} {digits[7:]}"
-
-                        # -----------------------
-                        # SIGNUP METRICS
-                        # -----------------------
-                        from django.db.models import Count
-                        from datetime import timedelta
-
-                        today = timezone.now().date()
-
-                        current_month_name = calendar.month_name[today.month]
-
-                        # TODAY SIGNUPS
-                        today_signup_count = CustomUser.objects.filter(
-                            date_joined__date=today,
-                            is_active=True,
-                        ).count()
-
-                        # CURRENT MONTH SIGNUPS
-                        month_signup_count = CustomUser.objects.filter(
-                            date_joined__year=today.year,
-                            date_joined__month=today.month,
-                            is_active=True,
-                        ).count()
-
-                        # TOTAL CONFIRMED USERS
-                        total_confirmed_users = CustomUser.objects.filter(
-                            is_active=True,
-                            is_deleted=False,
-                        ).count()
-
-                        # LAST MONTH CALCULATION
-                        if today.month == 1:
-                            previous_month = 12
-                            previous_year = today.year - 1
-                        else:
-                            previous_month = today.month - 1
-                            previous_year = today.year
-
-                        last_month_signup_count = CustomUser.objects.filter(
-                            date_joined__year=previous_year,
-                            date_joined__month=previous_month,
-                            is_active=True,
-                        ).count()
-
-                        # GROWTH %
-                        growth_percentage = 0
-
-                        if last_month_signup_count > 0:
-                            growth_percentage = round(
-                                (
-                                    (month_signup_count - last_month_signup_count)
-                                    / last_month_signup_count
-                                )
-                                * 100,
-                                1,
-                            )
-
-                        growth_prefix = "📈 +" if growth_percentage >= 0 else "📉 "
-
-                        # -----------------------
-                        # PUSH MESSAGE
-                        # -----------------------
-                        send_push_notification(
-                            user=admin_user,
-                            title=f"🎉 {u.first_name} Just Signed Up",
-                            message=(
-                                f"{u.first_name} {u.last_name}\n"
-                                f"{u.email}\n"
-                                f"{formatted_phone}\n\n"
-                                f"Today: {today_signup_count} users\n"
-                                f"{current_month_name}: {month_signup_count} users\n"
-                                f"Total Confirmed: {total_confirmed_users:,}\n"
-                                f"vs Last Month: {growth_prefix}{growth_percentage}%"
-                            ),
-                            data={
-                                "user_id": u.id,
-                                "email": u.email,
-                                "phone_number": u.phone_number,
-                                "today_signups": today_signup_count,
-                                "month_signups": month_signup_count,
-                                "total_confirmed_users": total_confirmed_users,
-                                "growth_percentage": growth_percentage,
-                                "type": "admin_signup_alert",
-                            },
-                            notif_type="ADMIN",
-                        )
-
-                        logger.info(f"Admin push sent to {admin_user.email}")
-
-                except Exception as e:
-                    logger.warning(f"Admin push failed for {admin_user.email}: {e}")
 
         except Exception as e:
             logger.exception(f"Background error for {u.email}: {e}")
