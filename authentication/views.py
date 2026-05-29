@@ -104,22 +104,33 @@ def signup(request):
     validated_phone = phone_check.get("formatted")
 
     phone_key = f"signup_phone:{validated_phone}"
-    ip_key = f"signup_ip:{request.META.get('REMOTE_ADDR')}"
+    ip_key = f"signup_ip_attempts:{request.META.get('REMOTE_ADDR')}"
 
+    # -----------------------
+    # PHONE RATE LIMIT (soft cooldown)
+    # -----------------------
     if cache.get(phone_key):
         return Response(
-            {"error": "Please wait before trying again."},
+            {"error": "Please wait a moment before trying again."},
             status=429,
         )
 
-    if cache.get(ip_key):
+    # -----------------------
+    # IP RATE LIMIT (counter-based, not hard block)
+    # -----------------------
+    ip_attempts = cache.get(ip_key, 0)
+
+    if ip_attempts >= 5:
         return Response(
-            {"error": "Too many signup attempts. Try again later."},
+            {"error": "Too many signup attempts. Try again shortly."},
             status=429,
         )
 
-    cache.set(phone_key, True, timeout=120)
-    cache.set(ip_key, True, timeout=60)
+    # increment attempts
+    cache.set(ip_key, ip_attempts + 1, timeout=60)
+
+    # short phone cooldown (prevents spam clicks)
+    cache.set(phone_key, True, timeout=60)
 
     try:
         serializer = SignupSerializer(data=request.data, context={"request": request})
