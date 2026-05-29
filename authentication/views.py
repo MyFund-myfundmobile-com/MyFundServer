@@ -487,8 +487,16 @@ def resend_otp(request):
     Resend OTP for an existing, inactive user.
     Payload: { "email": "user@example.com" }
     """
-    email = (request.data.get("email") or "").strip().lower()
+    email = serializer.validated_data.get("email") or request.data.get("email")
+
+    email = (email or "").strip().lower()
+
     if not email:
+        logger.warning("OTP confirm called without email")
+        return Response(
+            {"message": "Email is required."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
         logger.warning("Resend OTP called without email.")
         return Response(
             {"detail": "Email is required."}, status=status.HTTP_400_BAD_REQUEST
