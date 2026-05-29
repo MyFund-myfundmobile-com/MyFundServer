@@ -10700,7 +10700,6 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.utils import timezone
 from django.db.models import Count, Q
-from django.core.mail import send_mail
 from authentication.utils import send_push_notification
 from authentication.models import CustomUser
 
@@ -10726,42 +10725,22 @@ class TopReferralsAPIView(APIView):
         ).count()
 
     def send_rank_notification(self, user, old_rank, new_rank):
-        """Sends consistent email + push notifications for rank changes."""
+        """Push for all rank changes. Email only for Top 3 entry or reaching #1."""
+
         if new_rank < old_rank:
-            subject = f"🎉 Congrats! You're Now #{new_rank} on MyFund!"
-            message = (
-                f"Hi {user.first_name},<br><br>"
-                f"Great news! Your referral rank improved from #{old_rank} to #{new_rank}. "
-                "Keep referring friends to climb higher!<br><br>"
-                "Thank you for using MyFund.<br><br>"
-                "MyFund"
-            )
             push_title = f"🎉 Rank Improved! Now #{new_rank}"
             push_message = (
                 f"Hi {user.first_name}, you moved up to #{new_rank} (from #{old_rank}). "
                 "Keep referring to earn more referral rewards!"
             )
         else:
-            subject = f"📉 Your MyFund Rank Changed to #{new_rank}"
-            message = (
-                f"Hi {user.first_name},<br><br>"
-                f"Your referral rank changed from #{old_rank} to #{new_rank}. "
-                "Share your referral link to move back up and earn more referral bonus!<br><br>"
-                "Thank you for using MyFund.<br><br>"
-            )
             push_title = f"📉 Referral Rank Changed to #{new_rank}"
             push_message = (
                 f"Hi {user.first_name}, your rank is now #{new_rank} (was #{old_rank}). "
                 "Refer more friends to climb higher and earn more referral bonus!"
             )
 
-        send_generic_email(
-            subject=subject,
-            message=message,
-            from_email="MyFund <info@mg.myfundmobile.com>",
-            recipient_list=[user.email],
-        )
-
+        # Always send push
         send_push_notification(
             user=user,
             title=push_title,
@@ -10770,15 +10749,49 @@ class TopReferralsAPIView(APIView):
             notif_type="SYSTEM",
         )
 
+        # Email only for meaningful milestones
+        just_reached_number1 = new_rank == 1 and old_rank != 1
+        just_entered_top3 = new_rank <= 3 and old_rank > 3
+
+        if just_reached_number1:
+            subject = f"🏆 You're #1 on MyFund This Month!"
+            message = (
+                f"Hi {user.first_name},<br><br>"
+                f"You've hit the top! You're now <strong>#1</strong> on the MyFund referral leaderboard. "
+                "This is a huge deal — keep it up and finish the month strong!<br><br>"
+                "Thank you for using MyFund.<br><br>"
+                "MyFund"
+            )
+            send_generic_email(
+                subject=subject,
+                message=message,
+                from_email="MyFund <info@mg.myfundmobile.com>",
+                recipient_list=[user.email],
+            )
+
+        elif just_entered_top3:
+            subject = f"🎉 Congrats! You're Now #{new_rank} on MyFund!"
+            message = (
+                f"Hi {user.first_name},<br><br>"
+                f"Great news! You've entered the <strong>Top 3</strong> — your referral rank improved from #{old_rank} to #{new_rank}. "
+                "Keep referring friends to stay in the top and earn more referral rewards!<br><br>"
+                "Thank you for using MyFund.<br><br>"
+                "MyFund"
+            )
+            send_generic_email(
+                subject=subject,
+                message=message,
+                from_email="MyFund <info@mg.myfundmobile.com>",
+                recipient_list=[user.email],
+            )
+
     def get(self, request):
         user = request.user
         now = timezone.now()
         start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
-        # If logged-in user is ambassador, show only ambassador rankings
         ambassador_view = getattr(user, "is_ambassador", False)
 
-        # Get referral performance for the month
         ref_stats = (
             CustomUser.objects.filter(
                 referral__isnull=False,
@@ -10807,7 +10820,6 @@ class TopReferralsAPIView(APIView):
             if not ref_user:
                 continue
 
-            # If ambassador is viewing, only include ambassadors
             if ambassador_view and not getattr(ref_user, "is_ambassador", False):
                 continue
 
@@ -10829,10 +10841,8 @@ class TopReferralsAPIView(APIView):
                 }
             )
 
-        # Sort final filtered list
         top_users.sort(key=lambda x: (-x["monthly_confirmed"], -x["monthly_signups"]))
 
-        # Update rank only based on the correct leaderboard being viewed
         rank_changes = {}
         for index, user_data in enumerate(top_users):
             ranked_user = CustomUser.objects.get(id=user_data["id"])
@@ -10847,7 +10857,6 @@ class TopReferralsAPIView(APIView):
         for user_obj, (old_rank, new_rank) in rank_changes.items():
             self.send_rank_notification(user_obj, old_rank, new_rank)
 
-        # Current user monthly stats
         my_signups = CustomUser.objects.filter(
             referral=user,
             date_joined__gte=start_of_month,
