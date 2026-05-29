@@ -487,50 +487,63 @@ def resend_otp(request):
     Resend OTP for an existing, inactive user.
     Payload: { "email": "user@example.com" }
     """
-    email = serializer.validated_data.get("email") or request.data.get("email")
 
+    email = request.data.get("email")
     email = (email or "").strip().lower()
 
     if not email:
-        logger.warning("OTP confirm called without email")
-        return Response(
-            {"message": "Email is required."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
         logger.warning("Resend OTP called without email.")
         return Response(
-            {"detail": "Email is required."}, status=status.HTTP_400_BAD_REQUEST
+            {"detail": "Email is required."},
+            status=status.HTTP_400_BAD_REQUEST,
         )
 
     try:
         user = CustomUser.objects.get(email__iexact=email)
+
     except CustomUser.DoesNotExist:
         logger.warning("Resend OTP requested for non-existent user: %s", email)
-        return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response(
+            {"detail": "User not found."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
 
     if user.is_active:
         logger.info("Resend OTP requested for already active user: %s", user.email)
+
         return Response(
-            {"detail": "Account already verified."}, status=status.HTTP_400_BAD_REQUEST
+            {"detail": "Account already verified."},
+            status=status.HTTP_400_BAD_REQUEST,
         )
 
-    # Optional server-side cooldown using last_otp_sent_at if available
+    # Optional cooldown
     COOLDOWN_SECONDS = 60
+
     last_sent = getattr(user, "last_otp_sent_at", None)
+
     if last_sent and timezone.now() - last_sent < timedelta(seconds=COOLDOWN_SECONDS):
         logger.info("OTP resend cooldown in effect for %s", user.email)
+
         return Response(
-            {"detail": "Please wait before requesting another code."}, status=429
+            {"detail": "Please wait before requesting another code."},
+            status=429,
         )
 
     try:
         send_otp_for_user(user)
+
         return Response(
-            {"detail": "OTP resent successfully.", "email": user.email},
+            {
+                "detail": "OTP resent successfully.",
+                "email": user.email,
+            },
             status=status.HTTP_200_OK,
         )
+
     except Exception as e:
         logger.exception("Error resending OTP to %s: %s", email, str(e))
+
         return Response(
             {"detail": "Failed to resend OTP. Try again later."},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
