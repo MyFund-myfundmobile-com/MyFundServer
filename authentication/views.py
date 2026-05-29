@@ -198,8 +198,14 @@ def signup(request):
         # SEND OTP AFTER COMMIT
         # -----------------------
         def send_otp_async():
+            # -----------------------
+            # EMAIL OTP (always)
+            # -----------------------
             try:
                 send_otp_email(user, otp)
+
+                otp_log.email_status = "sent"
+                otp_log.save(update_fields=["email_status"])
 
             except Exception as exc:
                 logger.warning(f"OTP email failed for {user.email}: {exc}")
@@ -207,16 +213,47 @@ def signup(request):
                 otp_log.email_status = "failed"
                 otp_log.save(update_fields=["email_status"])
 
-                try:
-                    if user.phone_number:
+            # -----------------------
+            # SMS OTP (max 2/day)
+            # -----------------------
+            try:
+                if user.phone_number:
+
+                    sms_count_key = f"signup_sms_otp_count:{user.phone_number}"
+
+                    sms_count = cache.get(sms_count_key, 0)
+
+                    if sms_count < 2:
+
                         sms_success = send_otp_sms(user, otp)
 
                         if sms_success:
+                            cache.set(
+                                sms_count_key,
+                                sms_count + 1,
+                                timeout=60 * 60 * 24,  # 24 hours
+                            )
+
                             otp_log.sms_sent = True
                             otp_log.save(update_fields=["sms_sent"])
 
-                except Exception as sms_exc:
-                    logger.warning(f"OTP SMS fallback failed: {sms_exc}")
+                            logger.info(
+                                f"SMS OTP sent to {user.phone_number}. "
+                                f"Count: {sms_count + 1}/2"
+                            )
+
+                        else:
+                            logger.warning(f"SMS OTP failed for {user.phone_number}")
+
+                    else:
+                        logger.info(
+                            f"Daily SMS OTP limit reached for {user.phone_number}"
+                        )
+
+            except Exception as sms_exc:
+                logger.warning(
+                    f"SMS OTP sending error for {user.phone_number}: {sms_exc}"
+                )
 
         transaction.on_commit(send_otp_async)
 
@@ -435,7 +472,7 @@ def send_otp_sms(user, otp):
             logger.warning(f"SMS cooldown active for {phone_number}")
             return False
 
-        cache.set(sms_lock_key, True, timeout=600)
+        cache.set(sms_lock_key, True, timeout=30)
         success = send_sms_via_payless(phone_number, message)
         if success:
             logger.info(f"📱 SMS OTP sent to {phone_number}")
@@ -447,52 +484,70 @@ def send_otp_sms(user, otp):
         return False
 
 
-def send_otp_for_user(user):
-    """
-    Helper: generate OTP, persist it (and last_otp_sent_at if available),
-    attempt to send the OTP email, and return True on success or raise on failure.
-    """
+def send_otp_for_user(user, send_sms=False):
     otp = generate_otp()
 
     user.otp = otp
     user.otp_created_at = timezone.now()
 
-    # update last_otp_sent_at if you added the field previously
     if hasattr(user, "last_otp_sent_at"):
         user.last_otp_sent_at = timezone.now()
 
-    # Save fields atomically when possible
-    try:
-        update_fields = ["otp", "otp_created_at", "updated_at"]
-        if hasattr(user, "last_otp_sent_at"):
-            update_fields.append("last_otp_sent_at")
-        user.save(update_fields=update_fields)
-    except Exception:
-        user.save()
+    update_fields = ["otp", "otp_created_at", "updated_at"]
 
-    # Try to send the email and raise if it fails so caller can handle it
+    if hasattr(user, "last_otp_sent_at"):
+        update_fields.append("last_otp_sent_at")
+
+    user.save(update_fields=update_fields)
+
+    otp_log = OTPDeliveryLog.objects.create(
+        user=user,
+        otp=otp,
+    )
+
     try:
         send_otp_email(user, otp)
+        otp_log.email_status = "sent"
+        otp_log.save(update_fields=["email_status"])
 
     except Exception as e:
-        logger.warning(f"Email resend OTP failed: {e}")
-        raise
+        logger.warning(f"Email OTP failed: {e}")
+
+        otp_log.email_status = "failed"
+        otp_log.save(update_fields=["email_status"])
+
+    if send_sms:
+        try:
+            sms_count_key = f"sms_signup_count:{user.phone_number}"
+
+            sms_count = cache.get(sms_count_key, 0)
+
+            if sms_count < 2:
+                sms_success = send_otp_sms(user, otp)
+
+                if sms_success:
+                    cache.set(
+                        sms_count_key,
+                        sms_count + 1,
+                        timeout=60 * 60 * 24,
+                    )
+
+                    otp_log.sms_sent = True
+                    otp_log.save(update_fields=["sms_sent"])
+
+        except Exception as e:
+            logger.warning(f"SMS OTP failed: {e}")
+
+    return True
 
 
 @api_view(["POST"])
 @csrf_exempt
 @permission_classes([AllowAny])
 def resend_otp(request):
-    """
-    Resend OTP for an existing, inactive user.
-    Payload: { "email": "user@example.com" }
-    """
-
-    email = request.data.get("email")
-    email = (email or "").strip().lower()
+    email = (request.data.get("email") or "").strip().lower()
 
     if not email:
-        logger.warning("Resend OTP called without email.")
         return Response(
             {"detail": "Email is required."},
             status=status.HTTP_400_BAD_REQUEST,
@@ -502,50 +557,64 @@ def resend_otp(request):
         user = CustomUser.objects.get(email__iexact=email)
 
     except CustomUser.DoesNotExist:
-        logger.warning("Resend OTP requested for non-existent user: %s", email)
-
         return Response(
             {"detail": "User not found."},
             status=status.HTTP_404_NOT_FOUND,
         )
 
     if user.is_active:
-        logger.info("Resend OTP requested for already active user: %s", user.email)
-
         return Response(
             {"detail": "Account already verified."},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    # Optional cooldown
     COOLDOWN_SECONDS = 60
 
     last_sent = getattr(user, "last_otp_sent_at", None)
 
     if last_sent and timezone.now() - last_sent < timedelta(seconds=COOLDOWN_SECONDS):
-        logger.info("OTP resend cooldown in effect for %s", user.email)
-
         return Response(
             {"detail": "Please wait before requesting another code."},
             status=429,
         )
 
     try:
-        send_otp_for_user(user)
+        resend_count_key = f"otp_resend_count:{user.email}"
+
+        resend_count = cache.get(resend_count_key, 0)
+
+        # First resend = email only
+        # Second resend onwards = email + SMS
+        send_sms = resend_count >= 1
+
+        send_otp_for_user(
+            user=user,
+            send_sms=send_sms,
+        )
+
+        cache.set(
+            resend_count_key,
+            resend_count + 1,
+            timeout=60 * 60 * 24,
+        )
 
         return Response(
             {
-                "detail": "OTP resent successfully.",
+                "detail": (
+                    "OTP resent via email and SMS."
+                    if send_sms
+                    else "OTP resent successfully."
+                ),
                 "email": user.email,
             },
             status=status.HTTP_200_OK,
         )
 
     except Exception as e:
-        logger.exception("Error resending OTP to %s: %s", email, str(e))
+        logger.exception(f"Error resending OTP: {e}")
 
         return Response(
-            {"detail": "Failed to resend OTP. Try again later."},
+            {"detail": "Failed to resend OTP."},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
