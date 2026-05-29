@@ -121,7 +121,7 @@ def signup(request):
     # -----------------------
     ip_attempts = cache.get(ip_key, 0)
 
-    if ip_attempts >= 5:
+    if ip_attempts >= 10:
         return Response(
             {"error": "Too many signup attempts. Try again shortly."},
             status=429,
