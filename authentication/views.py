@@ -80,6 +80,7 @@ logger = logging.getLogger(__name__)
 from django.db import transaction
 from .utils import create_paystack_customer, create_dedicated_account
 from django.core.cache import cache
+from .models import OTPDeliveryLog
 
 
 @api_view(["POST"])
@@ -153,13 +154,17 @@ def signup(request):
         # PAYSTACK CUSTOMER
         # -----------------------
         customer_code = create_paystack_customer(user)
-        if customer_code:
-            user.paystack_customer_code = customer_code
 
-            # -----------------------
-            # DEDICATED VIRTUAL ACCOUNT (DVA)
-            # -----------------------
-            create_dedicated_account(user)
+        if not customer_code:
+            logger.warning(f"Paystack customer creation failed for user {user.email}")
+        else:
+            user.paystack_customer_code = customer_code
+            user.save(update_fields=["paystack_customer_code"])
+
+            try:
+                create_dedicated_account(user)
+            except Exception as e:
+                logger.exception(f"DVA creation failed for {user.email}: {e}")
 
         # OTP GENERATION
         otp = generate_otp()
