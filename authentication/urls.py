@@ -45,6 +45,9 @@ from .views import (
     AmbassadorMonthlyReportStatusView,
     submit_ambassador_attendance,
     AdminFinanceMetricsView,
+    request_phone_change,
+    verify_phone_change,
+    approve_phone_change_view,
 )
 from django.views.decorators.csrf import csrf_exempt
 from authentication.views import CustomGraphQLView
@@ -78,6 +81,7 @@ urlpatterns = [
         name="request-password-reset",
     ),
     path("reset-password/", views.reset_password, name="reset-password"),
+    #
     # Profile-related APIs
     path("get-user-profile/", views.get_user_profile, name="get-user-profile"),
     path("update-user-profile/", views.update_user_profile, name="update-user-profile"),
@@ -91,7 +95,11 @@ urlpatterns = [
         views.profile_picture_update,
         name="profile-picture-update",
     ),
-    # Savings goal-related APIs
+    path("api/request-phone-change/", request_phone_change),
+    path("api/verify-phone-change/", verify_phone_change),
+    path("api/approve-phone-change/", approve_phone_change_view),
+    #
+    # # Savings goal-related APIs
     path("update-savings-goal/", views.update_savings_goal, name="update-savings-goal"),
     # Admin-related APIs
     path("send-message/<int:recipient_id>/", views.send_message, name="send-message"),

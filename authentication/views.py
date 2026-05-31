@@ -1542,6 +1542,57 @@ def update_user_profile(request):
         )
 
 
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def request_phone_change(request):
+    new_phone = request.data.get("new_phone")
+
+    if not new_phone:
+        return Response({"error": "new_phone is required"}, status=400)
+
+    req = create_phone_change_request(request.user, new_phone)
+
+    return Response(
+        {
+            "message": "OTP sent to old and new phone numbers",
+            "request_id": req.id,
+            "status": req.status,
+        }
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def verify_phone_change(request):
+    request_id = request.data.get("request_id")
+    old_verified = request.data.get("old_verified", False)
+    new_verified = request.data.get("new_verified", False)
+
+    req = verify_phone_change_otp(
+        request_id=request_id, old_verified=old_verified, new_verified=new_verified
+    )
+
+    return Response(
+        {
+            "status": req.status,
+            "old_verified": req.old_phone_otp_verified,
+            "new_verified": req.new_phone_otp_verified,
+        }
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def approve_phone_change_view(request):
+    request_id = request.data.get("request_id")
+
+    req = approve_phone_change(request_id=request_id, admin_user=request.user)
+
+    return Response(
+        {"status": req.status, "message": "Phone number updated successfully"}
+    )
+
+
 import base64
 import time
 import uuid

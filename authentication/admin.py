@@ -3205,6 +3205,36 @@ def send_monthly_metrics(modeladmin, request, queryset):
     monthly_metrics_task.delay()
 
 
+from django.contrib import admin
+from authentication.models import PhoneChangeRequest
+from authentication.services.phone_change import approve_phone_change
+
+
+@admin.register(PhoneChangeRequest)
+class PhoneChangeRequestAdmin(admin.ModelAdmin):
+
+    list_display = (
+        "user",
+        "old_phone",
+        "new_phone",
+        "status",
+        "created_at",
+    )
+
+    actions = ["approve_requests"]
+
+    def approve_requests(self, request, queryset):
+        for obj in queryset:
+            try:
+                approve_phone_change(obj.id, request.user)
+            except Exception as e:
+                self.message_user(request, f"Failed: {e}", level="error")
+
+        self.message_user(request, "Selected requests approved successfully")
+
+    approve_requests.short_description = "Approve selected phone change requests"
+
+
 admin.site.register(DailyROIAccrual, DailyROIAccrualAdmin)
 admin.site.register(ROITransaction, ROITransactionAdmin)
 admin.site.register(Card, CardAdmin)

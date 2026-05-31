@@ -717,6 +717,10 @@ def send_bulk_sms(numbers, message):
         return {"success": False, "error": str(e)}
 
 
+def send_sms(phone_number, message):
+    return send_sms_via_payless(phone_number, message)
+
+
 import logging
 from django.db.models import Q
 from rest_framework.exceptions import AuthenticationFailed
