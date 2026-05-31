@@ -1542,6 +1542,13 @@ def update_user_profile(request):
         )
 
 
+from authentication.services.phone_change import (
+    create_phone_change_request,
+    verify_phone_change_otp,
+    approve_phone_change,
+)
+
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def request_phone_change(request):
