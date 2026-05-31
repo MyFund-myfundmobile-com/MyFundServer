@@ -26,8 +26,16 @@ def create_phone_change_request(user, new_phone):
     )
 
     # TODO: send SMS OTPs
-    send_sms_via_payless(user.phone_number, f"Old phone OTP: {old_otp}")
-    send_sms_via_payless(new_phone, f"New phone OTP: {new_otp}")
+    send_sms_via_payless(
+        user.phone_number,
+        f"Hi {user.first_name}, your MyFund phone change OTP is {old_otp}. "
+        f"Enter this to confirm your old number. Do not share this code.",
+    )
+    send_sms_via_payless(
+        new_phone,
+        f"Hi {user.first_name}, your MyFund phone change OTP is {new_otp}. "
+        f"Enter this to confirm your new number. Do not share this code.",
+    )
 
     send_generic_email(
         subject="Phone Change Request Initiated",
@@ -53,15 +61,19 @@ def create_phone_change_request(user, new_phone):
     return req
 
 
-def verify_phone_change_otp(request_id, old_verified=False, new_verified=False):
+def verify_phone_change_otp(request_id, old_otp=None, new_otp=None):
 
     req = PhoneChangeRequest.objects.get(id=request_id)
 
-    if old_verified:
+    if old_otp and str(old_otp).strip() == str(req.old_phone_otp).strip():
         req.old_phone_otp_verified = True
+    elif old_otp:
+        raise ValueError("Old phone OTP is incorrect.")
 
-    if new_verified:
+    if new_otp and str(new_otp).strip() == str(req.new_phone_otp).strip():
         req.new_phone_otp_verified = True
+    elif new_otp:
+        raise ValueError("New phone OTP is incorrect.")
 
     if req.old_phone_otp_verified and req.new_phone_otp_verified:
         req.status = "verified"

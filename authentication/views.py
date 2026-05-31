@@ -1565,12 +1565,21 @@ def request_phone_change(request):
 @permission_classes([IsAuthenticated])
 def verify_phone_change(request):
     request_id = request.data.get("request_id")
-    old_verified = request.data.get("old_verified", False)
-    new_verified = request.data.get("new_verified", False)
+    old_otp = request.data.get("old_otp")
+    new_otp = request.data.get("new_otp")
 
-    req = verify_phone_change_otp(
-        request_id=request_id, old_verified=old_verified, new_verified=new_verified
-    )
+    if not request_id:
+        return Response({"error": "request_id is required"}, status=400)
+
+    if not old_otp or not new_otp:
+        return Response({"error": "Both old_otp and new_otp are required"}, status=400)
+
+    try:
+        req = verify_phone_change_otp(
+            request_id=request_id, old_otp=old_otp, new_otp=new_otp
+        )
+    except ValueError as e:
+        return Response({"error": str(e)}, status=400)
 
     return Response(
         {
