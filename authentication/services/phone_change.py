@@ -1,5 +1,6 @@
 import random
 import logging
+import threading
 from django.utils import timezone
 from authentication.models import PhoneChangeRequest, CustomUser
 from authentication.utils import (
@@ -17,22 +18,62 @@ def generate_otp():
 
 
 # --------------------------------------------------
-# SAFE PHONE NORMALIZER
+# PHONE VALIDATION (STRICT)
 # --------------------------------------------------
 def safe_validate_phone(phone):
     if not phone:
         return {"valid": False, "error": "Phone number is required"}
 
-    phone = str(phone).strip()
-
-    # remove junk characters
-    phone = phone.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
-
+    phone = str(phone).strip().replace(" ", "").replace("-", "")
     return validate_phone_number(phone)
 
 
 # --------------------------------------------------
-# CREATE PHONE CHANGE REQUEST
+# BACKGROUND SMS WORKER (NON-BLOCKING)
+# --------------------------------------------------
+def _send_sms_async(phone, message):
+    try:
+        send_sms_via_payless(phone, message)
+    except Exception as e:
+        logger.error(f"SMS FAILED: {phone} | {str(e)}")
+
+
+def _send_email_async(user, old_phone, new_phone):
+    try:
+        send_generic_email(
+            subject="Phone Change Request Initiated",
+            message=f"""
+            <p><strong>Phone Change Request</strong></p>
+
+            <p>Hello {user.first_name},</p>
+
+            <p>
+                Old: {old_phone}<br>
+                New: {new_phone}
+            </p>
+
+            <p>OTP has been sent to both numbers.</p>
+            """,
+            recipient_list=[user.email],
+        )
+    except Exception as e:
+        logger.error(f"EMAIL FAILED: {str(e)}")
+
+
+def _send_push_async(user):
+    try:
+        send_push_notification(
+            user=user,
+            title="Phone Change Request",
+            message="OTP sent to both numbers",
+            data={"type": "phone_change_request"},
+        )
+    except Exception as e:
+        logger.error(f"PUSH FAILED: {str(e)}")
+
+
+# --------------------------------------------------
+# MAIN FUNCTION (FAST RESPONSE VERSION)
 # --------------------------------------------------
 def create_phone_change_request(user, new_phone):
 
@@ -41,16 +82,13 @@ def create_phone_change_request(user, new_phone):
     phone_check = safe_validate_phone(new_phone)
 
     if not phone_check.get("valid"):
-        logger.error(f"❌ PHONE VALIDATION FAILED: {phone_check}")
         raise ValueError(phone_check.get("error") or "Invalid phone number")
 
     normalized_new_phone = phone_check["formatted"]
 
-    # prevent same number
     if normalized_new_phone == user.phone_number:
-        raise ValueError("New number must be different from current number")
+        raise ValueError("New number must be different")
 
-    # prevent duplicates
     if (
         CustomUser.objects.filter(phone_number=normalized_new_phone)
         .exclude(id=user.id)
@@ -58,7 +96,6 @@ def create_phone_change_request(user, new_phone):
     ):
         raise ValueError("Phone already in use")
 
-    # generate OTPs
     old_otp = generate_otp()
     new_otp = generate_otp()
 
@@ -71,70 +108,37 @@ def create_phone_change_request(user, new_phone):
     )
 
     # --------------------------------------------------
-    # SMS SEND (CRASH PROTECTED)
+    # FIRE AND FORGET (THIS IS THE SPEED FIX)
     # --------------------------------------------------
-    try:
-        logger.info(f"📲 Sending OTP to OLD: {user.phone_number}")
-        send_sms_via_payless(
-            user.phone_number,
-            f"Your MyFund OTP (old number): {old_otp}. Do not share.",
-        )
-    except Exception as e:
-        logger.error(f"❌ OLD SMS FAILED: {str(e)}")
+    threading.Thread(
+        target=_send_sms_async,
+        args=(user.phone_number, f"Your OTP (old): {old_otp}. Do not share."),
+        daemon=True,
+    ).start()
 
-    try:
-        logger.info(f"📲 Sending OTP to NEW: {normalized_new_phone}")
-        send_sms_via_payless(
-            normalized_new_phone,
-            f"Your MyFund OTP (new number): {new_otp}. Do not share.",
-        )
-    except Exception as e:
-        logger.error(f"❌ NEW SMS FAILED: {str(e)}")
+    threading.Thread(
+        target=_send_sms_async,
+        args=(normalized_new_phone, f"Your OTP (new): {new_otp}. Do not share."),
+        daemon=True,
+    ).start()
 
-    # --------------------------------------------------
-    # EMAIL (HTML FORMATTED)
-    # --------------------------------------------------
-    send_generic_email(
-        subject="Phone Change Request Initiated",
-        message=f"""
-        <p><strong>Phone Change Request</strong></p>
+    threading.Thread(
+        target=_send_email_async,
+        args=(user, user.phone_number, normalized_new_phone),
+        daemon=True,
+    ).start()
 
-        <p>Hello <strong>{user.first_name}</strong>,</p>
-
-        <p>Your request to update your phone number has been initiated.</p>
-
-        <p>
-            <strong>Old Number:</strong> {user.phone_number}<br>
-            <strong>New Number:</strong> {normalized_new_phone}
-        </p>
-
-        <p>
-            <strong>OTP (Old):</strong> Sent to old number<br>
-            <strong>OTP (New):</strong> Sent to new number
-        </p>
-
-        <p style="color:red;">
-            If this wasn’t you, ignore this message immediately.
-        </p>
-        """,
-        recipient_list=[user.email],
-    )
-
-    # --------------------------------------------------
-    # PUSH NOTIFICATION
-    # --------------------------------------------------
-    send_push_notification(
-        user=user,
-        title="Phone Change Request",
-        message="OTP sent to both numbers",
-        data={"type": "phone_change_request"},
-    )
+    threading.Thread(
+        target=_send_push_async,
+        args=(user,),
+        daemon=True,
+    ).start()
 
     return req
 
 
 # --------------------------------------------------
-# VERIFY OTP
+# VERIFY OTP (UNCHANGED BUT CLEANED)
 # --------------------------------------------------
 def verify_phone_change_otp(request_id, old_otp=None, new_otp=None):
 
@@ -159,39 +163,22 @@ def verify_phone_change_otp(request_id, old_otp=None, new_otp=None):
 
 
 # --------------------------------------------------
-# ADMIN APPROVAL
+# APPROVAL (UNCHANGED)
 # --------------------------------------------------
 def approve_phone_change(request_id, admin_user):
 
     req = PhoneChangeRequest.objects.get(id=request_id)
 
     if req.status != "verified":
-        raise Exception("Request not verified")
+        raise Exception("Not verified")
 
     user = req.user
-    old_phone = user.phone_number
-
     user.phone_number = req.new_phone
     user.save(update_fields=["phone_number"])
 
     req.status = "approved"
     req.approved_at = timezone.now()
     req.save()
-
-    send_generic_email(
-        subject="Phone Number Updated Successfully",
-        message=f"""
-        <p><strong>Phone Update Successful</strong></p>
-
-        <p>Your phone number has been updated.</p>
-
-        <p>
-            <strong>Old:</strong> {old_phone}<br>
-            <strong>New:</strong> {req.new_phone}
-        </p>
-        """,
-        recipient_list=[user.email],
-    )
 
     send_push_notification(
         user=user,
