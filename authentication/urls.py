@@ -95,9 +95,9 @@ urlpatterns = [
         views.profile_picture_update,
         name="profile-picture-update",
     ),
-    path("api/request-phone-change/", request_phone_change),
-    path("api/verify-phone-change/", verify_phone_change),
-    path("api/approve-phone-change/", approve_phone_change_view),
+    path("request-phone-change/", request_phone_change),
+    path("verify-phone-change/", verify_phone_change),
+    path("approve-phone-change/", approve_phone_change_view),
     #
     # # Savings goal-related APIs
     path("update-savings-goal/", views.update_savings_goal, name="update-savings-goal"),
