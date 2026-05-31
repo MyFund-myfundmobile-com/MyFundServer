@@ -1,10 +1,11 @@
 import random
 from django.utils import timezone
-from authentication.models import PhoneChangeRequest
+from authentication.models import PhoneChangeRequest, CustomUser
 from authentication.utils import (
     send_generic_email,
     send_push_notification,
     send_sms_via_payless,
+    validate_phone_number,
 )
 
 
@@ -12,54 +13,93 @@ def generate_otp():
     return str(random.randint(100000, 999999))
 
 
-from authentication.utils import send_sms_via_payless, validate_phone_number
-
-
 def create_phone_change_request(user, new_phone):
-    # Normalize new_phone to E.164 first
+    # ----------------------------
+    # VALIDATE + NORMALIZE PHONE
+    # ----------------------------
     phone_check = validate_phone_number(new_phone)
     if not phone_check.get("valid"):
         raise ValueError(phone_check.get("error", "Invalid new phone number"))
 
     normalized_new_phone = phone_check.get("formatted")  # +234...
 
+    # ----------------------------
+    # PREVENT SAME NUMBER CHANGE
+    # ----------------------------
+    if normalized_new_phone == user.phone_number:
+        raise ValueError("New phone number cannot be the same as current number.")
+
+    # ----------------------------
+    # PREVENT DUPLICATE ACCOUNT PHONE
+    # ----------------------------
+    existing_user = (
+        CustomUser.objects.filter(phone_number=normalized_new_phone)
+        .exclude(id=user.id)
+        .first()
+    )
+
+    if existing_user:
+        raise ValueError("This phone number is already linked to another account.")
+
+    # ----------------------------
+    # GENERATE OTPs
+    # ----------------------------
     old_otp = generate_otp()
     new_otp = generate_otp()
 
     req = PhoneChangeRequest.objects.create(
         user=user,
         old_phone=user.phone_number,
-        new_phone=normalized_new_phone,  # save normalized
+        new_phone=normalized_new_phone,
         old_phone_otp=old_otp,
         new_phone_otp=new_otp,
     )
 
+    # ----------------------------
+    # SEND SMS OTPs
+    # ----------------------------
     send_sms_via_payless(
         user.phone_number,
         f"Hi {user.first_name}, your MyFund phone change OTP is {old_otp}. "
         f"Enter this to confirm your old number. Do not share this code.",
     )
+
     send_sms_via_payless(
-        normalized_new_phone,  # now +234 format
+        normalized_new_phone,
         f"Hi {user.first_name}, your MyFund phone change OTP is {new_otp}. "
         f"Enter this to confirm your new number. Do not share this code.",
     )
-    # ... rest unchanged
 
+    # ----------------------------
+    # SEND EMAIL (FORMATTED HTML)
+    # ----------------------------
     send_generic_email(
         subject="Phone Change Request Initiated",
         message=f"""
-        A request was made to change your phone number.
+        <p><strong>Phone Change Request Initiated</strong></p>
 
-        Old OTP sent to: {user.phone_number}
-        New OTP sent to: {new_phone}
+        <p>A request was made to update your phone number on <strong>MyFund</strong>.</p>
 
-        If this wasn't you, ignore this message.
+        <p>
+            <strong>Old Phone:</strong> {user.phone_number}<br>
+            <strong>New Phone:</strong> {normalized_new_phone}
+        </p>
+
+        <p>
+            <strong>Old OTP Sent To:</strong> {user.phone_number}<br>
+            <strong>New OTP Sent To:</strong> {normalized_new_phone}
+        </p>
+
+        <p style="color:red;">
+            If this was not you, please ignore this message immediately or contact support.
+        </p>
         """,
         recipient_list=[user.email],
     )
 
-    # notify admins
+    # ----------------------------
+    # ADMIN PUSH NOTIFICATION
+    # ----------------------------
     send_push_notification(
         user=user,
         title="New Phone Change Request",
@@ -71,7 +111,6 @@ def create_phone_change_request(user, new_phone):
 
 
 def verify_phone_change_otp(request_id, old_otp=None, new_otp=None):
-
     req = PhoneChangeRequest.objects.get(id=request_id)
 
     if old_otp and str(old_otp).strip() == str(req.old_phone_otp).strip():
@@ -93,7 +132,6 @@ def verify_phone_change_otp(request_id, old_otp=None, new_otp=None):
 
 
 def approve_phone_change(request_id, admin_user):
-
     req = PhoneChangeRequest.objects.get(id=request_id)
 
     if req.status != "verified":
@@ -109,13 +147,33 @@ def approve_phone_change(request_id, admin_user):
     req.approved_at = timezone.now()
     req.save()
 
-    # notify user
+    # ----------------------------
+    # USER NOTIFICATION EMAIL
+    # ----------------------------
     send_generic_email(
         subject="Phone Number Updated Successfully",
-        message=f"Your phone number changed from {old_phone} to {req.new_phone}",
+        message=f"""
+        <p><strong>Phone Number Successfully Updated</strong></p>
+
+        <p>
+            Your phone number has been updated successfully on <strong>MyFund</strong>.
+        </p>
+
+        <p>
+            <strong>Old Number:</strong> {old_phone}<br>
+            <strong>New Number:</strong> {req.new_phone}
+        </p>
+
+        <p style="color:green;">
+            If you did not request this change, please contact support immediately.
+        </p>
+        """,
         recipient_list=[user.email],
     )
 
+    # ----------------------------
+    # PUSH NOTIFICATION
+    # ----------------------------
     send_push_notification(
         user=user,
         title="Phone Updated",

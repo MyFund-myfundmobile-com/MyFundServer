@@ -594,7 +594,7 @@ import requests
 import logging
 import phonenumbers
 from django.conf import settings
-from phonenumbers.phonenumberutil import number_type, PhoneNumberType
+from phonenumbers import number_type, PhoneNumberType
 import urllib.parse
 
 logger = logging.getLogger(__name__)
@@ -611,7 +611,7 @@ def send_sms_via_payless(phone_number, message):
     sender = settings.PAYLESS_SMS_SENDER_ID
 
     encoded_message = urllib.parse.quote(message)
-    recipients = phone_number.replace(" ", "")
+    recipients = phone_number.replace(" ", "").replace("+", "")
 
     full_url = (
         f"{base_url}?option=com_spc&comm=spc_api"
@@ -622,7 +622,7 @@ def send_sms_via_payless(phone_number, message):
         f"&message={encoded_message}"
     )
 
-    logger.info(f"🔗 Sending SMS via: {full_url}")
+    logger.info(f"📲 Sending SMS to {recipients}")
 
     try:
         response = requests.get(full_url, timeout=20)
