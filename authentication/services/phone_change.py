@@ -1,12 +1,15 @@
 import random
+import logging
 from django.utils import timezone
 from authentication.models import PhoneChangeRequest, CustomUser
 from authentication.utils import (
     send_generic_email,
     send_push_notification,
     send_sms_via_payless,
+    validate_phone_number,
 )
-from authentication.utils import validate_phone_number
+
+logger = logging.getLogger(__name__)
 
 
 def generate_otp():
@@ -14,7 +17,7 @@ def generate_otp():
 
 
 # --------------------------------------------------
-# SAFE PHONE NORMALIZER WRAPPER (NEW SAFETY LAYER)
+# SAFE PHONE NORMALIZER
 # --------------------------------------------------
 def safe_validate_phone(phone):
     if not phone:
@@ -22,38 +25,32 @@ def safe_validate_phone(phone):
 
     phone = str(phone).strip()
 
-    # quick cleanup for frontend junk input
-    phone = phone.replace(" ", "").replace("-", "")
+    # remove junk characters
+    phone = phone.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
 
     return validate_phone_number(phone)
 
 
 # --------------------------------------------------
-# CREATE REQUEST (ROBUST VERSION)
+# CREATE PHONE CHANGE REQUEST
 # --------------------------------------------------
 def create_phone_change_request(user, new_phone):
 
-    print("🔥 PHONE CHANGE FLOW TRIGGERED")
+    logger.info("🔥 PHONE CHANGE FLOW STARTED")
 
-    # ----------------------------
-    # VALIDATE PHONE (SAFE WRAP)
-    # ----------------------------
     phone_check = safe_validate_phone(new_phone)
 
     if not phone_check.get("valid"):
+        logger.error(f"❌ PHONE VALIDATION FAILED: {phone_check}")
         raise ValueError(phone_check.get("error") or "Invalid phone number")
 
     normalized_new_phone = phone_check["formatted"]
 
-    # ----------------------------
-    # SAME NUMBER CHECK
-    # ----------------------------
+    # prevent same number
     if normalized_new_phone == user.phone_number:
         raise ValueError("New number must be different from current number")
 
-    # ----------------------------
-    # DUPLICATE CHECK
-    # ----------------------------
+    # prevent duplicates
     if (
         CustomUser.objects.filter(phone_number=normalized_new_phone)
         .exclude(id=user.id)
@@ -61,9 +58,7 @@ def create_phone_change_request(user, new_phone):
     ):
         raise ValueError("Phone already in use")
 
-    # ----------------------------
-    # OTP GENERATION
-    # ----------------------------
+    # generate OTPs
     old_otp = generate_otp()
     new_otp = generate_otp()
 
@@ -75,36 +70,38 @@ def create_phone_change_request(user, new_phone):
         new_phone_otp=new_otp,
     )
 
-    # ----------------------------
-    # SMS SEND (GUARDED)
-    # ----------------------------
+    # --------------------------------------------------
+    # SMS SEND (CRASH PROTECTED)
+    # --------------------------------------------------
     try:
+        logger.info(f"📲 Sending OTP to OLD: {user.phone_number}")
         send_sms_via_payless(
             user.phone_number,
             f"Your MyFund OTP (old number): {old_otp}. Do not share.",
         )
     except Exception as e:
-        print("❌ OLD PHONE SMS FAILED:", str(e))
+        logger.error(f"❌ OLD SMS FAILED: {str(e)}")
 
     try:
+        logger.info(f"📲 Sending OTP to NEW: {normalized_new_phone}")
         send_sms_via_payless(
             normalized_new_phone,
             f"Your MyFund OTP (new number): {new_otp}. Do not share.",
         )
     except Exception as e:
-        print("❌ NEW PHONE SMS FAILED:", str(e))
+        logger.error(f"❌ NEW SMS FAILED: {str(e)}")
 
-    # ----------------------------
-    # EMAIL (CLEAN + SAFE HTML)
-    # ----------------------------
+    # --------------------------------------------------
+    # EMAIL (HTML FORMATTED)
+    # --------------------------------------------------
     send_generic_email(
         subject="Phone Change Request Initiated",
         message=f"""
-        <p><strong>Phone Change Request Initiated</strong></p>
+        <p><strong>Phone Change Request</strong></p>
 
         <p>Hello <strong>{user.first_name}</strong>,</p>
 
-        <p>A request was made to change your phone number on <strong>MyFund</strong>.</p>
+        <p>Your request to update your phone number has been initiated.</p>
 
         <p>
             <strong>Old Number:</strong> {user.phone_number}<br>
@@ -112,7 +109,8 @@ def create_phone_change_request(user, new_phone):
         </p>
 
         <p>
-            OTPs have been sent to both numbers for verification.
+            <strong>OTP (Old):</strong> Sent to old number<br>
+            <strong>OTP (New):</strong> Sent to new number
         </p>
 
         <p style="color:red;">
@@ -122,9 +120,9 @@ def create_phone_change_request(user, new_phone):
         recipient_list=[user.email],
     )
 
-    # ----------------------------
+    # --------------------------------------------------
     # PUSH NOTIFICATION
-    # ----------------------------
+    # --------------------------------------------------
     send_push_notification(
         user=user,
         title="Phone Change Request",
@@ -136,7 +134,7 @@ def create_phone_change_request(user, new_phone):
 
 
 # --------------------------------------------------
-# VERIFY OTP (UNCHANGED)
+# VERIFY OTP
 # --------------------------------------------------
 def verify_phone_change_otp(request_id, old_otp=None, new_otp=None):
 
@@ -161,7 +159,7 @@ def verify_phone_change_otp(request_id, old_otp=None, new_otp=None):
 
 
 # --------------------------------------------------
-# ADMIN APPROVAL (UNCHANGED)
+# ADMIN APPROVAL
 # --------------------------------------------------
 def approve_phone_change(request_id, admin_user):
 
@@ -185,9 +183,11 @@ def approve_phone_change(request_id, admin_user):
         message=f"""
         <p><strong>Phone Update Successful</strong></p>
 
+        <p>Your phone number has been updated.</p>
+
         <p>
-            Old: {old_phone}<br>
-            New: {req.new_phone}
+            <strong>Old:</strong> {old_phone}<br>
+            <strong>New:</strong> {req.new_phone}
         </p>
         """,
         recipient_list=[user.email],
