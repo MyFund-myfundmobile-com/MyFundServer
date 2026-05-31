@@ -7735,6 +7735,7 @@ def process_dva_credit_from_paystack_event(event):
         notif_type="CREDIT",
     )
 
+    user.confirm_referral_rewards(is_referrer=True)
     print(f"✅ DVA {purpose} credited successfully for {user.email}")
     return True
 
@@ -7818,6 +7819,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         from_email=from_email,
                         recipient_list=recipient_list,
                     )
+
                     return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
                 saved_card = None
@@ -7998,6 +8000,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             notif_type="CREDIT",
                         )
 
+                        user.confirm_referral_rewards(is_referrer=True)
                         print("AutoSave Successfully Credited your Account.")
                         return
 
@@ -8093,6 +8096,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             notif_type="CREDIT",
                         )
 
+                        user.confirm_referral_rewards(is_referrer=True)
                         print("AutoInvest Successfully Credited your Account.")
                         return
 
@@ -8138,6 +8142,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         recipient_list=recipient_list,
                     )
 
+                    user.confirm_referral_rewards(is_referrer=True)
                     return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
                 elif transaction and transaction.description.lower().startswith(
@@ -8177,6 +8182,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         recipient_list=recipient_list,
                     )
 
+                    user.confirm_referral_rewards(is_referrer=True)
                     print("QuickInvest Successfully Credited your Account.")
                     return
 
