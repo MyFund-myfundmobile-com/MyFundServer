@@ -12,7 +12,16 @@ def generate_otp():
     return str(random.randint(100000, 999999))
 
 
+from authentication.utils import send_sms_via_payless, validate_phone_number
+
+
 def create_phone_change_request(user, new_phone):
+    # Normalize new_phone to E.164 first
+    phone_check = validate_phone_number(new_phone)
+    if not phone_check.get("valid"):
+        raise ValueError(phone_check.get("error", "Invalid new phone number"))
+
+    normalized_new_phone = phone_check.get("formatted")  # +234...
 
     old_otp = generate_otp()
     new_otp = generate_otp()
@@ -20,22 +29,22 @@ def create_phone_change_request(user, new_phone):
     req = PhoneChangeRequest.objects.create(
         user=user,
         old_phone=user.phone_number,
-        new_phone=new_phone,
+        new_phone=normalized_new_phone,  # save normalized
         old_phone_otp=old_otp,
         new_phone_otp=new_otp,
     )
 
-    # TODO: send SMS OTPs
     send_sms_via_payless(
         user.phone_number,
         f"Hi {user.first_name}, your MyFund phone change OTP is {old_otp}. "
         f"Enter this to confirm your old number. Do not share this code.",
     )
     send_sms_via_payless(
-        new_phone,
+        normalized_new_phone,  # now +234 format
         f"Hi {user.first_name}, your MyFund phone change OTP is {new_otp}. "
         f"Enter this to confirm your new number. Do not share this code.",
     )
+    # ... rest unchanged
 
     send_generic_email(
         subject="Phone Change Request Initiated",
