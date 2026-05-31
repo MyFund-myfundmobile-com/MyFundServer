@@ -600,76 +600,84 @@ import urllib.parse
 logger = logging.getLogger(__name__)
 
 
+# --------------------------------------------------
+# PHONE NORMALIZATION (STRICT SINGLE SOURCE OF TRUTH)
+# --------------------------------------------------
+def normalize_phone(phone_number, region="NG"):
+    try:
+        phone_number = phone_number.strip().replace(" ", "").replace("-", "")
+
+        if phone_number.startswith("0") and region.upper() == "NG":
+            phone_number = "+234" + phone_number[1:]
+
+        parsed = phonenumbers.parse(phone_number, region)
+
+        if not phonenumbers.is_valid_number(parsed):
+            return None
+
+        formatted = phonenumbers.format_number(
+            parsed, phonenumbers.PhoneNumberFormat.E164
+        )
+
+        # FORCE 234 FORMAT ONLY (NO +)
+        return formatted.replace("+", "")
+
+    except Exception:
+        return None
+
+
+# --------------------------------------------------
+# SMS SENDER (FINAL FIXED VERSION)
+# --------------------------------------------------
 def send_sms_via_payless(phone_number, message):
-    """
-    Send SMS via Payless SPC API.
-    Returns True if SMS delivered successfully, False otherwise.
-    """
     base_url = settings.PAYLESS_SMS_URL
     username = settings.PAYLESS_SMS_USERNAME
     password = settings.PAYLESS_SMS_PASSWORD
     sender = settings.PAYLESS_SMS_SENDER_ID
 
+    clean_number = normalize_phone(phone_number)
+
+    if not clean_number:
+        logger.error(f"❌ Invalid phone number: {phone_number}")
+        return False
+
     encoded_message = urllib.parse.quote(message)
-    recipients = phone_number.replace(" ", "").replace("+", "")
 
     full_url = (
         f"{base_url}?option=com_spc&comm=spc_api"
         f"&username={username}"
         f"&password={password}"
         f"&sender={sender}"
-        f"&recipient={recipients}"
+        f"&recipient={clean_number}"
         f"&message={encoded_message}"
     )
 
-    logger.info(f"📲 Sending SMS to {recipients}")
+    logger.info(f"📲 Sending SMS to {clean_number}")
 
     try:
         response = requests.get(full_url, timeout=20)
         text = response.text.strip()
+
         logger.info(f"✅ Payless Response: {text}")
 
+        # STRICT SUCCESS CHECK
         return text.upper().startswith("OK")
+
     except Exception as e:
-        logger.error(f"❌ Error sending SMS: {e}")
+        logger.error(f"❌ SMS Error: {e}")
         return False
 
 
+# --------------------------------------------------
+# VALIDATION WRAPPER (USED BY API)
+# --------------------------------------------------
 def validate_phone_number(phone_number, region="NG"):
-    """
-    Validate and normalize phone number using Google's libphonenumber.
-    Always returns E.164 format (+234...) if valid.
-    """
-    try:
-        # Clean up common formatting issues
-        phone_number = phone_number.strip().replace(" ", "").replace("-", "")
+    cleaned = normalize_phone(phone_number, region)
 
-        # If user entered 080..., add +234 manually for Nigerian defaults
-        if phone_number.startswith("0") and region.upper() == "NG":
-            phone_number = "+234" + phone_number[1:]
+    if not cleaned:
+        return {"valid": False, "error": "Invalid phone number format."}
 
-        # Parse the number
-        parsed = phonenumbers.parse(phone_number, region)
-        if not phonenumbers.is_valid_number(parsed):
-            return {"valid": False, "error": "Invalid phone number format."}
-
-        formatted = phonenumbers.format_number(
-            parsed, phonenumbers.PhoneNumberFormat.E164
-        )
-
-        line_type = number_type(parsed)
-        is_mobile = line_type in [
-            PhoneNumberType.MOBILE,
-            PhoneNumberType.FIXED_LINE_OR_MOBILE,
-        ]
-
-        if not is_mobile:
-            return {"valid": False, "error": "Only mobile numbers are allowed."}
-
-        return {"valid": True, "formatted": formatted, "error": None}
-
-    except phonenumbers.NumberParseException:
-        return {"valid": False, "error": "Could not parse phone number."}
+    return {"valid": True, "formatted": cleaned, "error": None}
 
 
 import urllib.parse
