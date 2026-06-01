@@ -2925,9 +2925,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
     user_email.admin_order_field = "user__email"
 
     def user_phone(self, obj):
-        if not obj.user.phone_number:
-            return "-"
-        return f"wa.me/{obj.user.phone_number}"
+        return obj.user.phone_number or "-"
 
     user_phone.short_description = "Phone"
     user_phone.admin_order_field = "user__phone_number"
