@@ -3050,6 +3050,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
                 f"Hi {user.first_name},<br><br>"
                 f"Your ambassador report for {formatted_month} has been approved and your stipend has been credited.<br><br>"
                 f"Amount: ₦{stipend_amount:,.2f}<br><br>"
+                f"Focus on key metrics, especially confirmed referrals, to increase your earnings for the new month🔥<br><br>"
                 f"Great work — keep it up 🔥<br><br>"
                 "MyFund"
             ),
