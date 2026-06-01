@@ -3045,7 +3045,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
             report.save(update_fields=["stipend_paid"])
 
         send_generic_email(
-            subject="Ambassador Stipend Credited ✅",
+            subject=f"{formatted_month} Stipend Credited ✅",
             message=(
                 f"Hi {user.first_name},<br><br>"
                 f"Your ambassador report for {formatted_month} has been approved and your stipend has been credited.<br><br>"
