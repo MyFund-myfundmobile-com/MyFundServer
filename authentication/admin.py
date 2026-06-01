@@ -2736,7 +2736,8 @@ class AmbassadorPointConfigAdmin(admin.ModelAdmin):
 class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
     list_display = (
         "id",
-        "formatted_month",
+        "user_email",
+        "user_phone",
         "user_first_name",
         "rank",
         "total_points_awarded",
@@ -2745,7 +2746,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
         "stipend_paid",
         "submitted_at",
         "approved_at",
-        "user_email",
+        "formatted_month",
     )
 
     list_filter = (
@@ -2922,6 +2923,14 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
 
     user_email.short_description = "Email"
     user_email.admin_order_field = "user__email"
+
+    def user_phone(self, obj):
+        if not obj.user.phone_number:
+            return "-"
+        return f"wa.me/{obj.user.phone_number}"
+
+    user_phone.short_description = "Phone"
+    user_phone.admin_order_field = "user__phone_number"
 
     def credit_stipend_and_notify(self, report):
         user = report.user

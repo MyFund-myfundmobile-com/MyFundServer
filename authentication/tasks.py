@@ -1846,24 +1846,41 @@ def send_batch_b_ambassador_email(test=True):
 from decimal import Decimal
 from django.db import transaction as db_transaction
 from django.utils import timezone
-from celery import shared_task
 
 from authentication.models import CustomUser, Transaction
 from authentication.utils import send_generic_email, send_push_notification
 
 
 def credit_team_wallets(
-    credits,
-    month_label="April 2026",
-    reason="MyFund Team Credit",
+    month_label="May 2026",
+    reason="MyFund Allowance",
     test=False,
     test_email="company@myfundmobile.com",
 ):
+    # 👇 HARD-CODED TEAM LIST (no placeholders, no external input needed)
+    credits = [
+        {
+            "name": "Precious Olorunfemi",
+            "email": "olorunfemiprecious2109@gmail.com",
+            "amount": "5000",
+        },
+        {
+            "name": "Abraham Akolade",
+            "email": "abrahamakoladeabraham76@gmail.com",
+            "amount": "5000",
+        },
+        {
+            "name": "Judith",
+            "email": "ofeimunjudith@gmail.com",
+            "amount": "5000",
+        },
+    ]
+
     results = []
 
     for item in credits:
-        original_email = item["email"].strip().lower()
-        amount = Decimal(str(item["amount"]))
+        email = item["email"].strip().lower()
+        amount = Decimal(item["amount"])
         name = item.get("name", "")
 
         subject = f"🎉 ₦{amount:,.2f} Has Been Credited To Your Wallet"
@@ -1871,7 +1888,7 @@ def credit_team_wallets(
         message = f"""
         <p>Hi {name or 'there'},</p>
 
-        <p>Your MyFund wallet has been credited with <strong>₦{amount:,.2f}</strong> for <strong>{month_label}</strong> as monthly allowance.</p>
+        <p>Your MyFund wallet has been credited with <strong>₦{amount:,.2f}</strong> for <strong>{month_label}</strong> as team allowance.</p>
 
         <p>Thank you for your work and consistency.</p>
 
@@ -1879,22 +1896,19 @@ def credit_team_wallets(
         """
 
         try:
-            user = CustomUser.objects.get(email__iexact=original_email)
+            user = CustomUser.objects.get(email__iexact=email)
         except CustomUser.DoesNotExist:
             results.append(
                 {
-                    "original_email": original_email,
-                    "used_email": test_email if test else original_email,
-                    "amount": str(amount),
-                    "status": "failed",
-                    "reason": "user_not_found",
-                    "test": test,
+                    "email": email,
+                    "status": "user_not_found",
                 }
             )
             continue
 
         balance_before = Decimal(str(user.wallet or 0))
 
+        # 💰 WALLET CREDIT (ONLY if not test)
         if not test:
             with db_transaction.atomic():
                 balance_after = balance_before + amount
@@ -1919,65 +1933,40 @@ def credit_team_wallets(
         else:
             balance_after = balance_before
 
-        recipient_email = test_email.strip().lower() if test else user.email
-
+        # 📧 EMAIL
         send_generic_email(
             subject=subject,
             message=message,
-            recipient_list=[recipient_email],
+            recipient_list=[test_email if test else user.email],
         )
 
-        push_status = "skipped_test_mode" if test else "not_attempted"
-
+        # 📲 PUSH NOTIFICATION
         if not test:
             try:
                 send_push_notification(
                     user=user,
                     title=subject,
-                    message=f"₦{amount:,.2f} has been credited to your wallet for {month_label}.",
+                    message=f"₦{amount:,.2f} credited to your wallet for {month_label}.",
                     data={
                         "type": "wallet_credit",
                         "amount": str(amount),
                         "month": month_label,
                     },
                 )
-                push_status = "sent"
-            except Exception as e:
-                push_status = f"failed: {str(e)}"
+            except Exception:
+                pass
 
         results.append(
             {
-                "original_email": original_email,
-                "used_email": recipient_email,
-                "amount": str(amount),
+                "email": email,
+                "name": name,
                 "balance_before": str(balance_before),
                 "balance_after": str(balance_after),
-                "status": (
-                    "test_email_sent_no_credit" if test else "credited_email_sent"
-                ),
-                "push_status": push_status,
-                "test": test,
+                "status": "credited" if not test else "test_run",
             }
         )
 
     return results
-
-
-@shared_task
-def credit_team_wallets_task(
-    credits,
-    month_label="April 2026",
-    reason="MyFund Team Credit",
-    test=False,
-    test_email="company@myfundmobile.com",
-):
-    return credit_team_wallets(
-        credits=credits,
-        month_label=month_label,
-        reason=reason,
-        test=test,
-        test_email=test_email,
-    )
 
 
 from datetime import timedelta
