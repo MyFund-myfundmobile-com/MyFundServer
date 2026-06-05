@@ -64,6 +64,7 @@ from .utils import (
     create_transaction,
 )
 from decimal import Decimal
+from django.utils.html import format_html
 
 GOOGLE_FORM_TEMPLATE = (
     "https://docs.google.com/forms/d/e/1FAIpQLSfHbVd5EtzSyJskgdvCRfGfYrdGaTw3RwCvnkk7pjl6LvS59A/"
@@ -1416,15 +1417,42 @@ from django.contrib import messages
 import uuid
 
 
+def get_transfer_status_badge(obj):
+    transaction = Transaction.objects.filter(
+        user=obj.user, transaction_id=obj.transaction_id
+    ).first()
+
+    # 🟢 Approved (deeper green)
+    if obj.is_approved:
+        return format_html(
+            '<span style="padding:4px 10px; border-radius:10px; background:#166534; color:#ffffff; font-size:11px; font-weight:600;">'
+            "✓ Approved</span>"
+        )
+
+    # ⚫ Cleaned Up (deeper grey)
+    if transaction and transaction.status.lower() == "abandoned":
+        return format_html(
+            '<span style="padding:4px 10px; border-radius:10px; background:#374151; color:#ffffff; font-size:11px; font-weight:600;">'
+            "🧹 Cleaned Up</span>"
+        )
+
+    # 🟠 Pending (deeper orange)
+    return format_html(
+        '<span style="padding:4px 10px; border-radius:10px; background:#c2410c; color:#ffffff; font-size:11px; font-weight:600;">'
+        "⏳ Pending</span>"
+    )
+
+
 @admin.register(BankTransferRequest)
 class BankTransferRequestAdmin(admin.ModelAdmin):
     list_display = (
         "user_full_name",
-        "is_approved",
+        "status_badge",
         "amount",
         "user_email",
         "created_at",
     )
+
     list_filter = ("is_approved",)
     search_fields = (
         "user__email",
@@ -1432,41 +1460,46 @@ class BankTransferRequestAdmin(admin.ModelAdmin):
         "user__last_name",
         "transaction_id",
     )
+
     actions = ["approve_bank_transfer", "mark_as_abandoned"]
 
-    # ✅ DISPLAY HELPERS (must be class-level)
+    # ─────────────────────────────────────────────
+    # DISPLAY HELPERS
+    # ─────────────────────────────────────────────
+
     def user_email(self, obj):
         return obj.user.email
 
     user_email.short_description = "Email"
-    user_email.admin_order_field = "user__email"
 
     def user_full_name(self, obj):
         return f"{obj.user.first_name} {obj.user.last_name}"
 
     user_full_name.short_description = "Full Name"
-    user_full_name.admin_order_field = "user__first_name"
 
-    # ✅ ACTION
+    def status_badge(self, obj):
+        return get_transfer_status_badge(obj)
+
+    status_badge.short_description = "Status"
+
+    # ─────────────────────────────────────────────
+    # ACTIONS
+    # ─────────────────────────────────────────────
+
     def approve_bank_transfer(self, request, queryset):
         for transfer_request in queryset:
             user = transfer_request.user
-            transaction_id = transfer_request.transaction_id
 
             ok, msg = approve_quicksave_credit(
                 user=user,
                 amount=transfer_request.amount,
-                transaction_id=transaction_id,
+                transaction_id=transfer_request.transaction_id,
                 description="QuickSave (Transfer)",
                 source="BANK_TRANSFER",
             )
 
             if not ok:
-                self.message_user(
-                    request,
-                    f"{msg} for {user.email}",
-                    level="error",
-                )
+                self.message_user(request, f"{msg} for {user.email}", level="error")
                 continue
 
             transfer_request.is_approved = True
@@ -1506,7 +1539,14 @@ class BankTransferRequestAdmin(admin.ModelAdmin):
 
 @admin.register(InvestTransferRequest)
 class InvestTransferRequestAdmin(admin.ModelAdmin):
-    list_display = ("user", "amount", "is_approved", "created_at")
+    list_display = (
+        "user_full_name",
+        "status_badge",
+        "amount",
+        "user_email",
+        "created_at",
+    )
+
     list_filter = ("is_approved",)
     search_fields = (
         "user__email",
@@ -1514,27 +1554,46 @@ class InvestTransferRequestAdmin(admin.ModelAdmin):
         "user__last_name",
         "transaction_id",
     )
+
     actions = ["approve_invest_transfer", "mark_as_abandoned"]
+
+    # ─────────────────────────────────────────────
+    # DISPLAY HELPERS
+    # ─────────────────────────────────────────────
+
+    def user_email(self, obj):
+        return obj.user.email
+
+    user_email.short_description = "Email"
+
+    def user_full_name(self, obj):
+        return f"{obj.user.first_name} {obj.user.last_name}"
+
+    user_full_name.short_description = "Full Name"
+
+    def status_badge(self, obj):
+        return get_transfer_status_badge(obj)
+
+    status_badge.short_description = "Status"
+
+    # ─────────────────────────────────────────────
+    # ACTIONS
+    # ─────────────────────────────────────────────
 
     def approve_invest_transfer(self, request, queryset):
         for transfer_request in queryset:
             user = transfer_request.user
-            transaction_id = transfer_request.transaction_id
 
             ok, msg = approve_quickinvest_credit(
                 user=user,
                 amount=transfer_request.amount,
-                transaction_id=transaction_id,
+                transaction_id=transfer_request.transaction_id,
                 description="QuickInvest (Transfer)",
                 source="BANK_TRANSFER",
             )
 
             if not ok:
-                self.message_user(
-                    request,
-                    f"{msg} for {user.email}",
-                    level="error",
-                )
+                self.message_user(request, f"{msg} for {user.email}", level="error")
                 continue
 
             transfer_request.is_approved = True
