@@ -1426,20 +1426,20 @@ def get_transfer_status_badge(obj):
     if obj.is_approved:
         return format_html(
             '<span style="padding:4px 10px; border-radius:10px; background:#166534; color:#ffffff; font-size:11px; font-weight:600;">'
-            "✓ Approved</span>"
+            "✅</span>"
         )
 
     # ⚫ Cleaned Up (deeper grey)
     if transaction and transaction.status.lower() == "abandoned":
         return format_html(
             '<span style="padding:4px 10px; border-radius:10px; background:#374151; color:#ffffff; font-size:11px; font-weight:600;">'
-            "🧹 Cleaned Up</span>"
+            "🧹</span>"
         )
 
     # 🟠 Pending (deeper orange)
     return format_html(
         '<span style="padding:4px 10px; border-radius:10px; background:#c2410c; color:#ffffff; font-size:11px; font-weight:600;">'
-        "⏳ Pending</span>"
+        "⏳</span>"
     )
 
 
