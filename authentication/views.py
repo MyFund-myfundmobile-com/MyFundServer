@@ -11217,7 +11217,10 @@ def earnings_summary(request):
     )
 
     # Recent 30 daily ROI records
-    recent_roi = DailyROIAccrual.objects.filter(user=user).order_by("-date")[:30]
+    year_start = date(today.year, 1, 1)
+    recent_roi = DailyROIAccrual.objects.filter(
+        user=user, date__gte=year_start
+    ).order_by("-date")
     roi_data = DailyROISerializer(recent_roi, many=True).data
 
     data = {

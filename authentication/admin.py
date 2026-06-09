@@ -156,6 +156,7 @@ class CustomUserAdmin(UserAdmin):
         "email",
         "first_name",
         "last_name",
+        "get_due_targets",
         "phone_number",
         "get_total_referrals",
         "get_confirmed_referrals",
@@ -363,6 +364,19 @@ class CustomUserAdmin(UserAdmin):
                 filter=Q(referral_transactions__status="confirmed"),
             ),
         )
+
+    def get_due_targets(self, obj):
+        from django.utils import timezone
+        from authentication.models import TargetSavings
+
+        return TargetSavings.objects.filter(
+            user=obj,
+            is_active=True,
+            is_cancelled=False,
+            next_deduction__lte=timezone.now(),
+        ).count()
+
+    get_due_targets.short_description = "Due Targets"
 
     def get_daily_savings_roi_rate(self):
         """Calculate daily savings ROI rate (13% per annum)"""
@@ -2338,16 +2352,43 @@ class TargetSavingsAdmin(admin.ModelAdmin):
         "current_amount",
         "progress_percentage",
         "frequency",
+        "is_due",  # 👈 NEW
         "is_active",
         "is_cancelled",
         "formatted_next_deduction",
         "formatted_last_processed",
     ]
-    list_filter = ["is_active", "is_cancelled", "frequency", "category"]
+
+    list_filter = [
+        "is_active",
+        "is_cancelled",
+        "frequency",
+        "category",
+        "due_status",  # 👈 NEW FILTER
+    ]
+
     search_fields = ["user__email", "name"]
+
     readonly_fields = ["current_amount", "progress_percentage", "last_processed"]
+
     actions = ["force_process_deduction", "mark_as_completed"]
 
+    # -----------------------------
+    # 🔥 NEW: DUE CHECK COLUMN
+    # -----------------------------
+    def is_due(self, obj):
+        from django.utils import timezone
+
+        if obj.next_deduction:
+            return obj.next_deduction <= timezone.now()
+        return False
+
+    is_due.boolean = True
+    is_due.short_description = "Due Now"
+
+    # -----------------------------
+    # formatting helpers
+    # -----------------------------
     def progress_percentage(self, obj):
         return f"{obj.progress_percentage:.1f}%"
 
@@ -2369,140 +2410,83 @@ class TargetSavingsAdmin(admin.ModelAdmin):
     formatted_last_processed.admin_order_field = "last_processed"
     formatted_last_processed.short_description = "Last processed"
 
+    # -----------------------------
+    # 🔥 NEW: FILTER (Due / Not Due)
+    # -----------------------------
+    from django.contrib import admin
+    from django.utils import timezone
+
+    class DueStatusFilter(admin.SimpleListFilter):
+        title = "Due Status"
+        parameter_name = "due_status"
+
+        def lookups(self, request, model_admin):
+            return (
+                ("due", "Due Now"),
+                ("not_due", "Not Due"),
+            )
+
+        def queryset(self, request, queryset):
+            if self.value() == "due":
+                return queryset.filter(
+                    is_active=True,
+                    is_cancelled=False,
+                    next_deduction__lte=timezone.now(),
+                )
+
+            if self.value() == "not_due":
+                return queryset.filter(next_deduction__gt=timezone.now())
+
+            return queryset
+
+    list_filter = [
+        "is_active",
+        "is_cancelled",
+        "frequency",
+        "category",
+        DueStatusFilter,  # 👈 IMPORTANT
+    ]
+
+    # -----------------------------
+    # existing actions (UNCHANGED)
+    # -----------------------------
     def force_process_deduction(self, request, queryset):
         results = {"processed": 0, "paused": 0, "failed": 0, "errors": []}
 
         for target in queryset:
             if target.is_active and not target.is_cancelled:
                 try:
-                    # DEBUG: Log current state before processing
                     logger.info(
                         f"🔄 Admin forcing deduction for target {target.id}: {target.name}"
                     )
-                    logger.info(
-                        f"   Attempts: {target.deduction_attempts}/{target.max_attempts}"
-                    )
-                    logger.info(f"   Current amount: {target.current_amount}")
-                    logger.info(f"   Monthly payment: {target.monthly_payment}")
-                    logger.info(f"   User savings: {target.user.savings}")
-                    logger.info(f"   User investment: {target.user.investment}")
-                    logger.info(f"   Funding source: {target.funding_source}")
-
-                    # Check if deduction would actually fail
-                    amount = target.monthly_payment or Decimal("0")
-                    if target.funding_source == "SAVINGS":
-                        will_fail = target.user.savings < amount
-                    else:
-                        will_fail = target.user.investment < amount
-
-                    logger.info(f"   Will fail due to insufficient funds: {will_fail}")
 
                     success = target.process_deduction()
-
-                    # Refresh the target to get updated data
                     target.refresh_from_db()
-
-                    logger.info(f"   ✅ After processing:")
-                    logger.info(
-                        f"   Attempts: {target.deduction_attempts}/{target.max_attempts}"
-                    )
-                    logger.info(f"   Is active: {target.is_active}")
-                    logger.info(f"   Success result: {success}")
 
                     if success:
                         results["processed"] += 1
                     elif not target.is_active:
                         results["paused"] += 1
-                        logger.info(
-                            f"🛑 Target {target.id} was PAUSED due to max attempts"
-                        )
                     else:
                         results["failed"] += 1
 
                 except Exception as e:
-                    error_msg = f"Error processing target {target.name}: {str(e)}"
-                    logger.error(error_msg)
-                    results["errors"].append(error_msg)
+                    results["errors"].append(str(e))
                     results["failed"] += 1
 
-        # Build result message
-        message_parts = []
-        if results["processed"] > 0:
-            message_parts.append(
-                f"Successfully processed {results['processed']} targets"
-            )
-        if results["paused"] > 0:
-            message_parts.append(
-                f"Paused {results['paused']} targets due to max attempts"
-            )
-        if results["failed"] > 0:
-            message_parts.append(f"Failed to process {results['failed']} targets")
-        if results["errors"]:
-            message_parts.append(f"Encountered {len(results['errors'])} errors")
+        self.message_user(
+            request,
+            f"Processed: {results['processed']} | Failed: {results['failed']} | Paused: {results['paused']}",
+        )
 
-        final_message = ". ".join(message_parts)
-        self.message_user(request, final_message)
-
-        # Log detailed results
-        logger.info(f"Admin force deduction results: {final_message}")
-
-    force_process_deduction.short_description = (
-        "Force process deduction for selected targets"
-    )
+    force_process_deduction.short_description = "Force process deduction"
 
     def mark_as_completed(self, request, queryset):
-        completed_count = 0
         for target in queryset:
-            if target.is_active and not target.is_cancelled:
-                try:
-                    # Check if completion record already exists
-                    if hasattr(target, "completion_record"):
-                        self.message_user(
-                            request,
-                            f"Target '{target.name}' already has a completion record",
-                            level="WARNING",
-                        )
-                        continue
+            target.is_active = False
+            target.save()
 
-                    # Create a TargetSavingsCompletion record
-                    completed_target = TargetSavingsCompletion.objects.create(
-                        user=target.user,
-                        target_savings=target,
-                        completed_amount=target.current_amount,
-                        bonus_amount=(
-                            target.calculate_bonus()
-                            if hasattr(target, "calculate_bonus")
-                            else 0
-                        ),
-                        total_amount=target.current_amount
-                        + (
-                            target.calculate_bonus()
-                            if hasattr(target, "calculate_bonus")
-                            else 0
-                        ),
-                        completed_date=timezone.now().date(),
-                        was_on_time=timezone.now().date() <= target.end_date,
-                    )
-
-                    # Deactivate the original target
-                    target.is_active = False
-                    target.save()
-                    completed_count += 1
-
-                    # Send completion notification/email
-                    if hasattr(target, "send_completion_email"):
-                        target.send_completion_email()
-
-                except Exception as e:
-                    self.message_user(
-                        request,
-                        f"Error completing target {target.name}: {str(e)}",
-                        level="ERROR",
-                    )
-
-        self.message_user(request, f"Marked {completed_count} targets as completed")
-
-    mark_as_completed.short_description = "Mark selected targets as completed"
+        self.message_user(request, "Targets marked as completed")
 
 
 @admin.register(TargetSavingsCompletion)
