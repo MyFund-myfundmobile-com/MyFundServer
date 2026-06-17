@@ -272,6 +272,7 @@ def signup(request):
 
 
 import threading
+from .push_deep_links import dl
 
 
 @api_view(["POST"])
@@ -509,6 +510,7 @@ def confirm_otp(request):
                                 f"{growth_prefix}{growth_percentage}%"
                             ),
                             data={
+                                # ── existing keys (unchanged) ──
                                 "user_id": u.id,
                                 "email": u.email,
                                 "phone_number": u.phone_number,
@@ -517,6 +519,8 @@ def confirm_otp(request):
                                 "total_confirmed_users": total_confirmed_users,
                                 "growth_percentage": growth_percentage,
                                 "type": "admin_signup_alert",
+                                # ── NEW: deep link ──
+                                **dl.admin_new_user(u.phone_number, u.email),
                             },
                             notif_type="ADMIN",
                         )
@@ -4751,6 +4755,7 @@ def withdraw_to_local_bank(request):
                             "bank_name": target_bank_account.bank_name,
                             "withdrawal_type": "immediate",
                             "type": "admin_withdrawal_alert",
+                            **dl.admin_withdrawal(withdrawal.id),  # ← add this
                         },
                         notif_type="ADMIN_ALERT",
                     )
@@ -6590,19 +6595,18 @@ def initiate_bank_transfer(request):
                             f"Please check to confirm."
                         )
 
+                        from .push_deep_links import dl
+
                         send_push_notification(
                             user=admin_user,
                             title=admin_push_title,
                             message=admin_push_message,
                             data={
+                                "type": "admin_bank_transfer",
                                 "transaction_id": transaction_id,
-                                "user_email": user.email,
-                                "amount": str(amount),
-                                "type": "QuickSave",
-                                "status": "pending",
-                                "source": "admin_quicksave_alert",
+                                **dl.admin_bank_transfer(transaction_id),  # ← add this
                             },
-                            notif_type="ADMIN_ALERT",
+                            notif_type="ADMIN",
                         )
                         print(
                             f"✅ Admin QuickSave push notification sent to {admin_user.email}"

@@ -2260,6 +2260,7 @@ class Transaction(models.Model):
         ]
 
 
+# Push Notifications Model
 class PushNotifications(models.Model):
     NOTIFICATION_TYPES = (
         ("CREDIT", "Credit Transaction"),

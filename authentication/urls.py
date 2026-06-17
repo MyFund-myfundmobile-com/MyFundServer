@@ -54,6 +54,7 @@ from authentication.views import CustomGraphQLView
 from authentication.schema import schema  # Adjust the import path
 from graphql_jwt.decorators import jwt_cookie
 from .ai_views import admin_ai_chat
+from .action_views import approve_bank_transfer_action, approve_withdrawal_action
 
 router = DefaultRouter()
 router.register(r"bank-accounts", views.BankAccountViewSet, basename="bank-account")
@@ -407,6 +408,17 @@ urlpatterns = [
     ),
     # AI
     path("admin-ai-chat/", admin_ai_chat, name="admin_ai_chat"),
+    # DEEP LINKS FOR PUSH NOTIFICATIONS
+    path(
+        "admin-action/approve-withdrawal/",
+        approve_withdrawal_action,
+        name="action_approve_withdrawal",
+    ),
+    path(
+        "admin-action/approve-bank-transfer/",
+        approve_bank_transfer_action,
+        name="action_approve_bank_transfer",
+    ),
     # AdminFinanceMetrics
     path(
         "admin/finance-metrics/",

@@ -2110,17 +2110,22 @@ class TransactionAdmin(admin.ModelAdmin):
             amount = txn.amount or Decimal("0.00")
             description = txn.description or ""
 
-            is_investment = (
-                "invest" in description.lower()
-                or str(txn.credited_to).upper() == "INVESTMENT"
-            )
+            credited_to = str(txn.credited_to).upper()
 
-            if is_investment:
+            if credited_to == "WALLET":
+                balance_before = user.wallet
+                user.wallet += amount
+                balance_after = user.wallet
+                txn.credited_to = "WALLET"
+                folder_name = "Wallet"
+
+            elif credited_to == "INVESTMENT":
                 balance_before = user.investment
                 user.investment += amount
                 balance_after = user.investment
                 txn.credited_to = "INVESTMENT"
                 folder_name = "Investment"
+
             else:
                 balance_before = user.savings
                 user.savings += amount
@@ -2128,7 +2133,7 @@ class TransactionAdmin(admin.ModelAdmin):
                 txn.credited_to = "SAVINGS"
                 folder_name = "Savings"
 
-            user.save(update_fields=["savings", "investment"])
+            user.save(update_fields=["savings", "investment", "wallet"])
 
             txn.transaction_type = "credit"
             txn.status = "confirmed"
