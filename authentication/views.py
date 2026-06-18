@@ -510,7 +510,6 @@ def confirm_otp(request):
                                 f"{growth_prefix}{growth_percentage}%"
                             ),
                             data={
-                                # ── existing keys (unchanged) ──
                                 "user_id": u.id,
                                 "email": u.email,
                                 "phone_number": u.phone_number,
@@ -519,7 +518,6 @@ def confirm_otp(request):
                                 "total_confirmed_users": total_confirmed_users,
                                 "growth_percentage": growth_percentage,
                                 "type": "admin_signup_alert",
-                                # ── NEW: deep link ──
                                 **dl.admin_new_user(u.phone_number, u.email),
                             },
                             notif_type="ADMIN",
@@ -4654,7 +4652,7 @@ def withdraw_to_local_bank(request):
 
             charge_percentage_display = f"{rate * 100}%" if rate > 0 else "0%"
 
-            WithdrawalsRequestToAdmin.objects.create(
+            withdrawal_request = WithdrawalsRequestToAdmin.objects.create(
                 user=user,
                 amount=withdrawal_amount,
                 total_amount=amount,
@@ -4755,7 +4753,7 @@ def withdraw_to_local_bank(request):
                             "bank_name": target_bank_account.bank_name,
                             "withdrawal_type": "immediate",
                             "type": "admin_withdrawal_alert",
-                            **dl.admin_withdrawal(withdrawal.id),  # ← add this
+                            **dl.admin_withdrawal(withdrawal_request.id),  # fixed
                         },
                         notif_type="ADMIN_ALERT",
                     )
@@ -6442,6 +6440,7 @@ def create_notification(user, notification_type, title, message, data=None):
 
 
 import threading
+from .push_deep_links import dl
 
 
 @api_view(["POST"])
@@ -6594,8 +6593,6 @@ def initiate_bank_transfer(request):
                             f"has initiated ₦{amount:,.2f} to Savings Account.\n"
                             f"Please check to confirm."
                         )
-
-                        from .push_deep_links import dl
 
                         send_push_notification(
                             user=admin_user,
