@@ -1,6 +1,6 @@
 # authentication/action_views.py
 #
-# New file — drop into authentication/ folder.
+# Drop this file in your authentication/ folder.
 # Register in urls.py:
 #
 #   from .action_views import (
@@ -17,6 +17,13 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
+
+# Both helpers live in utils.py
+from .utils import (
+    approve_quicksave_credit,
+    approve_quickinvest_credit,
+    make_withdrawal_through_paystack,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,14 +46,13 @@ def _require_staff(request):
 def approve_bank_transfer_action(request):
     """
     POST { "transaction_id": "xxx" }
-    Approves a pending BankTransferRequest. Mirrors BankTransferRequestAdmin.approve_bank_transfer.
+    Mirrors BankTransferRequestAdmin.approve_bank_transfer.
     """
     err = _require_staff(request)
     if err:
         return err
 
     from .models import BankTransferRequest
-    from .admin_helpers import approve_quicksave_credit
 
     transaction_id = request.data.get("transaction_id", "").strip()
     if not transaction_id:
@@ -99,14 +105,13 @@ def approve_bank_transfer_action(request):
 def approve_invest_transfer_action(request):
     """
     POST { "transaction_id": "xxx" }
-    Approves a pending InvestTransferRequest. Mirrors InvestTransferRequestAdmin.approve_invest_transfer.
+    Mirrors InvestTransferRequestAdmin.approve_invest_transfer.
     """
     err = _require_staff(request)
     if err:
         return err
 
     from .models import InvestTransferRequest
-    from .admin_helpers import approve_quickinvest_credit
 
     transaction_id = request.data.get("transaction_id", "").strip()
     if not transaction_id:
@@ -161,14 +166,13 @@ def approve_invest_transfer_action(request):
 def approve_withdrawal_action(request):
     """
     POST { "withdrawal_id": "123" }
-    Marks a WithdrawalsRequestToAdmin as approved and triggers Paystack payout.
+    Triggers Paystack payout for a pending WithdrawalsRequestToAdmin.
     """
     err = _require_staff(request)
     if err:
         return err
 
     from .models import WithdrawalsRequestToAdmin, BankAccount
-    from .utils import make_withdrawal_through_paystack
 
     withdrawal_id = request.data.get("withdrawal_id", "").strip()
     if not withdrawal_id:
@@ -187,7 +191,6 @@ def approve_withdrawal_action(request):
 
     user = withdrawal.user
 
-    # Find the matching bank account for the target account number
     bank_account = BankAccount.objects.filter(
         account_number=withdrawal.target_account_number,
     ).first()
@@ -202,18 +205,16 @@ def approve_withdrawal_action(request):
             status=400,
         )
 
-    # Attempt Paystack payout (same call as the original view)
     paystack_response = make_withdrawal_through_paystack(
         user,
         bank_account,
-        withdrawal.amount,  # net amount after charges
+        withdrawal.amount,
         withdrawal.transaction_id,
     )
 
     if paystack_response.get("status"):
         withdrawal.is_approved = True
         withdrawal.save(update_fields=["is_approved"])
-
         logger.info(
             f"[action] Withdrawal {withdrawal_id} approved by {request.user.email}"
         )
@@ -221,7 +222,7 @@ def approve_withdrawal_action(request):
             {
                 "message": (
                     f"Withdrawal of NGN {withdrawal.amount:,} approved for {user.full_name}. "
-                    f"Paystack payout initiated."
+                    "Paystack payout initiated."
                 ),
                 "withdrawal_id": withdrawal_id,
                 "user_email": user.email,
@@ -240,3 +241,109 @@ def approve_withdrawal_action(request):
             },
             status=400,
         )
+
+
+# ── 4. Mark Bank Transfer as Abandoned ───────────────────────────────────────
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def mark_bank_transfer_abandoned_action(request):
+    """
+    POST { "transaction_id": "xxx" }
+    Mirrors BankTransferRequestAdmin.mark_as_abandoned.
+    """
+    err = _require_staff(request)
+    if err:
+        return err
+
+    from .models import BankTransferRequest, Transaction
+
+    transaction_id = request.data.get("transaction_id", "").strip()
+    if not transaction_id:
+        return Response({"error": "transaction_id is required."}, status=400)
+
+    transfer = BankTransferRequest.objects.filter(
+        transaction_id=transaction_id,
+        is_approved=False,
+    ).first()
+
+    if not transfer:
+        return Response(
+            {"error": "No pending bank transfer found with that transaction_id."},
+            status=404,
+        )
+
+    tx = Transaction.objects.filter(
+        user=transfer.user,
+        transaction_id=transaction_id,
+        status__iexact="pending",
+    ).first()
+
+    if tx:
+        tx.status = "abandoned"
+        tx.description = "QuickSave (Abandoned)"
+        tx.save(update_fields=["status", "description"])
+
+    logger.info(
+        f"[action] Bank transfer {transaction_id} marked abandoned by {request.user.email}"
+    )
+    return Response(
+        {
+            "message": f"Transfer {transaction_id} marked as abandoned.",
+            "transaction_id": transaction_id,
+        }
+    )
+
+
+# ── 5. Mark Invest Transfer as Abandoned ─────────────────────────────────────
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def mark_invest_transfer_abandoned_action(request):
+    """
+    POST { "transaction_id": "xxx" }
+    Mirrors InvestTransferRequestAdmin.mark_as_abandoned.
+    """
+    err = _require_staff(request)
+    if err:
+        return err
+
+    from .models import InvestTransferRequest, Transaction
+
+    transaction_id = request.data.get("transaction_id", "").strip()
+    if not transaction_id:
+        return Response({"error": "transaction_id is required."}, status=400)
+
+    transfer = InvestTransferRequest.objects.filter(
+        transaction_id=transaction_id,
+        is_approved=False,
+    ).first()
+
+    if not transfer:
+        return Response(
+            {"error": "No pending invest transfer found with that transaction_id."},
+            status=404,
+        )
+
+    tx = Transaction.objects.filter(
+        user=transfer.user,
+        transaction_id=transaction_id,
+        status__iexact="pending",
+    ).first()
+
+    if tx:
+        tx.status = "abandoned"
+        tx.description = "QuickInvest (Abandoned)"
+        tx.save(update_fields=["status", "description"])
+
+    logger.info(
+        f"[action] Invest transfer {transaction_id} marked abandoned by {request.user.email}"
+    )
+    return Response(
+        {
+            "message": f"Invest transfer {transaction_id} marked as abandoned.",
+            "transaction_id": transaction_id,
+        }
+    )

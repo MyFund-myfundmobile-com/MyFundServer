@@ -58,6 +58,8 @@ from .action_views import (
     approve_bank_transfer_action,
     approve_invest_transfer_action,
     approve_withdrawal_action,
+    mark_bank_transfer_abandoned_action,
+    mark_invest_transfer_abandoned_action,
 )
 
 router = DefaultRouter()
@@ -427,6 +429,16 @@ urlpatterns = [
         "admin-action/approve-withdrawal/",
         approve_withdrawal_action,
         name="action_approve_withdrawal",
+    ),
+    path(
+        "admin-action/mark-bank-transfer-abandoned/",
+        mark_bank_transfer_abandoned_action,
+        name="action_abandon_bank_transfer",
+    ),
+    path(
+        "admin-action/mark-invest-transfer-abandoned/",
+        mark_invest_transfer_abandoned_action,
+        name="action_abandon_invest_transfer",
     ),
     # AdminFinanceMetrics
     path(
