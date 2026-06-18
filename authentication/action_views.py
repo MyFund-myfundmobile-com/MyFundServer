@@ -19,11 +19,8 @@ from rest_framework.response import Response
 from rest_framework import status
 
 # Both helpers live in utils.py
-from .utils import (
-    approve_quicksave_credit,
-    approve_quickinvest_credit,
-    make_withdrawal_through_paystack,
-)
+from .utils import approve_quicksave_credit, approve_quickinvest_credit
+from .views import make_withdrawal_through_paystack
 
 logger = logging.getLogger(__name__)
 
