@@ -1,16 +1,4 @@
 # authentication/action_views.py
-#
-# Drop this file in your authentication/ folder.
-# Register in urls.py:
-#
-#   from .action_views import (
-#       approve_bank_transfer_action,
-#       approve_invest_transfer_action,
-#       approve_withdrawal_action,
-#   )
-#   path("admin-action/approve-bank-transfer/",  approve_bank_transfer_action),
-#   path("admin-action/approve-invest-transfer/", approve_invest_transfer_action),
-#   path("admin-action/approve-withdrawal/",      approve_withdrawal_action),
 
 import logging
 from rest_framework.decorators import api_view, permission_classes
@@ -18,9 +6,10 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 
-# Both helpers live in utils.py
 from .utils import approve_quicksave_credit, approve_quickinvest_credit
-from .views import make_withdrawal_through_paystack
+
+# make_withdrawal_through_paystack is imported INSIDE approve_withdrawal_action
+# to avoid a circular import (views.py is too heavy to import at module level)
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +30,7 @@ def _require_staff(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def approve_bank_transfer_action(request):
-    """
-    POST { "transaction_id": "xxx" }
-    Mirrors BankTransferRequestAdmin.approve_bank_transfer.
-    """
+    """POST { "transaction_id": "xxx" }"""
     err = _require_staff(request)
     if err:
         return err
@@ -100,10 +86,7 @@ def approve_bank_transfer_action(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def approve_invest_transfer_action(request):
-    """
-    POST { "transaction_id": "xxx" }
-    Mirrors InvestTransferRequestAdmin.approve_invest_transfer.
-    """
+    """POST { "transaction_id": "xxx" }"""
     err = _require_staff(request)
     if err:
         return err
@@ -161,14 +144,13 @@ def approve_invest_transfer_action(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def approve_withdrawal_action(request):
-    """
-    POST { "withdrawal_id": "123" }
-    Triggers Paystack payout for a pending WithdrawalsRequestToAdmin.
-    """
+    """POST { "withdrawal_id": "123" }"""
     err = _require_staff(request)
     if err:
         return err
 
+    # Imported here (not at top) to avoid circular import with views.py
+    from .views import make_withdrawal_through_paystack
     from .models import WithdrawalsRequestToAdmin, BankAccount
 
     withdrawal_id = request.data.get("withdrawal_id", "").strip()
@@ -182,8 +164,7 @@ def approve_withdrawal_action(request):
         )
     except WithdrawalsRequestToAdmin.DoesNotExist:
         return Response(
-            {"error": "No pending withdrawal found with that ID."},
-            status=404,
+            {"error": "No pending withdrawal found with that ID."}, status=404
         )
 
     user = withdrawal.user
@@ -246,10 +227,7 @@ def approve_withdrawal_action(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def mark_bank_transfer_abandoned_action(request):
-    """
-    POST { "transaction_id": "xxx" }
-    Mirrors BankTransferRequestAdmin.mark_as_abandoned.
-    """
+    """POST { "transaction_id": "xxx" }"""
     err = _require_staff(request)
     if err:
         return err
@@ -299,10 +277,7 @@ def mark_bank_transfer_abandoned_action(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def mark_invest_transfer_abandoned_action(request):
-    """
-    POST { "transaction_id": "xxx" }
-    Mirrors InvestTransferRequestAdmin.mark_as_abandoned.
-    """
+    """POST { "transaction_id": "xxx" }"""
     err = _require_staff(request)
     if err:
         return err
