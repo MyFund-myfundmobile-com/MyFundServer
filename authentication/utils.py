@@ -2242,19 +2242,24 @@ def create_transaction(
         setattr(user, balance_field, new_balance)
         user.save(update_fields=[balance_field])
 
-        tx = Transaction.objects.create(
-            user=user,
-            amount=amount,
-            transaction_type=transaction_type,
-            status=status,
-            source=source,
-            credited_to=credited_to,
-            description=description,
-            service_charge=service_charge,
-            balance_before=previous_balance,
-            balance_after=new_balance,
-            transaction_id=reference if reference else None,
-        )
+        transaction_data = {
+            "user": user,
+            "amount": amount,
+            "transaction_type": transaction_type,
+            "status": status,
+            "source": source,
+            "credited_to": credited_to,
+            "description": description,
+            "service_charge": service_charge,
+            "balance_before": previous_balance,
+            "balance_after": new_balance,
+        }
+
+        # Only set transaction_id when a reference was actually supplied.
+        if reference:
+            transaction_data["transaction_id"] = reference
+
+        tx = Transaction.objects.create(**transaction_data)
 
         print("✅ TX SAVED:", tx.balance_before, tx.balance_after)
 

@@ -4125,6 +4125,8 @@ import uuid  # Import the uuid library
 
 random_uuid = uuid.uuid4()
 
+MINIMUM_INVESTMENT_AMOUNT = Decimal("100000")
+
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
@@ -4155,6 +4157,14 @@ def savings_to_investment(request):
     if amount <= 0:
         return Response(
             {"error": "Amount must be greater than zero."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if amount < MINIMUM_INVESTMENT_AMOUNT:
+        return Response(
+            {
+                "error": f"Minimum investment amount is ₦{MINIMUM_INVESTMENT_AMOUNT:,.0f}."
+            },
             status=status.HTTP_400_BAD_REQUEST,
         )
 
@@ -4340,6 +4350,9 @@ def wallet_to_savings(request):
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+MINIMUM_INVESTMENT_AMOUNT = Decimal("100000")
+
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def wallet_to_investment(request):
@@ -4361,6 +4374,14 @@ def wallet_to_investment(request):
     if amount <= 0:
         return Response(
             {"error": "Amount must be greater than zero."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if amount < MINIMUM_INVESTMENT_AMOUNT:
+        return Response(
+            {
+                "error": f"Minimum investment amount is ₦{MINIMUM_INVESTMENT_AMOUNT:,.0f}."
+            },
             status=status.HTTP_400_BAD_REQUEST,
         )
 
@@ -6657,7 +6678,7 @@ def initiate_invest_transfer(request):
             amount = Decimal(str(amount_raw))
             if amount < 100000:
                 return Response(
-                    {"error": "Amount must be greater than ₦100,000"},
+                    {"error": "Amount must at least ₦100,000"},
                     status=400,
                 )
         except (InvalidOperation, ValueError, TypeError):

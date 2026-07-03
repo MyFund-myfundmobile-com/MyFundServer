@@ -396,6 +396,65 @@ def send_batch_roi_notifications(notifications):
     return {"sent": sent_count, "failed": failed_count}
 
 
+# HELPER FOR RELEASE_QUARTERLY_ROI
+from datetime import date
+
+
+def get_previous_quarter():
+    """
+    Returns:
+        (quarter_start, quarter_end, quarter_label)
+
+    Examples:
+        Jul 1 2026 -> (Apr 1 2026, Jun 30 2026, "Q2 2026")
+        Oct 1 2026 -> (Jul 1 2026, Sep 30 2026, "Q3 2026")
+        Jan 1 2027 -> (Oct 1 2026, Dec 31 2026, "Q4 2026")
+        Apr 1 2026 -> (Jan 1 2026, Mar 31 2026, "Q1 2026")
+    """
+
+    today = date.today()
+
+    if today.month in (1, 2, 3):
+        year = today.year - 1
+        quarter = 4
+    elif today.month in (4, 5, 6):
+        year = today.year
+        quarter = 1
+    elif today.month in (7, 8, 9):
+        year = today.year
+        quarter = 2
+    else:
+        year = today.year
+        quarter = 3
+
+    if quarter == 1:
+        return (
+            date(year, 1, 1),
+            date(year, 3, 31),
+            f"Q1 {year}",
+        )
+
+    if quarter == 2:
+        return (
+            date(year, 4, 1),
+            date(year, 6, 30),
+            f"Q2 {year}",
+        )
+
+    if quarter == 3:
+        return (
+            date(year, 7, 1),
+            date(year, 9, 30),
+            f"Q3 {year}",
+        )
+
+    return (
+        date(year, 10, 1),
+        date(year, 12, 31),
+        f"Q4 {year}",
+    )
+
+
 @shared_task
 def release_quarterly_roi(test_mode=True):
     """
@@ -411,14 +470,36 @@ def release_quarterly_roi(test_mode=True):
     from .utils import send_push_notification
     from .tasks import send_single_email_task
 
-    QUARTER_START = date(2026, 1, 1)
-    QUARTER_END = date(2026, 3, 31)
-    QUARTER_LABEL = "Q1 2026"
+    from datetime import date
+
+    QUARTER_START = date(2026, 4, 1)
+    QUARTER_END = date(2026, 6, 30)
+    from datetime import date
+
+    today = date.today()
+    year = today.year
+
+    # Determine quarter being paid (based on fixed accrual window)
+    if QUARTER_START.month == 4:
+        QUARTER_LABEL = f"Q2 {QUARTER_START.year}"
+        NEXT_PAYOUT_LABEL = f"October {QUARTER_START.year}"
+
+    elif QUARTER_START.month == 1:
+        QUARTER_LABEL = f"Q1 {QUARTER_START.year}"
+        NEXT_PAYOUT_LABEL = f"July {QUARTER_START.year}"
+
+    elif QUARTER_START.month == 7:
+        QUARTER_LABEL = f"Q3 {QUARTER_START.year}"
+        NEXT_PAYOUT_LABEL = f"January {QUARTER_START.year + 1}"
+
+    elif QUARTER_START.month == 10:
+        QUARTER_LABEL = f"Q4 {QUARTER_START.year}"
+        NEXT_PAYOUT_LABEL = f"April {QUARTER_START.year + 1}"
 
     TEST_EMAILS = [
-        "sammy@myfundmobile.com",
+        # "valuepluspublishing@gmail.com",
         # "valueplusrecords@gmail.com",
-        # "tolulopeahmed@gmail.com",
+        "tolulopeahmed@gmail.com",
     ]
 
     logger.info(f"🚀 release_quarterly_roi started. test_mode={test_mode}")
@@ -494,7 +575,7 @@ def release_quarterly_roi(test_mode=True):
                     f"Congratulations {user.first_name}, ₦{total_payout:,.2f} has been added to "
                     f"your wallet as dividends for {QUARTER_LABEL}! "
                     f"(Savings: ₦{savings_roi:,.2f}, Investment: ₦{investment_roi:,.2f}). "
-                    f"Keep growing your funds for better ROI by the next payout by July."
+                    f"Keep growing your funds for better ROI by the next payout by {NEXT_PAYOUT_LABEL}."
                 ),
                 data={
                     "type": "QUARTERLY_PAYOUT",
@@ -511,21 +592,17 @@ def release_quarterly_roi(test_mode=True):
                 f"<b>Savings ROI:</b> ₦{savings_roi:,.2f}<br>"
                 f"<b>Investment ROI:</b> ₦{investment_roi:,.2f}<br><br>"
                 f"This payout covers your earnings for {QUARTER_LABEL}.<br><br>"
-                f"The next payout will be in July. Keep growing your funds.<br><br>"
+                f"The next payout will be in {NEXT_PAYOUT_LABEL}. Keep growing your funds.<br><br>"
                 f"Thank you for using MyFund.<br><br>"
                 f"The MyFund Team"
             )
 
-            send_single_email_task.apply_async(
-                args=[
-                    user.email,
-                    f"Quarterly ROI Paid! ({QUARTER_LABEL})",
-                    email_body,
-                    "MyFund <info@mg.myfundmobile.com>",
-                ],
-                countdown=processed
-                * 30,  # stagger: user 0 = now, user 1 = 72s, user 2 = 144s...
-                queue="email_queue",
+            send_generic_email(
+                subject=f"Quarterly ROI Paid! ({QUARTER_LABEL})",
+                message=email_body,
+                recipient_list=[user.email],
+                from_email="MyFund <noreply@mg.myfundmobile.com>",
+                use_celery_threshold=0,  # force direct send
             )
 
             processed += 1
@@ -535,7 +612,8 @@ def release_quarterly_roi(test_mode=True):
 
         except Exception as e:
             errors += 1
-            logger.error(f"❌ Error processing user {user_id}: {e}")
+            logger.exception(f"❌ FULL ERROR for user {user_id}: {e}")
+            print(f"❌ FULL ERROR for user {user_id}: {repr(e)}")
 
     result = (
         f"✅ release_quarterly_roi complete. "
@@ -1187,14 +1265,16 @@ def apply_withholding_tax_q1_2026(test_mode=True):
     from django.db.models import Sum
     from .models import CustomUser, Transaction, ROITransaction
 
-    QUARTER_START = date(2026, 1, 1)
-    QUARTER_END = date(2026, 3, 31)
-    QUARTER_LABEL = "Q1 2026"
+    from dateutil.relativedelta import relativedelta
+
+    QUARTER_START = date(2026, 4, 1)
+    QUARTER_END = date(2026, 6, 30)
+    QUARTER_LABEL = "Q2 2026"
     WHT_RATE = Decimal("0.10")
 
     TEST_EMAILS = [
-        "company@myfundmobile.com",
-        "valueplusrecords@gmail.com",
+        # "company@myfundmobile.com",
+        # "valuepluspublishing@gmail.com",
         "tolulopeahmed@gmail.com",
     ]
 
@@ -1241,9 +1321,10 @@ def apply_withholding_tax_q1_2026(test_mode=True):
         # Skip if WHT already applied for this user this quarter
         already_charged = Transaction.objects.filter(
             user_id=user_id,
-            description=f"WHT: {QUARTER_LABEL} Dividends",
             transaction_type="debit",
             status="confirmed",
+            source="WALLET",
+            description__icontains=f"WHT|{QUARTER_LABEL}",
         ).exists()
 
         if already_charged:
@@ -1262,8 +1343,7 @@ def apply_withholding_tax_q1_2026(test_mode=True):
                     transaction_type="debit",
                     source="WALLET",
                     status="confirmed",
-                    service_charge=Decimal("0.00"),
-                    description=f"WHT: {QUARTER_LABEL} Dividends",
+                    description=f"WHT|{QUARTER_LABEL}|10%",
                 )
 
             processed += 1
@@ -1841,132 +1921,6 @@ def send_batch_b_ambassador_email(test=True):
         recipient_list=recipients,
         use_celery_threshold=0,
     )
-
-
-from decimal import Decimal
-from django.db import transaction as db_transaction
-from django.utils import timezone
-
-from authentication.models import CustomUser, Transaction
-from authentication.utils import send_generic_email, send_push_notification
-
-
-def credit_team_wallets(
-    month_label="May 2026",
-    reason="MyFund Allowance",
-    test=False,
-    test_email="company@myfundmobile.com",
-):
-    # 👇 HARD-CODED TEAM LIST (no placeholders, no external input needed)
-    credits = [
-        {
-            "name": "Precious Olorunfemi",
-            "email": "olorunfemiprecious2109@gmail.com",
-            "amount": "5000",
-        },
-        {
-            "name": "Abraham Akolade",
-            "email": "abrahamakoladeabraham76@gmail.com",
-            "amount": "5000",
-        },
-        {
-            "name": "Judith",
-            "email": "ofeimunjudith@gmail.com",
-            "amount": "5000",
-        },
-    ]
-
-    results = []
-
-    for item in credits:
-        email = item["email"].strip().lower()
-        amount = Decimal(item["amount"])
-        name = item.get("name", "")
-
-        subject = f"🎉 ₦{amount:,.2f} Has Been Credited To Your Wallet"
-
-        message = f"""
-        <p>Hi {name or 'there'},</p>
-
-        <p>Your MyFund wallet has been credited with <strong>₦{amount:,.2f}</strong> for <strong>{month_label}</strong> as team allowance.</p>
-
-        <p>Thank you for your work and consistency.</p>
-
-        <p>— MyFund</p>
-        """
-
-        try:
-            user = CustomUser.objects.get(email__iexact=email)
-        except CustomUser.DoesNotExist:
-            results.append(
-                {
-                    "email": email,
-                    "status": "user_not_found",
-                }
-            )
-            continue
-
-        balance_before = Decimal(str(user.wallet or 0))
-
-        # 💰 WALLET CREDIT (ONLY if not test)
-        if not test:
-            with db_transaction.atomic():
-                balance_after = balance_before + amount
-
-                user.wallet = balance_after
-                user.save(update_fields=["wallet"])
-
-                Transaction.objects.create(
-                    user=user,
-                    transaction_type="credit",
-                    status="confirmed",
-                    source="WALLET",
-                    credited_to="WALLET",
-                    amount=amount,
-                    total_amount=amount,
-                    service_charge=Decimal("0.00"),
-                    balance_before=balance_before,
-                    balance_after=balance_after,
-                    description=f"{month_label} Allowance",
-                    date=timezone.now(),
-                )
-        else:
-            balance_after = balance_before
-
-        # 📧 EMAIL
-        send_generic_email(
-            subject=subject,
-            message=message,
-            recipient_list=[test_email if test else user.email],
-        )
-
-        # 📲 PUSH NOTIFICATION
-        if not test:
-            try:
-                send_push_notification(
-                    user=user,
-                    title=subject,
-                    message=f"₦{amount:,.2f} credited to your wallet for {month_label}.",
-                    data={
-                        "type": "wallet_credit",
-                        "amount": str(amount),
-                        "month": month_label,
-                    },
-                )
-            except Exception:
-                pass
-
-        results.append(
-            {
-                "email": email,
-                "name": name,
-                "balance_before": str(balance_before),
-                "balance_after": str(balance_after),
-                "status": "credited" if not test else "test_run",
-            }
-        )
-
-    return results
 
 
 from datetime import timedelta

@@ -3231,3 +3231,55 @@ class FinanceMetricSnapshot(models.Model):
 
     def __str__(self):
         return f"{self.period_type.title()} Finance Snapshot: {self.period_start} - {self.period_end}"
+
+
+class Employee(models.Model):
+    name = models.CharField(max_length=100)
+    email = models.EmailField(unique=True)
+    monthly_amount = models.DecimalField(max_digits=10, decimal_places=2)
+    is_active = models.BooleanField(default=True)
+    date_added = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.name} ({self.email})"
+
+
+class PayrollRun(models.Model):
+    month_label = models.CharField(max_length=50)
+    reason = models.CharField(max_length=100, default="MyFund Allowance")
+    is_test = models.BooleanField(default=False)
+    test_email = models.EmailField(null=True, blank=True)
+    executed_at = models.DateTimeField(auto_now_add=True)
+    executed_by = models.CharField(max_length=150, blank=True)
+
+    def __str__(self):
+        return f"{self.month_label} {'(TEST)' if self.is_test else ''}"
+
+
+class PayrollEntry(models.Model):
+    STATUS_CHOICES = [
+        ("pending", "Pending (Draft)"),
+        ("credited", "Credited"),
+        ("test_run", "Test Run"),
+        ("user_not_found", "User Not Found"),
+        ("failed", "Failed"),
+    ]
+    run = models.ForeignKey(
+        PayrollRun, on_delete=models.CASCADE, related_name="entries"
+    )
+    employee = models.ForeignKey(Employee, on_delete=models.SET_NULL, null=True)
+    email = models.EmailField()
+    name = models.CharField(max_length=100, blank=True)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    description = models.CharField(max_length=150, blank=True)
+    balance_before = models.DecimalField(
+        max_digits=11, decimal_places=2, null=True, blank=True
+    )
+    balance_after = models.DecimalField(
+        max_digits=11, decimal_places=2, null=True, blank=True
+    )
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.name} - ₦{self.amount} - {self.status}"

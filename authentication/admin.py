@@ -3291,6 +3291,137 @@ class PhoneChangeRequestAdmin(admin.ModelAdmin):
     approve_requests.short_description = "Approve selected phone change requests"
 
 
+from authentication.models import Employee, PayrollRun, PayrollEntry
+from authentication.payroll import create_draft_entries, send_pending_entries
+
+
+@admin.register(Employee)
+class EmployeeAdmin(admin.ModelAdmin):
+    list_display = (
+        "name",
+        "email",
+        "monthly_amount",
+        "is_active",
+        "total_paid_display",
+        "last_payment_display",
+        "date_added",
+    )
+    list_filter = ("is_active",)
+    search_fields = ("name", "email")
+    readonly_fields = ("total_paid_display", "last_payment_display")
+    actions = ["create_draft_payroll", "quick_test_payroll", "quick_live_payroll"]
+
+    def total_paid_display(self, obj):
+        total = (
+            PayrollEntry.objects.filter(employee=obj, status="credited").aggregate(
+                total=Sum("amount")
+            )["total"]
+            or 0
+        )
+        return f"₦{total:,.2f}"
+
+    total_paid_display.short_description = "Total Paid (All Time)"
+
+    def last_payment_display(self, obj):
+        last = (
+            PayrollEntry.objects.filter(employee=obj, status="credited")
+            .order_by("-created_at")
+            .first()
+        )
+        return last.created_at.strftime("%b %d, %Y") if last else "—"
+
+    last_payment_display.short_description = "Last Paid"
+
+    @admin.action(description="📝 CREATE PAYMENT DRAFT (edit details)")
+    def create_draft_payroll(self, request, queryset):
+        month_label = timezone.now().strftime("%B %Y")
+        run = create_draft_entries(
+            queryset, month_label, executed_by=request.user.email
+        )
+        self.message_user(
+            request,
+            f"Draft created for {month_label}: {queryset.count()} entries. Go to Payroll Entries to edit, then send.",
+            level=messages.SUCCESS,
+        )
+
+    @admin.action(description="✅ PAY Selected Employees (no editing)")
+    def quick_live_payroll(self, request, queryset):
+        month_label = timezone.now().strftime("%B %Y")
+        run = create_draft_entries(
+            queryset, month_label, executed_by=request.user.email
+        )
+        results = send_pending_entries(run.entries.all(), test=False)
+        self.message_user(
+            request, f"Live paid: {len(results)} entries.", level=messages.SUCCESS
+        )
+
+
+class PayrollEntryInline(admin.TabularInline):
+    model = PayrollEntry
+    extra = 0
+    fields = (
+        "employee",
+        "email",
+        "name",
+        "amount",
+        "description",
+        "balance_before",
+        "balance_after",
+        "status",
+        "created_at",
+    )
+    readonly_fields = (
+        "employee",
+        "email",
+        "balance_before",
+        "balance_after",
+        "status",
+        "created_at",
+    )
+    can_delete = False
+
+
+@admin.register(PayrollRun)
+class PayrollRunAdmin(admin.ModelAdmin):
+    list_display = ("month_label", "reason", "executed_at", "executed_by")
+    list_filter = ("month_label",)
+    inlines = [PayrollEntryInline]
+
+
+@admin.register(PayrollEntry)
+class PayrollEntryAdmin(admin.ModelAdmin):
+    list_display = (
+        "run",
+        "name",
+        "email",
+        "amount",
+        "description",
+        "status",
+        "created_at",
+    )
+    list_filter = ("status", "run")
+    search_fields = ("name", "email")
+    fields = ("run", "employee", "email", "name", "amount", "description", "status")
+    readonly_fields = ("run", "employee", "email", "name", "status")
+    actions = ["send_test", "send_live"]
+
+    @admin.action(description="🧪 Send TEST for selected pending entries")
+    def send_test(self, request, queryset):
+        results = send_pending_entries(queryset, test=True)
+        self.message_user(
+            request,
+            f"Test sent: {len(results)} entries. Check valueplusrecords@gmail.com.",
+            level=messages.SUCCESS,
+        )
+
+    @admin.action(description="💸 Send LIVE for selected pending entries")
+    def send_live(self, request, queryset):
+        results = send_pending_entries(queryset, test=False)
+        self.message_user(
+            request, f"Live sent: {len(results)} entries.", level=messages.SUCCESS
+        )
+
+
 admin.site.register(DailyROIAccrual, DailyROIAccrualAdmin)
 admin.site.register(ROITransaction, ROITransactionAdmin)
 admin.site.register(Card, CardAdmin)

@@ -87,8 +87,9 @@ app.conf.beat_schedule = {
         "options": {"queue": "default"},
     },
     "process-quarterly-payouts": {
-        "task": "authentication.tasks.process_quarterly_payouts_task",
+        "task": "authentication.tasks.release_quarterly_roi",
         "schedule": crontab(minute=0, hour=9, day_of_month=1, month_of_year="1,4,7,10"),
+        "kwargs": {"test_mode": False},
     },
     # Top Saver Rewards
     "reward-top-savers-monthly": {
