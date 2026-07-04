@@ -1941,6 +1941,44 @@ def send_ambassador_status_notification(user, became_ambassador=True):
         logger.error(f"Ambassador notification error for {user.email}: {e}")
 
 
+def grant_user_ambassador_status(user):
+    """
+    Grant ambassador status and notify the user.
+    Returns True if the status changed.
+    """
+    if user.is_ambassador:
+        return False
+
+    user.is_ambassador = True
+    user.save(update_fields=["is_ambassador"])
+
+    send_ambassador_status_notification(
+        user=user,
+        became_ambassador=True,
+    )
+
+    return True
+
+
+def revoke_user_ambassador_status(user):
+    """
+    Revoke ambassador status and notify the user.
+    Returns True if the status changed.
+    """
+    if not user.is_ambassador:
+        return False
+
+    user.is_ambassador = False
+    user.save(update_fields=["is_ambassador"])
+
+    send_ambassador_status_notification(
+        user=user,
+        became_ambassador=False,
+    )
+
+    return True
+
+
 from django.utils import timezone
 from .models import AmbassadorAttendanceSubmission
 
@@ -1952,117 +1990,6 @@ def get_user_monthly_attendance_count(user):
         user=user,
         month=current_month,
     ).count()
-
-
-from decimal import Decimal
-import uuid
-from django.db import transaction
-from django.contrib.auth import get_user_model
-from django.utils import timezone
-
-from .models import Transaction
-
-
-def credit_employee_wallet_allowance(email, amount, credited_by="Admin"):
-    User = get_user_model()
-
-    amount = Decimal(str(amount))
-
-    if amount <= 0:
-        return {
-            "success": False,
-            "message": "Amount must be greater than 0.",
-        }
-
-    with transaction.atomic():
-        try:
-            user = User.objects.select_for_update().get(email__iexact=email.strip())
-        except User.DoesNotExist:
-            return {
-                "success": False,
-                "message": f"No user found with email: {email}",
-            }
-
-        # 1. Credit wallet
-        user.wallet = (user.wallet or Decimal("0")) + amount
-        user.save(update_fields=["wallet"])
-
-        # 2. Create transaction record
-        tx = Transaction.objects.create(
-            user=user,
-            transaction_id=str(uuid.uuid4()),
-            transaction_type="credit",
-            status="confirmed",
-            amount=amount,
-            source="WALLET",
-            credited_to="WALLET",
-            description="Staff Allowance Credit",
-            date=timezone.now().date(),
-            time=timezone.now().time(),
-        )
-
-    # 3. Send user push
-    try:
-        send_push_notification(
-            user=user,
-            title="Allowance Credited ✅",
-            message=(
-                f"Hi {user.first_name}, your staff allowance of ₦{amount:,.2f} "
-                f"has been credited to your MyFund Wallet successfully."
-            ),
-            data={
-                "amount": str(amount),
-                "transaction_id": tx.transaction_id,
-                "type": "STAFF_ALLOWANCE",
-                "destination": "WALLET",
-            },
-            notif_type="CREDIT",
-        )
-    except Exception as e:
-        print(f"User push failed: {e}")
-
-    # 4. Send admin push copy
-    try:
-        send_admin_push_notification(
-            title="💰 Staff Allowance Credited",
-            message=(
-                f"{getattr(user, 'full_name', '') or user.email} was credited "
-                f"₦{amount:,.2f} to Wallet (Allowance)."
-            ),
-            data={
-                "amount": str(amount),
-                "user_email": user.email,
-                "transaction_id": tx.transaction_id,
-                "type": "ADMIN_ALERT",
-            },
-            notif_type="ADMIN_ALERT",
-        )
-    except Exception as e:
-        print(f"Admin push failed: {e}")
-
-    # 5. Send email
-    try:
-        send_generic_email(
-            subject="Staff Allowance Credited ✅",
-            message=(
-                f"Hi {user.first_name},<br><br>"
-                f"Your staff allowance of <b>₦{amount:,.2f}</b> has been credited "
-                f"to your MyFund Wallet successfully.<br><br>"
-                f"You can log in to view your updated wallet balance.<br><br>"
-                f"MyFund Team"
-            ),
-            from_email="MyFund <info@mg.myfundmobile.com>",
-            recipient_list=[user.email],
-        )
-    except Exception as e:
-        print(f"Email failed: {e}")
-
-    return {
-        "success": True,
-        "message": f"₦{amount:,.2f} credited successfully to {user.email}",
-        "transaction_id": tx.transaction_id,
-        "wallet_balance": str(user.wallet),
-    }
 
 
 from datetime import timedelta

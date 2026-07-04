@@ -61,6 +61,8 @@ from .utils import (
     approve_quicksave_credit,
     approve_quickinvest_credit,
     send_ambassador_status_notification,
+    grant_user_ambassador_status,
+    revoke_user_ambassador_status,
     create_transaction,
 )
 from decimal import Decimal
@@ -609,13 +611,7 @@ class CustomUserAdmin(UserAdmin):
         updated_count = 0
 
         for user in queryset:
-            if not user.is_ambassador:
-                user.is_ambassador = True
-                user.save(update_fields=["is_ambassador"])
-                send_ambassador_status_notification(
-                    user=user,
-                    became_ambassador=True,
-                )
+            if grant_user_ambassador_status(user):
                 updated_count += 1
 
         self.message_user(
@@ -629,13 +625,7 @@ class CustomUserAdmin(UserAdmin):
         updated_count = 0
 
         for user in queryset:
-            if user.is_ambassador:
-                user.is_ambassador = False
-                user.save(update_fields=["is_ambassador"])
-                send_ambassador_status_notification(
-                    user=user,
-                    became_ambassador=False,
-                )
+            if revoke_user_ambassador_status(user):
                 updated_count += 1
 
         self.message_user(
@@ -2927,6 +2917,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
         "approve_reports",
         "reject_reports",
         "recalculate_selected_reports",
+        "remove_ambassador_status",
     ]
 
     def formatted_month(self, obj):
@@ -3201,6 +3192,20 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
             report.save()
 
         self.message_user(request, "Recalculated.", level=messages.SUCCESS)
+
+    @admin.action(description="❌ Remove Ambassador Status")
+    def remove_ambassador_status(self, request, queryset):
+        updated_count = 0
+
+        for report in queryset:
+            if revoke_user_ambassador_status(report.user):
+                updated_count += 1
+
+        self.message_user(
+            request,
+            f"{updated_count} ambassador(s) removed and notified.",
+            level=messages.SUCCESS,
+        )
 
 
 @admin.register(FinanceMetricSnapshot)
