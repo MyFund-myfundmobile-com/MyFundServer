@@ -897,15 +897,87 @@ def send_large_email_batch_task(batches, from_email, batch_size=50, delay_second
             time.sleep(delay_seconds)
 
 
-from django.utils import timezone
+import logging
+
 from celery import shared_task
-from authentication.models import WithdrawalsRequestToAdmin
-from .utils import process_scheduled_withdrawal
+from django.utils import timezone
+
+from authentication.models import WithdrawalsRequestToAdmin, CustomUser
+from .utils import (
+    process_scheduled_withdrawal,
+    send_generic_email,
+    send_push_notification,
+)
+
+logger = logging.getLogger(__name__)
+
+ADMIN_ALERT_EMAILS = [
+    "tolulopeahmed@gmail.com",
+    "janet.adegbenro@gmail.com",
+]
+
+
+def alert_admins_of_failed_scheduled_withdrawals(failed_withdrawals):
+    if not failed_withdrawals:
+        return
+
+    failed_count = len(failed_withdrawals)
+
+    rows = []
+    for item in failed_withdrawals:
+        rows.append(
+            f"Transaction ID: {item['transaction_id']}<br>"
+            f"User: {item['user_email']}<br>"
+            f"Amount: ₦{item['amount']}<br>"
+            f"Error: {item['error']}<br>"
+            f"<br>"
+        )
+
+    message = (
+        f"Hello Admin,<br><br>"
+        f"{failed_count} scheduled withdrawal(s) failed during Celery processing.<br><br>"
+        f"Please check Django Admin, filter by overdue scheduled withdrawals, "
+        f"and force credit where necessary.<br><br>"
+        f"{''.join(rows)}"
+        f"MyFund System"
+    )
+
+    try:
+        send_generic_email(
+            subject="[ACTION REQUIRED] Scheduled Withdrawal Failed",
+            message=message,
+            from_email="MyFund <info@mg.myfundmobile.com>",
+            recipient_list=ADMIN_ALERT_EMAILS,
+        )
+    except Exception:
+        logger.exception("Failed to send scheduled withdrawal failure email to admins")
+
+    admin_users = CustomUser.objects.filter(email__in=ADMIN_ALERT_EMAILS)
+
+    for admin_user in admin_users:
+        try:
+            send_push_notification(
+                user=admin_user,
+                title="Scheduled Withdrawal Failed",
+                message=(
+                    f"{failed_count} scheduled withdrawal(s) failed in Celery. "
+                    f"Check overdue withdrawals in admin."
+                ),
+                data={
+                    "type": "scheduled_withdrawal_failed",
+                    "failed_count": str(failed_count),
+                },
+                notif_type="SUCCESS",
+            )
+        except Exception:
+            logger.exception(
+                "Failed to send scheduled withdrawal failure push to admin %s",
+                admin_user.email,
+            )
 
 
 @shared_task(bind=True, max_retries=3)
 def process_due_scheduled_withdrawals(self):
-
     today = timezone.localdate()
 
     withdrawals = WithdrawalsRequestToAdmin.objects.select_related("user").filter(
@@ -914,18 +986,49 @@ def process_due_scheduled_withdrawals(self):
         is_processed=False,
     )
 
+    failed_withdrawals = []
+    processed_count = 0
+
     for withdrawal in withdrawals:
         try:
-            process_scheduled_withdrawal(withdrawal)
-
-        except Exception as e:
-
-            logger.error(
-                f"Failed scheduled withdrawal {withdrawal.transaction_id}: {str(e)}"
+            result = process_scheduled_withdrawal(
+                withdrawal,
+                triggered_by="celery",
             )
 
-            # retry only THIS task run (not per item loop spam)
-            raise self.retry(exc=e, countdown=60)
+            if result in ["processed", "already_credited", "already_processed"]:
+                processed_count += 1
+
+        except Exception as e:
+            failed_withdrawals.append(
+                {
+                    "pk": withdrawal.pk,
+                    "transaction_id": withdrawal.transaction_id,
+                    "user_email": withdrawal.user.email,
+                    "amount": withdrawal.total_amount or withdrawal.amount,
+                    "error": str(e),
+                }
+            )
+
+            logger.exception(
+                "Failed scheduled withdrawal %s: %s",
+                withdrawal.transaction_id,
+                str(e),
+            )
+
+    if failed_withdrawals:
+        # Alert admins only on the first failed attempt to avoid repeated emails/push alerts.
+        if self.request.retries == 0:
+            alert_admins_of_failed_scheduled_withdrawals(failed_withdrawals)
+
+        failed_ids = [str(item["pk"]) for item in failed_withdrawals]
+
+        raise self.retry(
+            exc=Exception(f"Failed scheduled withdrawals: {', '.join(failed_ids)}"),
+            countdown=60,
+        )
+
+    return f"Processed {processed_count} due scheduled withdrawal(s)"
 
 
 from celery import shared_task
@@ -972,107 +1075,107 @@ def send_single_email_task(email, subject, message, from_email):
         return {"status": "failed", "email": email, "error": str(e)}
 
 
-from celery import shared_task
-import time
-import logging
-from django.core.mail import send_mail
-from django.template.loader import render_to_string
-from django.utils.html import strip_tags
+# from celery import shared_task
+# import time
+# import logging
+# from django.core.mail import send_mail
+# from django.template.loader import render_to_string
+# from django.utils.html import strip_tags
 
-logger = logging.getLogger(__name__)
-from celery import shared_task
-from django.core.mail import send_mail, get_connection
-from django.conf import settings
-import time
-import logging
+# logger = logging.getLogger(__name__)
+# from celery import shared_task
+# from django.core.mail import send_mail, get_connection
+# from django.conf import settings
+# import time
+# import logging
 
-logger = logging.getLogger(__name__)
+# logger = logging.getLogger(__name__)
 
 
-@shared_task(bind=True, max_retries=3)
-def send_namecheap_safe_email_task(
-    self, emails, from_email, reuse_connection=False, batch_size=15, delay_seconds=2
-):
-    """
-    Namecheap-safe email sending with single SMTP connection per batch.
-    """
-    total_emails = len(emails)
-    sent_count = 0
-    failed_emails = []
+# @shared_task(bind=True, max_retries=3)
+# def send_namecheap_safe_email_task(
+#     self, emails, from_email, reuse_connection=False, batch_size=15, delay_seconds=2
+# ):
+#     """
+#     Namecheap-safe email sending with single SMTP connection per batch.
+#     """
+#     total_emails = len(emails)
+#     sent_count = 0
+#     failed_emails = []
 
-    logger.info(
-        f"🛡️ Namecheap-safe: Processing {total_emails} emails in ultra-safe mode"
-    )
+#     logger.info(
+#         f"🛡️ Namecheap-safe: Processing {total_emails} emails in ultra-safe mode"
+#     )
 
-    # Open SMTP connection if reuse_connection is True
-    connection = None
-    if reuse_connection:
-        connection = get_connection(
-            username=from_email,
-            password=settings.EMAIL_HOST_PASSWORD,
-            fail_silently=False,
-        )
-        connection.open()
+#     # Open SMTP connection if reuse_connection is True
+#     connection = None
+#     if reuse_connection:
+#         connection = get_connection(
+#             username=from_email,
+#             password=settings.EMAIL_HOST_PASSWORD,
+#             fail_silently=False,
+#         )
+#         connection.open()
 
-    try:
-        for i, email_data in enumerate(emails):
-            try:
-                to_email = email_data.get("to", "")
-                subject = email_data.get("subject", "")
-                plain_message = email_data.get("plain_message", "")
-                html_message = email_data.get("html_message", "")
+#     try:
+#         for i, email_data in enumerate(emails):
+#             try:
+#                 to_email = email_data.get("to", "")
+#                 subject = email_data.get("subject", "")
+#                 plain_message = email_data.get("plain_message", "")
+#                 html_message = email_data.get("html_message", "")
 
-                if not to_email:
-                    logger.warning("Skipping email with no recipient")
-                    continue
+#                 if not to_email:
+#                     logger.warning("Skipping email with no recipient")
+#                     continue
 
-                send_mail(
-                    subject=subject,
-                    message=plain_message,
-                    from_email=from_email,
-                    recipient_list=[to_email],
-                    html_message=html_message,
-                    fail_silently=False,
-                    connection=connection,  # <-- USE the connection here
-                    timeout=30,  # optional, prevents hanging
-                )
+#                 send_mail(
+#                     subject=subject,
+#                     message=plain_message,
+#                     from_email=from_email,
+#                     recipient_list=[to_email],
+#                     html_message=html_message,
+#                     fail_silently=False,
+#                     connection=connection,  # <-- USE the connection here
+#                     timeout=30,  # optional, prevents hanging
+#                 )
 
-                sent_count += 1
+#                 sent_count += 1
 
-                if (i + 1) % 5 == 0:
-                    logger.info(f"✅ Sent {i+1}/{total_emails} emails in this batch")
+#                 if (i + 1) % 5 == 0:
+#                     logger.info(f"✅ Sent {i+1}/{total_emails} emails in this batch")
 
-                time.sleep(delay_seconds)
+#                 time.sleep(delay_seconds)
 
-            except Exception as e:
-                error_info = {"email": to_email, "error": str(e)}
-                failed_emails.append(error_info)
-                logger.error(f"❌ Email failed for {to_email}: {e}")
+#             except Exception as e:
+#                 error_info = {"email": to_email, "error": str(e)}
+#                 failed_emails.append(error_info)
+#                 logger.error(f"❌ Email failed for {to_email}: {e}")
 
-                # Retry if rate limit
-                if "rate limit" in str(e).lower() or "quota" in str(e).lower():
-                    logger.warning(f"⚠️ Rate limit detected, waiting 5 minutes...")
-                    time.sleep(300)
-                    try:
-                        self.retry(countdown=300, max_retries=2)
-                    except self.MaxRetriesExceededError:
-                        logger.error(f"Max retries exceeded for {to_email}")
-                        continue
+#                 # Retry if rate limit
+#                 if "rate limit" in str(e).lower() or "quota" in str(e).lower():
+#                     logger.warning(f"⚠️ Rate limit detected, waiting 5 minutes...")
+#                     time.sleep(300)
+#                     try:
+#                         self.retry(countdown=300, max_retries=2)
+#                     except self.MaxRetriesExceededError:
+#                         logger.error(f"Max retries exceeded for {to_email}")
+#                         continue
 
-    finally:
-        if connection:
-            connection.close()  # <-- close connection at the end
+#     finally:
+#         if connection:
+#             connection.close()  # <-- close connection at the end
 
-    logger.info(f"📊 Namecheap-safe batch complete: {sent_count}/{total_emails} sent")
+#     logger.info(f"📊 Namecheap-safe batch complete: {sent_count}/{total_emails} sent")
 
-    return {
-        "sent": sent_count,
-        "failed": len(failed_emails),
-        "total": total_emails,
-        "batch_size": batch_size,
-        "delay_seconds": delay_seconds,
-        "failed_emails": failed_emails if failed_emails else None,
-    }
+#     return {
+#         "sent": sent_count,
+#         "failed": len(failed_emails),
+#         "total": total_emails,
+#         "batch_size": batch_size,
+#         "delay_seconds": delay_seconds,
+#         "failed_emails": failed_emails if failed_emails else None,
+#     }
 
 
 from celery import shared_task

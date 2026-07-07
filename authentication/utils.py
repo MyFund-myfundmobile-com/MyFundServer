@@ -933,109 +933,104 @@ from decimal import Decimal
 from .models import WithdrawalsRequestToAdmin, CustomUser, Transaction
 
 
-def process_scheduled_withdrawal(withdrawal):
+def process_scheduled_withdrawal(withdrawal, triggered_by="celery"):
     """
-    Safely processes a scheduled withdrawal:
-    - credits user wallet
-    - updates original transaction log
-    - marks withdrawal as processed
-    - sends notifications
+    Safely processes a scheduled withdrawal.
+
+    - Credits user.wallet, not user.savings
+    - Creates a separate wallet credit transaction record
+    - Marks withdrawal as processed
+    - Prevents double-crediting
+    - Sends push notification and email after DB commit
     """
 
-    # Prevent double-processing (extra safety layer)
-    if withdrawal.is_processed:
-        return
+    amount = Decimal(withdrawal.total_amount or withdrawal.amount or 0)
 
-    user = withdrawal.user
-    amount = Decimal(withdrawal.total_amount or withdrawal.amount)
+    if amount <= 0:
+        raise ValueError("Scheduled withdrawal amount must be greater than zero.")
 
     with transaction.atomic():
-
         withdrawal = WithdrawalsRequestToAdmin.objects.select_for_update().get(
             pk=withdrawal.pk
         )
 
         if withdrawal.is_processed:
-            return
+            return "already_processed"
 
-        user = CustomUser.objects.select_for_update().get(pk=user.pk)
+        user = CustomUser.objects.select_for_update().get(pk=withdrawal.user_id)
 
-        previous_wallet = user.wallet
+        credit_transaction_id = f"SWC-{withdrawal.transaction_id}"
 
-        # 1️⃣ Credit wallet
-        user.wallet = user.wallet + amount
+        existing_credit = Transaction.objects.filter(
+            user=user,
+            transaction_id=credit_transaction_id,
+            transaction_type="credit",
+            status="confirmed",
+        ).first()
+
+        if existing_credit:
+            withdrawal.is_processed = True
+            withdrawal.save(update_fields=["is_processed"])
+            return "already_credited"
+
+        previous_wallet = user.wallet or Decimal("0.00")
+
+        user.wallet = previous_wallet + amount
         user.save(update_fields=["wallet"])
 
-        # 2️⃣ UPDATE the original transaction instead of creating a new one
-        try:
-            original_tx = Transaction.objects.get(
-                user=user,
-                transaction_id=withdrawal.transaction_id,  # Use the original ID
-            )
-            original_tx.status = "confirmed"
-            original_tx.transaction_type = "credit"  # Change from debit to credit
-            original_tx.balance_before = previous_wallet
-            original_tx.balance_after = user.wallet
-            original_tx.description = f"Scheduled withdrawal credited to wallet (Original: {withdrawal.source_account})"
-            original_tx.save()
-            print(f"✅ Updated original transaction: {original_tx.transaction_id}")
-        except Transaction.DoesNotExist:
-            # Fallback: create new one if original doesn't exist (shouldn't happen)
-            Transaction.objects.create(
-                user=user,
-                transaction_type="credit",
-                status="confirmed",
-                amount=amount,
-                total_amount=amount,
-                source="WALLET",
-                credited_to="WALLET",
-                description="Scheduled withdrawal credited to wallet",
-                balance_before=previous_wallet,
-                balance_after=user.wallet,
-                transaction_id=withdrawal.transaction_id,  # Use original ID
-            )
-            print(
-                f"⚠️ Created new transaction (original missing): {withdrawal.transaction_id}"
-            )
+        Transaction.objects.create(
+            user=user,
+            transaction_type="credit",
+            status="confirmed",
+            amount=amount,
+            total_amount=amount,
+            source="SCHEDULED_WITHDRAWAL",
+            credited_to="WALLET",
+            description="Scheduled Withdrawal ✅",
+            balance_before=previous_wallet,
+            balance_after=user.wallet,
+            transaction_id=credit_transaction_id,
+        )
 
-        # 3️⃣ Mark withdrawal as processed
         withdrawal.is_processed = True
         withdrawal.save(update_fields=["is_processed"])
 
-    # 4️⃣ Push notification (rest of your code remains the same)
     try:
         send_push_notification(
             user=user,
-            title="Withdrawal Completed 🎉",
+            title="Withdrawal Completed ✅",
             message=(
-                f"Your scheduled withdrawal of ₦{amount:,.2f} has been credited to your wallet."
+                f"Your scheduled withdrawal of ₦{amount:,.2f} "
+                f"has been credited to your MyFund wallet."
             ),
             data={
                 "amount": str(amount),
                 "type": "scheduled_withdrawal_completed",
+                "transaction_id": credit_transaction_id,
             },
             notif_type="SUCCESS",
         )
-    except Exception as e:
-        print(f"Push notification failed: {e}")
+    except Exception:
+        logger.exception(
+            "Push notification failed for scheduled withdrawal %s", withdrawal.pk
+        )
 
-    # 5️⃣ Email user
     try:
         send_generic_email(
             subject="Scheduled Withdrawal Completed",
             message=(
                 f"Hi {user.first_name},<br><br>"
-                f"Your scheduled withdrawal of ₦{amount:,.2f} has been successfully credited to your wallet.<br><br>"
+                f"Your scheduled withdrawal of ₦{amount:,.2f} has been successfully "
+                f"credited to your MyFund wallet.<br><br>"
                 "You can now use or withdraw the funds anytime.<br><br>"
                 "Thank you for using MyFund."
             ),
             from_email="MyFund <info@mg.myfundmobile.com>",
             recipient_list=[user.email],
         )
-    except Exception as e:
-        print(f"Email failed: {e}")
+    except Exception:
+        logger.exception("User email failed for scheduled withdrawal %s", withdrawal.pk)
 
-    # 6️⃣ Notify admin
     try:
         send_generic_email(
             subject="[AUTO] Scheduled Withdrawal Processed",
@@ -1043,13 +1038,19 @@ def process_scheduled_withdrawal(withdrawal):
                 f"Scheduled withdrawal processed successfully.<br><br>"
                 f"User: {user.first_name} {user.last_name} ({user.email})<br>"
                 f"Amount credited: ₦{amount:,.2f}<br>"
-                f"Transaction ID: {withdrawal.transaction_id}<br>"
+                f"Original Transaction ID: {withdrawal.transaction_id}<br>"
+                f"Credit Transaction ID: {credit_transaction_id}<br>"
+                f"Triggered by: {triggered_by}<br>"
             ),
             from_email="MyFund <info@mg.myfundmobile.com>",
             recipient_list=["tolulopeahmed@gmail.com"],
         )
-    except Exception as e:
-        print(f"Admin email failed: {e}")
+    except Exception:
+        logger.exception(
+            "Admin email failed for scheduled withdrawal %s", withdrawal.pk
+        )
+
+    return "processed"
 
 
 from datetime import date

@@ -1637,15 +1637,53 @@ class InvestTransferRequestAdmin(admin.ModelAdmin):
     approve_invest_transfer.short_description = "Approve selected investment transfers"
 
 
-from django.contrib import admin
+from django.contrib import admin, messages
 from django.db import transaction as db_transaction
-from django.core.mail import send_mail
+from django.utils import timezone
+
 from .models import WithdrawalsRequestToAdmin, Transaction, BankAccount
 from .utils import (
     process_scheduled_withdrawal,
     send_push_notification,
     send_generic_email,
 )
+
+
+class OverdueScheduledWithdrawalFilter(admin.SimpleListFilter):
+    title = "scheduled withdrawal status"
+    parameter_name = "scheduled_withdrawal_status"
+
+    def lookups(self, request, model_admin):
+        return (
+            ("overdue", "Overdue scheduled withdrawals"),
+            ("due_today", "Due today"),
+            ("processed", "Processed scheduled withdrawals"),
+        )
+
+    def queryset(self, request, queryset):
+        today = timezone.localdate()
+
+        if self.value() == "overdue":
+            return queryset.filter(
+                withdrawal_type="scheduled",
+                scheduled_processing_date__lt=today,
+                is_processed=False,
+            )
+
+        if self.value() == "due_today":
+            return queryset.filter(
+                withdrawal_type="scheduled",
+                scheduled_processing_date=today,
+                is_processed=False,
+            )
+
+        if self.value() == "processed":
+            return queryset.filter(
+                withdrawal_type="scheduled",
+                is_processed=True,
+            )
+
+        return queryset
 
 
 @admin.register(WithdrawalsRequestToAdmin)
@@ -1669,10 +1707,13 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
     )
 
     list_filter = (
+        OverdueScheduledWithdrawalFilter,
         "is_approved",
+        "is_processed",
         "source_account",
         "withdrawal_type",
-        "status",  # ✅ ADDED status filter
+        "status",
+        "scheduled_processing_date",
     )
 
     search_fields = (
@@ -1862,89 +1903,45 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
             self.message_user(request, "No withdrawals were approved.")
 
     def force_credit_wallet(self, request, queryset):
-        for w in queryset:
-            if w.is_processed:
-                continue
+        today = timezone.localdate()
 
-            user = w.user
-            amount = w.total_amount
+        eligible_withdrawals = queryset.filter(
+            withdrawal_type="scheduled",
+            scheduled_processing_date__lte=today,
+            is_processed=False,
+        )
 
-            with db_transaction.atomic():
-                # Capture balance before
-                balance_before = user.wallet
+        processed_count = 0
+        skipped_count = queryset.count() - eligible_withdrawals.count()
+        failed_count = 0
 
-                # 1. Credit wallet
-                user.wallet += amount
-                user.save()
-
-                # Balance after
-                balance_after = user.wallet
-
-                # 2. Get the existing transaction or create/update it properly
-                try:
-                    transaction = Transaction.objects.get(
-                        user=user, transaction_id=w.transaction_id
-                    )
-                    # Update existing transaction to confirmed
-                    transaction.status = "confirmed"
-                    transaction.transaction_type = "credit"
-                    transaction.balance_before = balance_before
-                    transaction.balance_after = balance_after
-                    transaction.is_processed = True
-                    transaction.description = f"Scheduled Withdrawal Credited to Wallet (Original: {w.source_account.capitalize()})"
-                    transaction.save()
-                except Transaction.DoesNotExist:
-                    # Create if doesn't exist
-                    transaction = Transaction.objects.create(
-                        user=user,
-                        transaction_type="credit",
-                        status="confirmed",
-                        amount=amount,
-                        total_amount=amount,
-                        source="WALLET",
-                        credited_to="WALLET",
-                        description=f"Credit Scheduled Withdrawal from {w.source_account.capitalize()}",
-                        transaction_id=f"ADMIN-FIX-{w.transaction_id}",
-                        balance_before=balance_before,
-                        balance_after=balance_after,
-                        is_processed=True,
-                    )
-
-                # 3. CRITICAL FIX → CLEAN FRONTEND STATE
-                w.is_processed = True
-                w.is_approved = True
-                w.withdrawal_type = "immediate"
-                w.scheduled_processing_date = None
-                w.status = "completed"
-
-                w.save(
-                    update_fields=[
-                        "is_processed",
-                        "is_approved",
-                        "withdrawal_type",
-                        "scheduled_processing_date",
-                        "status",
-                    ]
+        for withdrawal in eligible_withdrawals:
+            try:
+                result = process_scheduled_withdrawal(
+                    withdrawal,
+                    triggered_by=f"admin:{request.user}",
                 )
 
-                # 4. Send notification to user
-                send_push_notification(
-                    user=user,
-                    title="Scheduled Withdrawal Credited ✅",
-                    message=(
-                        f"{user.first_name}, your scheduled withdrawal of ₦{amount:,.2f} "
-                        f"has been credited to your wallet."
-                    ),
-                    data={
-                        "amount": str(amount),
-                        "transaction_id": w.transaction_id,
-                        "status": "confirmed",
-                    },
-                    notif_type="CREDIT",
+                if result in ["processed", "already_credited", "already_processed"]:
+                    processed_count += 1
+
+            except Exception as e:
+                failed_count += 1
+                self.message_user(
+                    request,
+                    f"Failed to force credit {withdrawal.transaction_id}: {str(e)}",
+                    level=messages.ERROR,
                 )
 
         self.message_user(
-            request, "Wallet credited and scheduled withdrawal fully cleared."
+            request,
+            (
+                f"Force credit completed. "
+                f"Processed: {processed_count}. "
+                f"Skipped: {skipped_count}. "
+                f"Failed: {failed_count}."
+            ),
+            level=messages.SUCCESS if failed_count == 0 else messages.WARNING,
         )
 
 
