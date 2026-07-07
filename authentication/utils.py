@@ -927,10 +927,21 @@ def calculate_withdrawal_charges(amount: Decimal, source_account: str):
     return rate, charge_amount, net_amount
 
 
+import logging
+from datetime import date
+from decimal import Decimal
+
 from django.db import transaction
 from django.utils import timezone
-from decimal import Decimal
+
 from .models import WithdrawalsRequestToAdmin, CustomUser, Transaction
+
+logger = logging.getLogger(__name__)
+
+ADMIN_ALERT_EMAILS = [
+    "tolulopeahmed@gmail.com",
+    "janet.adegbenro@gmail.com",
+]
 
 
 def process_scheduled_withdrawal(withdrawal, triggered_by="celery"):
@@ -986,7 +997,7 @@ def process_scheduled_withdrawal(withdrawal, triggered_by="celery"):
             total_amount=amount,
             source="SCHEDULED_WITHDRAWAL",
             credited_to="WALLET",
-            description="Scheduled Withdrawal ✅",
+            description="Scheduled Withdrawal Credited to Wallet",
             balance_before=previous_wallet,
             balance_after=user.wallet,
             transaction_id=credit_transaction_id,
@@ -1017,7 +1028,7 @@ def process_scheduled_withdrawal(withdrawal, triggered_by="celery"):
 
     try:
         send_generic_email(
-            subject="Scheduled Withdrawal Completed",
+            subject="Scheduled Withdrawal Completed ✅",
             message=(
                 f"Hi {user.first_name},<br><br>"
                 f"Your scheduled withdrawal of ₦{amount:,.2f} has been successfully "
@@ -1033,7 +1044,7 @@ def process_scheduled_withdrawal(withdrawal, triggered_by="celery"):
 
     try:
         send_generic_email(
-            subject="[AUTO] Scheduled Withdrawal Processed",
+            subject="[AUTO] Scheduled Withdrawal Processed ✅",
             message=(
                 f"Scheduled withdrawal processed successfully.<br><br>"
                 f"User: {user.first_name} {user.last_name} ({user.email})<br>"
@@ -1043,17 +1054,42 @@ def process_scheduled_withdrawal(withdrawal, triggered_by="celery"):
                 f"Triggered by: {triggered_by}<br>"
             ),
             from_email="MyFund <info@mg.myfundmobile.com>",
-            recipient_list=["tolulopeahmed@gmail.com"],
+            recipient_list=ADMIN_ALERT_EMAILS,
         )
     except Exception:
         logger.exception(
             "Admin email failed for scheduled withdrawal %s", withdrawal.pk
         )
 
+    if triggered_by == "celery":
+        admin_users = CustomUser.objects.filter(email__in=ADMIN_ALERT_EMAILS)
+
+        for admin_user in admin_users:
+            try:
+                send_push_notification(
+                    user=admin_user,
+                    title="Scheduled Withdrawal Completed",
+                    message=(
+                        f"{user.first_name} {user.last_name}'s scheduled withdrawal "
+                        f"of ₦{amount:,.2f} has been credited to wallet by Celery."
+                    ),
+                    data={
+                        "type": "scheduled_withdrawal_completed_admin",
+                        "customer_user_id": str(user.pk),
+                        "customer_email": user.email,
+                        "amount": str(amount),
+                        "transaction_id": credit_transaction_id,
+                    },
+                    notif_type="SUCCESS",
+                )
+            except Exception:
+                logger.exception(
+                    "Admin push failed for scheduled withdrawal %s to %s",
+                    withdrawal.pk,
+                    admin_user.email,
+                )
+
     return "processed"
-
-
-from datetime import date
 
 
 def get_next_payout_date(today: date) -> date:
@@ -1069,7 +1105,6 @@ def get_next_payout_date(today: date) -> date:
         if today < payout:
             return payout
 
-    # If we've passed Oct 1, next payout is Jan 1 of next year
     return date(year + 1, 1, 1)
 
 
