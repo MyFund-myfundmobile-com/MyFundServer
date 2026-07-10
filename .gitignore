@@ -178,3 +178,6 @@ newenv/
 *.sqlite3
 *.pyc
 __pycache__/
+
+
+data.json
