@@ -100,6 +100,7 @@ ALLOWED_HOSTS = [
     '10.5.4.62',
     '172.31.64.1',
     '10.5.5.250',
+    '10.5.11.82',
 ]
 
 SECURE_SSL_REDIRECT = False  # Disable forced HTTPS redirect@

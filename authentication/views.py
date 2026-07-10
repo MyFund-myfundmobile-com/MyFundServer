@@ -80,6 +80,9 @@ logger = logging.getLogger(__name__)
 from django.db import transaction
 from .utils import create_paystack_customer, create_dedicated_account
 
+MINIMUM_INVESTMENT = Decimal("100000")
+
+
 
 @api_view(["POST"])
 @csrf_exempt
@@ -6195,14 +6198,18 @@ def initiate_invest_transfer(request):
 
         try:
             amount = Decimal(str(amount_raw))
-            if amount < 100000:
-                return Response(
-                    {"error": "Amount must be greater than ₦100,000"},
-                    status=400,
-                )
         except (InvalidOperation, ValueError, TypeError):
             return Response(
                 {"error": "Invalid amount format"},
+                status=400,
+            )
+
+        # Minimum investment validation
+        if amount < MINIMUM_INVESTMENT:
+            return Response(
+                {
+                    "error": "Minimum investment amount is ₦100,000."
+                },
                 status=400,
             )
 
@@ -6217,7 +6224,6 @@ def initiate_invest_transfer(request):
         )
 
         # Create Transaction record
-        current_datetime = timezone.now()
         referral_email = user.referral.email if user.referral else None
 
         Transaction.objects.create(
@@ -6253,10 +6259,14 @@ def initiate_invest_transfer(request):
             f"Your investment transfer of ₦{amount:,.2f} is pending approval.<br><br>"
             "Thank you for using MyFund."
         )
+
         threading.Thread(
             target=send_generic_email,
             args=(user_subject, user_message, "info@myfundmobile.com", [user.email]),
-            kwargs={"use_celery_threshold": 30, "template": "email/email.html"},
+            kwargs={
+                "use_celery_threshold": 30,
+                "template": "email/email.html",
+            },
             daemon=True,
         ).start()
 
@@ -6269,6 +6279,7 @@ def initiate_invest_transfer(request):
             f"Review here: https://myfundapi-myfund-07ce351a.koyeb.app/admin/<br><br>"
             "MyFund Team"
         )
+
         threading.Thread(
             target=send_generic_email,
             args=(
@@ -6277,7 +6288,10 @@ def initiate_invest_transfer(request):
                 "info@myfundmobile.com",
                 ["company@myfundmobile.com", "info@myfundmobile.com"],
             ),
-            kwargs={"use_celery_threshold": 30, "template": "email/email.html"},
+            kwargs={
+                "use_celery_threshold": 30,
+                "template": "email/email.html",
+            },
             daemon=True,
         ).start()
 
@@ -6287,19 +6301,19 @@ def initiate_invest_transfer(request):
             "ceo@myfundmobile.com",
             "janet.adegbenro@gmail.com",
         ]
+
         admin_users = CustomUser.objects.filter(email__in=admin_emails)
 
         for admin in admin_users:
             if hasattr(admin, "expo_push_tokens") and admin.expo_push_tokens:
-                admin_push_title = f"{user.first_name} initiated a New QuickInvest"
-                admin_push_message = (
-                    f"{user.first_name} {user.last_name} ({user.email}) initiated "
-                    f"₦{amount:,.2f} to Investment Account.\nPlease check to confirm."
-                )
                 send_push_notification(
                     user=admin,
-                    title=admin_push_title,
-                    message=admin_push_message,
+                    title=f"{user.first_name} initiated a New QuickInvest",
+                    message=(
+                        f"{user.first_name} {user.last_name} ({user.email}) "
+                        f"initiated ₦{amount:,.2f} to Investment Account.\n"
+                        "Please check to confirm."
+                    ),
                     data={
                         "transaction_id": transaction_id,
                         "user_email": user.email,
@@ -6310,7 +6324,6 @@ def initiate_invest_transfer(request):
                     notif_type="ADMIN_ALERT",
                 )
 
-        # ✅ RETURN RESPONSE
         return Response(
             {
                 "message": "QuickInvest request created and pending approval",
@@ -6321,7 +6334,10 @@ def initiate_invest_transfer(request):
 
     except Exception as e:
         return Response(
-            {"error": str(e), "transaction_id": transaction_id},
+            {
+                "error": str(e),
+                "transaction_id": transaction_id,
+            },
             status=400,
         )
 
