@@ -1740,3 +1740,41 @@ def autosubmit_missing_ambassador_reports_task():
     result = autosubmit_missing_ambassador_reports_for_previous_month()
     logger.info(f"Ambassador autosubmit result: {result}")
     return result
+
+
+@shared_task
+def send_inactive_signup_reminders():
+    """
+    Sends reminders to active users who have not completed
+    onboarding or started saving.
+    """
+
+    users = CustomUser.objects.filter(
+        is_active=True,
+        # Add your business condition here
+    )
+
+    for user in users:
+        # Skip users who have already started saving
+        if user.savings > 0:
+            continue
+
+        send_push_notification(
+            user=user,
+            title="Complete your signup 🎉",
+            message="Finish setting up your account and start your savings journey today.",
+            data={"type": "signup_reminder"},
+            notif_type="REMINDER",
+        )
+
+        send_generic_email(
+            subject="Complete Your Signup",
+            message=(
+                f"Hi {user.first_name},<br><br>"
+                "You're just one step away from starting your savings journey.<br><br>"
+                "Log in today and complete your setup."
+            ),
+            from_email="info@myfundmobile.com",
+            recipient_list=[user.email],
+            template="email/email.html",
+        )

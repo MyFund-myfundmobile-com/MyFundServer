@@ -47,6 +47,9 @@ app.conf.task_routes = {
     "authentication.tasks.autosubmit_missing_ambassador_reports_task": {
         "queue": "default"
     },
+       "authentication.tasks.send_inactive_signup_reminders": {
+        "queue": "default"
+    },
 }
 
 # Default queue for unspecified tasks
@@ -109,6 +112,11 @@ app.conf.beat_schedule = {
         "task": "authentication.tasks.autosubmit_missing_ambassador_reports_task",
         "schedule": crontab(minute=5, hour=0, day_of_month=1),
     },
+    "send-inactive-signup-reminders": {
+        "task": "authentication.tasks.send_inactive_signup_reminders",
+        "schedule": crontab(hour=10, minute=0, day_of_month="*/3"),
+    },
+  
 }
 
 # -----------------------------
