@@ -181,3 +181,7 @@ __pycache__/
 
 
 data.json
+
+.env
+.env.*
+!.env.example
