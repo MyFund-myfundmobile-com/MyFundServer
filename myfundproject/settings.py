@@ -390,6 +390,12 @@ CELERY_TASK_ROUTES = {
 # ===== EMAIL CONFIGURATION =====
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
 
+# ===== BREVO CONFIGURATION =====
+BREVO_API_KEY = os.environ.get("BREVO_API_KEY")
+
+BREVO_SENDER_EMAIL = "hello@myfundmobile.com"
+BREVO_SENDER_NAME = "MyFund"
+
 EMAIL_BACKEND = "django.core.mail.backends.dummy.EmailBackend"
 
 DEFAULT_FROM_EMAIL = "MyFund <noreply@mg.myfundmobile.com>"

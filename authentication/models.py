@@ -3234,10 +3234,26 @@ class FinanceMetricSnapshot(models.Model):
 
 
 class Employee(models.Model):
+
+    DEPARTMENT_CHOICES = [
+        ("Tech", "Tech"),
+        ("Engagement", "Engagement"),
+        ("CX", "CX"),
+        ("Operations", "Operations"),
+        ("Property", "Property"),
+        ("Other", "Other"),
+    ]
+
     name = models.CharField(max_length=100)
     email = models.EmailField(unique=True)
     monthly_amount = models.DecimalField(max_digits=10, decimal_places=2)
+
+    department = models.CharField(
+        max_length=50, choices=DEPARTMENT_CHOICES, default="Other"
+    )
+
     is_active = models.BooleanField(default=True)
+
     date_added = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):

@@ -277,6 +277,7 @@ def send_generic_email(
     from_email=None,
     use_celery_threshold=30,
     template="email/email.html",
+    extra_context=None,
 ):
     """
     Smart, universal email sender (RESEND VERSION - SMTP REMOVED)
@@ -314,6 +315,8 @@ def send_generic_email(
 
     from_email = from_email or settings.DEFAULT_FROM_EMAIL
     total_valid = len(valid_recipients)
+
+    extra_context = extra_context or {}
 
     logger.info(
         f"📧 Valid recipients: {total_valid}, Invalid skipped: {len(invalid_recipients)}"
@@ -364,6 +367,10 @@ def send_generic_email(
                 "{investment_roi}": f"{investment_roi:,.2f}",
                 "{quarter_label}": ql,
             }
+
+            # Add custom dynamic values
+            for key, value in extra_context.items():
+                placeholders[f"{{{key}}}"] = value
 
             p_subject = subject
             p_message = message

@@ -357,6 +357,19 @@ def confirm_otp(request):
     logger.info(f"Account activated for {user.email}")
 
     # -----------------------
+    # BREVO CONTACT SYNC
+    # -----------------------
+    try:
+        from .tasks import sync_user_to_brevo
+
+        sync_user_to_brevo.delay(user.id)
+
+        logger.info(f"Brevo sync queued for {user.email}")
+
+    except Exception as e:
+        logger.warning(f"Could not queue Brevo sync: {e}")
+
+    # -----------------------
     # BACKGROUND TASKS
     # -----------------------
     def background_tasks(u):

@@ -2091,3 +2091,23 @@ def monthly_metrics_task():
     snapshot = generate_metric_snapshot(period_type="monthly")
 
     send_metrics_push(snapshot)
+
+
+@shared_task(bind=True, max_retries=3, default_retry_delay=300)
+def sync_user_to_brevo(self, user_id):
+
+    from authentication.models import CustomUser
+    from authentication.services.brevo_service import sync_contact_to_brevo
+
+    try:
+        user = CustomUser.objects.get(id=user_id)
+
+        response = sync_contact_to_brevo(user)
+
+        if response:
+            return {"status": "success", "email": user.email}
+
+        raise Exception("Brevo sync failed")
+
+    except Exception as exc:
+        raise self.retry(exc=exc)

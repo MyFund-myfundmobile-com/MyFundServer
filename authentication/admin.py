@@ -3296,65 +3296,352 @@ class PhoneChangeRequestAdmin(admin.ModelAdmin):
 from authentication.models import Employee, PayrollRun, PayrollEntry
 from authentication.payroll import create_draft_entries, send_pending_entries
 
+from django.contrib.auth import get_user_model
+from authentication.utils import (
+    send_push_notification,
+    send_generic_email,
+)
+
+User = get_user_model()
+
 
 @admin.register(Employee)
 class EmployeeAdmin(admin.ModelAdmin):
+
     list_display = (
         "name",
         "email",
+        "department",
         "monthly_amount",
         "is_active",
         "total_paid_display",
         "last_payment_display",
         "date_added",
     )
-    list_filter = ("is_active",)
-    search_fields = ("name", "email")
-    readonly_fields = ("total_paid_display", "last_payment_display")
-    actions = ["create_draft_payroll", "quick_test_payroll", "quick_live_payroll"]
+
+    list_filter = (
+        "is_active",
+        "department",
+    )
+
+    search_fields = (
+        "name",
+        "email",
+    )
+
+    readonly_fields = (
+        "total_paid_display",
+        "last_payment_display",
+    )
+
+    actions = [
+        "create_draft_payroll",
+        "quick_test_payroll",
+        "quick_live_payroll",
+    ]
 
     def total_paid_display(self, obj):
+
         total = (
             PayrollEntry.objects.filter(employee=obj, status="credited").aggregate(
                 total=Sum("amount")
             )["total"]
             or 0
         )
+
         return f"₦{total:,.2f}"
 
     total_paid_display.short_description = "Total Paid (All Time)"
 
     def last_payment_display(self, obj):
+
         last = (
             PayrollEntry.objects.filter(employee=obj, status="credited")
             .order_by("-created_at")
             .first()
         )
+
         return last.created_at.strftime("%b %d, %Y") if last else "—"
 
     last_payment_display.short_description = "Last Paid"
 
+    def save_model(self, request, obj, form, change):
+
+        old_status = None
+        old_department = None
+        old_amount = None
+
+        if change:
+            old_employee = (
+                Employee.objects.filter(pk=obj.pk)
+                .values(
+                    "is_active",
+                    "department",
+                    "monthly_amount",
+                )
+                .first()
+            )
+
+            if old_employee:
+                old_status = old_employee["is_active"]
+                old_department = old_employee["department"]
+                old_amount = old_employee["monthly_amount"]
+
+        super().save_model(request, obj, form, change)
+
+        try:
+
+            user = User.objects.get(email__iexact=obj.email)
+
+            # Sync employee status with user staff access
+            user.is_staff = obj.is_active
+            user.save(update_fields=["is_staff"])
+
+            status_changed = old_status is None or old_status != obj.is_active
+
+            department_changed = (
+                old_department is not None and old_department != obj.department
+            )
+
+            amount_changed = old_amount is not None and old_amount != obj.monthly_amount
+
+            # No employee details changed
+            if not (status_changed or department_changed or amount_changed):
+                return
+
+            # ==============================
+            # EMPLOYEE ACTIVATED / ADDED
+            # ==============================
+
+            if status_changed and obj.is_active:
+
+                title = "🎉 Welcome to the MyFund Team!"
+
+                message = (
+                    "Hi {first_name}, "
+                    "welcome to the MyFund team! "
+                    "You have joined the {department} department "
+                    "with a monthly allowance of ₦{monthly_amount}. "
+                    "We are excited to have you onboard. 🚀"
+                )
+
+                email_subject = "🎉 Welcome to MyFund, {first_name}!"
+
+                email_message = """
+    <p>
+    Hi <strong>{first_name}</strong>,
+    </p>
+
+    <p>
+    Congratulations and welcome to the <strong>MyFund team! 🎉</strong>
+    </p>
+
+    <p>
+    You have officially joined the 
+    <strong>{department} department</strong>.
+    </p>
+
+    <p>
+    Your employee access has been activated.
+    </p>
+
+    <p>
+    Your monthly team allowance is:
+    </p>
+
+    <p>
+    <strong>₦{monthly_amount}</strong>
+    </p>
+
+    <p>
+    You are now part of a team building solutions that make property ownership
+    and wealth creation more accessible across Africa.
+    </p>
+
+    <p>
+    We are excited about the skills, ideas, and energy you will bring to the
+    MyFund journey.
+    </p>
+
+    <p>
+    Welcome aboard! 🚀
+    </p>
+
+    <p>
+    Warm regards,<br>
+    <strong>The MyFund Team</strong>
+    </p>
+    """
+
+            # ==============================
+            # EMPLOYEE DEACTIVATED
+            # ==============================
+
+            elif status_changed and not obj.is_active:
+
+                title = "MyFund Team Access Update"
+
+                message = (
+                    "Hi {first_name}, "
+                    "your MyFund employee access has been updated. "
+                    "Thank you for your contributions and support."
+                )
+
+                email_subject = "MyFund Employee Access Update"
+
+                email_message = """
+    <p>
+    Hi <strong>{first_name}</strong>,
+    </p>
+
+    <p>
+    Your MyFund employee access has been updated.
+    </p>
+
+    <p>
+    Your team access has been deactivated.
+    </p>
+
+    <p>
+    Thank you for your contributions, dedication, and support during your time
+    with MyFund.
+    </p>
+
+    <p>
+    We appreciate the impact you have made.
+    </p>
+
+    <p>
+    Warm regards,<br>
+    <strong>The MyFund Team</strong>
+    </p>
+    """
+
+            # ==============================
+            # EMPLOYEE PROFILE UPDATED
+            # ==============================
+
+            else:
+
+                title = "MyFund Employee Profile Updated"
+
+                message = (
+                    "Hi {first_name}, "
+                    "your MyFund employee profile has been updated. "
+                    "Department: {department}. "
+                    "Monthly allowance: ₦{monthly_amount}."
+                )
+
+                email_subject = "MyFund Employee Details Updated"
+
+                email_message = """
+    <p>
+    Hi <strong>{first_name}</strong>,
+    </p>
+
+    <p>
+    Your MyFund employee details have been updated successfully.
+    </p>
+
+    <p>
+    Here are your updated details:
+    </p>
+
+    <p>
+    <strong>Department:</strong> {department}
+    </p>
+
+    <p>
+    <strong>Monthly Allowance:</strong> ₦{monthly_amount}
+    </p>
+
+    <p>
+    Your employee access remains active, and we appreciate your continued
+    contribution to the MyFund journey.
+    </p>
+
+    <p>
+    If you have any questions about this update, please contact the MyFund team.
+    </p>
+
+    <p>
+    Warm regards,<br>
+    <strong>The MyFund Team</strong>
+    </p>
+    """
+
+            # ==============================
+            # SEND PUSH NOTIFICATION
+            # ==============================
+
+            send_push_notification(
+                user=user,
+                title=title,
+                message=message,
+                notif_type="STAFF_STATUS",
+                extra_context={
+                    "department": obj.department,
+                    "monthly_amount": f"{obj.monthly_amount:,.2f}",
+                },
+            )
+
+            # ==============================
+            # SEND EMAIL
+            # ==============================
+
+            send_generic_email(
+                subject=email_subject,
+                message=email_message,
+                recipient_list=[user.email],
+                extra_context={
+                    "department": obj.department,
+                    "monthly_amount": f"{obj.monthly_amount:,.2f}",
+                },
+            )
+
+        except User.DoesNotExist:
+
+            self.message_user(
+                request,
+                f"No user account found for {obj.email}. "
+                "Employee saved but staff status was not updated.",
+                level=messages.WARNING,
+            )
+
     @admin.action(description="📝 CREATE PAYMENT DRAFT (edit details)")
     def create_draft_payroll(self, request, queryset):
+
         month_label = timezone.now().strftime("%B %Y")
+
         run = create_draft_entries(
-            queryset, month_label, executed_by=request.user.email
+            queryset,
+            month_label,
+            executed_by=request.user.email,
         )
+
         self.message_user(
             request,
-            f"Draft created for {month_label}: {queryset.count()} entries. Go to Payroll Entries to edit, then send.",
+            f"Draft created for {month_label}: {queryset.count()} entries.",
             level=messages.SUCCESS,
         )
 
-    @admin.action(description="✅ PAY Selected Employees (no editing)")
+    @admin.action(description="💸 PAY Selected Employees")
     def quick_live_payroll(self, request, queryset):
+
         month_label = timezone.now().strftime("%B %Y")
+
         run = create_draft_entries(
-            queryset, month_label, executed_by=request.user.email
+            queryset,
+            month_label,
+            executed_by=request.user.email,
         )
+
         results = send_pending_entries(run.entries.all(), test=False)
+
         self.message_user(
-            request, f"Live paid: {len(results)} entries.", level=messages.SUCCESS
+            request,
+            f"Live paid: {len(results)} entries.",
+            level=messages.SUCCESS,
         )
 
 
