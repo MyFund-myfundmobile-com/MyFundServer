@@ -9700,11 +9700,26 @@ def leave_groupbuy(request, group_id):
             group=group, user=user, payment_status="Confirmed"
         )
 
-        total_refund = Decimal(0)
+        # Voluntary exit costs a 1% service charge - only 99% is returned to
+        # the user - to discourage casually joining and exiting GroupBuys.
+        # (Expiry refunds, in expire_overdue_groupbuys, apply the same rate
+        # for the same reason; this is separate since exit is user-initiated
+        # while expiry is a deadline-driven sweep.)
+        from decimal import ROUND_HALF_UP
+
+        SERVICE_CHARGE_RATE = Decimal("0.01")
+
+        total_refund = Decimal(0)  # gross amount removed from the group's total_raised
+        total_net_refund = Decimal(0)  # what the user actually receives, net of charge
+        total_service_charge = Decimal(0)
 
         for contribution in contributions:
             amount = contribution.amount
             source = contribution.source
+            service_charge = (amount * SERVICE_CHARGE_RATE).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            net_amount = amount - service_charge
 
             # Refund to the correct account and log it as a Transaction, same
             # as the debit created when the contribution was made - otherwise
@@ -9712,11 +9727,15 @@ def leave_groupbuy(request, group_id):
             # user's transaction history / Notifications feed.
             create_transaction(
                 user=user,
-                amount=amount,
+                amount=net_amount,
                 transaction_type="credit",
                 credited_to=source.upper(),
                 status="confirmed",
-                description=f"GroupBuy refund - {group.property.name}",
+                service_charge=service_charge,
+                description=(
+                    f"GroupBuy exit refund - {group.property.name} "
+                    f"(1% service charge of ₦{service_charge} applied)"
+                ),
             )
 
             # Mark contribution as refunded
@@ -9724,8 +9743,12 @@ def leave_groupbuy(request, group_id):
             contribution.save()
 
             total_refund += amount
+            total_net_refund += net_amount
+            total_service_charge += service_charge
 
-        # 5. Update group total_raised
+        # 5. Update group total_raised (removes the full contributed amount,
+        # not just the net-of-charge refund - the 1% is a penalty on the
+        # user, it doesn't stay counted toward the group's funding goal)
         group.total_raised -= total_refund
         group.save()
 
@@ -9741,13 +9764,26 @@ def leave_groupbuy(request, group_id):
             user=user,
             reason=reason,
             additional_details=additional_details,
-            refunded_amount=total_refund,
+            refunded_amount=total_net_refund,
         )
+
+        # 9. Starting a GroupBuy is what activates it; once the last
+        # contributor exits, it shouldn't keep showing as active with 0
+        # participants. Deactivate it and release the unit so the property
+        # can be started fresh - same as an expired GroupBuy.
+        if not group.contributors.exists() and group.status.lower() == "active":
+            group.status = "failed"
+            group.save()
+
+            property_obj = group.property
+            property_obj.units_available += 1
+            property_obj.save()
 
         return Response(
             {
-                "message": "Successfully left the group. Contributions refunded.",
-                "refunded_amount": float(total_refund),
+                "message": "Successfully left the group. Contributions refunded (1% service charge applied).",
+                "refunded_amount": float(total_net_refund),
+                "service_charge": float(total_service_charge),
             },
             status=status.HTTP_200_OK,
         )
@@ -9767,10 +9803,14 @@ def get_user_groupbuys(request):
         # Get the current user
         user = request.user
 
-        # Get all groups the user created or contributed to
-        groups = Group.objects.filter(
-            Q(created_by=user) | Q(contributors=user)
-        ).distinct()
+        # "My GroupBuys" = groups the user is currently a contributor of.
+        # Deliberately NOT keyed off created_by too: the creator is always
+        # added as a contributor at creation time (StartGroupBuyModal
+        # immediately contributes after creating the group), so the only
+        # time this would diverge is after the creator exits via
+        # leave_groupbuy - and at that point the group should disappear
+        # from their list, not linger just because they started it.
+        groups = Group.objects.filter(contributors=user).distinct()
 
         groups_list = list(groups)
 
