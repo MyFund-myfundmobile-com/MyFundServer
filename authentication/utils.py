@@ -517,6 +517,52 @@ def set_user_balance(user, source, amount):
         user.wallet = amount
 
 
+def split_amount_by_percentage(total_amount, user_percentage_pairs):
+    """Split total_amount across users proportionally to their percentage share.
+
+    user_percentage_pairs: iterable of (user_id, percentage) tuples, where
+    percentage is out of 100 (does not need to sum to exactly 100).
+
+    Uses the largest-remainder method so the returned shares always sum to
+    exactly total_amount (to the cent) - straight proportional rounding can
+    otherwise lose or invent pennies.
+
+    Returns: dict of {user_id: Decimal share}, rounded to 2 decimal places.
+    """
+    from decimal import Decimal, ROUND_DOWN
+
+    total_amount = Decimal(str(total_amount))
+    pairs = [(user_id, Decimal(str(pct))) for user_id, pct in user_percentage_pairs]
+    total_percentage = sum(pct for _, pct in pairs)
+
+    if total_percentage <= 0 or not pairs:
+        return {user_id: Decimal("0.00") for user_id, _ in pairs}
+
+    shares = {}
+    remainders = []
+    cents_allocated = Decimal("0.00")
+
+    for user_id, pct in pairs:
+        exact_share = (total_amount * pct) / total_percentage
+        floored_share = exact_share.quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+        shares[user_id] = floored_share
+        cents_allocated += floored_share
+        remainders.append((exact_share - floored_share, user_id))
+
+    leftover_cents = int(
+        ((total_amount - cents_allocated) * 100).to_integral_value()
+    )
+
+    # Distribute leftover pennies to the largest fractional remainders first,
+    # tie-broken deterministically by user_id.
+    remainders.sort(key=lambda item: (-item[0], item[1]))
+    for i in range(leftover_cents):
+        _, user_id = remainders[i % len(remainders)]
+        shares[user_id] += Decimal("0.01")
+
+    return shares
+
+
 def generate_reference(length=20):
     """Generate a unique reference string with allowed characters."""
     allowed_chars = string.ascii_lowercase + string.digits + "-_"
@@ -2234,3 +2280,121 @@ def create_transaction(
         print("✅ TX SAVED:", tx.balance_before, tx.balance_after)
 
     return tx
+
+
+# GroupBuy minimum duration is 3 months (enforced in create_groupbuy). A
+# GroupBuy that reaches its deadline without hitting 100% funding is expired
+# here: every confirmed contributor is refunded (minus a 1% service charge),
+# the group is marked failed, and the property's unit is released so a new
+# GroupBuy can be started against it. Shared by both the management command
+# (authentication/management/commands/expire_groupbuys.py) and the Celery
+# task (authentication.tasks.expire_groupbuys_task) so there's one source of
+# truth for the sweep logic regardless of how it's triggered.
+def expire_overdue_groupbuys(dry_run=False):
+    from decimal import Decimal, ROUND_HALF_UP
+
+    from django.utils import timezone
+
+    from .models import Group, Contribution, GroupOwnership
+
+    SERVICE_CHARGE_RATE = Decimal("0.01")  # 1%
+
+    now = timezone.now()
+    overdue_groups = Group.objects.filter(
+        status__in=["Active", "active"],
+        deadline__lt=now,
+    ).select_related("property")
+
+    expired_groups = []
+    total_refunded = Decimal("0")
+    total_service_charge = Decimal("0")
+
+    for group in overdue_groups:
+        # Fully (or over-)funded by the deadline is a success, not an
+        # expiry - leave it for the normal completion flow to handle.
+        if group.total_raised >= group.goal_amount:
+            continue
+
+        contributions = Contribution.objects.filter(
+            group=group, payment_status="Confirmed"
+        ).select_related("user")
+
+        contributor_details = []
+
+        for contribution in contributions:
+            amount = contribution.amount
+            service_charge = (amount * SERVICE_CHARGE_RATE).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            refund_amount = amount - service_charge
+
+            contributor_details.append(
+                {
+                    "email": contribution.user.email,
+                    "amount": amount,
+                    "service_charge": service_charge,
+                    "refund_amount": refund_amount,
+                    "source": contribution.source,
+                }
+            )
+
+            if not dry_run:
+                create_transaction(
+                    user=contribution.user,
+                    amount=refund_amount,
+                    transaction_type="credit",
+                    credited_to=contribution.source.upper(),
+                    status="confirmed",
+                    service_charge=service_charge,
+                    description=(
+                        f"GroupBuy expired - refund for {group.property.name} "
+                        f"(1% service charge of ₦{service_charge} applied)"
+                    ),
+                )
+                contribution.payment_status = "Refunded"
+                contribution.save()
+
+                try:
+                    send_push_notification(
+                        user=contribution.user,
+                        title="GroupBuy Expired - Refunded",
+                        message=(
+                            f"The GroupBuy for {group.property.name} didn't reach its "
+                            f"goal before the deadline. ₦{refund_amount:,.2f} has been "
+                            f"refunded to your {contribution.source} account (1% "
+                            f"service charge applied)."
+                        ),
+                        notif_type="CREDIT",
+                        data={"group_id": str(group.id), "type": "GROUPBUY_EXPIRED"},
+                    )
+                except Exception:
+                    pass
+
+            total_refunded += refund_amount
+            total_service_charge += service_charge
+
+        if not dry_run:
+            group.status = "failed"
+            group.save()
+
+            GroupOwnership.objects.filter(group=group).delete()
+
+            # Release the unit so the property is available to start again.
+            property_obj = group.property
+            property_obj.units_available += 1
+            property_obj.save()
+
+        expired_groups.append(
+            {
+                "group_id": str(group.id),
+                "property": group.property.name,
+                "contributors": contributor_details,
+            }
+        )
+
+    return {
+        "expired_count": len(expired_groups),
+        "total_refunded": total_refunded,
+        "total_service_charge": total_service_charge,
+        "groups": expired_groups,
+    }

@@ -303,6 +303,11 @@ urlpatterns = [
         views.get_groupbuy_by_property,
         name="get_groupbuy_by_property",
     ),
+    path(
+        "groupbuy/detail/<str:group_id>/",
+        views.get_groupbuy_by_id,
+        name="get_groupbuy_by_id",
+    ),
     path("groupbuy/join/<str:group_id>/", views.join_groupbuy, name="join_groupbuy"),
     path(
         "groupbuy/invite/<str:group_id>/",
@@ -322,9 +327,24 @@ urlpatterns = [
     path("groupbuy/leave/<str:group_id>/", views.leave_groupbuy, name="leave_group"),
     path("user/groupbuy/", views.get_user_groupbuys, name="get_user_groupbuys"),
     path(
+        "user/groupbuy/invited/",
+        views.get_invited_groupbuys,
+        name="get_invited_groupbuys",
+    ),
+    path(
+        "admin/groupbuy/expire-sweep/",
+        views.trigger_groupbuy_expiry_sweep,
+        name="trigger_groupbuy_expiry_sweep",
+    ),
+    path(
         "user/groupbuy/contributions/",
         views.get_user_groupbuy_contributions,
         name="get_user_groupbuy_contributions",
+    ),
+    path(
+        "user/groupbuy/income-history/",
+        views.get_user_groupbuy_income_history,
+        name="get_user_groupbuy_income_history",
     ),
     # Target Savings URLs
     path(

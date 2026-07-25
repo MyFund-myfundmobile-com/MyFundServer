@@ -2819,6 +2819,62 @@ class Contribution(models.Model):
         return f"Contribution by {self.user.email} to Group {self.group.id} (Amount: {self.amount}, Source: {self.source}, Ownership: {self.ownership_percentage}%)"
 
 
+class GroupIncomeEvent(models.Model):
+    STATUS_CHOICES = [
+        ("pending", "Pending"),
+        ("completed", "Completed"),
+        ("failed", "Failed"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    group = models.ForeignKey(
+        Group, on_delete=models.CASCADE, related_name="income_events"
+    )
+    recorded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True
+    )
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    period_start = models.DateField()
+    period_end = models.DateField()
+    description = models.CharField(max_length=255, blank=True)
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default="pending")
+    total_distributed = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        unique_together = ("group", "period_start", "period_end")
+
+    def __str__(self):
+        return f"Income {self.amount} for Group {self.group.id} ({self.period_start} - {self.period_end})"
+
+
+class GroupIncomeDistribution(models.Model):
+    STATUS_CHOICES = [
+        ("paid", "Paid"),
+        ("failed", "Failed"),
+    ]
+
+    income_event = models.ForeignKey(
+        GroupIncomeEvent, on_delete=models.CASCADE, related_name="distributions"
+    )
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    ownership_percentage = models.DecimalField(max_digits=5, decimal_places=2)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    transaction = models.ForeignKey(
+        "Transaction", on_delete=models.SET_NULL, null=True, blank=True
+    )
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default="paid")
+    error_message = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("income_event", "user")
+
+    def __str__(self):
+        return f"Distribution of {self.amount} to {self.user.email} from event {self.income_event_id}"
+
+
 class SavingsGoal(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)

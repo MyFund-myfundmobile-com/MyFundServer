@@ -3718,3 +3718,94 @@ admin.site.register(Transaction, TransactionAdmin)
 admin.site.register(AutoSave, AutoSaveAdmin)
 admin.site.register(AutoInvest, AutoInvestAdmin)
 admin.site.register(Property, PropertyAdmin)
+
+
+from .models import (
+    Group,
+    GroupOwnership,
+    Contribution,
+    GroupDeparture,
+    GroupIncomeEvent,
+    GroupIncomeDistribution,
+)
+
+
+class GroupAdmin(admin.ModelAdmin):
+    list_display = [
+        "id",
+        "property",
+        "created_by",
+        "goal_amount",
+        "total_raised",
+        "status",
+        "group_type",
+        "deadline",
+        "created_at",
+    ]
+    list_editable = ["status"]
+    list_filter = ["status", "group_type"]
+    search_fields = ["id", "property__name", "created_by__email"]
+
+
+class GroupOwnershipAdmin(admin.ModelAdmin):
+    list_display = ["id", "group", "user", "total_contributed", "ownership_percentage"]
+    list_filter = ["group"]
+    search_fields = ["user__email", "group__id"]
+
+
+class ContributionAdmin(admin.ModelAdmin):
+    list_display = [
+        "id",
+        "group",
+        "user",
+        "amount",
+        "payment_status",
+        "source",
+        "created_at",
+    ]
+    list_filter = ["payment_status", "source"]
+    search_fields = ["user__email", "group__id"]
+
+
+class GroupDepartureAdmin(admin.ModelAdmin):
+    list_display = ["id", "group", "user", "reason", "refunded_amount", "left_at"]
+    list_filter = ["reason"]
+    search_fields = ["user__email", "group__id"]
+
+
+class GroupIncomeEventAdmin(admin.ModelAdmin):
+    list_display = [
+        "id",
+        "group",
+        "amount",
+        "period_start",
+        "period_end",
+        "status",
+        "total_distributed",
+        "recorded_by",
+        "created_at",
+    ]
+    list_filter = ["status"]
+    search_fields = ["group__id", "group__property__name"]
+
+
+class GroupIncomeDistributionAdmin(admin.ModelAdmin):
+    list_display = [
+        "id",
+        "income_event",
+        "user",
+        "ownership_percentage",
+        "amount",
+        "status",
+        "created_at",
+    ]
+    list_filter = ["status"]
+    search_fields = ["user__email", "income_event__id"]
+
+
+admin.site.register(Group, GroupAdmin)
+admin.site.register(GroupOwnership, GroupOwnershipAdmin)
+admin.site.register(Contribution, ContributionAdmin)
+admin.site.register(GroupDeparture, GroupDepartureAdmin)
+admin.site.register(GroupIncomeEvent, GroupIncomeEventAdmin)
+admin.site.register(GroupIncomeDistribution, GroupIncomeDistributionAdmin)

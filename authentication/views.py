@@ -9418,13 +9418,42 @@ def get_groupbuy_by_property(request, property_id):
         )
 
 
+# GET /groupbuy/detail/:groupId - Retrieve a single group buy by its own id
+# (used e.g. by the mobile app's groupbuy invite deep link, which only has the
+# Group.id, not the property_id that get_groupbuy_by_property needs)
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def get_groupbuy_by_id(request, group_id):
+    try:
+        group_uuid = uuid.UUID(str(group_id))
+    except ValueError:
+        return Response(
+            {"message": "Invalid group ID. It must be a valid UUID."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        group = Group.objects.get(id=group_uuid)
+    except Group.DoesNotExist:
+        return Response(
+            {"message": "Group not found."}, status=status.HTTP_404_NOT_FOUND
+        )
+
+    return Response(GroupSerializer(group).data)
+
+
 # GET /groupbuys/ - Retrieve group buy details for a specific property
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_active_public_groupbuys(request):
     try:
+        # Completed groups are included too (not just active) so a
+        # fully-funded property still shows "Fully Funded" on the Properties
+        # tab for everyone, instead of silently vanishing once its
+        # units_available hits 0.
         groups = Group.objects.filter(
-            status__in=["Active", "active"], group_type="public"
+            status__in=["Active", "active", "Completed", "completed"],
+            group_type="public",
         )
         if groups.exists():
             serializer = GroupSerializer(groups, many=True)
@@ -9677,21 +9706,24 @@ def leave_groupbuy(request, group_id):
             amount = contribution.amount
             source = contribution.source
 
-            # Refund to correct account
-            if source == "Savings":
-                user.savings += amount
-            elif source == "Investment":
-                user.investment += amount
-            elif source == "Wallet":
-                user.wallet += amount
+            # Refund to the correct account and log it as a Transaction, same
+            # as the debit created when the contribution was made - otherwise
+            # the refund silently changes the balance with no record in the
+            # user's transaction history / Notifications feed.
+            create_transaction(
+                user=user,
+                amount=amount,
+                transaction_type="credit",
+                credited_to=source.upper(),
+                status="confirmed",
+                description=f"GroupBuy refund - {group.property.name}",
+            )
 
             # Mark contribution as refunded
             contribution.payment_status = "Refunded"
             contribution.save()
 
             total_refund += amount
-
-        user.save()
 
         # 5. Update group total_raised
         group.total_raised -= total_refund
@@ -9752,6 +9784,74 @@ def get_user_groupbuys(request):
         return Response(
             {"message": "User not found."}, status=status.HTTP_404_NOT_FOUND
         )
+
+
+# GET /user/groupbuy/invited/ - Groups the current user has been invited to
+# but hasn't joined yet. Exists so private-group invites are discoverable
+# in-app, since the email invite's deep link isn't reliably wired up yet
+# (no iOS/Android native link registration).
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def get_invited_groupbuys(request):
+    try:
+        user = request.user
+
+        groups = Group.objects.filter(
+            invited_users=user,
+            status__in=["Active", "active"],
+        ).exclude(contributors=user).distinct()
+
+        serializer = GroupSerializer(groups, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        return Response(
+            {"message": f"An error occurred: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+# POST /admin/groupbuy/expire-sweep/ - Staff-only manual trigger for the
+# overdue-GroupBuy refund sweep (same logic as `manage.py expire_groupbuys`
+# / the Celery task). Exists so this can be tested/run without shell access
+# to the deployment - pass {"dry_run": true} to preview without saving.
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def trigger_groupbuy_expiry_sweep(request):
+    if not request.user.is_staff:
+        return Response({"message": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+
+    from .utils import expire_overdue_groupbuys
+
+    dry_run = bool(request.data.get("dry_run", False))
+    result = expire_overdue_groupbuys(dry_run=dry_run)
+
+    return Response(
+        {
+            "dry_run": dry_run,
+            "expired_count": result["expired_count"],
+            "total_refunded": float(result["total_refunded"]),
+            "total_service_charge": float(result["total_service_charge"]),
+            "groups": [
+                {
+                    "group_id": g["group_id"],
+                    "property": g["property"],
+                    "contributors": [
+                        {
+                            "email": c["email"],
+                            "amount": float(c["amount"]),
+                            "service_charge": float(c["service_charge"]),
+                            "refund_amount": float(c["refund_amount"]),
+                            "source": c["source"],
+                        }
+                        for c in g["contributors"]
+                    ],
+                }
+                for g in result["groups"]
+            ],
+        },
+        status=status.HTTP_200_OK,
+    )
 
 
 # Contribution Related APIs
@@ -9845,19 +9945,21 @@ def contribute_to_groupbuy(request, group_id):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # 8. Handle overfunding
+        # 8. Cap contribution at the remaining amount needed (overfunding guard)
         total_after = group.total_raised + amount
         excess_amount = max(total_after - group.goal_amount, Decimal("0.00"))
-
         if excess_amount > 0:
             amount -= excess_amount
-            refund_balance = get_user_balance(user, source)
-            set_user_balance(user, source, refund_balance + excess_amount)
-            user.save()
 
-        # 9. Deduct actual amount
-        set_user_balance(user, source, user_balance - amount)
-        user.save()
+        # 9. Deduct the (possibly capped) amount and log it as a Transaction
+        create_transaction(
+            user=user,
+            amount=amount,
+            transaction_type="debit",
+            source=source.upper(),
+            status="confirmed",
+            description=f"GroupBuy contribution to {group.property.name}",
+        )
 
         # 10. Create contribution
         contribution = Contribution.objects.create(
@@ -9868,8 +9970,13 @@ def contribute_to_groupbuy(request, group_id):
             source=source,
         )
 
-        # 11. Update group total raised
+        # 11. Update group total raised, and flip it to completed the moment
+        # it's fully funded - otherwise it stays "active" forever even though
+        # step 7 already blocks further contributions once the goal is hit,
+        # which left the property showing as still-joinable indefinitely.
         group.total_raised += amount
+        if group.total_raised >= group.goal_amount:
+            group.status = "completed"
         group.save()
 
         # 12. Ownership calculation
@@ -9948,6 +10055,21 @@ def get_user_groupbuy_contributions(request):
         return Response(
             {"message": "No contributions found."}, status=status.HTTP_404_NOT_FOUND
         )
+
+
+# GET /user/groupbuy/income-history - Fetch all GroupBuy income payouts the
+# currently authenticated user has received, most recent first.
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def get_user_groupbuy_income_history(request):
+    from .models import GroupIncomeDistribution
+    from .serializers import GroupIncomeDistributionSerializer
+
+    distributions = GroupIncomeDistribution.objects.filter(
+        user=request.user
+    ).order_by("-created_at")
+    serializer = GroupIncomeDistributionSerializer(distributions, many=True)
+    return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 from .models import SavingsGoal

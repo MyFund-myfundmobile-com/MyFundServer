@@ -680,6 +680,23 @@ from .models import Group
 from authentication.models import CustomUser
 
 
+def _resolve_profile_picture_url(profile_picture):
+    """Same resolution rules as UserSerializer.get_profile_picture, factored
+    out so GroupSerializer can attach contributor avatars without dragging in
+    the full UserSerializer."""
+    if isinstance(profile_picture, str):
+        if profile_picture and "http" not in profile_picture:
+            return f"{settings.MEDIA_URL}{profile_picture}"
+        return profile_picture or None
+
+    if profile_picture and hasattr(profile_picture, "url"):
+        if "http" not in profile_picture.url:
+            return f"{settings.MEDIA_URL}{profile_picture.url}"
+        return profile_picture.url
+
+    return None
+
+
 class GroupSerializer(serializers.ModelSerializer):
     # You may want to serialize user-related fields as well. For example, including the creator's username.
     created_by = serializers.SerializerMethodField()
@@ -699,9 +716,30 @@ class GroupSerializer(serializers.ModelSerializer):
         )  # Get unique emails of invited users
 
     def get_contributors(self, obj):
-        return list(
-            set(user.email for user in obj.contributors.all())
-        )  # Get unique emails of contributors
+        # Returns contributor identity + avatar so clients can render a
+        # profile-picture stack instead of a plain headcount.
+        seen_emails = set()
+        contributors = []
+        for user in obj.contributors.all():
+            if user.email in seen_emails:
+                continue
+            seen_emails.add(user.email)
+            contributors.append(
+                {
+                    "email": user.email,
+                    "first_name": user.first_name,
+                    "profile_picture": _resolve_profile_picture_url(
+                        user.profile_picture
+                    ),
+                }
+            )
+        return contributors
+
+    # Nest the property details so clients don't need a second round-trip
+    property = serializers.SerializerMethodField()
+
+    def get_property(self, obj):
+        return PropertySerializer(obj.property).data
 
     status = serializers.ChoiceField(
         choices=Group.GROUP_STATUS
@@ -716,6 +754,7 @@ class GroupSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "property_id",
+            "property",
             "created_by",
             "goal_amount",
             "minimum_contribution",
@@ -778,6 +817,67 @@ class ContributionSerializer(serializers.ModelSerializer):
             "payment_status",
             "source",
             "ownership_percentage",
+            "created_at",
+        ]
+
+
+from .models import GroupIncomeEvent, GroupIncomeDistribution
+
+
+class GroupIncomeEventSerializer(serializers.ModelSerializer):
+    property_name = serializers.SerializerMethodField()
+    recorded_by_email = serializers.SerializerMethodField()
+
+    def get_property_name(self, obj):
+        return obj.group.property.name
+
+    def get_recorded_by_email(self, obj):
+        return obj.recorded_by.email if obj.recorded_by else None
+
+    class Meta:
+        model = GroupIncomeEvent
+        fields = [
+            "id",
+            "group_id",
+            "property_name",
+            "recorded_by_email",
+            "amount",
+            "period_start",
+            "period_end",
+            "description",
+            "status",
+            "total_distributed",
+            "created_at",
+            "completed_at",
+        ]
+
+
+class GroupIncomeDistributionSerializer(serializers.ModelSerializer):
+    property_name = serializers.SerializerMethodField()
+    group_id = serializers.SerializerMethodField()
+    period_start = serializers.DateField(source="income_event.period_start", read_only=True)
+    period_end = serializers.DateField(source="income_event.period_end", read_only=True)
+    description = serializers.CharField(source="income_event.description", read_only=True)
+
+    def get_property_name(self, obj):
+        return obj.income_event.group.property.name
+
+    def get_group_id(self, obj):
+        return obj.income_event.group_id
+
+    class Meta:
+        model = GroupIncomeDistribution
+        fields = [
+            "id",
+            "income_event",
+            "group_id",
+            "property_name",
+            "period_start",
+            "period_end",
+            "description",
+            "ownership_percentage",
+            "amount",
+            "status",
             "created_at",
         ]
 

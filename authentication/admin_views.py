@@ -1279,9 +1279,162 @@ def top_influencers(request):
         
         cache.set(cache_key, response_data, 900)
         return Response(response_data)
-        
+
     except Exception as e:
         return Response({"error": str(e)}, status=500)
+
+
+import uuid
+from decimal import InvalidOperation
+from datetime import datetime as dt
+from django.db import transaction as db_transaction, IntegrityError
+from .models import Group, GroupOwnership, GroupIncomeEvent, GroupIncomeDistribution
+from .utils import create_transaction, split_amount_by_percentage
+from .serializers import GroupIncomeEventSerializer
+
+
+@api_view(["POST"])
+@permission_classes([IsAdminUser])
+def distribute_groupbuy_income(request, group_id):
+    """
+    POST /api/admin/groupbuy/<group_id>/distribute-income/
+
+    Staff-only. Records that a GroupBuy's property earned income for a given
+    period, then distributes it to every member's wallet in proportion to
+    their GroupOwnership.ownership_percentage.
+    """
+    try:
+        group_uuid = uuid.UUID(str(group_id))
+    except ValueError:
+        return Response(
+            {"message": "Invalid group ID. It must be a valid UUID."}, status=400
+        )
+
+    try:
+        group = Group.objects.get(id=group_uuid)
+    except Group.DoesNotExist:
+        return Response({"message": "Group not found."}, status=404)
+
+    if group.status != "completed":
+        return Response(
+            {
+                "message": "Income can only be distributed for a GroupBuy whose "
+                "status is 'completed'. Mark the group completed in Django admin first."
+            },
+            status=400,
+        )
+
+    try:
+        amount = Decimal(str(request.data.get("amount")))
+    except (TypeError, InvalidOperation):
+        return Response({"message": "Invalid or missing amount."}, status=400)
+
+    if amount <= 0:
+        return Response({"message": "Amount must be greater than zero."}, status=400)
+
+    period_start_raw = request.data.get("period_start")
+    period_end_raw = request.data.get("period_end")
+    if not period_start_raw or not period_end_raw:
+        return Response(
+            {"message": "period_start and period_end are required (YYYY-MM-DD)."},
+            status=400,
+        )
+
+    try:
+        period_start = dt.strptime(period_start_raw, "%Y-%m-%d").date()
+        period_end = dt.strptime(period_end_raw, "%Y-%m-%d").date()
+    except ValueError:
+        return Response(
+            {"message": "period_start/period_end must be in YYYY-MM-DD format."},
+            status=400,
+        )
+
+    if period_end < period_start:
+        return Response({"message": "period_end cannot be before period_start."}, status=400)
+
+    description = request.data.get("description", "")
+
+    try:
+        with db_transaction.atomic():
+            event = GroupIncomeEvent.objects.create(
+                group=group,
+                recorded_by=request.user,
+                amount=amount,
+                period_start=period_start,
+                period_end=period_end,
+                description=description,
+            )
+
+            # Note: can't combine select_for_update() with a GROUP BY/annotate
+            # query (Postgres rejects "FOR UPDATE" with GROUP BY), so lock the
+            # raw rows first and aggregate per-user in Python instead.
+            ownership_rows = list(
+                GroupOwnership.objects.select_for_update().filter(group=group)
+            )
+            pct_by_user = {}
+            for row in ownership_rows:
+                pct_by_user[row.user_id] = (
+                    pct_by_user.get(row.user_id, Decimal("0")) + row.ownership_percentage
+                )
+            ownership_pairs = [
+                (user_id, pct) for user_id, pct in pct_by_user.items() if pct > 0
+            ]
+
+            if not ownership_pairs:
+                raise ValueError(
+                    "This group has no members with a positive ownership percentage."
+                )
+
+            shares = split_amount_by_percentage(amount, ownership_pairs)
+            pct_lookup = dict(ownership_pairs)
+            user_lookup = {
+                u.id: u for u in CustomUser.objects.filter(id__in=shares.keys())
+            }
+            total_distributed = Decimal("0.00")
+
+            for user_id, share in shares.items():
+                if share <= 0:
+                    continue
+                member = user_lookup[user_id]
+                tx = create_transaction(
+                    user=member,
+                    amount=share,
+                    transaction_type="credit",
+                    source="WALLET",
+                    credited_to="WALLET",
+                    status="confirmed",
+                    description=(
+                        f"GroupBuy income: {group.property.name} "
+                        f"({period_start} - {period_end})"
+                    ),
+                )
+                GroupIncomeDistribution.objects.create(
+                    income_event=event,
+                    user=member,
+                    ownership_percentage=pct_lookup[user_id],
+                    amount=share,
+                    transaction=tx,
+                    status="paid",
+                )
+                total_distributed += share
+
+            event.status = "completed"
+            event.total_distributed = total_distributed
+            event.completed_at = timezone.now()
+            event.save()
+    except IntegrityError:
+        return Response(
+            {"message": "Income has already been recorded for this group and period."},
+            status=409,
+        )
+    except ValueError as e:
+        return Response({"message": str(e)}, status=400)
+
+    from .tasks import distribute_groupbuy_income_notifications
+
+    distribute_groupbuy_income_notifications.delay(str(event.id))
+
+    return Response(GroupIncomeEventSerializer(event).data, status=201)
 
 
 @api_view(['GET'])
@@ -1298,42 +1451,41 @@ def groupbuy_metrics(request):
         return Response(cached_data)
     
     try:
-        # Assuming there's a GroupBuy model with status field
-        # You'll need to import and adjust based on your actual model
-        # from .models import GroupBuy
-        
-        # Placeholder response - replace with actual GroupBuy queries
+        from .models import Group, GroupIncomeEvent
+
+        groupbuy_stats = Group.objects.aggregate(
+            active=Count("id", filter=Q(status="active")),
+            successful=Count("id", filter=Q(status="completed")),
+            failed=Count("id", filter=Q(status="failed")),
+            total=Count("id"),
+            total_raised=Coalesce(Sum("total_raised"), Value(0, output_field=DecimalField())),
+            total_goal=Coalesce(Sum("goal_amount"), Value(0, output_field=DecimalField())),
+        )
+
+        total = groupbuy_stats["total"] or 0
+        # "Successful" here means fully funded (status=completed), not yet
+        # decided/still raising (active) - failed groups missed their deadline.
+        decided = groupbuy_stats["successful"] + groupbuy_stats["failed"]
+        success_rate = (groupbuy_stats["successful"] / decided * 100) if decided > 0 else 0
+
+        total_income_distributed = GroupIncomeEvent.objects.filter(
+            status="completed"
+        ).aggregate(total=Coalesce(Sum("total_distributed"), Value(0, output_field=DecimalField())))["total"]
+
         response_data = {
-            "active_groupbuys": 0,
-            "successful_groupbuys": 0,
-            "failed_groupbuys": 0,
-            "total_groupbuys": 0,
-            "success_rate": 0,
-            "note": "GroupBuy model integration needed"
+            "active_groupbuys": groupbuy_stats["active"],
+            "successful_groupbuys": groupbuy_stats["successful"],
+            "failed_groupbuys": groupbuy_stats["failed"],
+            "total_groupbuys": total,
+            "success_rate": round(success_rate, 2),
+            "total_raised": float(groupbuy_stats["total_raised"]),
+            "total_goal_amount": float(groupbuy_stats["total_goal"]),
+            "total_income_distributed": float(total_income_distributed),
         }
-        
-        # Example implementation (uncomment and adjust):
-        # groupbuy_stats = GroupBuy.objects.aggregate(
-        #     active=Count('id', filter=Q(status='active')),
-        #     successful=Count('id', filter=Q(status='successful')),
-        #     failed=Count('id', filter=Q(status='failed')),
-        #     total=Count('id')
-        # )
-        # 
-        # total = groupbuy_stats['total'] or 0
-        # success_rate = (groupbuy_stats['successful'] / total * 100) if total > 0 else 0
-        # 
-        # response_data = {
-        #     "active_groupbuys": groupbuy_stats['active'],
-        #     "successful_groupbuys": groupbuy_stats['successful'],
-        #     "failed_groupbuys": groupbuy_stats['failed'],
-        #     "total_groupbuys": total,
-        #     "success_rate": round(success_rate, 2)
-        # }
-        
+
         cache.set(cache_key, response_data, 900)
         return Response(response_data)
-        
+
     except Exception as e:
         return Response({"error": str(e)}, status=500)
 

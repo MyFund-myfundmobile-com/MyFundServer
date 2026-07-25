@@ -41,6 +41,7 @@ app.conf.task_routes = {
     "authentication.tasks.refund_contributions_if_goal_not_reached": {
         "queue": "default"
     },
+    "authentication.tasks.expire_groupbuys_task": {"queue": "default"},
     "authentication.tasks.process_due_scheduled_withdrawals": {"queue": "default"},
     "authentication.tasks.send_birthday_greetings": {"queue": "default"},
     "authentication.tasks.reward_top_savers_of_month": {"queue": "default"},
@@ -80,6 +81,10 @@ app.conf.beat_schedule = {
     "refund-contributions": {
         "task": "authentication.tasks.refund_contributions_if_goal_not_reached",
         "schedule": crontab(hour=0, minute=0),
+    },
+    "expire-overdue-groupbuys-daily": {
+        "task": "authentication.tasks.expire_groupbuys_task",
+        "schedule": crontab(hour=0, minute=15),
     },
     # ROI & Payouts
     "calculate-daily-roi": {

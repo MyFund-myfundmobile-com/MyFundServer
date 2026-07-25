@@ -100,6 +100,26 @@ def refund_contributions_if_goal_not_reached():
 
 
 @shared_task
+def expire_groupbuys_task():
+    """
+    Celery counterpart to `python manage.py expire_groupbuys`. Scheduled
+    daily via app.conf.beat_schedule in myfundproject/celery.py
+    ("expire-overdue-groupbuys-daily") - runs on the existing Beat/worker,
+    no extra infrastructure. Can also be triggered manually via the
+    management command or the staff-only admin endpoint for testing.
+    """
+    from .utils import expire_overdue_groupbuys
+
+    result = expire_overdue_groupbuys(dry_run=False)
+    logger.info(
+        f"✅ Expired {result['expired_count']} GroupBuy(s), "
+        f"refunded ₦{result['total_refunded']:,.2f}, "
+        f"₦{result['total_service_charge']:,.2f} service charge collected."
+    )
+    return result["expired_count"]
+
+
+@shared_task
 def process_target_savings_deductions():
     """Celery task to process all due target savings deductions"""
     now = timezone.now()
@@ -619,6 +639,73 @@ def release_quarterly_roi(test_mode=True):
         f"✅ release_quarterly_roi complete. "
         f"Processed: {processed}, Skipped: {skipped}, Errors: {errors}"
     )
+    logger.info(result)
+    return result
+
+
+@shared_task
+def distribute_groupbuy_income_notifications(event_id):
+    """
+    Sends push + email notifications for a GroupBuy income distribution that
+    has already been credited to members' wallets. Dispatched after the
+    money-moving transaction commits (see admin_views.distribute_groupbuy_income)
+    so a slow/failed notification can never block or roll back a payout.
+    """
+    from .models import GroupIncomeDistribution
+    from .utils import send_push_notification, send_generic_email
+
+    distributions = GroupIncomeDistribution.objects.filter(
+        income_event_id=event_id
+    ).select_related("user", "income_event", "income_event__group__property")
+
+    processed = 0
+    errors = 0
+
+    for dist in distributions:
+        try:
+            user = dist.user
+            event = dist.income_event
+            property_name = event.group.property.name
+
+            send_push_notification(
+                user=user,
+                title="💰 GroupBuy Income Received!",
+                message=(
+                    f"₦{dist.amount:,.2f} has been added to your wallet from "
+                    f"{property_name} ({dist.ownership_percentage}% ownership)."
+                ),
+                data={
+                    "type": "GROUPBUY_INCOME",
+                    "amount": float(dist.amount),
+                    "group_id": str(event.group_id),
+                },
+            )
+
+            email_body = (
+                f"Hi {user.first_name},<br><br>"
+                f"Great news — <b>{property_name}</b> earned income for the period "
+                f"{event.period_start} to {event.period_end}, and your share has "
+                f"been credited to your MyFund wallet.<br><br>"
+                f"<b>Your ownership:</b> {dist.ownership_percentage}%<br>"
+                f"<b>Amount credited:</b> ₦{dist.amount:,.2f}<br><br>"
+                f"Thank you for investing with MyFund.<br><br>"
+                f"The MyFund Team"
+            )
+            send_generic_email(
+                subject=f"GroupBuy Income Paid — {property_name}",
+                message=email_body,
+                recipient_list=[user.email],
+                from_email="MyFund <noreply@mg.myfundmobile.com>",
+                use_celery_threshold=0,
+            )
+            processed += 1
+        except Exception as e:
+            errors += 1
+            logger.exception(
+                f"❌ Failed to notify user {dist.user_id} for GroupIncomeDistribution {dist.id}: {e}"
+            )
+
+    result = f"✅ distribute_groupbuy_income_notifications complete for event {event_id}. Processed: {processed}, Errors: {errors}"
     logger.info(result)
     return result
 

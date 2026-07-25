@@ -57,6 +57,11 @@ urlpatterns = [
         admin_views.groupbuy_metrics,
         name="admin_groupbuy_metrics",
     ),
+    path(
+        "groupbuy/<str:group_id>/distribute-income/",
+        admin_views.distribute_groupbuy_income,
+        name="distribute_groupbuy_income",
+    ),
     # ========================================================================
     # FINANCIAL STRENGTH & MOMENTUM
     # ========================================================================
