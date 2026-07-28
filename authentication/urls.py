@@ -34,6 +34,7 @@ from .views import (
     get_my_push_notifications,
     send_admin_push_notification,
     save_expo_push_token,
+    remove_expo_push_token,
     earnings_summary,
     get_or_create_dva_account,
     initiate_dva_quicksave,
@@ -415,6 +416,7 @@ urlpatterns = [
     ),
     path("admin/send-push/", send_admin_push_notification, name="send_admin_push"),
     path("push/save-token/", save_expo_push_token, name="save_push_token"),
+    path("push/remove-token/", remove_expo_push_token, name="remove_push_token"),
     path("top-referrals/", TopReferralsAPIView.as_view(), name="top-referrals"),
     # Ambassadors
     path(

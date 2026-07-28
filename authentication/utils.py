@@ -26,11 +26,6 @@ logger = logging.getLogger(__name__)
 
 EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
 
-ADMIN_PUSH_EMAILS = [
-    "tolulopeahmed@gmail.com",
-    "ceo@myfundmobile.com",
-]
-
 
 class SafeDict(dict):
     """
@@ -167,6 +162,16 @@ def send_push_notification(
             "priority": "high",
         }
 
+        # Expo only renders a notification's action buttons (registered via
+        # setNotificationCategoryAsync on-device) when the push carries a
+        # top-level categoryId - a "category" key buried inside `data` (as
+        # set by push_deep_links.py) is not the same thing and gets
+        # silently ignored by Expo, so the buttons never appear no matter
+        # how correctly they're registered client-side.
+        category = data.get("category")
+        if category:
+            payload["categoryId"] = category
+
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
@@ -218,7 +223,12 @@ def send_admin_push_notification(
     Supports personalization too.
     """
     User = get_user_model()
-    admins = User.objects.filter(email__in=ADMIN_PUSH_EMAILS)
+    # Single source of truth: is_staff already gates the actual
+    # admin-action endpoints (action_views.py's _require_staff), so it's
+    # also what should gate who gets notified - a hardcoded email list
+    # drifts out of sync with real staff status and silently drops new
+    # admins from alerts (or keeps notifying former ones).
+    admins = User.objects.filter(is_staff=True)
 
     if not admins.exists():
         logger.warning("No admin users found for push notification")

@@ -414,15 +414,13 @@ def confirm_otp(request):
             # -----------------------
             try:
 
-                admin_emails = [
-                    "tolulopeahmed@gmail.com",
-                    "ceo@mg.myfundmobile.com",
-                    "janet.adegbenro@gmail.com",
-                    "josephgideon95@gmail.com",
-                ]
-
+                # Single source of truth: is_staff is what actually gates
+                # the admin-action endpoints, so it's also what gates who
+                # gets notified - hardcoded email lists drift out of sync
+                # (this one didn't even match the other admin push blocks)
+                # and silently drop new admins from alerts.
                 admin_users = CustomUser.objects.filter(
-                    email__in=admin_emails,
+                    is_staff=True,
                     is_active=True,
                 )
 
@@ -4754,12 +4752,7 @@ def withdraw_to_local_bank(request):
                 recipient_list=["admin@myfundmobile.com"],
             )
 
-            admin_emails = [
-                "tolulopeahmed@gmail.com",
-                "ceo@myfundmobile.com",
-                "janet.adegbenro@gmail.com",
-            ]
-            admin_users = CustomUser.objects.filter(email__in=admin_emails)
+            admin_users = CustomUser.objects.filter(is_staff=True, is_active=True)
 
             admin_push_message = (
                 f"{user.first_name} {user.last_name} wants to withdraw ₦{amount:,.2f} "
@@ -5207,12 +5200,7 @@ def process_withdrawal_to_local_bank(request):
             ],
         )
 
-        admin_emails = [
-            "tolulopeahmed@gmail.com",
-            "ceo@myfundmobile.com",
-            "janet.adegbenro@gmail.com",
-        ]
-        admin_users = CustomUser.objects.filter(email__in=admin_emails)
+        admin_users = CustomUser.objects.filter(is_staff=True, is_active=True)
 
         for admin_user in admin_users:
             if hasattr(admin_user, "expo_push_tokens") and admin_user.expo_push_tokens:
@@ -6287,13 +6275,7 @@ class KYCUpdateView(generics.UpdateAPIView):
         )
 
         # 4️⃣ Push notification to admin (KYC alert)
-        admin_emails = [
-            "tolulopeahmed@gmail.com",
-            "ceo@myfundmobile.com",
-            "janet.adegbenro@gmail.com",
-        ]
-
-        admin_users = CustomUser.objects.filter(email__in=admin_emails)
+        admin_users = CustomUser.objects.filter(is_staff=True, is_active=True)
 
         for admin_user in admin_users:
             if hasattr(admin_user, "expo_push_tokens") and admin_user.expo_push_tokens:
@@ -6607,12 +6589,7 @@ def initiate_bank_transfer(request):
                 )
 
                 # 4. Push notification to admins
-                admin_emails = [
-                    "tolulopeahmed@gmail.com",
-                    "ceo@myfundmobile.com",
-                    "janet.adegbenro@gmail.com",
-                ]
-                admin_users = CustomUser.objects.filter(email__in=admin_emails)
+                admin_users = CustomUser.objects.filter(is_staff=True, is_active=True)
 
                 for admin_user in admin_users:
                     if (
@@ -6777,12 +6754,7 @@ def initiate_invest_transfer(request):
         ).start()
 
         # 🔔 ADMIN PUSH
-        admin_emails = [
-            "tolulopeahmed@gmail.com",
-            "ceo@myfundmobile.com",
-            "janet.adegbenro@gmail.com",
-        ]
-        admin_users = CustomUser.objects.filter(email__in=admin_emails)
+        admin_users = CustomUser.objects.filter(is_staff=True, is_active=True)
 
         for admin in admin_users:
             if hasattr(admin, "expo_push_tokens") and admin.expo_push_tokens:
@@ -6801,6 +6773,12 @@ def initiate_invest_transfer(request):
                         "type": "QuickInvest",
                         "status": "pending",
                         "source": "admin_quickinvest_alert",
+                        # Was missing entirely - this is what actually
+                        # attaches the "Approve"/"Mark Abandoned" action
+                        # buttons (category) and the admin_url, mirroring
+                        # what QuickSave's admin push already sends via
+                        # dl.admin_bank_transfer().
+                        **dl.admin_invest_transfer(transaction_id),
                     },
                     notif_type="ADMIN_ALERT",
                 )
@@ -11199,6 +11177,27 @@ def save_expo_push_token(request):
     user.expo_push_tokens.append(new_token)
     user.save()
     return Response({"message": "Token saved"})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def remove_expo_push_token(request):
+    """Counterpart to save_expo_push_token - called on logout. The mobile
+    app (utils/PushNotififaction.js removePushToken) has been posting here
+    since it was built, but this route was never registered, so logout was
+    silently 404ing and stale tokens were never cleaned up.
+    """
+    user = request.user
+    token = request.data.get("expo_push_token")
+
+    if not token:
+        return Response({"error": "No token provided"}, status=400)
+
+    user.expo_push_tokens = [
+        entry for entry in user.expo_push_tokens if entry.get("token") != token
+    ]
+    user.save(update_fields=["expo_push_tokens"])
+    return Response({"message": "Token removed"})
 
 
 from rest_framework.views import APIView
