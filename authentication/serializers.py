@@ -400,6 +400,38 @@ class TargetSavingsSerializer(serializers.ModelSerializer):
 
         return data
 
+    def update(self, instance, validated_data):
+        # 🔴 SECURITY: target_amount/end_date drive process_deduction()'s
+        # completion check and the 15% bonus's prorated-months calculation.
+        # They can't be marked read_only (the create flow needs to accept
+        # them from the client), but they - along with monthly_payment/
+        # funding_source/frequency, which drive the debit schedule - must
+        # never be editable on an *existing* plan via this same serializer.
+        # Without this guard, a user could PATCH target_amount down below
+        # their already-saved current_amount to fake instant completion,
+        # and/or push end_date years out to inflate the bonus multiplier,
+        # collecting an arbitrarily large bonus for money they never
+        # actually saved for the stated term. No mobile client currently
+        # sends PATCH/PUT to this endpoint, so this closes the hole with no
+        # behavior change for legitimate use - only "name" and "category"
+        # remain editable post-creation.
+        locked_fields = {
+            "target_amount",
+            "end_date",
+            "monthly_payment",
+            "funding_source",
+            "frequency",
+        }
+        attempted = locked_fields & set(validated_data.keys())
+        if attempted:
+            raise serializers.ValidationError(
+                {
+                    field: "This field cannot be changed after the plan is created."
+                    for field in attempted
+                }
+            )
+        return super().update(instance, validated_data)
+
     class Meta:
         model = TargetSavings
         fields = [

@@ -2474,11 +2474,24 @@ class TargetSavingsAdmin(admin.ModelAdmin):
     force_process_deduction.short_description = "Force process deduction"
 
     def mark_as_completed(self, request, queryset):
+        # Delegates to process_deduction() (same as force_process_deduction
+        # above) so the 15% completion bonus is always credited via
+        # _complete_target() rather than this action just flipping
+        # is_active off with no payout, as it previously did.
+        processed, skipped = 0, 0
         for target in queryset:
-            target.is_active = False
-            target.save()
+            try:
+                if target.process_deduction():
+                    processed += 1
+                else:
+                    skipped += 1
+            except Exception as e:
+                skipped += 1
+                logger.error(f"Error marking target {target.id} as completed: {e}")
 
-        self.message_user(request, "Targets marked as completed")
+        self.message_user(
+            request, f"Completed: {processed} | Skipped/unchanged: {skipped}"
+        )
 
 
 @admin.register(TargetSavingsCompletion)

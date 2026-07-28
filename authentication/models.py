@@ -1620,11 +1620,20 @@ class TargetSavings(models.Model):
                     id=target.user.id
                 )
 
-                # Skip if no longer actionable
-                # Skip if no longer actionable
-                if target.is_completed or target.is_cancelled or not target.is_active:
+                # Skip only if this target has already been closed out. Note:
+                # deliberately NOT checking target.is_completed here - that
+                # property just reflects current_amount >= target_amount,
+                # which can already be true for a target that hasn't been
+                # paid out yet (e.g. fully funded by a single upfront
+                # payment at creation). Treating "amount reached" as
+                # equivalent to "already processed" made such targets
+                # permanently unprocessable - is_active is the only
+                # reliable "already handled" signal, since completion
+                # always flips it to False in the same atomic step that
+                # pays out the bonus.
+                if target.is_cancelled or not target.is_active:
                     logger.info(
-                        f"Target {target.id} is completed/cancelled/inactive, skipping deduction"
+                        f"Target {target.id} is cancelled/inactive, skipping deduction"
                     )
                     return False
 
@@ -1636,6 +1645,15 @@ class TargetSavings(models.Model):
                     target.is_active = False
                     target.save(update_fields=["is_active"])
                     return False
+
+                # Already fully funded (e.g. a single upfront payment covered
+                # the whole target at creation, or a balance was adjusted
+                # directly) - nothing left to deduct, so route straight to
+                # completion instead of falling into the debit math below,
+                # which would compute amount <= 0 and get wrongly recorded
+                # as a failed deduction attempt.
+                if target.current_amount >= target.target_amount:
+                    return target._complete_target(user)
 
                 # Base amount (guard against None)
                 amount = target.monthly_payment or Decimal("0")
@@ -1690,15 +1708,26 @@ class TargetSavings(models.Model):
                             ]
                         )
 
-                        # Refund 99%
-                        # 🚫 BANNED USERS DO NOT GET REFUNDS
+                        # Refund 99% - banned users forfeit their refund
+                        # entirely. `refund_amount` was previously left
+                        # undefined for the normal (non-banned) case, which
+                        # raised a NameError caught by the outer try/except -
+                        # the target's deduction_attempts increment above got
+                        # rolled back (same atomic block), so it silently
+                        # re-hit this exact crash on every subsequent retry
+                        # forever: never refunded, never paused, never
+                        # notified.
                         if user.is_banned:
                             logger.warning(
                                 f"Banned user {user.email} attempted refund on target {target.id}. Blocking refund."
                             )
                             refund_amount = Decimal("0")
                             charge = target.current_amount
-                        charge = target.current_amount - refund_amount
+                        else:
+                            refund_amount = (
+                                target.current_amount * Decimal("0.99")
+                            ).quantize(Decimal("0.01"))
+                            charge = target.current_amount - refund_amount
 
                         if refund_amount > 0:
                             if target.funding_source == "SAVINGS":
@@ -1817,97 +1846,7 @@ class TargetSavings(models.Model):
 
                 # If target completed, handle completion flow
                 if target.current_amount >= target.target_amount:
-
-                    today = timezone.now().date()
-                    bonus = Decimal("0")
-                    completed_amount = target.current_amount
-
-                    if today <= target.end_date:
-                        # 🔹 Use prorated 13% p.a. bonus
-                        months = max(
-                            1,
-                            (target.end_date.year - target.start_date.year) * 12
-                            + (target.end_date.month - target.start_date.month),
-                        )
-                        bonus = (
-                            completed_amount
-                            * Decimal("0.15")
-                            * Decimal(months)
-                            / Decimal(12)
-                        ).quantize(Decimal("0.01"))
-
-                    user.wallet += completed_amount + bonus
-                    user.save(update_fields=["wallet"])
-
-                    # zero out and deactivate target
-                    target.current_amount = Decimal("0")
-                    target.is_active = False
-                    target.save()
-
-                    TargetSavingsCompletion.objects.create(
-                        user=user,
-                        target_savings=target,
-                        completed_amount=completed_amount,
-                        bonus_amount=bonus,
-                        total_amount=completed_amount + bonus,
-                        completed_date=today,
-                        was_on_time=today <= target.end_date,
-                    )
-
-                    Transaction.objects.create(
-                        user=user,
-                        transaction_type="credit",
-                        status="confirmed",
-                        amount=completed_amount + bonus,
-                        description=f"{target.name} Completed! ✅",
-                        service_charge=0,
-                        total_amount=completed_amount + bonus,
-                        target_savings=target,
-                        source="TARGET_COMPLETION",
-                        transaction_id=f"[{target.id}]-{uuid.uuid4().hex[:12]}_COMPLETION",
-                    )
-
-                    # ✅ Record wallet credit transaction (separate, so user sees wallet inflow)
-                    Transaction.objects.create(
-                        user=user,
-                        transaction_type="credit",
-                        status="confirmed",
-                        amount=completed_amount + bonus,
-                        description=f"{target.name} Completed! ✅",
-                        service_charge=0,
-                        total_amount=completed_amount + bonus,
-                        source="WALLET",
-                        transaction_id=f"[{target.id}]-{uuid.uuid4().hex[:12]}_WALLET",
-                    )
-
-                    def _notify_completion():
-                        try:
-                            target.send_completion_email()
-                        except Exception as e:
-                            logger.exception(
-                                f"Error sending completion email for target {target.id}: {e}"
-                            )
-                        try:
-                            send_push_notification(
-                                user,
-                                title=f"🎉 {target.name} Target Completed!✅",
-                                message=(
-                                    f"Congratulations, your {target.name} Target Savings is completed! "
-                                    f"₦{completed_amount + bonus:,.2f} credited to your wallet."
-                                ),
-                                data={
-                                    "target_id": target.id,
-                                    "type": "TARGET_COMPLETED",
-                                    "amount": float(completed_amount + bonus),
-                                },
-                            )
-                        except Exception as e:
-                            logger.exception(
-                                f"Error sending completion push for target {target.id}: {e}"
-                            )
-
-                    transaction.on_commit(_notify_completion)
-                    return True
+                    return target._complete_target(user)
 
                 # Otherwise persist next deduction and create auto transaction, then notify
                 target.update_next_deduction_date()
@@ -1976,6 +1915,112 @@ class TargetSavings(models.Model):
             except Exception:
                 logger.exception("Failed to schedule retry after unexpected error")
             return False
+
+    def _complete_target(self, user):
+        """Credit the completion bonus and close out a fully-funded target.
+
+        Single source of truth for target-savings completion - every caller
+        that closes out a target (process_deduction's own success path, the
+        check_completed_targets safety-net sweep, and the admin
+        "mark as completed" action) must go through here so the 15%
+        prorated bonus is always awarded consistently. Must be called with
+        `self` (the target) and `user` already select_for_update-locked
+        inside an enclosing transaction.atomic() block - it does not open
+        its own transaction.
+        """
+        from django.db import transaction
+        from .utils import send_push_notification
+
+        target = self
+        today = timezone.now().date()
+        bonus = Decimal("0")
+        completed_amount = target.current_amount
+
+        if today <= target.end_date:
+            # 🔹 Use prorated 15% p.a. bonus, prorated by the target's
+            # planned duration (start_date to end_date), not by how fast it
+            # was actually filled.
+            months = max(
+                1,
+                (target.end_date.year - target.start_date.year) * 12
+                + (target.end_date.month - target.start_date.month),
+            )
+            bonus = (
+                completed_amount * Decimal("0.15") * Decimal(months) / Decimal(12)
+            ).quantize(Decimal("0.01"))
+
+        user.wallet += completed_amount + bonus
+        user.save(update_fields=["wallet"])
+
+        # zero out and deactivate target
+        target.current_amount = Decimal("0")
+        target.is_active = False
+        target.save()
+
+        TargetSavingsCompletion.objects.create(
+            user=user,
+            target_savings=target,
+            completed_amount=completed_amount,
+            bonus_amount=bonus,
+            total_amount=completed_amount + bonus,
+            completed_date=today,
+            was_on_time=today <= target.end_date,
+        )
+
+        Transaction.objects.create(
+            user=user,
+            transaction_type="credit",
+            status="confirmed",
+            amount=completed_amount + bonus,
+            description=f"{target.name} Completed! ✅",
+            service_charge=0,
+            total_amount=completed_amount + bonus,
+            target_savings=target,
+            source="TARGET_COMPLETION",
+            transaction_id=f"[{target.id}]-{uuid.uuid4().hex[:12]}_COMPLETION",
+        )
+
+        # ✅ Record wallet credit transaction (separate, so user sees wallet inflow)
+        Transaction.objects.create(
+            user=user,
+            transaction_type="credit",
+            status="confirmed",
+            amount=completed_amount + bonus,
+            description=f"{target.name} Completed! ✅",
+            service_charge=0,
+            total_amount=completed_amount + bonus,
+            source="WALLET",
+            transaction_id=f"[{target.id}]-{uuid.uuid4().hex[:12]}_WALLET",
+        )
+
+        def _notify_completion():
+            try:
+                target.send_completion_email()
+            except Exception as e:
+                logger.exception(
+                    f"Error sending completion email for target {target.id}: {e}"
+                )
+            try:
+                send_push_notification(
+                    user,
+                    title=f"🎉 {target.name} Target Completed!✅",
+                    message=(
+                        f"Congratulations, your {target.name} Target Savings is completed! "
+                        f"₦{completed_amount + bonus:,.2f} credited to your wallet."
+                    ),
+                    data={
+                        "target_id": target.id,
+                        "type": "TARGET_COMPLETED",
+                        "amount": float(completed_amount + bonus),
+                    },
+                )
+            except Exception as e:
+                logger.exception(
+                    f"Error sending completion push for target {target.id}: {e}"
+                )
+
+        transaction.on_commit(_notify_completion)
+        return True
 
     def send_failed_deduction_email(self, max_attempts=False):
         """Send formatted email notification about failed deduction using generic email helper"""

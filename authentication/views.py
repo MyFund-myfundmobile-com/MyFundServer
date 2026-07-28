@@ -9390,6 +9390,38 @@ def create_groupbuy(request):
                 if invalid_emails:
                     warning_message = f"Some emails were invalid and skipped: {', '.join(invalid_emails)}"
 
+        # Step 8b: Notify test users that a new public GroupBuy just went
+        # live. Scoped to a hardcoded test list for now (not all users) -
+        # a handful of Expo push calls is cheap regardless, but we only
+        # want this actually landing on real devices during testing.
+        if group_type == "public":
+            TEST_NOTIFY_EMAILS = [
+                "tolulopeahmed@gmail.com",
+                "valueplusrecords@gmail.com",
+                "valuepluspublishing@gmail.com",
+            ]
+            try:
+                notify_users = get_user_model().objects.filter(
+                    email__in=TEST_NOTIFY_EMAILS
+                )
+                for notify_user in notify_users:
+                    send_push_notification(
+                        user=notify_user,
+                        title="New GroupBuy is Live! 🏠",
+                        message=(
+                            f"A new GroupBuy just opened for {property_obj.name}. "
+                            f"Join now to start owning a share of this property."
+                        ),
+                        data={
+                            "type": "groupbuy_live",
+                            "group_id": str(group.id),
+                            "property_id": str(property_obj.id),
+                        },
+                        notif_type="GROUP",
+                    )
+            except Exception as e:
+                logger.warning(f"GroupBuy-live push failed: {e}")
+
         # Step 9: Return the serialized group
         serializer = GroupSerializer(group)
         response_data = serializer.data
@@ -10055,16 +10087,43 @@ def get_groupbuy_contributions(request, group_id):
 
         for ownership in ownerships:
             user = ownership.user
+            # "Date joined" = their first confirmed contribution to this
+            # group - GroupOwnership itself has no timestamp of its own.
+            first_contribution = (
+                Contribution.objects.filter(
+                    group=group, user=user, payment_status="Confirmed"
+                )
+                .order_by("created_at")
+                .first()
+            )
+            date_joined = first_contribution.created_at if first_contribution else None
+
             contributions_list.append(
                 {
                     "user_id": user.id,
                     "email": user.email,
+                    "first_name": user.first_name,
+                    "last_name": user.last_name,
+                    "profile_picture": user.profile_picture,
                     "total_contributed": float(ownership.total_contributed),
                     "ownership_percentage": round(
                         float(ownership.ownership_percentage), 2
                     ),
+                    "date_joined": date_joined.isoformat() if date_joined else None,
+                    "_date_joined_sort": date_joined,
                 }
             )
+
+        # Ranked by ownership % (highest first); ties broken by whoever
+        # joined earliest.
+        contributions_list.sort(
+            key=lambda c: (
+                -c["ownership_percentage"],
+                c["_date_joined_sort"] or timezone.now(),
+            )
+        )
+        for item in contributions_list:
+            del item["_date_joined_sort"]
 
         return Response(contributions_list, status=status.HTTP_200_OK)
 
@@ -10878,6 +10937,19 @@ class TargetSavingsRetrieveUpdateDestroy(RetrieveUpdateDestroyAPIView):
         return TargetSavings.objects.filter(
             user=self.request.user,
             is_cancelled=False,
+        )
+
+    def destroy(self, request, *args, **kwargs):
+        # 🔴 SECURITY: a raw DELETE here would wipe out current_amount with
+        # no refund and no Transaction record - the mobile app never calls
+        # this (it uses POST .../cancel/, which refunds 99% through
+        # create_transaction()). Force every cancellation through that
+        # money-safe path instead of allowing silent fund loss here.
+        return Response(
+            {
+                "detail": "Use POST /target-savings/<id>/cancel/ to close a target savings plan."
+            },
+            status=405,
         )
 
 

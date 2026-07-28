@@ -180,37 +180,33 @@ def process_target_savings_deductions():
 
 @shared_task
 def check_completed_targets():
-    """Check and mark completed targets"""
+    """Safety-net sweep for targets that reached their goal amount without
+    going through process_target_savings_deductions - e.g. a target fully
+    funded by a single upfront payment at creation, which that task's query
+    skips (current_amount is not < target_amount, so there's nothing to
+    "deduct"). Delegates to target.process_deduction(), which now detects
+    the already-funded state and completes it via the shared
+    _complete_target() method - this must never independently flip
+    is_active without awarding the 15% completion bonus the way it
+    previously did here.
+    """
     completed_targets = TargetSavings.objects.filter(
         is_active=True,
         is_cancelled=False,
         current_amount__gte=models.F("target_amount"),
     ).select_related("user")
 
+    processed_count = 0
     for target in completed_targets:
-        user = target.user
-        target.is_active = False
-        target.save()
+        try:
+            if target.process_deduction():
+                processed_count += 1
+        except Exception as e:
+            logger.error(
+                f"Error completing target {target.id} via safety-net sweep: {e}"
+            )
 
-        # Email user
-        subject = f"Target Savings '{target.name}' Completed! 🎉"
-        message = (
-            f"Hi {user.first_name},<br><br>"
-            f"Congratulations! You’ve successfully completed your Target Savings plan "
-            f"'{target.name}' with ₦{target.current_amount:,.2f}.<br><br>"
-            "You can now withdraw or reinvest these funds. 🥂"
-        )
-        send_generic_email(subject, message, settings.DEFAULT_FROM_EMAIL, [user.email])
-
-        # Push notification
-        send_push_notification(
-            user,
-            title="🎉 Target Savings Completed!",
-            message=f"Congrats! '{target.name}' reached ₦{target.current_amount:,.2f}.",
-            data={"target_id": target.id, "type": "TARGET_COMPLETED"},
-        )
-
-    return {"completed_count": completed_targets.count()}
+    return {"completed_count": processed_count}
 
 
 @shared_task
