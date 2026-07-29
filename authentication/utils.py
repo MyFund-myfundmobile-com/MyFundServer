@@ -1069,6 +1069,19 @@ def process_scheduled_withdrawal(withdrawal, triggered_by="celery"):
         withdrawal.is_processed = True
         withdrawal.save(update_fields=["is_processed"])
 
+        # The original debit Transaction (created when the withdrawal was
+        # first scheduled) was otherwise never touched by this function -
+        # it stayed "pending" forever even after the wallet credit above
+        # completed the withdrawal. That ledger gap is exactly what
+        # management/commands/fix_scheduled_withdrawals.py had to be
+        # written to hand-patch after the fact; closing it here means new
+        # withdrawals won't need that patch going forward.
+        Transaction.objects.filter(
+            user=user,
+            transaction_id=withdrawal.transaction_id,
+            transaction_type="debit",
+        ).exclude(status="confirmed").update(status="confirmed")
+
     try:
         send_push_notification(
             user=user,
@@ -1125,7 +1138,10 @@ def process_scheduled_withdrawal(withdrawal, triggered_by="celery"):
         )
 
     if triggered_by == "celery":
-        admin_users = CustomUser.objects.filter(email__in=ADMIN_ALERT_EMAILS)
+        # Same is_staff consolidation as send_admin_push_notification()'s
+        # recipient targeting - a hardcoded email list silently drops
+        # whichever admin isn't on it.
+        admin_users = CustomUser.objects.filter(is_staff=True, is_active=True)
 
         for admin_user in admin_users:
             try:

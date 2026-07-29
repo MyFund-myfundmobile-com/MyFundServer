@@ -5333,15 +5333,28 @@ def cancel_scheduled_withdrawal(request):
             )
 
             if withdrawal_request:
+                # 🔴 CRITICAL: must also set is_processed=True here. The
+                # automated Celery task and the "Force credit wallet" admin
+                # action both select on `is_processed=False` (and don't
+                # look at `status` at all) to decide what's still due for
+                # automated crediting. Without this, a cancelled-and-
+                # refunded withdrawal was still "scheduled" with
+                # is_processed still False, so once its
+                # scheduled_processing_date arrived it got auto-credited to
+                # user.wallet a second time - on top of the 99% refund
+                # already paid into savings here. Also clearing
+                # scheduled_processing_date so it can never match that
+                # "due" query at all, belt-and-suspenders.
+                withdrawal_request.is_processed = True
+                withdrawal_request.scheduled_processing_date = None
+                update_fields = ["is_processed", "scheduled_processing_date"]
                 if hasattr(withdrawal_request, "is_cancelled"):
                     withdrawal_request.is_cancelled = True
-                    withdrawal_request.save(update_fields=["is_cancelled"])
-                elif hasattr(withdrawal_request, "status"):
+                    update_fields.append("is_cancelled")
+                if hasattr(withdrawal_request, "status"):
                     withdrawal_request.status = "cancelled"
-                    withdrawal_request.save(update_fields=["status"])
-                else:
-                    withdrawal_request.is_approved = True
-                    withdrawal_request.save(update_fields=["is_approved"])
+                    update_fields.append("status")
+                withdrawal_request.save(update_fields=update_fields)
 
             # 4) Delete pending transaction
             pending_transaction.delete()

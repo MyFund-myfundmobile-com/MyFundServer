@@ -1,8 +1,7 @@
 from django.core.management.base import BaseCommand
-from django.db import transaction
 from django.utils import timezone
-from authentication.models import WithdrawalsRequestToAdmin, Transaction
-from authentication.utils import send_push_notification
+from authentication.models import WithdrawalsRequestToAdmin
+from authentication.utils import process_scheduled_withdrawal
 
 
 class Command(BaseCommand):
@@ -62,68 +61,26 @@ class Command(BaseCommand):
                 continue
 
             try:
-                with transaction.atomic():
-                    user = w.user
-                    amount = w.total_amount
+                # Delegate to the single source-of-truth crediting function
+                # instead of duplicating it inline - that inline version
+                # had no select_for_update() locking (a real race risk
+                # against the Celery task picking up the same row
+                # concurrently) and mutated the original *debit*
+                # Transaction into a credit record in place, destroying the
+                # debit history, instead of creating a separate SWC-{id}
+                # credit row the way every other path does.
+                result = process_scheduled_withdrawal(w, triggered_by="management_command")
 
-                    # Credit wallet
-                    balance_before = user.wallet
-                    user.wallet += amount
-                    user.save()
-                    balance_after = user.wallet
-
-                    # Update or create transaction
-                    try:
-                        tx = Transaction.objects.get(
-                            user=user, transaction_id=w.transaction_id
-                        )
-                        tx.status = "confirmed"
-                        tx.transaction_type = "credit"
-                        tx.is_processed = True
-                        tx.balance_before = balance_before
-                        tx.balance_after = balance_after
-                        tx.description = f"Scheduled Withdrawal Credited to Wallet (Original: {w.source_account.capitalize()})"
-                        tx.save()
-                    except Transaction.DoesNotExist:
-                        tx = Transaction.objects.create(
-                            user=user,
-                            transaction_type="credit",
-                            status="confirmed",
-                            is_processed=True,
-                            amount=amount,
-                            total_amount=amount,
-                            source="WALLET",
-                            credited_to="WALLET",
-                            description=f"Credit Scheduled Withdrawal from {w.source_account.capitalize()}",
-                            transaction_id=w.transaction_id,
-                            balance_before=balance_before,
-                            balance_after=balance_after,
-                        )
-
-                    # Mark withdrawal as processed
-                    w.is_processed = True
-                    w.is_approved = True
-                    w.withdrawal_type = "immediate"
-                    w.scheduled_processing_date = None
-                    w.status = "completed"
-                    w.save()
-
-                    # Send notification
-                    try:
-                        send_push_notification(
-                            user=user,
-                            title="✅ Overdue Withdrawal Credited",
-                            message=f"Your overdue scheduled withdrawal of ₦{amount:,.2f} has been credited to your wallet.",
-                            data={"amount": str(amount), "status": "confirmed"},
-                            notif_type="CREDIT",
-                        )
-                    except:
-                        pass
-
+                if result in ("processed", "already_credited"):
                     self.stdout.write(
-                        self.style.SUCCESS(f"  ✅ Fixed overdue withdrawal")
+                        self.style.SUCCESS(f"  ✅ {result}: {w.transaction_id}")
                     )
                     fixed_count += 1
+                else:
+                    self.stdout.write(
+                        self.style.WARNING(f"  ⚠️ {result}: {w.transaction_id}")
+                    )
+                    skipped_count += 1
 
             except Exception as e:
                 self.stdout.write(self.style.ERROR(f"  ❌ Error: {e}"))

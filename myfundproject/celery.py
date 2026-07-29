@@ -107,10 +107,17 @@ app.conf.beat_schedule = {
         "task": "authentication.tasks.send_birthday_greetings",
         "schedule": crontab(hour=8, minute=0),
     },
-    # Scheduled withdrawals
-    "process-scheduled-withdrawals-daily": {
+    # Scheduled withdrawals - hourly rather than once/day. The model only
+    # stores a date (no time), so hourly is already far finer than needed
+    # for "due" precision - the real point is resilience: if a run fails
+    # (exhausts its in-task retries), a once-daily schedule left a
+    # withdrawal stuck for up to 24h with no other automated attempt. Since
+    # process_due_scheduled_withdrawals/process_scheduled_withdrawal are
+    # both idempotent (is_processed guard + existing-credit check), the
+    # next hourly run just safely re-picks-up anything still pending.
+    "process-scheduled-withdrawals-hourly": {
         "task": "authentication.tasks.process_due_scheduled_withdrawals",
-        "schedule": crontab(hour=11, minute=0),
+        "schedule": crontab(minute=0),
     },
     "autosubmit-missing-ambassador-reports-monthly": {
         "task": "authentication.tasks.autosubmit_missing_ambassador_reports_task",

@@ -1794,9 +1794,24 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
 
     def approve_withdrawal(self, request, queryset):
         approved_count = 0
+        skipped_scheduled = 0
 
         for withdrawal in queryset:
             if withdrawal.is_approved:
+                continue
+
+            # 🔴 This action is for immediate bank-payout withdrawals only -
+            # it flips is_processed=True and never touches user.wallet,
+            # since for an immediate withdrawal the money already left
+            # savings/investment for the bank at request time. Scheduled
+            # withdrawals instead need process_scheduled_withdrawal() (via
+            # "Force credit wallet" below) to actually pay out - running
+            # this action on one instead permanently stranded the money:
+            # marked "completed" with is_processed=True (which blocks the
+            # real crediting task/action from ever picking it up again),
+            # but nothing ever landed in the user's wallet.
+            if withdrawal.withdrawal_type == "scheduled":
+                skipped_scheduled += 1
                 continue
 
             user = withdrawal.user
@@ -1895,11 +1910,20 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
                     level="error",
                 )
 
+        if skipped_scheduled:
+            self.message_user(
+                request,
+                f"Skipped {skipped_scheduled} scheduled withdrawal(s) - use "
+                f"'Force credit wallet' for those instead, this action is "
+                f"for immediate bank-payout withdrawals only.",
+                level="warning",
+            )
+
         if approved_count:
             self.message_user(
                 request, f"{approved_count} withdrawal(s) approved successfully."
             )
-        else:
+        elif not skipped_scheduled:
             self.message_user(request, "No withdrawals were approved.")
 
     def force_credit_wallet(self, request, queryset):
