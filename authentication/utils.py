@@ -1044,7 +1044,8 @@ def process_scheduled_withdrawal(withdrawal, triggered_by="celery"):
 
         if existing_credit:
             withdrawal.is_processed = True
-            withdrawal.save(update_fields=["is_processed"])
+            withdrawal.status = "completed"
+            withdrawal.save(update_fields=["is_processed", "status"])
             return "already_credited"
 
         previous_wallet = user.wallet or Decimal("0.00")
@@ -1067,7 +1068,12 @@ def process_scheduled_withdrawal(withdrawal, triggered_by="celery"):
         )
 
         withdrawal.is_processed = True
-        withdrawal.save(update_fields=["is_processed"])
+        # `status` never got flipped to "completed" here even though the
+        # credit above is exactly what "completes" the withdrawal - it
+        # stayed "pending" forever, which made a fully-processed row look
+        # stuck to anyone (support/admin) checking the list view for it.
+        withdrawal.status = "completed"
+        withdrawal.save(update_fields=["is_processed", "status"])
 
         # The original debit Transaction (created when the withdrawal was
         # first scheduled) was otherwise never touched by this function -
