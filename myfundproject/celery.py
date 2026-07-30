@@ -32,7 +32,10 @@ app.conf.task_queues = (
 app.conf.task_routes = {
     "authentication.tasks.send_bulk_email_task": {"queue": "email_queue"},
     "authentication.tasks.send_single_email_task": {"queue": "email_queue"},
+<<<<<<< HEAD
+=======
     "authentication.tasks.sync_user_to_brevo": {"queue": "default"},
+>>>>>>> staging
     "authentication.tasks.send_namecheap_safe_email_task_v2": {"queue": "default"},
     "authentication.tasks.calculate_daily_roi_task": {"queue": "default"},
     "authentication.tasks.process_target_savings_deductions": {"queue": "default"},
@@ -41,7 +44,10 @@ app.conf.task_routes = {
     "authentication.tasks.refund_contributions_if_goal_not_reached": {
         "queue": "default"
     },
+<<<<<<< HEAD
+=======
     "authentication.tasks.expire_groupbuys_task": {"queue": "default"},
+>>>>>>> staging
     "authentication.tasks.process_due_scheduled_withdrawals": {"queue": "default"},
     "authentication.tasks.send_birthday_greetings": {"queue": "default"},
     "authentication.tasks.reward_top_savers_of_month": {"queue": "default"},
@@ -49,6 +55,12 @@ app.conf.task_routes = {
     "authentication.tasks.autosubmit_missing_ambassador_reports_task": {
         "queue": "default"
     },
+<<<<<<< HEAD
+       "authentication.tasks.send_inactive_signup_reminders": {
+        "queue": "default"
+    },
+=======
+>>>>>>> staging
 }
 
 # Default queue for unspecified tasks
@@ -82,10 +94,13 @@ app.conf.beat_schedule = {
         "task": "authentication.tasks.refund_contributions_if_goal_not_reached",
         "schedule": crontab(hour=0, minute=0),
     },
+<<<<<<< HEAD
+=======
     "expire-overdue-groupbuys-daily": {
         "task": "authentication.tasks.expire_groupbuys_task",
         "schedule": crontab(hour=0, minute=15),
     },
+>>>>>>> staging
     # ROI & Payouts
     "calculate-daily-roi": {
         "task": "authentication.tasks.calculate_daily_roi_task",
@@ -93,9 +108,14 @@ app.conf.beat_schedule = {
         "options": {"queue": "default"},
     },
     "process-quarterly-payouts": {
+<<<<<<< HEAD
+        "task": "authentication.tasks.process_quarterly_payouts_task",
+        "schedule": crontab(minute=0, hour=9, day_of_month=1, month_of_year="1,4,7,10"),
+=======
         "task": "authentication.tasks.release_quarterly_roi",
         "schedule": crontab(minute=0, hour=9, day_of_month=1, month_of_year="1,4,7,10"),
         "kwargs": {"test_mode": False},
+>>>>>>> staging
     },
     # Top Saver Rewards
     "reward-top-savers-monthly": {
@@ -107,6 +127,12 @@ app.conf.beat_schedule = {
         "task": "authentication.tasks.send_birthday_greetings",
         "schedule": crontab(hour=8, minute=0),
     },
+<<<<<<< HEAD
+    # Scheduled withdrawals
+    "process-scheduled-withdrawals-daily": {
+        "task": "authentication.tasks.process_due_scheduled_withdrawals",
+        "schedule": crontab(hour=11, minute=0),
+=======
     # Scheduled withdrawals - hourly rather than once/day. The model only
     # stores a date (no time), so hourly is already far finer than needed
     # for "due" precision - the real point is resilience: if a run fails
@@ -118,11 +144,19 @@ app.conf.beat_schedule = {
     "process-scheduled-withdrawals-hourly": {
         "task": "authentication.tasks.process_due_scheduled_withdrawals",
         "schedule": crontab(minute=0),
+>>>>>>> staging
     },
     "autosubmit-missing-ambassador-reports-monthly": {
         "task": "authentication.tasks.autosubmit_missing_ambassador_reports_task",
         "schedule": crontab(minute=5, hour=0, day_of_month=1),
     },
+<<<<<<< HEAD
+    "send-inactive-signup-reminders": {
+        "task": "authentication.tasks.send_inactive_signup_reminders",
+        "schedule": crontab(hour=10, minute=0, day_of_month="*/3"),
+    },
+  
+=======
 }
 
 
@@ -147,6 +181,7 @@ CELERY_BEAT_SCHEDULE = {
             day_of_month=1,
         ),
     },
+>>>>>>> staging
 }
 
 # -----------------------------
@@ -158,6 +193,10 @@ app.conf.update(
     worker_prefetch_multiplier=1,  # Prevent task hoarding
     worker_max_tasks_per_child=100,  # Avoid memory leaks
     task_acks_late=True,  # Ack after task completes
+<<<<<<< HEAD
+    timezone=settings.TIME_ZONE,
+=======
     timezone="Africa/Lagos",
     enable_utc=False,
+>>>>>>> staging
 )

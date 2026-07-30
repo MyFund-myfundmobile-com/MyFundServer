@@ -7,6 +7,99 @@ urlpatterns = [
     # ========================================================================
     # PRIORITY 1: Critical Dashboard Data
     # ========================================================================
+<<<<<<< HEAD
+    path('dashboard/summary/', 
+         admin_views.dashboard_summary, 
+         name='admin_dashboard_summary'),
+    
+    # ========================================================================
+    # GROWTH METRICS
+    # ========================================================================
+    path('metrics/monthly-active-savers', 
+         admin_views.monthly_active_savers, 
+         name='admin_monthly_active_savers'),
+    
+    path('metrics/activated-users', 
+         admin_views.activated_users_percentage, 
+         name='admin_activated_users'),
+    
+    path('metrics/retention-rate', 
+         admin_views.retention_rate, 
+         name='admin_retention_rate'),
+    
+    path('metrics/investors-vs-savers', 
+         admin_views.active_investors_vs_savers, 
+         name='admin_investors_vs_savers'),
+    
+    path('metrics/transaction-success-rate', 
+         admin_views.transaction_success_rate, 
+         name='admin_transaction_success_rate'),
+    
+    # ========================================================================
+    # GROWTH MULTIPLIERS
+    # ========================================================================
+    path('multipliers/top-referrals', 
+         admin_views.top_referrals, 
+         name='admin_top_referrals'),
+    
+    path('multipliers/top-influencers', 
+         admin_views.top_influencers, 
+         name='admin_top_influencers'),
+    
+    path('multipliers/groupbuys', 
+         admin_views.groupbuy_metrics, 
+         name='admin_groupbuy_metrics'),
+    
+    # ========================================================================
+    # FINANCIAL STRENGTH & MOMENTUM
+    # ========================================================================
+    path('financial/fum', 
+         admin_views.funds_under_management, 
+         name='admin_funds_under_management'),
+    
+    path('financial/net-fum-change', 
+         admin_views.net_fum_change, 
+         name='admin_net_fum_change'),
+    
+    path('financial/churn-rate', 
+         admin_views.churn_rate, 
+         name='admin_churn_rate'),
+    
+    # ========================================================================
+    # PRIORITY 2: Chart Data
+    # ========================================================================
+    path('charts/user-growth', 
+         admin_views.user_growth_chart, 
+         name='admin_user_growth_chart'),
+    
+    path('charts/top-savers', 
+         admin_views.top_savers_chart, 
+         name='admin_top_savers_chart'),
+    
+    path('charts/new-savers', 
+         admin_views.new_savers_chart, 
+         name='admin_new_savers_chart'),
+    
+    path('charts/user-metrics', 
+         admin_views.user_metrics_chart, 
+         name='admin_user_metrics_chart'),
+    
+    path('charts/financial-history', 
+         admin_views.financial_history_chart, 
+         name='admin_financial_history_chart'),
+    
+    # ========================================================================
+    # PRIORITY 3: List Data (Paginated)
+    # ========================================================================
+    path('users/recent', 
+         admin_views.recent_signups, 
+         name='admin_recent_signups'),
+    
+    path('users/list', 
+         admin_views.all_users_list, 
+         name='admin_all_users_list'),
+]
+=======
     path(
         "dashboard/summary/",
         admin_views.dashboard_summary,
@@ -106,3 +199,4 @@ urlpatterns = [
     path("users/recent", admin_views.recent_signups, name="admin_recent_signups"),
     path("users/list", admin_views.all_users_list, name="admin_all_users_list"),
 ]
+>>>>>>> staging

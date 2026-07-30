@@ -9,6 +9,10 @@ from django.contrib.auth.hashers import make_password
 import logging
 from django.db.models import Q
 
+<<<<<<< HEAD
+
+=======
+>>>>>>> staging
 logger = logging.getLogger(__name__)
 
 
@@ -400,6 +404,8 @@ class TargetSavingsSerializer(serializers.ModelSerializer):
 
         return data
 
+<<<<<<< HEAD
+=======
     def update(self, instance, validated_data):
         # 🔴 SECURITY: target_amount/end_date drive process_deduction()'s
         # completion check and the 15% bonus's prorated-months calculation.
@@ -432,6 +438,7 @@ class TargetSavingsSerializer(serializers.ModelSerializer):
             )
         return super().update(instance, validated_data)
 
+>>>>>>> staging
     class Meta:
         model = TargetSavings
         fields = [
@@ -549,7 +556,11 @@ class CardSerializer(serializers.ModelSerializer):
 
     #         subject = "New Card Added Successfully"
     #         message = f"Well done {user.first_name},\n\nYour card has been successfully added to your account. \n\nKeep growing your funds.🥂\n\nMyFund"
+<<<<<<< HEAD
+    #         from_email = "MyFund <info@myfundmobile.com>"
+=======
     #         from_email = "MyFund <info@mg.myfundmobile.com>"
+>>>>>>> staging
     #         recipient_list = [user.email]
 
     #         send_mail(subject, message, from_email, recipient_list, fail_silently=False)
@@ -585,6 +596,8 @@ class TransactionSerializer(serializers.ModelSerializer):
         model = Transaction
         fields = "__all__"
         extra_kwargs = {"transaction_id": {"read_only": True}}
+<<<<<<< HEAD
+=======
 
     def get_is_processed(self, obj):
         # Check if this transaction has a corresponding withdrawal request
@@ -596,6 +609,7 @@ class TransactionSerializer(serializers.ModelSerializer):
         except WithdrawalsRequestToAdmin.DoesNotExist:
             # If no withdrawal request, it's not a scheduled withdrawal
             return True  # Or False depending on your logic
+>>>>>>> staging
 
 
 class QuickSaveSerializer(serializers.Serializer):
@@ -712,6 +726,8 @@ from .models import Group
 from authentication.models import CustomUser
 
 
+<<<<<<< HEAD
+=======
 def _resolve_profile_picture_url(profile_picture):
     """Same resolution rules as UserSerializer.get_profile_picture, factored
     out so GroupSerializer can attach contributor avatars without dragging in
@@ -729,6 +745,7 @@ def _resolve_profile_picture_url(profile_picture):
     return None
 
 
+>>>>>>> staging
 class GroupSerializer(serializers.ModelSerializer):
     # You may want to serialize user-related fields as well. For example, including the creator's username.
     created_by = serializers.SerializerMethodField()
@@ -748,6 +765,11 @@ class GroupSerializer(serializers.ModelSerializer):
         )  # Get unique emails of invited users
 
     def get_contributors(self, obj):
+<<<<<<< HEAD
+        return list(
+            set(user.email for user in obj.contributors.all())
+        )  # Get unique emails of contributors
+=======
         # Returns contributor identity + avatar so clients can render a
         # profile-picture stack instead of a plain headcount.
         seen_emails = set()
@@ -772,6 +794,7 @@ class GroupSerializer(serializers.ModelSerializer):
 
     def get_property(self, obj):
         return PropertySerializer(obj.property).data
+>>>>>>> staging
 
     status = serializers.ChoiceField(
         choices=Group.GROUP_STATUS
@@ -786,7 +809,10 @@ class GroupSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "property_id",
+<<<<<<< HEAD
+=======
             "property",
+>>>>>>> staging
             "created_by",
             "goal_amount",
             "minimum_contribution",
@@ -853,6 +879,8 @@ class ContributionSerializer(serializers.ModelSerializer):
         ]
 
 
+<<<<<<< HEAD
+=======
 from .models import GroupIncomeEvent, GroupIncomeDistribution
 
 
@@ -914,6 +942,7 @@ class GroupIncomeDistributionSerializer(serializers.ModelSerializer):
         ]
 
 
+>>>>>>> staging
 from .models import SavingsGoal
 
 

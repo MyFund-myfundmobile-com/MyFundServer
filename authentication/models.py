@@ -22,6 +22,10 @@ from django.db import transaction
 import logging
 from django.db.models import F
 
+<<<<<<< HEAD
+
+=======
+>>>>>>> staging
 logger = logging.getLogger(__name__)
 
 
@@ -72,10 +76,16 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     phone_number = models.CharField(max_length=15, unique=True)
     referral_reward_granted = models.BooleanField(default=False)
     otp = models.CharField(max_length=6, blank=True, null=True)
+<<<<<<< HEAD
+    reset_token = models.CharField(max_length=64, null=True, blank=True)
+    reset_token_expires = models.DateTimeField(null=True, blank=True)
+    profile_picture = models.CharField(max_length=200, null=True, blank=True)
+=======
     otp_created_at = models.DateTimeField(null=True, blank=True)
     reset_token = models.CharField(max_length=64, null=True, blank=True)
     reset_token_expires = models.DateTimeField(null=True, blank=True)
     profile_picture = models.CharField(max_length=1000, null=True, blank=True)
+>>>>>>> staging
     is_confirmed = models.BooleanField(default=False)
     referral_reward_confirmed_at = models.DateTimeField(null=True, blank=True)
     is_subscribed = models.BooleanField(default=True)
@@ -551,11 +561,18 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
             str(self.investment)
         )
 
+<<<<<<< HEAD
+        if self.profile_picture:
+            self.profile_picture = self.profile_picture.replace(
+                "https://myfund.onrender.com", "", 1
+            )
+=======
         if self.profile_picture and "myfund.onrender.com" in self.profile_picture:
             # Legacy URL cleanup: strip old Render domain to get the path,
             # then repoint to ImageKit
             path = self.profile_picture.replace("https://myfund.onrender.com", "")
             self.profile_picture = f"https://ik.imagekit.io/myfundmobile{path}"
+>>>>>>> staging
 
         super().save(*args, **kwargs)
 
@@ -689,7 +706,11 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                 subject=subject,
                 message=message_html,
                 recipient_list=[self.email],
+<<<<<<< HEAD
+                from_email="MyFund <info@myfundmobile.com>",
+=======
                 from_email="MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
                 template="email/email.html",  # <-- add this
             )
             logger.info(f"✅ Welcome email sent to {self.email}")
@@ -757,7 +778,11 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                     subject=subject,
                     message=message,
                     recipient_list=[self.referral.email],
+<<<<<<< HEAD
+                    from_email="MyFund <info@myfundmobile.com>",
+=======
                     from_email="MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
                     template="email/email.html",
                 )
             except Exception as e:
@@ -779,7 +804,11 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                 subject=subject,
                 message=message,
                 recipient_list=[self.email],
+<<<<<<< HEAD
+                from_email="MyFund <info@myfundmobile.com>",
+=======
                 from_email="MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
                 template="email/email.html",
             )
         except Exception as e:
@@ -991,7 +1020,11 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                 subject=subject,
                 message=message,
                 recipient_list=[user.email],
+<<<<<<< HEAD
+                from_email="MyFund <info@myfundmobile.com>",
+=======
                 from_email="MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
                 template="email/email.html",  # <-- ensures your header/footer template is used
             )
             logger.info(f"✅ Confirmation email sent to {user.email}")
@@ -1101,6 +1134,8 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         ]
 
 
+<<<<<<< HEAD
+=======
 class OTPDeliveryLog(models.Model):
     DELIVERY_STATUS_CHOICES = [
         ("pending", "Pending"),
@@ -1134,6 +1169,7 @@ class OTPDeliveryLog(models.Model):
         return f"{self.user.email} - {self.otp}"
 
 
+>>>>>>> staging
 class MonthlySavings(models.Model):
     user = models.ForeignKey(
         CustomUser, on_delete=models.CASCADE, related_name="monthly_savings"
@@ -1374,6 +1410,8 @@ class AccountBalance(models.Model):
     wallet = models.DecimalField(max_digits=10, decimal_places=2, default=0)
 
 
+<<<<<<< HEAD
+=======
 class PhoneChangeRequest(models.Model):
     STATUS_CHOICES = (
         ("pending", "Pending"),
@@ -1400,6 +1438,7 @@ class PhoneChangeRequest(models.Model):
     approved_at = models.DateTimeField(null=True, blank=True)
 
 
+>>>>>>> staging
 from django.db import models
 from django.conf import settings
 
@@ -1426,12 +1465,16 @@ class DvaDepositIntent(models.Model):
     purpose = models.CharField(max_length=20, choices=PURPOSE_CHOICES)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
     transaction_id = models.CharField(max_length=50, unique=True)
+<<<<<<< HEAD
+    paystack_reference = models.CharField(max_length=100, null=True, blank=True)
+=======
     paystack_reference = models.CharField(
         max_length=100,
         null=True,
         blank=True,
         unique=True,
     )
+>>>>>>> staging
     matched_account_number = models.CharField(max_length=20, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     confirmed_at = models.DateTimeField(null=True, blank=True)
@@ -1454,6 +1497,10 @@ from django.utils import timezone
 from datetime import timedelta
 from decimal import Decimal
 
+<<<<<<< HEAD
+
+=======
+>>>>>>> staging
 logger = logging.getLogger(__name__)
 
 
@@ -1620,6 +1667,13 @@ class TargetSavings(models.Model):
                     id=target.user.id
                 )
 
+<<<<<<< HEAD
+                # Skip if no longer actionable
+                # Skip if no longer actionable
+                if target.is_completed or target.is_cancelled or not target.is_active:
+                    logger.info(
+                        f"Target {target.id} is completed/cancelled/inactive, skipping deduction"
+=======
                 # Skip only if this target has already been closed out. Note:
                 # deliberately NOT checking target.is_completed here - that
                 # property just reflects current_amount >= target_amount,
@@ -1634,6 +1688,7 @@ class TargetSavings(models.Model):
                 if target.is_cancelled or not target.is_active:
                     logger.info(
                         f"Target {target.id} is cancelled/inactive, skipping deduction"
+>>>>>>> staging
                     )
                     return False
 
@@ -1646,6 +1701,8 @@ class TargetSavings(models.Model):
                     target.save(update_fields=["is_active"])
                     return False
 
+<<<<<<< HEAD
+=======
                 # Already fully funded (e.g. a single upfront payment covered
                 # the whole target at creation, or a balance was adjusted
                 # directly) - nothing left to deduct, so route straight to
@@ -1655,6 +1712,7 @@ class TargetSavings(models.Model):
                 if target.current_amount >= target.target_amount:
                     return target._complete_target(user)
 
+>>>>>>> staging
                 # Base amount (guard against None)
                 amount = target.monthly_payment or Decimal("0")
 
@@ -1708,6 +1766,10 @@ class TargetSavings(models.Model):
                             ]
                         )
 
+<<<<<<< HEAD
+                        # Refund 99%
+                        # 🚫 BANNED USERS DO NOT GET REFUNDS
+=======
                         # Refund 99% - banned users forfeit their refund
                         # entirely. `refund_amount` was previously left
                         # undefined for the normal (non-banned) case, which
@@ -1717,17 +1779,22 @@ class TargetSavings(models.Model):
                         # re-hit this exact crash on every subsequent retry
                         # forever: never refunded, never paused, never
                         # notified.
+>>>>>>> staging
                         if user.is_banned:
                             logger.warning(
                                 f"Banned user {user.email} attempted refund on target {target.id}. Blocking refund."
                             )
                             refund_amount = Decimal("0")
                             charge = target.current_amount
+<<<<<<< HEAD
+                        charge = target.current_amount - refund_amount
+=======
                         else:
                             refund_amount = (
                                 target.current_amount * Decimal("0.99")
                             ).quantize(Decimal("0.01"))
                             charge = target.current_amount - refund_amount
+>>>>>>> staging
 
                         if refund_amount > 0:
                             if target.funding_source == "SAVINGS":
@@ -1846,7 +1913,101 @@ class TargetSavings(models.Model):
 
                 # If target completed, handle completion flow
                 if target.current_amount >= target.target_amount:
+<<<<<<< HEAD
+
+                    today = timezone.now().date()
+                    bonus = Decimal("0")
+                    completed_amount = target.current_amount
+
+                    if today <= target.end_date:
+                        # 🔹 Use prorated 13% p.a. bonus
+                        months = max(
+                            1,
+                            (target.end_date.year - target.start_date.year) * 12
+                            + (target.end_date.month - target.start_date.month),
+                        )
+                        bonus = (
+                            completed_amount
+                            * Decimal("0.15")
+                            * Decimal(months)
+                            / Decimal(12)
+                        ).quantize(Decimal("0.01"))
+
+                    user.wallet += completed_amount + bonus
+                    user.save(update_fields=["wallet"])
+
+                    # zero out and deactivate target
+                    target.current_amount = Decimal("0")
+                    target.is_active = False
+                    target.save()
+
+                    TargetSavingsCompletion.objects.create(
+                        user=user,
+                        target_savings=target,
+                        completed_amount=completed_amount,
+                        bonus_amount=bonus,
+                        total_amount=completed_amount + bonus,
+                        completed_date=today,
+                        was_on_time=today <= target.end_date,
+                    )
+
+                    Transaction.objects.create(
+                        user=user,
+                        transaction_type="credit",
+                        status="confirmed",
+                        amount=completed_amount + bonus,
+                        description=f"{target.name} Completed! ✅",
+                        service_charge=0,
+                        total_amount=completed_amount + bonus,
+                        target_savings=target,
+                        source="TARGET_COMPLETION",
+                        transaction_id=f"[{target.id}]-{uuid.uuid4().hex[:12]}_COMPLETION",
+                    )
+
+                    # ✅ Record wallet credit transaction (separate, so user sees wallet inflow)
+                    Transaction.objects.create(
+                        user=user,
+                        transaction_type="credit",
+                        status="confirmed",
+                        amount=completed_amount + bonus,
+                        description=f"{target.name} Completed! ✅",
+                        service_charge=0,
+                        total_amount=completed_amount + bonus,
+                        source="WALLET",
+                        transaction_id=f"[{target.id}]-{uuid.uuid4().hex[:12]}_WALLET",
+                    )
+
+                    def _notify_completion():
+                        try:
+                            target.send_completion_email()
+                        except Exception as e:
+                            logger.exception(
+                                f"Error sending completion email for target {target.id}: {e}"
+                            )
+                        try:
+                            send_push_notification(
+                                user,
+                                title=f"🎉 {target.name} Target Completed!✅",
+                                message=(
+                                    f"Congratulations, your {target.name} Target Savings is completed! "
+                                    f"₦{completed_amount + bonus:,.2f} credited to your wallet."
+                                ),
+                                data={
+                                    "target_id": target.id,
+                                    "type": "TARGET_COMPLETED",
+                                    "amount": float(completed_amount + bonus),
+                                },
+                            )
+                        except Exception as e:
+                            logger.exception(
+                                f"Error sending completion push for target {target.id}: {e}"
+                            )
+
+                    transaction.on_commit(_notify_completion)
+                    return True
+=======
                     return target._complete_target(user)
+>>>>>>> staging
 
                 # Otherwise persist next deduction and create auto transaction, then notify
                 target.update_next_deduction_date()
@@ -1916,6 +2077,8 @@ class TargetSavings(models.Model):
                 logger.exception("Failed to schedule retry after unexpected error")
             return False
 
+<<<<<<< HEAD
+=======
     def _complete_target(self, user):
         """Credit the completion bonus and close out a fully-funded target.
 
@@ -2022,6 +2185,7 @@ class TargetSavings(models.Model):
         transaction.on_commit(_notify_completion)
         return True
 
+>>>>>>> staging
     def send_failed_deduction_email(self, max_attempts=False):
         """Send formatted email notification about failed deduction using generic email helper"""
         from .utils import send_generic_email
@@ -2189,8 +2353,11 @@ class Transaction(models.Model):
         help_text="Where the transaction funds came from",
     )
 
+<<<<<<< HEAD
+=======
     source_channel = models.CharField(max_length=20, null=True, blank=True)
 
+>>>>>>> staging
     credited_to = models.CharField(
         max_length=20,
         choices=[
@@ -2210,10 +2377,13 @@ class Transaction(models.Model):
     )
 
     transaction_type = models.CharField(max_length=20, choices=TRANSACTION_TYPES)
+<<<<<<< HEAD
+=======
     is_processed = models.BooleanField(
         default=False,
         help_text="For scheduled withdrawals - whether the scheduled withdrawal has been processed",
     )
+>>>>>>> staging
     status = models.CharField(
         max_length=20, choices=STATUS_TYPES, default="pending", db_index=True
     )
@@ -2305,7 +2475,10 @@ class Transaction(models.Model):
         ]
 
 
+<<<<<<< HEAD
+=======
 # Push Notifications Model
+>>>>>>> staging
 class PushNotifications(models.Model):
     NOTIFICATION_TYPES = (
         ("CREDIT", "Credit Transaction"),
@@ -2333,6 +2506,8 @@ class PushNotifications(models.Model):
         return f"{self.title} - {self.user.email}"
 
 
+<<<<<<< HEAD
+=======
 # Metrics MODEL #Metric MODEL
 
 
@@ -2409,6 +2584,7 @@ class MetricSnapshot(models.Model):
         return f"{self.period_type} metrics - {self.snapshot_date}"
 
 
+>>>>>>> staging
 class AutoSave(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     card = models.ForeignKey(Card, on_delete=models.CASCADE, null=True, blank=True)
@@ -2594,7 +2770,10 @@ class WithdrawalsRequestToAdmin(models.Model):
     target_bank = models.CharField(max_length=100, default="")
     target_account_number = models.CharField(max_length=50, default="")
     target_account_name = models.CharField(max_length=255, blank=True, null=True)
+<<<<<<< HEAD
+=======
 
+>>>>>>> staging
     # Withdrawal type fields
     withdrawal_type = models.CharField(
         max_length=50,
@@ -2608,6 +2787,8 @@ class WithdrawalsRequestToAdmin(models.Model):
         help_text="Date when scheduled withdrawal should be processed",
     )
 
+<<<<<<< HEAD
+=======
     # ✅ ADDED STATUS FIELD
     WITHDRAWAL_STATUS = (
         ("pending", "Pending"),
@@ -2626,6 +2807,7 @@ class WithdrawalsRequestToAdmin(models.Model):
         help_text="Current status of the withdrawal request",
     )
 
+>>>>>>> staging
     # Add a method to calculate net amount if needed
     @property
     def net_amount(self):
@@ -2864,6 +3046,8 @@ class Contribution(models.Model):
         return f"Contribution by {self.user.email} to Group {self.group.id} (Amount: {self.amount}, Source: {self.source}, Ownership: {self.ownership_percentage}%)"
 
 
+<<<<<<< HEAD
+=======
 class GroupIncomeEvent(models.Model):
     STATUS_CHOICES = [
         ("pending", "Pending"),
@@ -2920,6 +3104,7 @@ class GroupIncomeDistribution(models.Model):
         return f"Distribution of {self.amount} to {self.user.email} from event {self.income_event_id}"
 
 
+>>>>>>> staging
 class SavingsGoal(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
@@ -3276,6 +3461,8 @@ class AmbassadorAttendanceSubmission(models.Model):
 
     def __str__(self):
         return f"{self.user.email} - {self.week_key} - {self.attendance_date}"
+<<<<<<< HEAD
+=======
 
 
 class FinanceMetricSnapshot(models.Model):
@@ -3400,3 +3587,4 @@ class PayrollEntry(models.Model):
 
     def __str__(self):
         return f"{self.name} - ₦{self.amount} - {self.status}"
+>>>>>>> staging

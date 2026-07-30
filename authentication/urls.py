@@ -34,12 +34,20 @@ from .views import (
     get_my_push_notifications,
     send_admin_push_notification,
     save_expo_push_token,
+<<<<<<< HEAD
+=======
     remove_expo_push_token,
+>>>>>>> staging
     earnings_summary,
     get_or_create_dva_account,
     initiate_dva_quicksave,
     initiate_dva_quickinvest,
     requery_my_dva_payments,
+<<<<<<< HEAD
+    AmbassadorMonthlyReportCreateView,
+    AmbassadorMonthlyReportStatusView,
+    submit_ambassador_attendance,
+=======
     remove_dva_account,
     profile_picture_update_base64,
     AmbassadorMonthlyReportCreateView,
@@ -49,12 +57,15 @@ from .views import (
     request_phone_change,
     verify_phone_change,
     approve_phone_change_view,
+>>>>>>> staging
 )
 from django.views.decorators.csrf import csrf_exempt
 from authentication.views import CustomGraphQLView
 from authentication.schema import schema  # Adjust the import path
 from graphql_jwt.decorators import jwt_cookie
 from .ai_views import admin_ai_chat
+<<<<<<< HEAD
+=======
 from .action_views import (
     approve_bank_transfer_action,
     approve_invest_transfer_action,
@@ -62,6 +73,7 @@ from .action_views import (
     mark_bank_transfer_abandoned_action,
     mark_invest_transfer_abandoned_action,
 )
+>>>>>>> staging
 
 router = DefaultRouter()
 router.register(r"bank-accounts", views.BankAccountViewSet, basename="bank-account")
@@ -263,7 +275,10 @@ urlpatterns = [
         requery_my_dva_payments,
         name="requery_my_dva_payments",
     ),
+<<<<<<< HEAD
+=======
     path("dva/remove/", remove_dva_account, name="remove_dva_account"),
+>>>>>>> staging
     # PIN Management APIs
     path("update-myfundpin/", views.update_myfund_pin, name="update-myfundpin"),
     path("has-myfundpin/", views.has_myfund_pin, name="has-myfundpin"),
@@ -304,11 +319,14 @@ urlpatterns = [
         views.get_groupbuy_by_property,
         name="get_groupbuy_by_property",
     ),
+<<<<<<< HEAD
+=======
     path(
         "groupbuy/detail/<str:group_id>/",
         views.get_groupbuy_by_id,
         name="get_groupbuy_by_id",
     ),
+>>>>>>> staging
     path("groupbuy/join/<str:group_id>/", views.join_groupbuy, name="join_groupbuy"),
     path(
         "groupbuy/invite/<str:group_id>/",
@@ -328,6 +346,8 @@ urlpatterns = [
     path("groupbuy/leave/<str:group_id>/", views.leave_groupbuy, name="leave_group"),
     path("user/groupbuy/", views.get_user_groupbuys, name="get_user_groupbuys"),
     path(
+<<<<<<< HEAD
+=======
         "user/groupbuy/invited/",
         views.get_invited_groupbuys,
         name="get_invited_groupbuys",
@@ -338,15 +358,19 @@ urlpatterns = [
         name="trigger_groupbuy_expiry_sweep",
     ),
     path(
+>>>>>>> staging
         "user/groupbuy/contributions/",
         views.get_user_groupbuy_contributions,
         name="get_user_groupbuy_contributions",
     ),
+<<<<<<< HEAD
+=======
     path(
         "user/groupbuy/income-history/",
         views.get_user_groupbuy_income_history,
         name="get_user_groupbuy_income_history",
     ),
+>>>>>>> staging
     # Target Savings URLs
     path(
         "target-savings/",
@@ -416,7 +440,10 @@ urlpatterns = [
     ),
     path("admin/send-push/", send_admin_push_notification, name="send_admin_push"),
     path("push/save-token/", save_expo_push_token, name="save_push_token"),
+<<<<<<< HEAD
+=======
     path("push/remove-token/", remove_expo_push_token, name="remove_push_token"),
+>>>>>>> staging
     path("top-referrals/", TopReferralsAPIView.as_view(), name="top-referrals"),
     # Ambassadors
     path(
@@ -436,6 +463,8 @@ urlpatterns = [
     ),
     # AI
     path("admin-ai-chat/", admin_ai_chat, name="admin_ai_chat"),
+<<<<<<< HEAD
+=======
     # DEEP LINKS FOR PUSH NOTIFICATIONS
     path(
         "admin-action/approve-bank-transfer/",
@@ -468,4 +497,5 @@ urlpatterns = [
         AdminFinanceMetricsView.as_view(),
         name="admin-finance-metrics",
     ),
+>>>>>>> staging
 ]
