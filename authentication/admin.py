@@ -16,6 +16,10 @@ from .models import (
     TopSaverHistory,
     DailyROIAccrual,
     ROITransaction,
+<<<<<<< HEAD
+=======
+    FinanceMetricSnapshot,
+>>>>>>> staging
 )
 from django.core.mail import send_mail
 from django.urls import reverse
@@ -43,6 +47,14 @@ from django.utils.html import format_html
 from django.urls import reverse
 from django.contrib import messages
 from django.utils.html import format_html
+<<<<<<< HEAD
+=======
+from authentication.tasks import (
+    daily_metrics_task,
+    weekly_metrics_task,
+    monthly_metrics_task,
+)
+>>>>>>> staging
 
 from .utils import (
     send_push_notification,
@@ -55,9 +67,18 @@ from .utils import (
     approve_quicksave_credit,
     approve_quickinvest_credit,
     send_ambassador_status_notification,
+<<<<<<< HEAD
     create_transaction,
 )
 from decimal import Decimal
+=======
+    grant_user_ambassador_status,
+    revoke_user_ambassador_status,
+    create_transaction,
+)
+from decimal import Decimal
+from django.utils.html import format_html
+>>>>>>> staging
 
 GOOGLE_FORM_TEMPLATE = (
     "https://docs.google.com/forms/d/e/1FAIpQLSfHbVd5EtzSyJskgdvCRfGfYrdGaTw3RwCvnkk7pjl6LvS59A/"
@@ -149,6 +170,10 @@ class CustomUserAdmin(UserAdmin):
         "email",
         "first_name",
         "last_name",
+<<<<<<< HEAD
+=======
+        "get_due_targets",
+>>>>>>> staging
         "phone_number",
         "get_total_referrals",
         "get_confirmed_referrals",
@@ -357,6 +382,22 @@ class CustomUserAdmin(UserAdmin):
             ),
         )
 
+<<<<<<< HEAD
+=======
+    def get_due_targets(self, obj):
+        from django.utils import timezone
+        from authentication.models import TargetSavings
+
+        return TargetSavings.objects.filter(
+            user=obj,
+            is_active=True,
+            is_cancelled=False,
+            next_deduction__lte=timezone.now(),
+        ).count()
+
+    get_due_targets.short_description = "Due Targets"
+
+>>>>>>> staging
     def get_daily_savings_roi_rate(self):
         """Calculate daily savings ROI rate (13% per annum)"""
         return Decimal("0.13") / Decimal("365")
@@ -588,6 +629,7 @@ class CustomUserAdmin(UserAdmin):
         updated_count = 0
 
         for user in queryset:
+<<<<<<< HEAD
             if not user.is_ambassador:
                 user.is_ambassador = True
                 user.save(update_fields=["is_ambassador"])
@@ -595,6 +637,9 @@ class CustomUserAdmin(UserAdmin):
                     user=user,
                     became_ambassador=True,
                 )
+=======
+            if grant_user_ambassador_status(user):
+>>>>>>> staging
                 updated_count += 1
 
         self.message_user(
@@ -608,6 +653,7 @@ class CustomUserAdmin(UserAdmin):
         updated_count = 0
 
         for user in queryset:
+<<<<<<< HEAD
             if user.is_ambassador:
                 user.is_ambassador = False
                 user.save(update_fields=["is_ambassador"])
@@ -615,6 +661,9 @@ class CustomUserAdmin(UserAdmin):
                     user=user,
                     became_ambassador=False,
                 )
+=======
+            if revoke_user_ambassador_status(user):
+>>>>>>> staging
                 updated_count += 1
 
         self.message_user(
@@ -1104,7 +1153,11 @@ class CustomUserAdmin(UserAdmin):
                 send_generic_email(
                     subject=f"[TEST] Top Saver Notification - {prev_month_name}",
                     message=email_message,
+<<<<<<< HEAD
                     from_email="MyFund <info@myfundmobile.com>",
+=======
+                    from_email="MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
                     recipient_list=[user.email],
                 )
 
@@ -1410,15 +1463,52 @@ from django.contrib import messages
 import uuid
 
 
+<<<<<<< HEAD
+=======
+def get_transfer_status_badge(obj):
+    transaction = Transaction.objects.filter(
+        user=obj.user, transaction_id=obj.transaction_id
+    ).first()
+
+    # 🟢 Approved (deeper green)
+    if obj.is_approved:
+        return format_html(
+            '<span style="padding:4px 10px; border-radius:10px; background:#166534; color:#ffffff; font-size:11px; font-weight:600;">'
+            "✅</span>"
+        )
+
+    # ⚫ Cleaned Up (deeper grey)
+    if transaction and transaction.status.lower() == "abandoned":
+        return format_html(
+            '<span style="padding:4px 10px; border-radius:10px; background:#374151; color:#ffffff; font-size:11px; font-weight:600;">'
+            "🧹</span>"
+        )
+
+    # 🟠 Pending (deeper orange)
+    return format_html(
+        '<span style="padding:4px 10px; border-radius:10px; background:#c2410c; color:#ffffff; font-size:11px; font-weight:600;">'
+        "⏳</span>"
+    )
+
+
+>>>>>>> staging
 @admin.register(BankTransferRequest)
 class BankTransferRequestAdmin(admin.ModelAdmin):
     list_display = (
         "user_full_name",
+<<<<<<< HEAD
         "is_approved",
+=======
+        "status_badge",
+>>>>>>> staging
         "amount",
         "user_email",
         "created_at",
     )
+<<<<<<< HEAD
+=======
+
+>>>>>>> staging
     list_filter = ("is_approved",)
     search_fields = (
         "user__email",
@@ -1426,7 +1516,35 @@ class BankTransferRequestAdmin(admin.ModelAdmin):
         "user__last_name",
         "transaction_id",
     )
+<<<<<<< HEAD
     actions = ["approve_bank_transfer"]
+=======
+
+    actions = ["approve_bank_transfer", "mark_as_abandoned"]
+
+    # ─────────────────────────────────────────────
+    # DISPLAY HELPERS
+    # ─────────────────────────────────────────────
+
+    def user_email(self, obj):
+        return obj.user.email
+
+    user_email.short_description = "Email"
+
+    def user_full_name(self, obj):
+        return f"{obj.user.first_name} {obj.user.last_name}"
+
+    user_full_name.short_description = "Full Name"
+
+    def status_badge(self, obj):
+        return get_transfer_status_badge(obj)
+
+    status_badge.short_description = "Status"
+
+    # ─────────────────────────────────────────────
+    # ACTIONS
+    # ─────────────────────────────────────────────
+>>>>>>> staging
 
     # ✅ DISPLAY HELPERS (must be class-level)
     def user_email(self, obj):
@@ -1445,22 +1563,33 @@ class BankTransferRequestAdmin(admin.ModelAdmin):
     def approve_bank_transfer(self, request, queryset):
         for transfer_request in queryset:
             user = transfer_request.user
+<<<<<<< HEAD
             transaction_id = transfer_request.transaction_id
+=======
+>>>>>>> staging
 
             ok, msg = approve_quicksave_credit(
                 user=user,
                 amount=transfer_request.amount,
+<<<<<<< HEAD
                 transaction_id=transaction_id,
+=======
+                transaction_id=transfer_request.transaction_id,
+>>>>>>> staging
                 description="QuickSave (Transfer)",
                 source="BANK_TRANSFER",
             )
 
             if not ok:
+<<<<<<< HEAD
                 self.message_user(
                     request,
                     f"{msg} for {user.email}",
                     level="error",
                 )
+=======
+                self.message_user(request, f"{msg} for {user.email}", level="error")
+>>>>>>> staging
                 continue
 
             transfer_request.is_approved = True
@@ -1471,35 +1600,115 @@ class BankTransferRequestAdmin(admin.ModelAdmin):
             "Selected bank transfers approved successfully!",
             level="success",
         )
+<<<<<<< HEAD
+=======
+
+    @admin.action(description="🧹 Mark selected pending transfers as abandoned")
+    def mark_as_abandoned(self, request, queryset):
+        cleaned_count = 0
+
+        for transfer_request in queryset.filter(is_approved=False):
+            transaction = Transaction.objects.filter(
+                user=transfer_request.user,
+                transaction_id=transfer_request.transaction_id,
+                status__iexact="pending",
+            ).first()
+
+            if transaction:
+                transaction.status = "abandoned"
+                transaction.description = "QuickSave (Abandoned)"
+                transaction.save(update_fields=["status", "description"])
+                cleaned_count += 1
+
+        self.message_user(
+            request,
+            f"{cleaned_count} abandoned QuickSave transfer(s) cleaned up.",
+            level=messages.SUCCESS,
+        )
+>>>>>>> staging
 
     approve_bank_transfer.short_description = "Approve selected bank transfers"
 
 
 @admin.register(InvestTransferRequest)
 class InvestTransferRequestAdmin(admin.ModelAdmin):
+<<<<<<< HEAD
     list_display = ("user", "amount", "is_approved", "created_at")
     list_filter = ("is_approved",)
     actions = ["approve_invest_transfer", "reject_invest_transfer"]
+=======
+    list_display = (
+        "user_full_name",
+        "status_badge",
+        "amount",
+        "user_email",
+        "created_at",
+    )
+
+    list_filter = ("is_approved",)
+    search_fields = (
+        "user__email",
+        "user__first_name",
+        "user__last_name",
+        "transaction_id",
+    )
+
+    actions = ["approve_invest_transfer", "mark_as_abandoned"]
+
+    # ─────────────────────────────────────────────
+    # DISPLAY HELPERS
+    # ─────────────────────────────────────────────
+
+    def user_email(self, obj):
+        return obj.user.email
+
+    user_email.short_description = "Email"
+
+    def user_full_name(self, obj):
+        return f"{obj.user.first_name} {obj.user.last_name}"
+
+    user_full_name.short_description = "Full Name"
+
+    def status_badge(self, obj):
+        return get_transfer_status_badge(obj)
+
+    status_badge.short_description = "Status"
+
+    # ─────────────────────────────────────────────
+    # ACTIONS
+    # ─────────────────────────────────────────────
+>>>>>>> staging
 
     def approve_invest_transfer(self, request, queryset):
         for transfer_request in queryset:
             user = transfer_request.user
+<<<<<<< HEAD
             transaction_id = transfer_request.transaction_id
+=======
+>>>>>>> staging
 
             ok, msg = approve_quickinvest_credit(
                 user=user,
                 amount=transfer_request.amount,
+<<<<<<< HEAD
                 transaction_id=transaction_id,
+=======
+                transaction_id=transfer_request.transaction_id,
+>>>>>>> staging
                 description="QuickInvest (Transfer)",
                 source="BANK_TRANSFER",
             )
 
             if not ok:
+<<<<<<< HEAD
                 self.message_user(
                     request,
                     f"{msg} for {user.email}",
                     level="error",
                 )
+=======
+                self.message_user(request, f"{msg} for {user.email}", level="error")
+>>>>>>> staging
                 continue
 
             transfer_request.is_approved = True
@@ -1510,8 +1719,37 @@ class InvestTransferRequestAdmin(admin.ModelAdmin):
             "Selected investment transfers approved successfully!",
             level="success",
         )
+<<<<<<< HEAD
+=======
+
+    @admin.action(
+        description="🧹 Mark selected pending QuickInvest transfers as abandoned"
+    )
+    def mark_as_abandoned(self, request, queryset):
+        cleaned_count = 0
+
+        for transfer_request in queryset.filter(is_approved=False):
+            transaction = Transaction.objects.filter(
+                user=transfer_request.user,
+                transaction_id=transfer_request.transaction_id,
+                status__iexact="pending",
+            ).first()
+
+            if transaction:
+                transaction.status = "abandoned"
+                transaction.description = "QuickInvest (Abandoned)"
+                transaction.save(update_fields=["status", "description"])
+                cleaned_count += 1
+
+        self.message_user(
+            request,
+            f"{cleaned_count} abandoned QuickInvest transfer(s) cleaned up.",
+            level=messages.SUCCESS,
+        )
+>>>>>>> staging
 
 
+<<<<<<< HEAD
 from django.contrib import admin
 from django.db import transaction as db_transaction
 from django.core.mail import send_mail
@@ -1716,6 +1954,340 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
         else:
             self.message_user(request, "No withdrawals were approved.")
 
+=======
+
+from django.contrib import admin, messages
+from django.db import transaction as db_transaction
+from django.utils import timezone
+
+from .models import WithdrawalsRequestToAdmin, Transaction, BankAccount
+from .utils import (
+    process_scheduled_withdrawal,
+    send_push_notification,
+    send_generic_email,
+)
+
+
+class OverdueScheduledWithdrawalFilter(admin.SimpleListFilter):
+    title = "scheduled withdrawal status"
+    parameter_name = "scheduled_withdrawal_status"
+
+    def lookups(self, request, model_admin):
+        return (
+            ("overdue", "Overdue scheduled withdrawals"),
+            ("due_today", "Due today"),
+            ("processed", "Processed scheduled withdrawals"),
+        )
+
+    def queryset(self, request, queryset):
+        today = timezone.localdate()
+
+        if self.value() == "overdue":
+            return queryset.filter(
+                withdrawal_type="scheduled",
+                scheduled_processing_date__lt=today,
+                is_processed=False,
+            )
+
+        if self.value() == "due_today":
+            return queryset.filter(
+                withdrawal_type="scheduled",
+                scheduled_processing_date=today,
+                is_processed=False,
+            )
+
+        if self.value() == "processed":
+            return queryset.filter(
+                withdrawal_type="scheduled",
+                is_processed=True,
+            )
+
+        return queryset
+
+
+@admin.register(WithdrawalsRequestToAdmin)
+class PendingWithdrawalsAdmin(admin.ModelAdmin):
+    list_display = (
+        "is_approved",
+        "user",
+        "source_account",
+        "withdrawal_type",
+        "total_amount_display",  # Original requested amount
+        "charge_percentage_display",  # %
+        "charge_amount_display",  # ₦ charge
+        "net_amount_display",  # ₦ to send
+        "target_bank_display",
+        "target_account_number",
+        "target_account_name_display",
+        "created_at",
+        "scheduled_processing_date",
+        "transaction_id",
+        "status",  # ✅ ADDED status to display
+    )
+
+    list_filter = (
+        OverdueScheduledWithdrawalFilter,
+        "is_approved",
+        "is_processed",
+        "source_account",
+        "withdrawal_type",
+        "status",
+        "scheduled_processing_date",
+    )
+
+    search_fields = (
+        "user__email",
+        "transaction_id",
+        "target_bank",
+        "source_account",
+        "target_account_number",
+    )
+
+    actions = ["approve_withdrawal", "force_credit_wallet"]
+
+    # =========================
+    # DISPLAY HELPERS (READ-ONLY)
+    # =========================
+
+    def target_bank_display(self, obj):
+        if getattr(obj, "target_bank", None):
+            return obj.target_bank
+
+        bank = BankAccount.objects.filter(
+            user=obj.user,
+            account_number=obj.target_account_number,
+        ).first()
+
+        if bank:
+            return bank.bank_name
+
+        return "-"
+
+    target_bank_display.short_description = "Target Bank"
+
+    def target_account_name_display(self, obj):
+        if getattr(obj, "target_account_name", None):
+            return obj.target_account_name
+
+        bank = BankAccount.objects.filter(
+            user=obj.user,
+            account_number=obj.target_account_number,
+        ).first()
+
+        if bank:
+            return bank.account_name
+
+        return "-"
+
+    target_account_name_display.short_description = "Target Account Name"
+
+    def total_amount_display(self, obj):
+        """Original amount requested by user"""
+        return f"₦{obj.total_amount:,.2f}"
+
+    total_amount_display.short_description = "Requested"
+
+    def charge_percentage_display(self, obj):
+        """Stored charge percentage"""
+        if obj.withdrawal_type.lower() != "immediate":
+            return "0%"
+        return f"{obj.charge_percentage:.0f}%"
+
+    charge_percentage_display.short_description = "%"
+
+    def charge_amount_display(self, obj):
+        """Stored charge amount"""
+        return f"₦{obj.charge_amount:,.2f}"
+
+    charge_amount_display.short_description = "Charge"
+
+    def net_amount_display(self, obj):
+        """Amount admin should send"""
+        return f"₦{obj.amount:,.2f}"
+
+    net_amount_display.short_description = "To Send"
+
+    # =========================
+    # ADMIN ACTIONS
+    # =========================
+
+    def approve_withdrawal(self, request, queryset):
+        approved_count = 0
+        skipped_scheduled = 0
+
+        for withdrawal in queryset:
+            if withdrawal.is_approved:
+                continue
+
+            # 🔴 This action is for immediate bank-payout withdrawals only -
+            # it flips is_processed=True and never touches user.wallet,
+            # since for an immediate withdrawal the money already left
+            # savings/investment for the bank at request time. Scheduled
+            # withdrawals instead need process_scheduled_withdrawal() (via
+            # "Force credit wallet" below) to actually pay out - running
+            # this action on one instead permanently stranded the money:
+            # marked "completed" with is_processed=True (which blocks the
+            # real crediting task/action from ever picking it up again),
+            # but nothing ever landed in the user's wallet.
+            if withdrawal.withdrawal_type == "scheduled":
+                skipped_scheduled += 1
+                continue
+
+            user = withdrawal.user
+            transaction_id = withdrawal.transaction_id
+
+            try:
+                with db_transaction.atomic():
+                    withdrawal.is_approved = True
+                    withdrawal.is_processed = True
+                    withdrawal.withdrawal_type = "immediate"
+                    withdrawal.scheduled_processing_date = None
+                    withdrawal.status = "completed"
+
+                    withdrawal.save(
+                        update_fields=[
+                            "is_approved",
+                            "is_processed",
+                            "withdrawal_type",
+                            "scheduled_processing_date",
+                            "status",
+                        ]
+                    )
+
+                    transaction = Transaction.objects.get(
+                        user=user, transaction_id=transaction_id
+                    )
+
+                    # Capture balance snapshot at approval time
+                    source = (
+                        withdrawal.source_account.lower()
+                    )  # "savings", "investment", "wallet"
+                    if source == "savings":
+                        balance_before = (
+                            user.savings + withdrawal.total_amount
+                        )  # already debited when scheduled
+                        balance_after = user.savings
+                    elif source == "investment":
+                        balance_before = user.investment + withdrawal.total_amount
+                        balance_after = user.investment
+                    else:
+                        balance_before = user.wallet + withdrawal.total_amount
+                        balance_after = user.wallet
+
+                    transaction.status = "confirmed"
+                    destination = "Bank"
+                    source_display = withdrawal.source_account.capitalize()
+
+                    transaction.description = f"{source_display} > {destination}"
+                    transaction.balance_before = balance_before
+                    transaction.balance_after = balance_after
+                    transaction.save()
+
+                    approved_count += 1
+
+                    # Push notification
+                    send_push_notification(
+                        user=user,
+                        title="Withdrawal Successful! ✅",
+                        message=(
+                            f"{user.first_name}, your withdrawal of ₦{withdrawal.amount:,.2f} "
+                            f"to your {withdrawal.target_bank} account has been processed successfully."
+                        ),
+                        data={
+                            "amount": str(withdrawal.amount),
+                            "transaction_id": transaction_id,
+                            "source_account": withdrawal.source_account,
+                            "status": "confirmed",
+                        },
+                        notif_type="DEBIT",
+                    )
+
+                    # Email
+                    try:
+                        send_generic_email(
+                            subject="Withdrawal Successful ✔",
+                            message=(
+                                f"Hi {user.first_name},<br><br>"
+                                f"Your withdrawal of ₦{withdrawal.amount:,.2f} from your "
+                                f"{withdrawal.source_account.capitalize()} account "
+                                f"has been processed successfully.<br><br>"
+                                f"Transaction ID: {transaction_id}<br><br>"
+                                f"MyFund Team"
+                            ),
+                            from_email="MyFund <info@mg.myfundmobile.com>",
+                            recipient_list=[user.email],
+                        )
+                    except Exception as email_error:
+                        print(
+                            f"Withdrawal approval email failed for {user.email}: {email_error}"
+                        )
+
+            except Exception as e:
+                self.message_user(
+                    request,
+                    f"Error approving {transaction_id}: {str(e)}",
+                    level="error",
+                )
+
+        if skipped_scheduled:
+            self.message_user(
+                request,
+                f"Skipped {skipped_scheduled} scheduled withdrawal(s) - use "
+                f"'Force credit wallet' for those instead, this action is "
+                f"for immediate bank-payout withdrawals only.",
+                level="warning",
+            )
+
+        if approved_count:
+            self.message_user(
+                request, f"{approved_count} withdrawal(s) approved successfully."
+            )
+        elif not skipped_scheduled:
+            self.message_user(request, "No withdrawals were approved.")
+
+    def force_credit_wallet(self, request, queryset):
+        today = timezone.localdate()
+
+        eligible_withdrawals = queryset.filter(
+            withdrawal_type="scheduled",
+            scheduled_processing_date__lte=today,
+            is_processed=False,
+        )
+
+        processed_count = 0
+        skipped_count = queryset.count() - eligible_withdrawals.count()
+        failed_count = 0
+
+        for withdrawal in eligible_withdrawals:
+            try:
+                result = process_scheduled_withdrawal(
+                    withdrawal,
+                    triggered_by=f"admin:{request.user}",
+                )
+
+                if result in ["processed", "already_credited", "already_processed"]:
+                    processed_count += 1
+
+            except Exception as e:
+                failed_count += 1
+                self.message_user(
+                    request,
+                    f"Failed to force credit {withdrawal.transaction_id}: {str(e)}",
+                    level=messages.ERROR,
+                )
+
+        self.message_user(
+            request,
+            (
+                f"Force credit completed. "
+                f"Processed: {processed_count}. "
+                f"Skipped: {skipped_count}. "
+                f"Failed: {failed_count}."
+            ),
+            level=messages.SUCCESS if failed_count == 0 else messages.WARNING,
+        )
+
+>>>>>>> staging
 
 class BankAccountAdmin(admin.ModelAdmin):
     list_display = (
@@ -1869,17 +2441,34 @@ class TransactionAdmin(admin.ModelAdmin):
             amount = txn.amount or Decimal("0.00")
             description = txn.description or ""
 
+<<<<<<< HEAD
             is_investment = (
                 "invest" in description.lower()
                 or str(txn.credited_to).upper() == "INVESTMENT"
             )
 
             if is_investment:
+=======
+            credited_to = str(txn.credited_to).upper()
+
+            if credited_to == "WALLET":
+                balance_before = user.wallet
+                user.wallet += amount
+                balance_after = user.wallet
+                txn.credited_to = "WALLET"
+                folder_name = "Wallet"
+
+            elif credited_to == "INVESTMENT":
+>>>>>>> staging
                 balance_before = user.investment
                 user.investment += amount
                 balance_after = user.investment
                 txn.credited_to = "INVESTMENT"
                 folder_name = "Investment"
+<<<<<<< HEAD
+=======
+
+>>>>>>> staging
             else:
                 balance_before = user.savings
                 user.savings += amount
@@ -1887,7 +2476,11 @@ class TransactionAdmin(admin.ModelAdmin):
                 txn.credited_to = "SAVINGS"
                 folder_name = "Savings"
 
+<<<<<<< HEAD
             user.save(update_fields=["savings", "investment"])
+=======
+            user.save(update_fields=["savings", "investment", "wallet"])
+>>>>>>> staging
 
             txn.transaction_type = "credit"
             txn.status = "confirmed"
@@ -2111,16 +2704,54 @@ class TargetSavingsAdmin(admin.ModelAdmin):
         "current_amount",
         "progress_percentage",
         "frequency",
+<<<<<<< HEAD
+=======
+        "is_due",  # 👈 NEW
+>>>>>>> staging
         "is_active",
         "is_cancelled",
         "formatted_next_deduction",
         "formatted_last_processed",
     ]
+<<<<<<< HEAD
     list_filter = ["is_active", "is_cancelled", "frequency", "category"]
     search_fields = ["user__email", "name"]
     readonly_fields = ["current_amount", "progress_percentage", "last_processed"]
     actions = ["force_process_deduction", "mark_as_completed"]
 
+=======
+
+    list_filter = [
+        "is_active",
+        "is_cancelled",
+        "frequency",
+        "category",
+        "due_status",  # 👈 NEW FILTER
+    ]
+
+    search_fields = ["user__email", "name"]
+
+    readonly_fields = ["current_amount", "progress_percentage", "last_processed"]
+
+    actions = ["force_process_deduction", "mark_as_completed"]
+
+    # -----------------------------
+    # 🔥 NEW: DUE CHECK COLUMN
+    # -----------------------------
+    def is_due(self, obj):
+        from django.utils import timezone
+
+        if obj.next_deduction:
+            return obj.next_deduction <= timezone.now()
+        return False
+
+    is_due.boolean = True
+    is_due.short_description = "Due Now"
+
+    # -----------------------------
+    # formatting helpers
+    # -----------------------------
+>>>>>>> staging
     def progress_percentage(self, obj):
         return f"{obj.progress_percentage:.1f}%"
 
@@ -2142,12 +2773,56 @@ class TargetSavingsAdmin(admin.ModelAdmin):
     formatted_last_processed.admin_order_field = "last_processed"
     formatted_last_processed.short_description = "Last processed"
 
+<<<<<<< HEAD
+=======
+    # -----------------------------
+    # 🔥 NEW: FILTER (Due / Not Due)
+    # -----------------------------
+    from django.contrib import admin
+    from django.utils import timezone
+
+    class DueStatusFilter(admin.SimpleListFilter):
+        title = "Due Status"
+        parameter_name = "due_status"
+
+        def lookups(self, request, model_admin):
+            return (
+                ("due", "Due Now"),
+                ("not_due", "Not Due"),
+            )
+
+        def queryset(self, request, queryset):
+            if self.value() == "due":
+                return queryset.filter(
+                    is_active=True,
+                    is_cancelled=False,
+                    next_deduction__lte=timezone.now(),
+                )
+
+            if self.value() == "not_due":
+                return queryset.filter(next_deduction__gt=timezone.now())
+
+            return queryset
+
+    list_filter = [
+        "is_active",
+        "is_cancelled",
+        "frequency",
+        "category",
+        DueStatusFilter,  # 👈 IMPORTANT
+    ]
+
+    # -----------------------------
+    # existing actions (UNCHANGED)
+    # -----------------------------
+>>>>>>> staging
     def force_process_deduction(self, request, queryset):
         results = {"processed": 0, "paused": 0, "failed": 0, "errors": []}
 
         for target in queryset:
             if target.is_active and not target.is_cancelled:
                 try:
+<<<<<<< HEAD
                     # DEBUG: Log current state before processing
                     logger.info(
                         f"🔄 Admin forcing deduction for target {target.id}: {target.name}"
@@ -2182,17 +2857,30 @@ class TargetSavingsAdmin(admin.ModelAdmin):
                     logger.info(f"   Is active: {target.is_active}")
                     logger.info(f"   Success result: {success}")
 
+=======
+                    logger.info(
+                        f"🔄 Admin forcing deduction for target {target.id}: {target.name}"
+                    )
+
+                    success = target.process_deduction()
+                    target.refresh_from_db()
+
+>>>>>>> staging
                     if success:
                         results["processed"] += 1
                     elif not target.is_active:
                         results["paused"] += 1
+<<<<<<< HEAD
                         logger.info(
                             f"🛑 Target {target.id} was PAUSED due to max attempts"
                         )
+=======
+>>>>>>> staging
                     else:
                         results["failed"] += 1
 
                 except Exception as e:
+<<<<<<< HEAD
                     error_msg = f"Error processing target {target.name}: {str(e)}"
                     logger.error(error_msg)
                     results["errors"].append(error_msg)
@@ -2276,6 +2964,37 @@ class TargetSavingsAdmin(admin.ModelAdmin):
         self.message_user(request, f"Marked {completed_count} targets as completed")
 
     mark_as_completed.short_description = "Mark selected targets as completed"
+=======
+                    results["errors"].append(str(e))
+                    results["failed"] += 1
+
+        self.message_user(
+            request,
+            f"Processed: {results['processed']} | Failed: {results['failed']} | Paused: {results['paused']}",
+        )
+
+    force_process_deduction.short_description = "Force process deduction"
+
+    def mark_as_completed(self, request, queryset):
+        # Delegates to process_deduction() (same as force_process_deduction
+        # above) so the 15% completion bonus is always credited via
+        # _complete_target() rather than this action just flipping
+        # is_active off with no payout, as it previously did.
+        processed, skipped = 0, 0
+        for target in queryset:
+            try:
+                if target.process_deduction():
+                    processed += 1
+                else:
+                    skipped += 1
+            except Exception as e:
+                skipped += 1
+                logger.error(f"Error marking target {target.id} as completed: {e}")
+
+        self.message_user(
+            request, f"Completed: {processed} | Skipped/unchanged: {skipped}"
+        )
+>>>>>>> staging
 
 
 @admin.register(TargetSavingsCompletion)
@@ -2568,17 +3287,48 @@ class AmbassadorPointConfigAdmin(admin.ModelAdmin):
 class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
     list_display = (
         "id",
+<<<<<<< HEAD
         "user",
         "month",
         "status",
         "total_points_awarded",
+=======
+        "user_email",
+        "user_phone",
+        "user_first_name",
+        "rank",
+        "total_points_awarded",
+        "status",
+>>>>>>> staging
         "stipend_amount",
         "stipend_paid",
         "submitted_at",
         "approved_at",
+<<<<<<< HEAD
     )
     list_filter = ("status", "month", "stipend_paid", "submitted_at")
     search_fields = ("user__email", "user__first_name", "user__last_name", "month")
+=======
+        "formatted_month",
+    )
+
+    list_filter = (
+        "month",
+        "status",
+        "stipend_paid",
+    )
+
+    date_hierarchy = "submitted_at"
+    ordering = ("-month", "-submitted_at")
+
+    search_fields = (
+        "user__email",
+        "user__first_name",
+        "user__last_name",
+        "month",
+    )
+
+>>>>>>> staging
     readonly_fields = (
         "submitted_at",
         "updated_at",
@@ -2689,6 +3439,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
         ),
     )
 
+<<<<<<< HEAD
     actions = ["approve_reports", "reject_reports", "recalculate_selected_reports"]
 
     def credit_stipend_and_notify(self, report):
@@ -2706,11 +3457,167 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
             locked_user = type(user).objects.select_for_update().get(pk=user.pk)
 
             # credit wallet
+=======
+    actions = [
+        "approve_reports",
+        "reject_reports",
+        "recalculate_selected_reports",
+        "remove_ambassador_status",
+    ]
+
+    def formatted_month(self, obj):
+        try:
+            return datetime.strptime(obj.month, "%Y-%m").strftime("%b %Y")
+        except:
+            return obj.month
+
+    formatted_month.short_description = "Month"
+    formatted_month.admin_order_field = "month"
+
+    def user_first_name(self, obj):
+        return obj.user.first_name or obj.user.email
+
+    user_first_name.short_description = "Name"
+    user_first_name.admin_order_field = "user__first_name"
+
+    def rank(self, obj):
+        queryset = AmbassadorMonthlyReport.objects.filter(month=obj.month).order_by(
+            "-stipend_amount", "-total_points_awarded", "submitted_at"
+        )
+
+        ids = list(queryset.values_list("id", flat=True))
+
+        try:
+            position = ids.index(obj.id) + 1
+        except ValueError:
+            return "-"
+
+        if 10 <= position % 100 <= 20:
+            suffix = "th"
+        else:
+            suffix = {1: "st", 2: "nd", 3: "rd"}.get(position % 10, "th")
+
+        return f"{position}{suffix}"
+
+    rank.short_description = "Rank"
+    rank.admin_order_field = "stipend_amount"
+
+    def user_email(self, obj):
+        return obj.user.email
+
+    user_email.short_description = "Email"
+    user_email.admin_order_field = "user__email"
+
+    def user_phone(self, obj):
+        return obj.user.phone_number or "-"
+
+    user_phone.short_description = "Phone"
+    user_phone.admin_order_field = "user__phone_number"
+
+    def credit_stipend_and_notify(self, report):
+        user = report.user
+        stipend_amount = Decimal(report.stipend_amount or 0)
+
+        formatted_month = report.month
+        try:
+            formatted_month = datetime.strptime(report.month, "%Y-%m").strftime("%b %Y")
+        except:
+            pass
+
+        # -----------------------------
+        # CASE 1: ZERO PERFORMANCE
+        # -----------------------------
+        if stipend_amount <= 0:
+            send_generic_email(
+                subject="Ambassador Report Reviewed",
+                message=(
+                    f"Hi {user.first_name},<br><br>"
+                    f"Your ambassador report for {formatted_month} has been reviewed.<br><br>"
+                    f"No points were recorded for this period.<br><br>"
+                    f"Don't worry — a new month is a fresh opportunity to grow. "
+                    f"We're rooting for you to take action and earn more next time 💪<br><br>"
+                    "MyFund"
+                ),
+                from_email="MyFund <info@mg.myfundmobile.com>",
+                recipient_list=[user.email],
+            )
+
+            send_push_notification(
+                user=user,
+                title="Ambassador Report Reviewed",
+                message="No activity recorded this month. You can bounce back next month 💪",
+                data={"report_id": report.id},
+                notif_type="SYSTEM",
+            )
+
+            return False, "No stipend — encouragement sent."
+
+        # -----------------------------
+        # CASE 2: LOW PERFORMANCE (< ₦1000)
+        # -----------------------------
+        if stipend_amount < 1000:
+            with db_transaction.atomic():
+                locked_user = type(user).objects.select_for_update().get(pk=user.pk)
+
+                locked_user.wallet = (
+                    locked_user.wallet or Decimal("0.00")
+                ) + stipend_amount
+                locked_user.save(update_fields=["wallet"])
+
+                Transaction.objects.create(
+                    user=locked_user,
+                    transaction_type="credit",
+                    status="confirmed",
+                    amount=stipend_amount,
+                    description=f"{formatted_month} Stipend",
+                    source="WALLET",
+                )
+
+                report.stipend_paid = True
+                report.save(update_fields=["stipend_paid"])
+
+            send_generic_email(
+                subject="Ambassador Stipend Credited",
+                message=(
+                    f"Hi {user.first_name},<br><br>"
+                    f"Your ambassador report for {formatted_month} has been reviewed.<br><br>"
+                    f"Stipend credited: ₦{stipend_amount:,.2f}<br><br>"
+                    f"Good effort 👍 — with a bit more consistency, you can earn much more next month.<br><br>"
+                    "MyFund"
+                ),
+                from_email="MyFund <info@mg.myfundmobile.com>",
+                recipient_list=[user.email],
+            )
+
+            send_push_notification(
+                user=user,
+                title=f"{formatted_month} Stipend Credited ✅",
+                message=(
+                    f"Hi {user.first_name}, the stipends for {formatted_month} has been credited "
+                    f"to your wallet. Keep developing your community for more rewards next month. Well done."
+                ),
+                data={"report_id": report.id},
+                notif_type="SYSTEM",
+            )
+
+            return True, "Low stipend credited."
+
+        # -----------------------------
+        # CASE 3: NORMAL / HIGH PERFORMANCE
+        # -----------------------------
+        if report.stipend_paid:
+            return False, "Already paid."
+
+        with db_transaction.atomic():
+            locked_user = type(user).objects.select_for_update().get(pk=user.pk)
+
+>>>>>>> staging
             locked_user.wallet = (
                 locked_user.wallet or Decimal("0.00")
             ) + stipend_amount
             locked_user.save(update_fields=["wallet"])
 
+<<<<<<< HEAD
             # create confirmed credit transaction
             formatted_month = report.month
             try:
@@ -2720,6 +3627,8 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
             except Exception:
                 pass
 
+=======
+>>>>>>> staging
             Transaction.objects.create(
                 user=locked_user,
                 transaction_type="credit",
@@ -2732,6 +3641,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
             report.stipend_paid = True
             report.save(update_fields=["stipend_paid"])
 
+<<<<<<< HEAD
         # email user
         send_generic_email(
             subject="Ambassador Stipend Credited ✅",
@@ -2766,6 +3676,34 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
         )
 
         return True, f"₦{stipend_amount:,.2f} credited successfully."
+=======
+        send_generic_email(
+            subject=f"{formatted_month} Stipend Credited ✅",
+            message=(
+                f"Hi {user.first_name},<br><br>"
+                f"Your ambassador report for {formatted_month} has been approved and your stipend has been credited.<br><br>"
+                f"Amount: ₦{stipend_amount:,.2f}<br><br>"
+                f"Focus on key metrics, especially confirmed referrals, to increase your earnings for the new month🔥<br><br>"
+                f"Great work — keep it up 🔥<br><br>"
+                "MyFund"
+            ),
+            from_email="MyFund <info@mg.myfundmobile.com>",
+            recipient_list=[user.email],
+        )
+
+        send_push_notification(
+            user=user,
+            title=f"{formatted_month} Stipend Credited ✅",
+            message=(
+                f"Hi {user.first_name}, the stipends for {formatted_month} has been credited "
+                f"to your wallet. Keep developing your community for more rewards next month. Well done."
+            ),
+            data={"report_id": report.id},
+            notif_type="SYSTEM",
+        )
+
+        return True, "Credited successfully."
+>>>>>>> staging
 
     def notify_user_rejected(self, report):
         user = report.user
@@ -2774,34 +3712,55 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
             subject="Ambassador Report Update",
             message=(
                 f"Hi {user.first_name},<br><br>"
+<<<<<<< HEAD
                 f"Your ambassador report for {report.month} was reviewed but not approved.<br><br>"
                 f"Admin note: {report.admin_note or 'Please contact support for clarification.'}<br><br>"
                 "MyFund"
             ),
             from_email="MyFund <info@myfundmobile.com>",
+=======
+                f"Your report for {report.month} was not approved.<br><br>"
+                f"{report.admin_note or ''}"
+            ),
+            from_email="MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
             recipient_list=[user.email],
         )
 
         send_push_notification(
             user=user,
             title="Ambassador Report Not Approved",
+<<<<<<< HEAD
             message=f"Your report for {report.month} was reviewed. Please check the update.",
             data={
                 "report_id": report.id,
                 "month": report.month,
                 "status": report.status,
             },
+=======
+            message=f"Check your {report.month} report.",
+            data={"report_id": report.id},
+>>>>>>> staging
             notif_type="SYSTEM",
         )
 
     def save_model(self, request, obj, form, change):
         old_status = None
+<<<<<<< HEAD
         old_stipend_paid = False
 
         if change and obj.pk:
             old_obj = AmbassadorMonthlyReport.objects.get(pk=obj.pk)
             old_status = old_obj.status
             old_stipend_paid = old_obj.stipend_paid
+=======
+        old_paid = False
+
+        if change and obj.pk:
+            old = AmbassadorMonthlyReport.objects.get(pk=obj.pk)
+            old_status = old.status
+            old_paid = old.stipend_paid
+>>>>>>> staging
 
         obj.recalculate_points()
 
@@ -2816,6 +3775,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
         if old_status != "rejected" and obj.status == "rejected":
             self.notify_user_rejected(obj)
 
+<<<<<<< HEAD
         if obj.status == "approved" and not old_stipend_paid and not obj.stipend_paid:
             success, msg = self.credit_stipend_and_notify(obj)
             if success:
@@ -2853,10 +3813,37 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
     @admin.action(description="❌ Reject selected ambassador reports")
     def reject_reports(self, request, queryset):
         count = 0
+=======
+        if obj.status == "approved" and not old_paid and not obj.stipend_paid:
+            success, msg = self.credit_stipend_and_notify(obj)
+            self.message_user(
+                request,
+                msg,
+                level=messages.SUCCESS if success else messages.WARNING,
+            )
+
+    @admin.action(description="✅ Approve selected reports")
+    def approve_reports(self, request, queryset):
+        for report in queryset:
+            report.status = "approved"
+            report.approved_by = request.user
+            report.approved_at = timezone.now()
+            report.recalculate_points()
+            report.save()
+
+            if not report.stipend_paid:
+                self.credit_stipend_and_notify(report)
+
+        self.message_user(request, "Approved.", level=messages.SUCCESS)
+
+    @admin.action(description="❌ Reject selected reports")
+    def reject_reports(self, request, queryset):
+>>>>>>> staging
         for report in queryset:
             report.status = "rejected"
             report.save()
             self.notify_user_rejected(report)
+<<<<<<< HEAD
             count += 1
 
         self.message_user(
@@ -2873,6 +3860,537 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
 
         self.message_user(
             request, f"{count} report(s) recalculated.", level=messages.SUCCESS
+=======
+
+        self.message_user(request, "Rejected.", level=messages.WARNING)
+
+    @admin.action(description="🔄 Recalculate selected reports")
+    def recalculate_selected_reports(self, request, queryset):
+        for report in queryset:
+            report.recalculate_points()
+            report.save()
+
+        self.message_user(request, "Recalculated.", level=messages.SUCCESS)
+
+    @admin.action(description="❌ Remove Ambassador Status")
+    def remove_ambassador_status(self, request, queryset):
+        updated_count = 0
+
+        for report in queryset:
+            if revoke_user_ambassador_status(report.user):
+                updated_count += 1
+
+        self.message_user(
+            request,
+            f"{updated_count} ambassador(s) removed and notified.",
+            level=messages.SUCCESS,
+        )
+
+
+@admin.register(FinanceMetricSnapshot)
+class FinanceMetricSnapshotAdmin(admin.ModelAdmin):
+    list_display = (
+        "period_type",
+        "period_start",
+        "period_end",
+        "total_revenue",
+        "net_profit",
+        "profit_margin",
+        "abrupt_withdrawal_revenue",
+        "float_gross_revenue",
+        "roi_payable_to_users",
+        "float_net_profit",
+    )
+
+    list_filter = ("period_type", "period_start")
+    search_fields = ("period_type", "notes")
+    readonly_fields = (
+        "created_at",
+        "updated_at",
+    )
+
+    actions = ["refresh_selected_snapshots"]
+
+    @admin.action(description="Refresh selected finance snapshots")
+    def refresh_selected_snapshots(self, request, queryset):
+        from .finance_metrics import calculate_finance_metrics
+
+        count = 0
+        for snapshot in queryset:
+            calculate_finance_metrics(
+                period_type=snapshot.period_type,
+                target_date=snapshot.period_start,
+                save=True,
+            )
+            count += 1
+
+        self.message_user(request, f"{count} finance snapshot(s) refreshed.")
+
+
+@admin.action(description="📊 Send Daily Metrics Now")
+def send_daily_metrics(modeladmin, request, queryset):
+
+    daily_metrics_task.delay()
+
+
+@admin.action(description="📈 Send Weekly Metrics Now")
+def send_weekly_metrics(modeladmin, request, queryset):
+
+    weekly_metrics_task.delay()
+
+
+@admin.action(description="💰 Send Monthly Metrics Now")
+def send_monthly_metrics(modeladmin, request, queryset):
+
+    monthly_metrics_task.delay()
+
+
+from django.contrib import admin
+from authentication.models import PhoneChangeRequest
+from authentication.services.phone_change import approve_phone_change
+
+
+@admin.register(PhoneChangeRequest)
+class PhoneChangeRequestAdmin(admin.ModelAdmin):
+
+    list_display = (
+        "user",
+        "old_phone",
+        "new_phone",
+        "status",
+        "created_at",
+    )
+
+    actions = ["approve_requests"]
+
+    def approve_requests(self, request, queryset):
+        for obj in queryset:
+            try:
+                approve_phone_change(obj.id, request.user)
+            except Exception as e:
+                self.message_user(request, f"Failed: {e}", level="error")
+
+        self.message_user(request, "Selected requests approved successfully")
+
+    approve_requests.short_description = "Approve selected phone change requests"
+
+
+from authentication.models import Employee, PayrollRun, PayrollEntry
+from authentication.payroll import create_draft_entries, send_pending_entries
+
+from django.contrib.auth import get_user_model
+from authentication.utils import (
+    send_push_notification,
+    send_generic_email,
+)
+
+User = get_user_model()
+
+
+@admin.register(Employee)
+class EmployeeAdmin(admin.ModelAdmin):
+
+    list_display = (
+        "name",
+        "email",
+        "department",
+        "monthly_amount",
+        "is_active",
+        "total_paid_display",
+        "last_payment_display",
+        "date_added",
+    )
+
+    list_filter = (
+        "is_active",
+        "department",
+    )
+
+    search_fields = (
+        "name",
+        "email",
+    )
+
+    readonly_fields = (
+        "total_paid_display",
+        "last_payment_display",
+    )
+
+    actions = [
+        "create_draft_payroll",
+        "quick_test_payroll",
+        "quick_live_payroll",
+    ]
+
+    def total_paid_display(self, obj):
+
+        total = (
+            PayrollEntry.objects.filter(employee=obj, status="credited").aggregate(
+                total=Sum("amount")
+            )["total"]
+            or 0
+        )
+
+        return f"₦{total:,.2f}"
+
+    total_paid_display.short_description = "Total Paid (All Time)"
+
+    def last_payment_display(self, obj):
+
+        last = (
+            PayrollEntry.objects.filter(employee=obj, status="credited")
+            .order_by("-created_at")
+            .first()
+        )
+
+        return last.created_at.strftime("%b %d, %Y") if last else "—"
+
+    last_payment_display.short_description = "Last Paid"
+
+    def save_model(self, request, obj, form, change):
+
+        old_status = None
+        old_department = None
+        old_amount = None
+
+        if change:
+            old_employee = (
+                Employee.objects.filter(pk=obj.pk)
+                .values(
+                    "is_active",
+                    "department",
+                    "monthly_amount",
+                )
+                .first()
+            )
+
+            if old_employee:
+                old_status = old_employee["is_active"]
+                old_department = old_employee["department"]
+                old_amount = old_employee["monthly_amount"]
+
+        super().save_model(request, obj, form, change)
+
+        try:
+
+            user = User.objects.get(email__iexact=obj.email)
+
+            # Sync employee status with user staff access
+            user.is_staff = obj.is_active
+            user.save(update_fields=["is_staff"])
+
+            status_changed = old_status is None or old_status != obj.is_active
+
+            department_changed = (
+                old_department is not None and old_department != obj.department
+            )
+
+            amount_changed = old_amount is not None and old_amount != obj.monthly_amount
+
+            # No employee details changed
+            if not (status_changed or department_changed or amount_changed):
+                return
+
+            # ==============================
+            # EMPLOYEE ACTIVATED / ADDED
+            # ==============================
+
+            if status_changed and obj.is_active:
+
+                title = "🎉 Welcome to the MyFund Team!"
+
+                message = (
+                    "Hi {first_name}, "
+                    "welcome to the MyFund team! "
+                    "You have joined the {department} department "
+                    "with a monthly allowance of ₦{monthly_amount}. "
+                    "We are excited to have you onboard. 🚀"
+                )
+
+                email_subject = "🎉 Welcome to MyFund, {first_name}!"
+
+                email_message = """
+    <p>
+    Hi <strong>{first_name}</strong>,
+    </p>
+
+    <p>
+    Congratulations and welcome to the <strong>MyFund team! 🎉</strong>
+    </p>
+
+    <p>
+    You have officially joined the 
+    <strong>{department} department</strong>.
+    </p>
+
+    <p>
+    Your employee access has been activated.
+    </p>
+
+    <p>
+    Your monthly team allowance is:
+    </p>
+
+    <p>
+    <strong>₦{monthly_amount}</strong>
+    </p>
+
+    <p>
+    You are now part of a team building solutions that make property ownership
+    and wealth creation more accessible across Africa.
+    </p>
+
+    <p>
+    We are excited about the skills, ideas, and energy you will bring to the
+    MyFund journey.
+    </p>
+
+    <p>
+    Welcome aboard! 🚀
+    </p>
+
+    <p>
+    Warm regards,<br>
+    <strong>The MyFund Team</strong>
+    </p>
+    """
+
+            # ==============================
+            # EMPLOYEE DEACTIVATED
+            # ==============================
+
+            elif status_changed and not obj.is_active:
+
+                title = "MyFund Team Access Update"
+
+                message = (
+                    "Hi {first_name}, "
+                    "your MyFund employee access has been updated. "
+                    "Thank you for your contributions and support."
+                )
+
+                email_subject = "MyFund Employee Access Update"
+
+                email_message = """
+    <p>
+    Hi <strong>{first_name}</strong>,
+    </p>
+
+    <p>
+    Your MyFund employee access has been updated.
+    </p>
+
+    <p>
+    Your team access has been deactivated.
+    </p>
+
+    <p>
+    Thank you for your contributions, dedication, and support during your time
+    with MyFund.
+    </p>
+
+    <p>
+    We appreciate the impact you have made.
+    </p>
+
+    <p>
+    Warm regards,<br>
+    <strong>The MyFund Team</strong>
+    </p>
+    """
+
+            # ==============================
+            # EMPLOYEE PROFILE UPDATED
+            # ==============================
+
+            else:
+
+                title = "MyFund Employee Profile Updated"
+
+                message = (
+                    "Hi {first_name}, "
+                    "your MyFund employee profile has been updated. "
+                    "Department: {department}. "
+                    "Monthly allowance: ₦{monthly_amount}."
+                )
+
+                email_subject = "MyFund Employee Details Updated"
+
+                email_message = """
+    <p>
+    Hi <strong>{first_name}</strong>,
+    </p>
+
+    <p>
+    Your MyFund employee details have been updated successfully.
+    </p>
+
+    <p>
+    Here are your updated details:
+    </p>
+
+    <p>
+    <strong>Department:</strong> {department}
+    </p>
+
+    <p>
+    <strong>Monthly Allowance:</strong> ₦{monthly_amount}
+    </p>
+
+    <p>
+    Your employee access remains active, and we appreciate your continued
+    contribution to the MyFund journey.
+    </p>
+
+    <p>
+    If you have any questions about this update, please contact the MyFund team.
+    </p>
+
+    <p>
+    Warm regards,<br>
+    <strong>The MyFund Team</strong>
+    </p>
+    """
+
+            # ==============================
+            # SEND PUSH NOTIFICATION
+            # ==============================
+
+            send_push_notification(
+                user=user,
+                title=title,
+                message=message,
+                notif_type="STAFF_STATUS",
+                extra_context={
+                    "department": obj.department,
+                    "monthly_amount": f"{obj.monthly_amount:,.2f}",
+                },
+            )
+
+            # ==============================
+            # SEND EMAIL
+            # ==============================
+
+            send_generic_email(
+                subject=email_subject,
+                message=email_message,
+                recipient_list=[user.email],
+                extra_context={
+                    "department": obj.department,
+                    "monthly_amount": f"{obj.monthly_amount:,.2f}",
+                },
+            )
+
+        except User.DoesNotExist:
+
+            self.message_user(
+                request,
+                f"No user account found for {obj.email}. "
+                "Employee saved but staff status was not updated.",
+                level=messages.WARNING,
+            )
+
+    @admin.action(description="📝 CREATE PAYMENT DRAFT (edit details)")
+    def create_draft_payroll(self, request, queryset):
+
+        month_label = timezone.now().strftime("%B %Y")
+
+        run = create_draft_entries(
+            queryset,
+            month_label,
+            executed_by=request.user.email,
+        )
+
+        self.message_user(
+            request,
+            f"Draft created for {month_label}: {queryset.count()} entries.",
+            level=messages.SUCCESS,
+        )
+
+    @admin.action(description="💸 PAY Selected Employees")
+    def quick_live_payroll(self, request, queryset):
+
+        month_label = timezone.now().strftime("%B %Y")
+
+        run = create_draft_entries(
+            queryset,
+            month_label,
+            executed_by=request.user.email,
+        )
+
+        results = send_pending_entries(run.entries.all(), test=False)
+
+        self.message_user(
+            request,
+            f"Live paid: {len(results)} entries.",
+            level=messages.SUCCESS,
+        )
+
+
+class PayrollEntryInline(admin.TabularInline):
+    model = PayrollEntry
+    extra = 0
+    fields = (
+        "employee",
+        "email",
+        "name",
+        "amount",
+        "description",
+        "balance_before",
+        "balance_after",
+        "status",
+        "created_at",
+    )
+    readonly_fields = (
+        "employee",
+        "email",
+        "balance_before",
+        "balance_after",
+        "status",
+        "created_at",
+    )
+    can_delete = False
+
+
+@admin.register(PayrollRun)
+class PayrollRunAdmin(admin.ModelAdmin):
+    list_display = ("month_label", "reason", "executed_at", "executed_by")
+    list_filter = ("month_label",)
+    inlines = [PayrollEntryInline]
+
+
+@admin.register(PayrollEntry)
+class PayrollEntryAdmin(admin.ModelAdmin):
+    list_display = (
+        "run",
+        "name",
+        "email",
+        "amount",
+        "description",
+        "status",
+        "created_at",
+    )
+    list_filter = ("status", "run")
+    search_fields = ("name", "email")
+    fields = ("run", "employee", "email", "name", "amount", "description", "status")
+    readonly_fields = ("run", "employee", "email", "name", "status")
+    actions = ["send_test", "send_live"]
+
+    @admin.action(description="🧪 Send TEST for selected pending entries")
+    def send_test(self, request, queryset):
+        results = send_pending_entries(queryset, test=True)
+        self.message_user(
+            request,
+            f"Test sent: {len(results)} entries. Check valueplusrecords@gmail.com.",
+            level=messages.SUCCESS,
+        )
+
+    @admin.action(description="💸 Send LIVE for selected pending entries")
+    def send_live(self, request, queryset):
+        results = send_pending_entries(queryset, test=False)
+        self.message_user(
+            request, f"Live sent: {len(results)} entries.", level=messages.SUCCESS
+>>>>>>> staging
         )
 
 
@@ -2883,3 +4401,97 @@ admin.site.register(Transaction, TransactionAdmin)
 admin.site.register(AutoSave, AutoSaveAdmin)
 admin.site.register(AutoInvest, AutoInvestAdmin)
 admin.site.register(Property, PropertyAdmin)
+<<<<<<< HEAD
+=======
+
+
+from .models import (
+    Group,
+    GroupOwnership,
+    Contribution,
+    GroupDeparture,
+    GroupIncomeEvent,
+    GroupIncomeDistribution,
+)
+
+
+class GroupAdmin(admin.ModelAdmin):
+    list_display = [
+        "id",
+        "property",
+        "created_by",
+        "goal_amount",
+        "total_raised",
+        "status",
+        "group_type",
+        "deadline",
+        "created_at",
+    ]
+    list_editable = ["status"]
+    list_filter = ["status", "group_type"]
+    search_fields = ["id", "property__name", "created_by__email"]
+
+
+class GroupOwnershipAdmin(admin.ModelAdmin):
+    list_display = ["id", "group", "user", "total_contributed", "ownership_percentage"]
+    list_filter = ["group"]
+    search_fields = ["user__email", "group__id"]
+
+
+class ContributionAdmin(admin.ModelAdmin):
+    list_display = [
+        "id",
+        "group",
+        "user",
+        "amount",
+        "payment_status",
+        "source",
+        "created_at",
+    ]
+    list_filter = ["payment_status", "source"]
+    search_fields = ["user__email", "group__id"]
+
+
+class GroupDepartureAdmin(admin.ModelAdmin):
+    list_display = ["id", "group", "user", "reason", "refunded_amount", "left_at"]
+    list_filter = ["reason"]
+    search_fields = ["user__email", "group__id"]
+
+
+class GroupIncomeEventAdmin(admin.ModelAdmin):
+    list_display = [
+        "id",
+        "group",
+        "amount",
+        "period_start",
+        "period_end",
+        "status",
+        "total_distributed",
+        "recorded_by",
+        "created_at",
+    ]
+    list_filter = ["status"]
+    search_fields = ["group__id", "group__property__name"]
+
+
+class GroupIncomeDistributionAdmin(admin.ModelAdmin):
+    list_display = [
+        "id",
+        "income_event",
+        "user",
+        "ownership_percentage",
+        "amount",
+        "status",
+        "created_at",
+    ]
+    list_filter = ["status"]
+    search_fields = ["user__email", "income_event__id"]
+
+
+admin.site.register(Group, GroupAdmin)
+admin.site.register(GroupOwnership, GroupOwnershipAdmin)
+admin.site.register(Contribution, ContributionAdmin)
+admin.site.register(GroupDeparture, GroupDepartureAdmin)
+admin.site.register(GroupIncomeEvent, GroupIncomeEventAdmin)
+admin.site.register(GroupIncomeDistribution, GroupIncomeDistributionAdmin)
+>>>>>>> staging

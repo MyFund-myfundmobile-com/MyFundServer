@@ -23,7 +23,10 @@ from .serializers import (
 import random
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
+<<<<<<< HEAD
 from django.conf import settings
+=======
+>>>>>>> staging
 from rest_framework.views import APIView
 from django.contrib.auth import logout
 from django.shortcuts import render, redirect
@@ -72,6 +75,10 @@ from .utils import (
 from rest_framework.exceptions import AuthenticationFailed
 import threading
 from .utils import create_transaction
+<<<<<<< HEAD
+=======
+from django.conf import settings
+>>>>>>> staging
 
 load_dotenv()
 
@@ -79,9 +86,14 @@ logger = logging.getLogger(__name__)
 
 from django.db import transaction
 from .utils import create_paystack_customer, create_dedicated_account
+<<<<<<< HEAD
 
 MINIMUM_INVESTMENT = Decimal("100000")
 
+=======
+from django.core.cache import cache
+from .models import OTPDeliveryLog
+>>>>>>> staging
 
 
 @api_view(["POST"])
@@ -89,6 +101,10 @@ MINIMUM_INVESTMENT = Decimal("100000")
 @permission_classes([AllowAny])
 def signup(request):
     phone_number = request.data.get("phone_number")
+<<<<<<< HEAD
+=======
+
+>>>>>>> staging
     if not phone_number:
         return Response(
             {"error": "Phone number is required"},
@@ -104,6 +120,7 @@ def signup(request):
 
     validated_phone = phone_check.get("formatted")
 
+<<<<<<< HEAD
     try:
         serializer = SignupSerializer(data=request.data, context={"request": request})
         if not serializer.is_valid():
@@ -122,16 +139,85 @@ def signup(request):
             # Create DVA
             create_dedicated_account(user)
 
+=======
+    phone_key = f"signup_phone:{validated_phone}"
+    ip_key = f"signup_ip_attempts:{request.META.get('REMOTE_ADDR')}"
+
+    # -----------------------
+    # PHONE RATE LIMIT (soft cooldown)
+    # -----------------------
+    if cache.get(phone_key):
+        return Response(
+            {"error": "Please wait a moment before trying again."},
+            status=429,
+        )
+
+    # -----------------------
+    # IP RATE LIMIT (counter-based, not hard block)
+    # -----------------------
+    ip_attempts = cache.get(ip_key, 0)
+
+    if ip_attempts >= 10:
+        return Response(
+            {"error": "Too many signup attempts. Try again shortly."},
+            status=429,
+        )
+
+    # increment attempts
+    cache.set(ip_key, ip_attempts + 1, timeout=60)
+
+    # short phone cooldown (prevents spam clicks)
+    cache.set(phone_key, True, timeout=60)
+
+    try:
+        serializer = SignupSerializer(data=request.data, context={"request": request})
+
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        # -----------------------
+        # CREATE USER
+        # -----------------------
+        user = serializer.save()
+
+>>>>>>> staging
         user.phone_number = validated_phone
         user.how_did_you_hear = serializer.validated_data.get(
             "how_did_you_hear", "OTHER"
         )
         user.is_active = False
 
+<<<<<<< HEAD
         # --- Generate OTP ---
         otp = generate_otp()
         user.otp = otp
         user.last_otp_sent_at = timezone.now()
+=======
+        # -----------------------
+        # PAYSTACK CUSTOMER
+        # -----------------------
+        customer_code = create_paystack_customer(user)
+
+        if not customer_code:
+            logger.warning(f"Paystack customer creation failed for user {user.email}")
+        else:
+            user.paystack_customer_code = customer_code
+            user.save(update_fields=["paystack_customer_code"])
+
+            try:
+                create_dedicated_account(user)
+            except Exception as e:
+                logger.exception(f"DVA creation failed for {user.email}: {e}")
+
+        # OTP GENERATION
+        otp = generate_otp()
+
+        user.otp = otp
+        user.otp_created_at = timezone.now()
+
+        if hasattr(user, "last_otp_sent_at"):
+            user.last_otp_sent_at = timezone.now()
+>>>>>>> staging
 
         user.save(
             update_fields=[
@@ -139,6 +225,7 @@ def signup(request):
                 "how_did_you_hear",
                 "is_active",
                 "otp",
+<<<<<<< HEAD
                 "last_otp_sent_at",
                 "updated_at",
             ]
@@ -158,6 +245,81 @@ def signup(request):
                     send_otp_sms(user, otp)
             except Exception as exc:
                 logger.warning(f"OTP SMS failed for {user.phone_number}: {exc}")
+=======
+                "otp_created_at",
+                "paystack_customer_code",
+                "updated_at",
+                *(["last_otp_sent_at"] if hasattr(user, "last_otp_sent_at") else []),
+            ]
+        )
+
+        # CREATE DELIVERY LOG
+        otp_log = OTPDeliveryLog.objects.create(
+            user=user,
+            otp=otp,
+        )
+
+        # -----------------------
+        # SEND OTP AFTER COMMIT
+        # -----------------------
+        def send_otp_async():
+            # -----------------------
+            # EMAIL OTP (always)
+            # -----------------------
+            try:
+                send_otp_email(user, otp)
+
+                otp_log.email_status = "sent"
+                otp_log.save(update_fields=["email_status"])
+
+            except Exception as exc:
+                logger.warning(f"OTP email failed for {user.email}: {exc}")
+
+                otp_log.email_status = "failed"
+                otp_log.save(update_fields=["email_status"])
+
+            # -----------------------
+            # SMS OTP (max 2/day)
+            # -----------------------
+            try:
+                if user.phone_number:
+
+                    sms_count_key = f"signup_sms_otp_count:{user.phone_number}"
+
+                    sms_count = cache.get(sms_count_key, 0)
+
+                    if sms_count < 2:
+
+                        sms_success = send_otp_sms(user, otp)
+
+                        if sms_success:
+                            cache.set(
+                                sms_count_key,
+                                sms_count + 1,
+                                timeout=60 * 60 * 24,  # 24 hours
+                            )
+
+                            otp_log.sms_sent = True
+                            otp_log.save(update_fields=["sms_sent"])
+
+                            logger.info(
+                                f"SMS OTP sent to {user.phone_number}. "
+                                f"Count: {sms_count + 1}/2"
+                            )
+
+                        else:
+                            logger.warning(f"SMS OTP failed for {user.phone_number}")
+
+                    else:
+                        logger.info(
+                            f"Daily SMS OTP limit reached for {user.phone_number}"
+                        )
+
+            except Exception as sms_exc:
+                logger.warning(
+                    f"SMS OTP sending error for {user.phone_number}: {sms_exc}"
+                )
+>>>>>>> staging
 
         transaction.on_commit(send_otp_async)
 
@@ -167,11 +329,24 @@ def signup(request):
 
         return Response(response_data, status=status.HTTP_201_CREATED)
 
+<<<<<<< HEAD
     except Exception:
         logger.exception("Unexpected error during signup")
 
 
 import threading
+=======
+    except Exception as e:
+        logger.exception(f"Unexpected error during signup: {e}")
+        return Response(
+            {"error": "Signup failed. Try again later."},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+import threading
+from .push_deep_links import dl
+>>>>>>> staging
 
 
 @api_view(["POST"])
@@ -179,12 +354,17 @@ import threading
 @permission_classes([AllowAny])
 def confirm_otp(request):
     serializer = ConfirmOTPSerializer(data=request.data)
+<<<<<<< HEAD
+=======
+
+>>>>>>> staging
     if not serializer.is_valid():
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     otp = serializer.validated_data["otp"]
 
     try:
+<<<<<<< HEAD
         user = CustomUser.objects.get(otp=otp)
     except CustomUser.DoesNotExist:
         return Response({"message": "Invalid OTP."}, status=status.HTTP_400_BAD_REQUEST)
@@ -206,10 +386,113 @@ def confirm_otp(request):
             except Exception as e:
                 logger.warning(f"Welcome email failed: {e}")
 
+=======
+        email = (request.data.get("email") or "").strip().lower()
+
+        user = CustomUser.objects.filter(
+            email__iexact=email,
+            is_active=False,
+        ).first()
+
+        if not user:
+            logger.warning(f"OTP attempt for non-existent/inactive user: {email}")
+
+            return Response(
+                {"message": "Invalid OTP."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # OTP must exist
+        if not user.otp:
+            return Response(
+                {"message": "OTP expired. Please request a new one."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # normalize OTP comparison
+        if str(user.otp).strip() != str(otp).strip():
+            logger.warning(f"Invalid OTP attempt: {otp} for {email}")
+
+            return Response(
+                {"message": "Invalid OTP."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    except Exception as e:
+        logger.exception(f"OTP validation error: {e}")
+
+        return Response(
+            {"message": "Invalid OTP."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # expiry check
+    if user.otp_created_at and timezone.now() > user.otp_created_at + timedelta(
+        minutes=20
+    ):
+        return Response(
+            {"message": "OTP has expired."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # -----------------------
+    # ACTIVATE USER + CLEAN OTP
+    # -----------------------
+    user.is_active = True
+
+    # HARD CLEAR OTP STATE
+    user.otp = None
+    user.otp_created_at = None
+
+    if hasattr(user, "last_otp_sent_at"):
+        user.last_otp_sent_at = None
+
+    update_fields = ["is_active", "otp", "otp_created_at"]
+
+    if hasattr(user, "last_otp_sent_at"):
+        update_fields.append("last_otp_sent_at")
+
+    user.save(update_fields=update_fields)
+
+    logger.info(f"Account activated for {user.email}")
+
+    # -----------------------
+    # BREVO CONTACT SYNC
+    # -----------------------
+    try:
+        from .tasks import sync_user_to_brevo
+
+        sync_user_to_brevo.delay(user.id)
+
+        logger.info(f"Brevo sync queued for {user.email}")
+
+    except Exception as e:
+        logger.warning(f"Could not queue Brevo sync: {e}")
+
+    # -----------------------
+    # BACKGROUND TASKS
+    # -----------------------
+    def background_tasks(u):
+        try:
+
+            # -----------------------
+            # WELCOME EMAIL
+            # -----------------------
+            try:
+                u.send_welcome_email()
+
+            except Exception as e:
+                logger.warning(f"Welcome email failed: {e}")
+
+            # -----------------------
+            # WELCOME PUSH
+            # -----------------------
+>>>>>>> staging
             try:
                 send_push_notification(
                     user=u,
                     title="Welcome to MyFund 🎉",
+<<<<<<< HEAD
                     message=f"Hi {u.first_name}, Welcome to MyFund! Your account is now active. Earn daily returns up to 20% p.a. Make a quicksave to get started!",
                     data={"type": "welcome"},
                     notif_type="SYSTEM",
@@ -253,6 +536,174 @@ def confirm_otp(request):
     threading.Thread(target=background_tasks, args=(user,), daemon=True).start()
 
     return Response({"message": "Account confirmed successfully."}, status=200)
+=======
+                    message=f"Hi {u.first_name}, Welcome to MyFund! Your account is now active.",
+                    data={"type": "welcome"},
+                    notif_type="SYSTEM",
+                )
+
+            except Exception as e:
+                logger.warning(f"Welcome push failed: {e}")
+
+            # -----------------------
+            # REFERRAL REWARD
+            # -----------------------
+            try:
+                if u.referral:
+                    u.create_pending_referral_reward()
+
+            except Exception as e:
+                logger.warning(f"Referral reward failed: {e}")
+
+            # -----------------------
+            # ADMIN PUSH NOTIFICATIONS
+            # -----------------------
+            try:
+
+                # Single source of truth: is_staff is what actually gates
+                # the admin-action endpoints, so it's also what gates who
+                # gets notified - hardcoded email lists drift out of sync
+                # (this one didn't even match the other admin push blocks)
+                # and silently drop new admins from alerts.
+                admin_users = CustomUser.objects.filter(
+                    is_staff=True,
+                    is_active=True,
+                )
+
+                from django.utils import timezone
+                import calendar
+
+                today = timezone.now().date()
+
+                current_month_name = calendar.month_name[today.month]
+
+                # -----------------------
+                # FORMAT PHONE NUMBER
+                # -----------------------
+                formatted_phone = u.phone_number or "N/A"
+
+                digits = "".join(filter(str.isdigit, formatted_phone))
+
+                if len(digits) == 11:
+                    formatted_phone = f"{digits[:4]} {digits[4:7]} {digits[7:]}"
+
+                # -----------------------
+                # SIGNUP METRICS
+                # -----------------------
+
+                # TODAY SIGNUPS
+                today_signup_count = CustomUser.objects.filter(
+                    date_joined__date=today,
+                    is_active=True,
+                ).count()
+
+                # CURRENT MONTH SIGNUPS
+                month_signup_count = CustomUser.objects.filter(
+                    date_joined__year=today.year,
+                    date_joined__month=today.month,
+                    is_active=True,
+                ).count()
+
+                # TOTAL CONFIRMED USERS
+                total_confirmed_users = CustomUser.objects.filter(
+                    is_active=True,
+                    is_deleted=False,
+                ).count()
+
+                # LAST MONTH CALCULATION
+                if today.month == 1:
+                    previous_month = 12
+                    previous_year = today.year - 1
+                else:
+                    previous_month = today.month - 1
+                    previous_year = today.year
+
+                last_month_signup_count = CustomUser.objects.filter(
+                    date_joined__year=previous_year,
+                    date_joined__month=previous_month,
+                    is_active=True,
+                ).count()
+
+                # GROWTH %
+                growth_percentage = 0
+
+                if last_month_signup_count > 0:
+                    growth_percentage = round(
+                        (
+                            (month_signup_count - last_month_signup_count)
+                            / last_month_signup_count
+                        )
+                        * 100,
+                        1,
+                    )
+
+                growth_prefix = "📈 +" if growth_percentage >= 0 else "📉 "
+
+                # -----------------------
+                # SEND ADMIN PUSHES
+                # -----------------------
+                for admin_user in admin_users:
+
+                    try:
+
+                        if not getattr(
+                            admin_user,
+                            "expo_push_tokens",
+                            None,
+                        ):
+                            continue
+
+                        send_push_notification(
+                            user=admin_user,
+                            title=f"🎉 {u.first_name} Just Signed Up",
+                            message=(
+                                f"{u.first_name} {u.last_name}\n"
+                                f"{u.email}\n"
+                                f"{formatted_phone}\n\n"
+                                f"Today: {today_signup_count} users\n"
+                                f"{current_month_name}: {month_signup_count} users\n"
+                                f"Total Confirmed: {total_confirmed_users:,}\n"
+                                f"vs Last Month: "
+                                f"{growth_prefix}{growth_percentage}%"
+                            ),
+                            data={
+                                "user_id": u.id,
+                                "email": u.email,
+                                "phone_number": u.phone_number,
+                                "today_signups": today_signup_count,
+                                "month_signups": month_signup_count,
+                                "total_confirmed_users": total_confirmed_users,
+                                "growth_percentage": growth_percentage,
+                                "type": "admin_signup_alert",
+                                **dl.admin_new_user(u.phone_number, u.email),
+                            },
+                            notif_type="ADMIN",
+                        )
+
+                        logger.info(f"Admin push sent to {admin_user.email}")
+
+                    except Exception as e:
+                        logger.warning(
+                            f"Admin push failed for " f"{admin_user.email}: {e}"
+                        )
+
+            except Exception as e:
+                logger.warning(f"Admin notification block failed: {e}")
+
+        except Exception as e:
+            logger.exception(f"Background error for {u.email}: {e}")
+
+    threading.Thread(
+        target=background_tasks,
+        args=(user,),
+        daemon=True,
+    ).start()
+
+    return Response(
+        {"message": "Account confirmed successfully."},
+        status=status.HTTP_200_OK,
+    )
+>>>>>>> staging
 
 
 def generate_otp():
@@ -261,6 +712,7 @@ def generate_otp():
 
 def send_otp_email(user, otp):
     """
+<<<<<<< HEAD
     Sends the OTP email using Django's send_mail with a proper recipient_list.
     Now always wrapped in MyFund's email/email.html template.
     Raises on failure so callers can handle/log it.
@@ -276,10 +728,34 @@ def send_otp_email(user, otp):
     <h1 style="text-align: center; font-size: 36px;">{otp}</h1>
 
     <p>If you did not request to create a MyFund account, kindly ignore this email. Otherwise, buckle up, you're in for a treat!</p>
+=======
+    Sends signup OTP email using Resend2 via send_generic_email.
+    """
+
+    subject = f"[OTP-{otp}] Did You Just Signup?"
+
+    inner_html = f"""
+    <p>Hi {user.first_name},</p>
+
+    <p>
+    We heard you'd like a shiny new MyFund account.
+    Use the One-Time-Password (OTP) below to complete your signup.
+    This code is valid for 20 minutes.
+    </p>
+
+    <h1 style="text-align:center; font-size:36px;">
+        {otp}
+    </h1>
+
+    <p>
+    If you did not request this, kindly ignore this email.
+    </p>
+>>>>>>> staging
 
     <p>Cheers! 🥂</p>
     """
 
+<<<<<<< HEAD
     # Wrap in MyFund template
     context = {
         "subject": subject,
@@ -306,15 +782,40 @@ def send_otp_email(user, otp):
         logger.info("OTP email sent to %s", user.email)
     except Exception as exc:
         logger.exception("Failed to send OTP email to %s: %s", user.email, str(exc))
+=======
+    try:
+        send_generic_email(
+            subject=subject,
+            message=inner_html,
+            recipient_list=[user.email],
+            from_email="MyFund <noreply@mg.myfundmobile.com>",
+            use_celery_threshold=0,
+            template="email/email.html",
+        )
+
+        logger.info(f"✅ Signup OTP email sent to {user.email}")
+
+    except Exception as exc:
+        logger.exception(f"❌ Failed to send signup OTP email to {user.email}: {exc}")
+
+>>>>>>> staging
         try:
             user.otp = None
             user.save(update_fields=["otp"])
         except Exception:
             user.save()
+<<<<<<< HEAD
+=======
+
+>>>>>>> staging
         raise
 
 
 def send_otp_sms(user, otp):
+<<<<<<< HEAD
+=======
+    from django.core.cache import cache
+>>>>>>> staging
     from authentication.utils import send_sms_via_payless
 
     phone_number = getattr(user, "phone_number", None)  # should already be +234...
@@ -330,6 +831,16 @@ def send_otp_sms(user, otp):
     )
 
     try:
+<<<<<<< HEAD
+=======
+        sms_lock_key = f"sms_otp_lock:{phone_number}"
+
+        if cache.get(sms_lock_key):
+            logger.warning(f"SMS cooldown active for {phone_number}")
+            return False
+
+        cache.set(sms_lock_key, True, timeout=30)
+>>>>>>> staging
         success = send_sms_via_payless(phone_number, message)
         if success:
             logger.info(f"📱 SMS OTP sent to {phone_number}")
@@ -341,6 +852,7 @@ def send_otp_sms(user, otp):
         return False
 
 
+<<<<<<< HEAD
 def send_otp_for_user(user):
     """
     Helper: generate OTP, persist it (and last_otp_sent_at if available),
@@ -379,12 +891,70 @@ def send_otp_for_user(user):
             user.save()
         # raise to inform the caller
         raise
+=======
+def send_otp_for_user(user, send_sms=False):
+    otp = generate_otp()
+
+    user.otp = otp
+    user.otp_created_at = timezone.now()
+
+    if hasattr(user, "last_otp_sent_at"):
+        user.last_otp_sent_at = timezone.now()
+
+    update_fields = ["otp", "otp_created_at", "updated_at"]
+
+    if hasattr(user, "last_otp_sent_at"):
+        update_fields.append("last_otp_sent_at")
+
+    user.save(update_fields=update_fields)
+
+    otp_log = OTPDeliveryLog.objects.create(
+        user=user,
+        otp=otp,
+    )
+
+    try:
+        send_otp_email(user, otp)
+        otp_log.email_status = "sent"
+        otp_log.save(update_fields=["email_status"])
+
+    except Exception as e:
+        logger.warning(f"Email OTP failed: {e}")
+
+        otp_log.email_status = "failed"
+        otp_log.save(update_fields=["email_status"])
+
+    if send_sms:
+        try:
+            sms_count_key = f"sms_signup_count:{user.phone_number}"
+
+            sms_count = cache.get(sms_count_key, 0)
+
+            if sms_count < 2:
+                sms_success = send_otp_sms(user, otp)
+
+                if sms_success:
+                    cache.set(
+                        sms_count_key,
+                        sms_count + 1,
+                        timeout=60 * 60 * 24,
+                    )
+
+                    otp_log.sms_sent = True
+                    otp_log.save(update_fields=["sms_sent"])
+
+        except Exception as e:
+            logger.warning(f"SMS OTP failed: {e}")
+
+    return True
+>>>>>>> staging
 
 
 @api_view(["POST"])
 @csrf_exempt
 @permission_classes([AllowAny])
 def resend_otp(request):
+<<<<<<< HEAD
     """
     Resend OTP for an existing, inactive user.
     Payload: { "email": "user@example.com" }
@@ -394,10 +964,19 @@ def resend_otp(request):
         logger.warning("Resend OTP called without email.")
         return Response(
             {"detail": "Email is required."}, status=status.HTTP_400_BAD_REQUEST
+=======
+    email = (request.data.get("email") or "").strip().lower()
+
+    if not email:
+        return Response(
+            {"detail": "Email is required."},
+            status=status.HTTP_400_BAD_REQUEST,
+>>>>>>> staging
         )
 
     try:
         user = CustomUser.objects.get(email__iexact=email)
+<<<<<<< HEAD
     except CustomUser.DoesNotExist:
         logger.warning("Resend OTP requested for non-existent user: %s", email)
         return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
@@ -427,6 +1006,68 @@ def resend_otp(request):
         logger.exception("Error resending OTP to %s: %s", email, str(e))
         return Response(
             {"detail": "Failed to resend OTP. Try again later."},
+=======
+
+    except CustomUser.DoesNotExist:
+        return Response(
+            {"detail": "User not found."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    if user.is_active:
+        return Response(
+            {"detail": "Account already verified."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    COOLDOWN_SECONDS = 60
+
+    last_sent = getattr(user, "last_otp_sent_at", None)
+
+    if last_sent and timezone.now() - last_sent < timedelta(seconds=COOLDOWN_SECONDS):
+        return Response(
+            {"detail": "Please wait before requesting another code."},
+            status=429,
+        )
+
+    try:
+        resend_count_key = f"otp_resend_count:{user.email}"
+
+        resend_count = cache.get(resend_count_key, 0)
+
+        # First resend = email only
+        # Second resend onwards = email + SMS
+        send_sms = resend_count >= 1
+
+        send_otp_for_user(
+            user=user,
+            send_sms=send_sms,
+        )
+
+        cache.set(
+            resend_count_key,
+            resend_count + 1,
+            timeout=60 * 60 * 24,
+        )
+
+        return Response(
+            {
+                "detail": (
+                    "OTP resent via email and SMS."
+                    if send_sms
+                    else "OTP resent successfully."
+                ),
+                "email": user.email,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    except Exception as e:
+        logger.exception(f"Error resending OTP: {e}")
+
+        return Response(
+            {"detail": "Failed to resend OTP."},
+>>>>>>> staging
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
@@ -516,7 +1157,11 @@ def send_otp_reset_email(user, otp):
     MyFund
     """
 
+<<<<<<< HEAD
     from_email = "MyFund <info@myfundmobile.com>"
+=======
+    from_email = "MyFund <info@mg.myfundmobile.com>"
+>>>>>>> staging
     recipient_list = [user.email]
 
     send_generic_email(
@@ -537,7 +1182,11 @@ def test_email(request):
     MyFund
     """
 
+<<<<<<< HEAD
     from_email = "MyFund <info@myfundmobile.com>"
+=======
+    from_email = "MyFund <info@mg.myfundmobile.com>"
+>>>>>>> staging
     recipient_list = ["sammy@myfundmobile.com"]
 
     send_generic_email(
@@ -713,6 +1362,7 @@ class CustomObtainAuthToken(ObtainAuthToken):
                     )
 
                 # For regular users, send OTP
+<<<<<<< HEAD
                 from authentication.views import send_otp_for_user
 
                 send_otp_for_user(user)
@@ -721,6 +1371,12 @@ class CustomObtainAuthToken(ObtainAuthToken):
                     {
                         "status": "inactive",
                         "message": "Account not verified. OTP sent.",
+=======
+                return Response(
+                    {
+                        "status": "inactive",
+                        "message": "Account not verified.",
+>>>>>>> staging
                         "next_step": "enter_otp",
                         "email": user.email,
                     },
@@ -834,7 +1490,10 @@ import logging
 import random
 from datetime import timedelta, datetime
 from django.utils import timezone
+<<<<<<< HEAD
 from django.conf import settings
+=======
+>>>>>>> staging
 from django.template.loader import render_to_string
 from django.utils.html import strip_tags
 from django.core.mail import send_mail
@@ -881,7 +1540,11 @@ def _send_otp(user, otp, purpose="signup"):
                 subject=subject,
                 message=inner_html,  # pass HTML content directly
                 recipient_list=[user.email],
+<<<<<<< HEAD
                 from_email="MyFund <info@myfundmobile.com>",
+=======
+                from_email="MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
                 use_celery_threshold=30,
                 template="email/email.html",
             )
@@ -890,6 +1553,7 @@ def _send_otp(user, otp, purpose="signup"):
             logger.error(f"Error sending OTP email to {user.email}: {e}")
 
         # Send SMS OTP if phone is available
+<<<<<<< HEAD
         phone_number = getattr(user, "phone_number", None)
         if phone_number:
             sms_message = (
@@ -904,6 +1568,10 @@ def _send_otp(user, otp, purpose="signup"):
                     logger.warning(f"Failed to send SMS OTP to {phone_number}")
             except Exception as sms_err:
                 logger.error(f"Error sending SMS OTP to {phone_number}: {sms_err}")
+=======
+        # Password reset uses email only.
+        # No SMS fallback here intentionally.
+>>>>>>> staging
 
         return True
 
@@ -930,7 +1598,11 @@ def send_password_change_confirmation(user):
                 subject=subject,
                 message=inner_html,  # fixed from context dict to plain HTML
                 recipient_list=[user.email],
+<<<<<<< HEAD
                 from_email="MyFund Security <info@myfundmobile.com>",
+=======
+                from_email="MyFund Security <info@mg.myfundmobile.com>",
+>>>>>>> staging
                 use_celery_threshold=30,
                 template="email/email.html",
             )
@@ -1219,7 +1891,80 @@ def update_user_profile(request):
         )
 
 
+<<<<<<< HEAD
 import time
+=======
+from authentication.services.phone_change import (
+    create_phone_change_request,
+    verify_phone_change_otp,
+    approve_phone_change,
+)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def request_phone_change(request):
+    new_phone = request.data.get("new_phone")
+
+    if not new_phone:
+        return Response({"error": "new_phone is required"}, status=400)
+
+    req = create_phone_change_request(request.user, new_phone)
+
+    return Response(
+        {
+            "message": "OTP sent to old and new phone numbers",
+            "request_id": req.id,
+            "status": req.status,
+        }
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def verify_phone_change(request):
+    request_id = request.data.get("request_id")
+    old_otp = request.data.get("old_otp")
+    new_otp = request.data.get("new_otp")
+
+    if not request_id:
+        return Response({"error": "request_id is required"}, status=400)
+
+    if not old_otp or not new_otp:
+        return Response({"error": "Both old_otp and new_otp are required"}, status=400)
+
+    try:
+        req = verify_phone_change_otp(
+            request_id=request_id, old_otp=old_otp, new_otp=new_otp
+        )
+    except ValueError as e:
+        return Response({"error": str(e)}, status=400)
+
+    return Response(
+        {
+            "status": req.status,
+            "old_verified": req.old_phone_otp_verified,
+            "new_verified": req.new_phone_otp_verified,
+        }
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def approve_phone_change_view(request):
+    request_id = request.data.get("request_id")
+
+    req = approve_phone_change(request_id=request_id, admin_user=request.user)
+
+    return Response(
+        {"status": req.status, "message": "Phone number updated successfully"}
+    )
+
+
+import base64
+import time
+import uuid
+>>>>>>> staging
 import logging
 from rest_framework import status
 from rest_framework.parsers import MultiPartParser, FormParser
@@ -1227,7 +1972,11 @@ from rest_framework.decorators import api_view, permission_classes, parser_class
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from imagekitio import ImageKit
+<<<<<<< HEAD
 from django.conf import settings
+=======
+from imagekitio.models.UploadFileRequestOptions import UploadFileRequestOptions
+>>>>>>> staging
 
 logger = logging.getLogger(__name__)
 
@@ -1238,17 +1987,54 @@ imagekit = ImageKit(
 )
 
 
+<<<<<<< HEAD
+=======
+def upload_to_imagekit(file_data, user_id, filename):
+    """Shared upload logic"""
+    timestamp = int(time.time())
+    unique_id = str(uuid.uuid4())[:8]
+    ext = filename.split(".")[-1].lower()
+    if ext not in ["jpg", "jpeg", "png", "gif", "webp"]:
+        ext = "jpg"
+
+    final_filename = f"profile_{user_id}_{timestamp}_{unique_id}.{ext}"
+
+    upload_options = UploadFileRequestOptions()
+    upload_options.use_unique_file_name = False
+    upload_options.is_private_file = False
+
+    result = imagekit.upload(
+        file=file_data,
+        file_name=final_filename,
+        options=upload_options,
+    )
+
+    base_url = "https://ik.imagekit.io/myfundmobile"
+    public_url = f"{base_url}/{final_filename}"
+
+    return public_url
+
+
+>>>>>>> staging
 @api_view(["PATCH"])
 @permission_classes([IsAuthenticated])
 @parser_classes([MultiPartParser, FormParser])
 def profile_picture_update(request):
+<<<<<<< HEAD
     user = request.user
     pic = request.FILES.get("profile_picture")
+=======
+    """iOS: Handles FormData upload"""
+    user = request.user
+    pic = request.FILES.get("profile_picture")
+
+>>>>>>> staging
     if not pic:
         return Response(
             {"error": "No image file provided"}, status=status.HTTP_400_BAD_REQUEST
         )
 
+<<<<<<< HEAD
     # optional: enforce size/type here…
 
     ext = pic.name.rsplit(".", 1)[-1]
@@ -1273,16 +2059,40 @@ def profile_picture_update(request):
 
         user.profile_picture = url
         user.save()
+=======
+    if pic.size > 5 * 1024 * 1024:
+        return Response(
+            {"error": "Image too large. Max size is 5MB"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        pic.seek(0)
+        file_content = pic.read()
+        encoded_string = base64.b64encode(file_content).decode("utf-8")
+
+        public_url = upload_to_imagekit(encoded_string, user.id, pic.name)
+
+        user.profile_picture = public_url
+        user.save(update_fields=["profile_picture"])
+
+        logger.info(f"iOS upload success for user {user.id}: {public_url}")
+>>>>>>> staging
 
         return Response(
             {
                 "message": "Profile picture updated successfully",
+<<<<<<< HEAD
                 "profile_picture": url,
+=======
+                "profile_picture": public_url,
+>>>>>>> staging
             },
             status=status.HTTP_200_OK,
         )
 
     except Exception as e:
+<<<<<<< HEAD
         logger.error("ImageKit upload failed: %s", e)
         # fallback to local
         from django.core.files.storage import FileSystemStorage
@@ -1298,10 +2108,58 @@ def profile_picture_update(request):
                 "message": "Profile picture updated successfully!",
                 "profile_picture": local_url,
                 "warning": "Cloud upload failed, using local storage",
+=======
+        logger.error(f"ImageKit upload failed for user {user.id}: {str(e)}")
+        return Response(
+            {"error": f"Upload failed: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@api_view(["PATCH"])
+@permission_classes([IsAuthenticated])
+def profile_picture_update_base64(request):
+    """Android: Handles base64 upload"""
+    user = request.user
+    image_base64 = request.data.get("image_base64")
+    filename = request.data.get("filename", "profile_image.jpg")
+
+    if not image_base64:
+        return Response(
+            {"error": "No image data provided"}, status=status.HTTP_400_BAD_REQUEST
+        )
+
+    try:
+        # Remove data URL prefix if present
+        if "," in image_base64:
+            image_base64 = image_base64.split(",")[1]
+
+        public_url = upload_to_imagekit(image_base64, user.id, filename)
+
+        user.profile_picture = public_url
+        user.save(update_fields=["profile_picture"])
+
+        logger.info(f"Android base64 upload success for user {user.id}: {public_url}")
+
+        return Response(
+            {
+                "message": "Profile picture updated successfully",
+                "profile_picture": public_url,
+>>>>>>> staging
             },
             status=status.HTTP_200_OK,
         )
 
+<<<<<<< HEAD
+=======
+    except Exception as e:
+        logger.error(f"ImageKit base64 upload failed for user {user.id}: {str(e)}")
+        return Response(
+            {"error": f"Upload failed: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+>>>>>>> staging
 
 from .serializers import SavingsGoalUpdateSerializer
 
@@ -1948,7 +2806,11 @@ def add_bank_account(request):
                 f"<b>Account Name:</b> {dva_result.get('account_name')}<br><br>"
                 f"You can now fund your QuickSave by bank transfer."
             ),
+<<<<<<< HEAD
             from_email="MyFund <info@myfundmobile.com>",
+=======
+            from_email="MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
             recipient_list=[user.email],
         )
 
@@ -2207,7 +3069,13 @@ def save_or_update_card_from_paystack_auth(user, authorization):
     - same-user updates by signature, authorization_code, or fingerprint
     """
     if not authorization:
+<<<<<<< HEAD
         print("⚠️ save_or_update_card_from_paystack_auth: authorization payload missing")
+=======
+        print(
+            "⚠️ save_or_update_card_from_paystack_auth: authorization payload missing"
+        )
+>>>>>>> staging
         return None
 
     authorization_code = (authorization.get("authorization_code") or "").strip()
@@ -2353,8 +3221,21 @@ class UserTransactionListView(generics.ListAPIView):
 
     def get_queryset(self):
         user = self.request.user
+<<<<<<< HEAD
         transactions = Transaction.objects.filter(user=user).order_by("-date", "-time")
         return transactions
+=======
+
+        return (
+            Transaction.objects.filter(user=user)
+            .exclude(status__iexact="abandoned")
+            .exclude(
+                status__iexact="pending",
+                source_channel="CARD",
+            )
+            .order_by("-date", "-time")
+        )
+>>>>>>> staging
 
 
 from .serializers import AccountBalancesSerializer
@@ -2397,7 +3278,10 @@ paystack_secret_key = os.environ.get(
 from decimal import Decimal
 from rest_framework import status
 import requests
+<<<<<<< HEAD
 from django.conf import settings
+=======
+>>>>>>> staging
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -2433,9 +3317,15 @@ def quicksave(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+<<<<<<< HEAD
     if amount < Decimal("100"):
         return Response(
             {"error": "Amount cannot be less than ₦100"},
+=======
+    if amount < settings.MIN_DEPOSIT_AMOUNT:
+        return Response(
+            {"error": f"Amount cannot be less than ₦{settings.MIN_DEPOSIT_AMOUNT}"},
+>>>>>>> staging
             status=status.HTTP_400_BAD_REQUEST,
         )
 
@@ -2541,7 +3431,11 @@ def quicksave(request):
                 send_generic_email(
                     subject=subject,
                     message=message,
+<<<<<<< HEAD
                     from_email="MyFund <info@myfundmobile.com>",
+=======
+                    from_email="MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
                     recipient_list=[request.user.email],
                 )
             except Exception as e:
@@ -2693,9 +3587,15 @@ def autosave(request):
 
     try:
         amount = int(amount)
+<<<<<<< HEAD
         if amount < 100:
             return Response(
                 {"error": "Amount cannot be less than ₦100"},
+=======
+        if amount < settings.MIN_DEPOSIT_AMOUNT:
+            return Response(
+                {"error": f"Amount cannot be less than ₦{settings.MIN_DEPOSIT_AMOUNT}"},
+>>>>>>> staging
                 status=status.HTTP_400_BAD_REQUEST,
             )
     except ValueError:
@@ -2838,7 +3738,11 @@ def autosave(request):
         f"Bank: {card.bank_name}<br><br>"
         f"Keep growing your funds.🥂"
     )
+<<<<<<< HEAD
     from_email = "MyFund <info@myfundmobile.com>"
+=======
+    from_email = "MyFund <info@mg.myfundmobile.com>"
+>>>>>>> staging
     recipient_list = [user.email]
 
     send_generic_email(
@@ -2956,7 +3860,11 @@ def deactivate_autosave(request):
             f"Your {frequency} AutoSave has been deactivated successfully."
             f"<br><br>Keep growing your funds.🥂"
         )
+<<<<<<< HEAD
         from_email = "MyFund <info@myfundmobile.com>"
+=======
+        from_email = "MyFund <info@mg.myfundmobile.com>"
+>>>>>>> staging
         recipient_list = [user.email]
 
         send_generic_email(
@@ -3034,7 +3942,10 @@ def get_autosave_status(request):
 from decimal import Decimal
 from rest_framework import status
 import requests
+<<<<<<< HEAD
 from django.conf import settings
+=======
+>>>>>>> staging
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -3176,7 +4087,11 @@ def quickinvest(request):
                 send_generic_email(
                     subject=subject,
                     message=message,
+<<<<<<< HEAD
                     from_email="MyFund <info@myfundmobile.com>",
+=======
+                    from_email="MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
                     recipient_list=[request.user.email],
                 )
             except Exception as e:
@@ -3465,7 +4380,11 @@ def autoinvest(request):
         f"Bank: {card.bank_name}<br><br>"
         f"Keep growing your funds.🥂"
     )
+<<<<<<< HEAD
     from_email = "MyFund <info@myfundmobile.com>"
+=======
+    from_email = "MyFund <info@mg.myfundmobile.com>"
+>>>>>>> staging
     recipient_list = [user.email]
 
     send_generic_email(
@@ -3581,7 +4500,11 @@ def deactivate_autoinvest(request):
         # Send a confirmation email
         subject = "AutoInvest Deactivated!"
         message = f"Hi {user.first_name},<br><br>Your {frequency} AutoInvest subscription have been deactivated. <br><br>Keep growing your funds.🥂"
+<<<<<<< HEAD
         from_email = "MyFund <info@myfundmobile.com>"
+=======
+        from_email = "MyFund <info@mg.myfundmobile.com>"
+>>>>>>> staging
         recipient_list = [user.email]
 
         send_generic_email(
@@ -3674,20 +4597,31 @@ import uuid  # Import the uuid library
 
 random_uuid = uuid.uuid4()
 
+<<<<<<< HEAD
+=======
+MINIMUM_INVESTMENT_AMOUNT = Decimal("100000")
+
+>>>>>>> staging
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def savings_to_investment(request):
     user = request.user
 
+<<<<<<< HEAD
     # Ensure user is authenticated
+=======
+>>>>>>> staging
     if not user or not user.is_authenticated:
         return Response(
             {"error": "Authentication credentials were not provided."},
             status=status.HTTP_401_UNAUTHORIZED,
         )
 
+<<<<<<< HEAD
     # Validate and parse amount
+=======
+>>>>>>> staging
     amount_raw = request.data.get("amount", None)
     if amount_raw is None:
         return Response(
@@ -3709,9 +4643,22 @@ def savings_to_investment(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+<<<<<<< HEAD
     try:
         with transaction.atomic():
             # Refresh user to get latest balance and lock row for update
+=======
+    if amount < MINIMUM_INVESTMENT_AMOUNT:
+        return Response(
+            {
+                "error": f"Minimum investment amount is ₦{MINIMUM_INVESTMENT_AMOUNT:,.0f}."
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        with transaction.atomic():
+>>>>>>> staging
             user = user.__class__.objects.select_for_update().get(pk=user.pk)
 
             if user.savings < amount:
@@ -3720,8 +4667,14 @@ def savings_to_investment(request):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
+<<<<<<< HEAD
             # Use full UUID for transaction IDs (no truncation)
             base_transaction_id = str(uuid.uuid4())[:16]
+=======
+            base_transaction_id = str(uuid.uuid4())[:16]
+            debit_transaction_id = base_transaction_id + "-D"
+            credit_transaction_id = base_transaction_id + "-C"
+>>>>>>> staging
 
             create_transaction(
                 user=user,
@@ -3731,7 +4684,11 @@ def savings_to_investment(request):
                 source="SAVINGS",
                 description="Savings > Investment",
                 service_charge=0,
+<<<<<<< HEAD
                 reference=base_transaction_id + "-D",
+=======
+                reference=debit_transaction_id,
+>>>>>>> staging
             )
 
             create_transaction(
@@ -3742,6 +4699,7 @@ def savings_to_investment(request):
                 credited_to="INVESTMENT",
                 description="QuickInvest",
                 service_charge=0,
+<<<<<<< HEAD
                 reference=base_transaction_id + "-C",
             )
 
@@ -3759,26 +4717,63 @@ def savings_to_investment(request):
                 },
                 notif_type="TRANSACTION",
             )
+=======
+                reference=credit_transaction_id,
+            )
+
+            # Refresh to get updated balances after create_transaction mutations
+            user.refresh_from_db()
+
+            try:
+                send_push_notification(
+                    user=user,
+                    title="Savings > Investment Transfer ✅",
+                    message=f"You have successfully transferred ₦{amount:,.0f} from your Savings to Investment.",
+                    data={
+                        "amount": float(amount),
+                        "from": "savings",
+                        "to": "investment",
+                        "debit_transaction_id": debit_transaction_id,
+                        "credit_transaction_id": credit_transaction_id,
+                    },
+                    notif_type="TRANSACTION",
+                )
+            except Exception:
+                pass  # Don't let push notification failure roll back the transaction
+>>>>>>> staging
 
             return Response(
                 {
                     "message": "Savings to investment transfer successful.",
                     "debit_transaction_id": debit_transaction_id,
                     "credit_transaction_id": credit_transaction_id,
+<<<<<<< HEAD
+=======
+                    "newAccountBalances": {
+                        "savings": float(user.savings),
+                        "investment": float(user.investment),
+                        "wallet": float(user.wallet),
+                        "properties": float(user.properties),
+                    },
+>>>>>>> staging
                 },
                 status=status.HTTP_200_OK,
             )
 
+<<<<<<< HEAD
     except Transaction.DoesNotExist:
         return Response(
             {"error": "User account not found."},
             status=status.HTTP_404_NOT_FOUND,
         )
+=======
+>>>>>>> staging
     except IntegrityError:
         return Response(
             {"error": "Transaction ID conflict. Please try again."},
             status=status.HTTP_400_BAD_REQUEST,
         )
+<<<<<<< HEAD
 
     return Response(
         {
@@ -3788,6 +4783,13 @@ def savings_to_investment(request):
         },
         status=status.HTTP_200_OK,
     )
+=======
+    except Exception as e:
+        return Response(
+            {"error": str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+>>>>>>> staging
 
 
 @api_view(["POST"])
@@ -3795,6 +4797,7 @@ def savings_to_investment(request):
 def wallet_to_savings(request):
     user = request.user
 
+<<<<<<< HEAD
     # Ensure user is authenticated
     if not user or not user.is_authenticated:
         return Response(
@@ -3808,14 +4811,24 @@ def wallet_to_savings(request):
         return Response(
             {"error": "Amount is required."},
             status=status.HTTP_400_BAD_REQUEST,
+=======
+    amount_raw = request.data.get("amount", None)
+    if amount_raw is None:
+        return Response(
+            {"error": "Amount is required."}, status=status.HTTP_400_BAD_REQUEST
+>>>>>>> staging
         )
 
     try:
         amount = Decimal(amount_raw)
     except (InvalidOperation, TypeError):
         return Response(
+<<<<<<< HEAD
             {"error": "Invalid amount format."},
             status=status.HTTP_400_BAD_REQUEST,
+=======
+            {"error": "Invalid amount format."}, status=status.HTTP_400_BAD_REQUEST
+>>>>>>> staging
         )
 
     if amount <= 0:
@@ -3826,7 +4839,10 @@ def wallet_to_savings(request):
 
     try:
         with transaction.atomic():
+<<<<<<< HEAD
             # Lock user record to prevent race conditions
+=======
+>>>>>>> staging
             user = user.__class__.objects.select_for_update().get(pk=user.pk)
 
             if user.wallet < amount:
@@ -3835,7 +4851,10 @@ def wallet_to_savings(request):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
+<<<<<<< HEAD
             # Use full UUID for transaction IDs with clear suffixes
+=======
+>>>>>>> staging
             base_transaction_id = str(uuid.uuid4())[:16]
 
             create_transaction(
@@ -3860,6 +4879,7 @@ def wallet_to_savings(request):
                 reference=base_transaction_id + "-C",
             )
 
+<<<<<<< HEAD
             # Send push notification after successful transfer
             send_push_notification(
                 user=user,
@@ -3873,25 +4893,57 @@ def wallet_to_savings(request):
                 },
                 notif_type="TRANSACTION",
             )
+=======
+            user.refresh_from_db()
+
+            try:
+                send_push_notification(
+                    user=user,
+                    title="Wallet > Savings Successful ✅",
+                    message=f"You have successfully transferred ₦{amount:,.0f} from your Wallet to Savings. Well done!",
+                    data={
+                        "amount": float(amount),
+                        "from": "wallet",
+                        "to": "savings",
+                        "transaction_id": base_transaction_id,
+                    },
+                    notif_type="TRANSACTION",
+                )
+            except Exception:
+                pass
+>>>>>>> staging
 
             return Response(
                 {
                     "message": "Wallet to savings transfer successful.",
                     "transaction_id": base_transaction_id,
+<<<<<<< HEAD
+=======
+                    "newAccountBalances": {
+                        "savings": float(user.savings),
+                        "investment": float(user.investment),
+                        "wallet": float(user.wallet),
+                        "properties": float(user.properties),
+                    },
+>>>>>>> staging
                 },
                 status=status.HTTP_200_OK,
             )
 
+<<<<<<< HEAD
     except user.DoesNotExist:
         return Response(
             {"error": "User account not found."},
             status=status.HTTP_404_NOT_FOUND,
         )
+=======
+>>>>>>> staging
     except IntegrityError:
         return Response(
             {"error": "Transaction ID conflict. Please try again."},
             status=status.HTTP_400_BAD_REQUEST,
         )
+<<<<<<< HEAD
 
     return Response(
         {
@@ -3900,6 +4952,13 @@ def wallet_to_savings(request):
         },
         status=status.HTTP_200_OK,
     )
+=======
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+MINIMUM_INVESTMENT_AMOUNT = Decimal("100000")
+>>>>>>> staging
 
 
 @api_view(["POST"])
@@ -3907,6 +4966,7 @@ def wallet_to_savings(request):
 def wallet_to_investment(request):
     user = request.user
 
+<<<<<<< HEAD
     # Ensure user is authenticated
     if not user or not user.is_authenticated:
         return Response(
@@ -3920,14 +4980,24 @@ def wallet_to_investment(request):
         return Response(
             {"error": "Amount is required."},
             status=status.HTTP_400_BAD_REQUEST,
+=======
+    amount_raw = request.data.get("amount", None)
+    if amount_raw is None:
+        return Response(
+            {"error": "Amount is required."}, status=status.HTTP_400_BAD_REQUEST
+>>>>>>> staging
         )
 
     try:
         amount = Decimal(amount_raw)
     except (InvalidOperation, TypeError):
         return Response(
+<<<<<<< HEAD
             {"error": "Invalid amount format."},
             status=status.HTTP_400_BAD_REQUEST,
+=======
+            {"error": "Invalid amount format."}, status=status.HTTP_400_BAD_REQUEST
+>>>>>>> staging
         )
 
     if amount <= 0:
@@ -3936,9 +5006,22 @@ def wallet_to_investment(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+<<<<<<< HEAD
     try:
         with transaction.atomic():
             # Lock user record to prevent race conditions
+=======
+    if amount < MINIMUM_INVESTMENT_AMOUNT:
+        return Response(
+            {
+                "error": f"Minimum investment amount is ₦{MINIMUM_INVESTMENT_AMOUNT:,.0f}."
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        with transaction.atomic():
+>>>>>>> staging
             user = user.__class__.objects.select_for_update().get(pk=user.pk)
 
             if user.wallet < amount:
@@ -3947,7 +5030,10 @@ def wallet_to_investment(request):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
+<<<<<<< HEAD
             # Use full UUID as base transaction ID
+=======
+>>>>>>> staging
             base_transaction_id = str(uuid.uuid4())[:16]
 
             create_transaction(
@@ -3972,6 +5058,7 @@ def wallet_to_investment(request):
                 reference=base_transaction_id + "-C",
             )
 
+<<<<<<< HEAD
             # Send push notification after successful transfer
             send_push_notification(
                 user=user,
@@ -3985,25 +5072,57 @@ def wallet_to_investment(request):
                 },
                 notif_type="TRANSACTION",
             )
+=======
+            user.refresh_from_db()
+
+            try:
+                send_push_notification(
+                    user=user,
+                    title="Wallet > Investment Successful ✅",
+                    message=f"You have successfully transferred ₦{amount:,.0f} from your Wallet to Investment. Well done!",
+                    data={
+                        "amount": float(amount),
+                        "from": "wallet",
+                        "to": "investment",
+                        "transaction_id": base_transaction_id,
+                    },
+                    notif_type="TRANSACTION",
+                )
+            except Exception:
+                pass
+>>>>>>> staging
 
             return Response(
                 {
                     "message": "Wallet to investment transfer successful.",
                     "transaction_id": base_transaction_id,
+<<<<<<< HEAD
+=======
+                    "newAccountBalances": {
+                        "savings": float(user.savings),
+                        "investment": float(user.investment),
+                        "wallet": float(user.wallet),
+                        "properties": float(user.properties),
+                    },
+>>>>>>> staging
                 },
                 status=status.HTTP_200_OK,
             )
 
+<<<<<<< HEAD
     except user.DoesNotExist:
         return Response(
             {"error": "User account not found."},
             status=status.HTTP_404_NOT_FOUND,
         )
+=======
+>>>>>>> staging
     except IntegrityError:
         return Response(
             {"error": "Transaction ID conflict. Please try again."},
             status=status.HTTP_400_BAD_REQUEST,
         )
+<<<<<<< HEAD
 
     return Response(
         {
@@ -4012,6 +5131,10 @@ def wallet_to_investment(request):
         },
         status=status.HTTP_200_OK,
     )
+=======
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+>>>>>>> staging
 
 
 import uuid
@@ -4165,7 +5288,11 @@ def withdraw_to_local_bank(request):
                         f"<strong>Account:</strong> {target_bank_account.account_name} - {target_bank_account.account_number}<br><br>"
                         "Thank you for using MyFund! 🥂<br><br>"
                     ),
+<<<<<<< HEAD
                     from_email="MyFund <info@myfundmobile.com>",
+=======
+                    from_email="MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
                     recipient_list=[user.email],
                 )
 
@@ -4227,7 +5354,11 @@ def withdraw_to_local_bank(request):
 
             charge_percentage_display = f"{rate * 100}%" if rate > 0 else "0%"
 
+<<<<<<< HEAD
             WithdrawalsRequestToAdmin.objects.create(
+=======
+            withdrawal_request = WithdrawalsRequestToAdmin.objects.create(
+>>>>>>> staging
                 user=user,
                 amount=withdrawal_amount,
                 total_amount=amount,
@@ -4275,7 +5406,11 @@ def withdraw_to_local_bank(request):
                     "It'll be processed within the hour.<br><br>"
                     "Thank you for using MyFund!<br><br>"
                 ),
+<<<<<<< HEAD
                 from_email="MyFund <info@myfundmobile.com>",
+=======
+                from_email="MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
                 recipient_list=[user.email],
             )
 
@@ -4291,6 +5426,7 @@ def withdraw_to_local_bank(request):
                     f"Transaction ID: {transaction_id}<br>"
                     "Reason: automatic Paystack withdrawal failed; manual processing required.<br>"
                 ),
+<<<<<<< HEAD
                 from_email="MyFund <info@myfundmobile.com>",
                 recipient_list=["admin@myfundmobile.com"],
             )
@@ -4301,6 +5437,13 @@ def withdraw_to_local_bank(request):
                 "janet.adegbenro@gmail.com",
             ]
             admin_users = CustomUser.objects.filter(email__in=admin_emails)
+=======
+                from_email="MyFund <info@mg.myfundmobile.com>",
+                recipient_list=["admin@myfundmobile.com"],
+            )
+
+            admin_users = CustomUser.objects.filter(is_staff=True, is_active=True)
+>>>>>>> staging
 
             admin_push_message = (
                 f"{user.first_name} {user.last_name} wants to withdraw ₦{amount:,.2f} "
@@ -4328,6 +5471,10 @@ def withdraw_to_local_bank(request):
                             "bank_name": target_bank_account.bank_name,
                             "withdrawal_type": "immediate",
                             "type": "admin_withdrawal_alert",
+<<<<<<< HEAD
+=======
+                            **dl.admin_withdrawal(withdrawal_request.id),  # fixed
+>>>>>>> staging
                         },
                         notif_type="ADMIN_ALERT",
                     )
@@ -4633,7 +5780,11 @@ def process_withdrawal_to_local_bank(request):
                 f"{user_message_body}<br><br>"
                 "Thank you for using MyFund.<br><br>"
             ),
+<<<<<<< HEAD
             from_email="MyFund <info@myfundmobile.com>",
+=======
+            from_email="MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
             recipient_list=[user_locked.email],
         )
 
@@ -4739,7 +5890,11 @@ def process_withdrawal_to_local_bank(request):
             send_generic_email,
             subject=f"[CHECK] {user_locked.first_name} Wants to Withdraw ₦{amount:,.2f} ({withdrawal_type.capitalize()})",
             message=admin_message,
+<<<<<<< HEAD
             from_email="MyFund <info@myfundmobile.com>",
+=======
+            from_email="MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
             recipient_list=[
                 "company@myfundmobile.com",
                 "tolulopeahmed@gmail.com",
@@ -4747,12 +5902,16 @@ def process_withdrawal_to_local_bank(request):
             ],
         )
 
+<<<<<<< HEAD
         admin_emails = [
             "tolulopeahmed@gmail.com",
             "ceo@myfundmobile.com",
             "janet.adegbenro@gmail.com",
         ]
         admin_users = CustomUser.objects.filter(email__in=admin_emails)
+=======
+        admin_users = CustomUser.objects.filter(is_staff=True, is_active=True)
+>>>>>>> staging
 
         for admin_user in admin_users:
             if hasattr(admin_user, "expo_push_tokens") and admin_user.expo_push_tokens:
@@ -4885,6 +6044,7 @@ def cancel_scheduled_withdrawal(request):
             )
 
             if withdrawal_request:
+<<<<<<< HEAD
                 if hasattr(withdrawal_request, "is_cancelled"):
                     withdrawal_request.is_cancelled = True
                     withdrawal_request.save(update_fields=["is_cancelled"])
@@ -4894,6 +6054,30 @@ def cancel_scheduled_withdrawal(request):
                 else:
                     withdrawal_request.is_approved = True
                     withdrawal_request.save(update_fields=["is_approved"])
+=======
+                # 🔴 CRITICAL: must also set is_processed=True here. The
+                # automated Celery task and the "Force credit wallet" admin
+                # action both select on `is_processed=False` (and don't
+                # look at `status` at all) to decide what's still due for
+                # automated crediting. Without this, a cancelled-and-
+                # refunded withdrawal was still "scheduled" with
+                # is_processed still False, so once its
+                # scheduled_processing_date arrived it got auto-credited to
+                # user.wallet a second time - on top of the 99% refund
+                # already paid into savings here. Also clearing
+                # scheduled_processing_date so it can never match that
+                # "due" query at all, belt-and-suspenders.
+                withdrawal_request.is_processed = True
+                withdrawal_request.scheduled_processing_date = None
+                update_fields = ["is_processed", "scheduled_processing_date"]
+                if hasattr(withdrawal_request, "is_cancelled"):
+                    withdrawal_request.is_cancelled = True
+                    update_fields.append("is_cancelled")
+                if hasattr(withdrawal_request, "status"):
+                    withdrawal_request.status = "cancelled"
+                    update_fields.append("status")
+                withdrawal_request.save(update_fields=update_fields)
+>>>>>>> staging
 
             # 4) Delete pending transaction
             pending_transaction.delete()
@@ -4930,7 +6114,11 @@ def cancel_scheduled_withdrawal(request):
             send_generic_email(
                 subject=subject,
                 message=user_message,
+<<<<<<< HEAD
                 from_email="MyFund <info@myfundmobile.com>",
+=======
+                from_email="MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
                 recipient_list=[user_locked.email],
             )
 
@@ -5057,10 +6245,17 @@ def make_withdrawal_through_admin(user, amount, transaction_id):
         # Send an email to admin
         subject = f"[CHECK] {user.first_name} Made A Withdrawal Request"
         message = f"Hi Admin, <br><br>A withdrawal request of ₦{amount} has just been initiated by {user.first_name} {user.last_name} ({user.email}).<br><br>Please log in to the admin panel for review: https://myfundapi-myfund-07ce351a.koyeb.app/admin/login/?next=/admin/"
+<<<<<<< HEAD
         from_email = "MyFund <info@myfundmobile.com>"
         recipient_list = [
             "company@myfundmobile.com",
             "info@myfundmobile.com",
+=======
+        from_email = "MyFund <info@mg.myfundmobile.com>"
+        recipient_list = [
+            "company@myfundmobile.com",
+            "info@mg.myfundmobile.com",
+>>>>>>> staging
             "cto@myfundmobile.com",
         ]
 
@@ -5090,25 +6285,61 @@ def make_withdrawal_through_admin(user, amount, transaction_id):
         print(f"\n(Error) make_withdrawal_through_admin():  {e}\n")
 
 
+<<<<<<< HEAD
 from decimal import Decimal
 
 from decimal import Decimal, InvalidOperation
 from django.core.mail import send_mail
+=======
+from decimal import Decimal, InvalidOperation
+import uuid
+
+from django.db import transaction as db_transaction
+>>>>>>> staging
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
+<<<<<<< HEAD
 import uuid
+=======
+
+from authentication.models import CustomUser
+from authentication.utils import (
+    create_transaction,
+    send_generic_email,
+    send_push_notification,
+)
+>>>>>>> staging
 
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def wallet_transfer_view(request):
+<<<<<<< HEAD
     from .utils import create_transaction
 
     sender = request.user
     data = request.data
     target_email = data.get("recipient_email")
+=======
+    sender = request.user
+    data = request.data
+
+    target_email = (data.get("recipient_email") or "").strip().lower()
+
+    if not target_email:
+        return Response(
+            {"error": "Recipient email is required."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if sender.email.lower() == target_email:
+        return Response(
+            {"error": "You cannot send money to yourself."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+>>>>>>> staging
 
     try:
         amount = Decimal(str(data.get("amount")))
@@ -5124,31 +6355,54 @@ def wallet_transfer_view(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+<<<<<<< HEAD
     # Check sender balance
     if sender.wallet < amount:
+=======
+    sender_wallet = Decimal(str(sender.wallet or 0))
+
+    if sender_wallet < amount:
+>>>>>>> staging
         return Response(
             {"error": "Insufficient balance in the wallet."},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+<<<<<<< HEAD
     # Find recipient
     try:
         target_user = CustomUser.objects.get(email=target_email)
+=======
+    try:
+        target_user = CustomUser.objects.get(email__iexact=target_email)
+>>>>>>> staging
     except CustomUser.DoesNotExist:
         return Response(
             {"error": "Target user not found."},
             status=status.HTTP_404_NOT_FOUND,
         )
 
+<<<<<<< HEAD
     # 🔥 SINGLE TRANSACTION BLOCK (atomic consistency)
     with transaction.atomic():
+=======
+    # 🔥 FIX: generate transaction reference (THIS was your error)
+    transfer_reference = f"WALLET-{uuid.uuid4().hex[:12].upper()}"
+
+    with db_transaction.atomic():
+>>>>>>> staging
         # debit sender
         create_transaction(
             user=sender,
             amount=amount,
             transaction_type="debit",
             source="WALLET",
+<<<<<<< HEAD
             description=f"Sent to {target_user.first_name}",
+=======
+            description=f"Sent to {target_user.first_name or target_user.email}",
+            reference=f"{transfer_reference}-D",
+>>>>>>> staging
         )
 
         # credit receiver
@@ -5157,6 +6411,7 @@ def wallet_transfer_view(request):
             amount=amount,
             transaction_type="credit",
             credited_to="WALLET",
+<<<<<<< HEAD
             description=f"Received from {sender.first_name}",
         )
 
@@ -5202,6 +6457,65 @@ def wallet_transfer_view(request):
     )
 
     return Response({"success": True})
+=======
+            description=f"Received from {sender.first_name or sender.email}",
+            reference=f"{transfer_reference}-C",
+        )
+
+    # Push notifications
+    try:
+        send_push_notification(
+            user=target_user,
+            title=f"You've Received ₦{amount:,.2f}",
+            message=f"{sender.first_name or 'Someone'} just sent you ₦{amount:,.2f}. Check your Wallet.",
+            data={"amount": str(amount), "from": sender.email},
+            notif_type="CREDIT",
+        )
+    except Exception:
+        pass
+
+    try:
+        send_push_notification(
+            user=sender,
+            title=f"You Sent ₦{amount:,.2f}",
+            message=f"You successfully sent ₦{amount:,.2f} to {target_user.first_name or target_user.email}.",
+            data={"amount": str(amount), "to": target_user.email},
+            notif_type="DEBIT",
+        )
+    except Exception:
+        pass
+
+    # Emails
+    send_generic_email(
+        subject=f"You Sent ₦{amount:,.2f} to {target_user.first_name or target_user.email}",
+        message=(
+            f"Hi {sender.first_name or 'there'},<br><br>"
+            f"You have successfully transferred ₦{amount:,.2f} to "
+            f"{target_user.first_name or target_user.email} ({target_user.email}).<br><br>"
+            f"Thank you for using MyFund!"
+        ),
+        recipient_list=[sender.email],
+    )
+
+    send_generic_email(
+        subject=f"You Received ₦{amount:,.2f} from {sender.first_name or 'a MyFund user'}",
+        message=(
+            f"Hi {target_user.first_name or 'there'},<br><br>"
+            f"You have received ₦{amount:,.2f} from "
+            f"{sender.first_name or sender.email} ({sender.email}).<br><br>"
+            f"Thank you for using MyFund!"
+        ),
+        recipient_list=[target_user.email],
+    )
+
+    return Response(
+        {
+            "success": True,
+            "message": "Wallet transfer successful.",
+        },
+        status=status.HTTP_200_OK,
+    )
+>>>>>>> staging
 
 
 from rest_framework import generics, status
@@ -5238,7 +6552,11 @@ def schedule_rent_reward(user_id, rent_reward, transaction_id, property_name):
     # # Send an email to the user for the rental income
     # subject = "You've Earned a Rental Income!"
     # message = f"Hi {user.first_name},<br><br>You've received an annual rental income of ₦{rent_reward} from your {property_name} property. Keep growing your portfolio to enjoy more returns on your investment.🥂 <br><br>Thank you for using MyFund!"
+<<<<<<< HEAD
     # from_email = "MyFund <info@myfundmobile.com>"
+=======
+    # from_email = "MyFund <info@mg.myfundmobile.com>"
+>>>>>>> staging
     # recipient_list = [user.email]
 
     # send_generic_email(subject=subject, message=message, from_email=from_email, recipient_list=recipient_list)
@@ -5321,7 +6639,11 @@ class BuyPropertyView(generics.CreateAPIView):
             subject = f"Congratulations {user.first_name} on Your Property Purchase!"
             num_units_text = "unit" if num_units == 1 else "units"
             message = f"Hi {user.first_name},<br><br>You've successfully purchased {num_units} {num_units_text} of {property.name} property valued at {property.price}.<br><br>You will earn an annual rental income of ₦{rent_reward} on this property.<br><br>Congratulations on being a landlord!"
+<<<<<<< HEAD
             from_email = "MyFund <info@myfundmobile.com>"
+=======
+            from_email = "MyFund <info@mg.myfundmobile.com>"
+>>>>>>> staging
             recipient_list = [user.email]
 
             send_generic_email(
@@ -5407,7 +6729,11 @@ class BuyPropertyView(generics.CreateAPIView):
                     )
                     num_units_text = "unit" if num_units == 1 else "units"
                     message = f"Hi {user.first_name},<br><br>You've successfully purchased {num_units} {num_units_text} of {property.name} property valued at {property.price}.<br><br>You will earn an annual rental income of ₦{rent_reward} on this property.<br><br>Congratulations on being a landlord!"
+<<<<<<< HEAD
                     from_email = "MyFund <info@myfundmobile.com>"
+=======
+                    from_email = "MyFund <info@mg.myfundmobile.com>"
+>>>>>>> staging
                     recipient_list = [user.email]
 
                     send_generic_email(
@@ -5572,7 +6898,11 @@ def send_top_saver_notification(user, old_rank, new_rank):
         send_generic_email(
             subject=subject,
             message=email_message,
+<<<<<<< HEAD
             from_email="MyFund <info@myfundmobile.com>",
+=======
+            from_email="MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
             recipient_list=[user.email],
         )
 
@@ -5759,7 +7089,11 @@ class KYCUpdateView(generics.UpdateAPIView):
                 "Our team will review them shortly, and we’ll let you know once it’s approved.<br><br>"
                 "Thank you for using MyFund.<br><br>"
             )
+<<<<<<< HEAD
             from_email = "MyFund <info@myfundmobile.com>"
+=======
+            from_email = "MyFund <info@mg.myfundmobile.com>"
+>>>>>>> staging
             recipient_list = [user.email]
 
             send_generic_email(
@@ -5779,7 +7113,11 @@ class KYCUpdateView(generics.UpdateAPIView):
         )
 
         # 3️⃣ Notify admin
+<<<<<<< HEAD
         admin_email = ["info@myfundmobile.com", "company@myfundmobile.com"]
+=======
+        admin_email = ["info@mg.myfundmobile.com", "company@myfundmobile.com"]
+>>>>>>> staging
         admin_subject = f"KYC Update for {user.first_name} Pending Approval"
         admin_message = (
             f"Hello Admin,<br><br>"
@@ -5790,11 +7128,16 @@ class KYCUpdateView(generics.UpdateAPIView):
         send_generic_email(
             subject=admin_subject,
             message=admin_message,
+<<<<<<< HEAD
             from_email="MyFund <info@myfundmobile.com>",
+=======
+            from_email="MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
             recipient_list=admin_email,
         )
 
         # 4️⃣ Push notification to admin (KYC alert)
+<<<<<<< HEAD
         admin_emails = [
             "tolulopeahmed@gmail.com",
             "ceo@myfundmobile.com",
@@ -5802,6 +7145,9 @@ class KYCUpdateView(generics.UpdateAPIView):
         ]
 
         admin_users = CustomUser.objects.filter(email__in=admin_emails)
+=======
+        admin_users = CustomUser.objects.filter(is_staff=True, is_active=True)
+>>>>>>> staging
 
         for admin_user in admin_users:
             if hasattr(admin_user, "expo_push_tokens") and admin_user.expo_push_tokens:
@@ -5982,6 +7328,10 @@ def create_notification(user, notification_type, title, message, data=None):
 
 
 import threading
+<<<<<<< HEAD
+=======
+from .push_deep_links import dl
+>>>>>>> staging
 
 
 @api_view(["POST"])
@@ -6008,9 +7358,15 @@ def initiate_bank_transfer(request):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+<<<<<<< HEAD
         if amount < 100:
             return Response(
                 {"error": "Amount must be greater than ₦100"},
+=======
+        if amount < 500:
+            return Response(
+                {"error": "Amount must be greater than ₦500"},
+>>>>>>> staging
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -6035,6 +7391,10 @@ def initiate_bank_transfer(request):
             status="pending",
             amount=amount,
             description="QuickSave . . .",
+<<<<<<< HEAD
+=======
+            source_channel="BANK_TRANSFER",
+>>>>>>> staging
             transaction_id=transaction_id,
             balance_before=user.savings,
             balance_after=user.savings + amount,
@@ -6083,7 +7443,11 @@ def initiate_bank_transfer(request):
                 send_generic_email(
                     subject=user_subject,
                     message=user_message,
+<<<<<<< HEAD
                     from_email="info@myfundmobile.com",
+=======
+                    from_email="info@mg.myfundmobile.com",
+>>>>>>> staging
                     recipient_list=[user.email],
                     use_celery_threshold=30,
                     template="email/email.html",
@@ -6103,22 +7467,33 @@ def initiate_bank_transfer(request):
                 send_generic_email(
                     subject=admin_subject,
                     message=admin_message,
+<<<<<<< HEAD
                     from_email="info@myfundmobile.com",
                     recipient_list=[
                         "company@myfundmobile.com",
                         "info@myfundmobile.com",
+=======
+                    from_email="info@mg.myfundmobile.com",
+                    recipient_list=[
+                        "company@myfundmobile.com",
+                        "info@mg.myfundmobile.com",
+>>>>>>> staging
                     ],
                     use_celery_threshold=30,
                     template="email/email.html",
                 )
 
                 # 4. Push notification to admins
+<<<<<<< HEAD
                 admin_emails = [
                     "tolulopeahmed@gmail.com",
                     "ceo@myfundmobile.com",
                     "janet.adegbenro@gmail.com",
                 ]
                 admin_users = CustomUser.objects.filter(email__in=admin_emails)
+=======
+                admin_users = CustomUser.objects.filter(is_staff=True, is_active=True)
+>>>>>>> staging
 
                 for admin_user in admin_users:
                     if (
@@ -6139,6 +7514,7 @@ def initiate_bank_transfer(request):
                             title=admin_push_title,
                             message=admin_push_message,
                             data={
+<<<<<<< HEAD
                                 "transaction_id": transaction_id,
                                 "user_email": user.email,
                                 "amount": str(amount),
@@ -6147,6 +7523,13 @@ def initiate_bank_transfer(request):
                                 "source": "admin_quicksave_alert",
                             },
                             notif_type="ADMIN_ALERT",
+=======
+                                "type": "admin_bank_transfer",
+                                "transaction_id": transaction_id,
+                                **dl.admin_bank_transfer(transaction_id),  # ← add this
+                            },
+                            notif_type="ADMIN",
+>>>>>>> staging
                         )
                         print(
                             f"✅ Admin QuickSave push notification sent to {admin_user.email}"
@@ -6198,12 +7581,21 @@ def initiate_invest_transfer(request):
 
         try:
             amount = Decimal(str(amount_raw))
+<<<<<<< HEAD
+=======
+            if amount < 100000:
+                return Response(
+                    {"error": "Amount must at least ₦100,000"},
+                    status=400,
+                )
+>>>>>>> staging
         except (InvalidOperation, ValueError, TypeError):
             return Response(
                 {"error": "Invalid amount format"},
                 status=400,
             )
 
+<<<<<<< HEAD
         # Minimum investment validation
         if amount < MINIMUM_INVESTMENT:
             return Response(
@@ -6213,6 +7605,8 @@ def initiate_invest_transfer(request):
                 status=400,
             )
 
+=======
+>>>>>>> staging
         # Generate transaction ID
         transaction_id = str(uuid4())[:10]
 
@@ -6224,6 +7618,10 @@ def initiate_invest_transfer(request):
         )
 
         # Create Transaction record
+<<<<<<< HEAD
+=======
+        current_datetime = timezone.now()
+>>>>>>> staging
         referral_email = user.referral.email if user.referral else None
 
         Transaction.objects.create(
@@ -6236,6 +7634,10 @@ def initiate_invest_transfer(request):
             transaction_id=transaction_id,
             balance_before=user.investment,
             balance_after=user.investment + amount,
+<<<<<<< HEAD
+=======
+            source_channel="BANK_TRANSFER",
+>>>>>>> staging
         )
 
         # 🔔 USER PUSH
@@ -6259,6 +7661,7 @@ def initiate_invest_transfer(request):
             f"Your investment transfer of ₦{amount:,.2f} is pending approval.<br><br>"
             "Thank you for using MyFund."
         )
+<<<<<<< HEAD
 
         threading.Thread(
             target=send_generic_email,
@@ -6267,6 +7670,12 @@ def initiate_invest_transfer(request):
                 "use_celery_threshold": 30,
                 "template": "email/email.html",
             },
+=======
+        threading.Thread(
+            target=send_generic_email,
+            args=(user_subject, user_message, "info@mg.myfundmobile.com", [user.email]),
+            kwargs={"use_celery_threshold": 30, "template": "email/email.html"},
+>>>>>>> staging
             daemon=True,
         ).start()
 
@@ -6279,12 +7688,16 @@ def initiate_invest_transfer(request):
             f"Review here: https://myfundapi-myfund-07ce351a.koyeb.app/admin/<br><br>"
             "MyFund Team"
         )
+<<<<<<< HEAD
 
+=======
+>>>>>>> staging
         threading.Thread(
             target=send_generic_email,
             args=(
                 admin_subject,
                 admin_message,
+<<<<<<< HEAD
                 "info@myfundmobile.com",
                 ["company@myfundmobile.com", "info@myfundmobile.com"],
             ),
@@ -6292,10 +7705,17 @@ def initiate_invest_transfer(request):
                 "use_celery_threshold": 30,
                 "template": "email/email.html",
             },
+=======
+                "info@mg.myfundmobile.com",
+                ["company@myfundmobile.com", "info@mg.myfundmobile.com"],
+            ),
+            kwargs={"use_celery_threshold": 30, "template": "email/email.html"},
+>>>>>>> staging
             daemon=True,
         ).start()
 
         # 🔔 ADMIN PUSH
+<<<<<<< HEAD
         admin_emails = [
             "tolulopeahmed@gmail.com",
             "ceo@myfundmobile.com",
@@ -6314,16 +7734,44 @@ def initiate_invest_transfer(request):
                         f"initiated ₦{amount:,.2f} to Investment Account.\n"
                         "Please check to confirm."
                     ),
+=======
+        admin_users = CustomUser.objects.filter(is_staff=True, is_active=True)
+
+        for admin in admin_users:
+            if hasattr(admin, "expo_push_tokens") and admin.expo_push_tokens:
+                admin_push_title = f"{user.first_name} initiated a New QuickInvest"
+                admin_push_message = (
+                    f"{user.first_name} {user.last_name} ({user.email}) initiated "
+                    f"₦{amount:,.2f} to Investment Account.\nPlease check to confirm."
+                )
+                send_push_notification(
+                    user=admin,
+                    title=admin_push_title,
+                    message=admin_push_message,
+>>>>>>> staging
                     data={
                         "transaction_id": transaction_id,
                         "user_email": user.email,
                         "type": "QuickInvest",
                         "status": "pending",
                         "source": "admin_quickinvest_alert",
+<<<<<<< HEAD
+=======
+                        # Was missing entirely - this is what actually
+                        # attaches the "Approve"/"Mark Abandoned" action
+                        # buttons (category) and the admin_url, mirroring
+                        # what QuickSave's admin push already sends via
+                        # dl.admin_bank_transfer().
+                        **dl.admin_invest_transfer(transaction_id),
+>>>>>>> staging
                     },
                     notif_type="ADMIN_ALERT",
                 )
 
+<<<<<<< HEAD
+=======
+        # ✅ RETURN RESPONSE
+>>>>>>> staging
         return Response(
             {
                 "message": "QuickInvest request created and pending approval",
@@ -6334,10 +7782,14 @@ def initiate_invest_transfer(request):
 
     except Exception as e:
         return Response(
+<<<<<<< HEAD
             {
                 "error": str(e),
                 "transaction_id": transaction_id,
             },
+=======
+            {"error": str(e), "transaction_id": transaction_id},
+>>>>>>> staging
             status=400,
         )
 
@@ -6378,7 +7830,11 @@ def _create_dva_intent(user, amount, purpose):
         transaction_id=transaction_id,
     )
 
+<<<<<<< HEAD
     description = "QuickSave . . ." if purpose == "SAVINGS" else "QuickInvest . . ."
+=======
+    description = "QuickSave" if purpose == "SAVINGS" else "QuickInvest"
+>>>>>>> staging
 
     transaction = Transaction.objects.create(
         user=user,
@@ -6388,6 +7844,10 @@ def _create_dva_intent(user, amount, purpose):
         amount=amount,
         description=description,
         transaction_id=transaction_id,
+<<<<<<< HEAD
+=======
+        source_channel="DVA",
+>>>>>>> staging
     )
 
     return intent, transaction
@@ -6491,9 +7951,17 @@ def initiate_dva_quicksave(request):
 
         try:
             amount = Decimal(str(amount_raw))
+<<<<<<< HEAD
             if amount < 100:
                 return Response(
                     {"error": "Amount must be greater than ₦100"},
+=======
+            if amount < settings.MIN_DEPOSIT_AMOUNT:
+                return Response(
+                    {
+                        "error": f"Amount cannot be less than ₦{settings.MIN_DEPOSIT_AMOUNT}"
+                    },
+>>>>>>> staging
                     status=status.HTTP_400_BAD_REQUEST,
                 )
         except (InvalidOperation, ValueError, TypeError):
@@ -6584,9 +8052,17 @@ def initiate_dva_quickinvest(request):
 
         try:
             amount = Decimal(str(amount_raw))
+<<<<<<< HEAD
             if amount < 100:
                 return Response(
                     {"error": "Amount must be greater than ₦100"},
+=======
+            if amount < settings.MIN_DEPOSIT_AMOUNT:
+                return Response(
+                    {
+                        "error": f"Amount cannot be less than ₦{settings.MIN_DEPOSIT_AMOUNT}"
+                    },
+>>>>>>> staging
                     status=status.HTTP_400_BAD_REQUEST,
                 )
         except (InvalidOperation, ValueError, TypeError):
@@ -6632,7 +8108,11 @@ def initiate_dva_quickinvest(request):
                         f"<br><br>We will credit your investment automatically once confirmed."
                     ),
                     [user.email],
+<<<<<<< HEAD
                     "MyFund <info@myfundmobile.com>",
+=======
+                    "MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
                 )
             except Exception as e:
                 print(f"DVA QuickInvest background task error: {e}")
@@ -6656,17 +8136,77 @@ def initiate_dva_quickinvest(request):
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
+<<<<<<< HEAD
+=======
+@api_view(["DELETE"])
+@permission_classes([IsAuthenticated])
+def remove_dva_account(request):
+    """
+    Allows a user to remove their own DVA from the app.
+    Clears local DVA fields only (does not call Paystack to deactivate).
+    """
+    user = request.user
+
+    if not user.dva_account_number:
+        return Response(
+            {"error": "You don't have a DVA account to remove."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Clear all DVA-related fields
+    user.dva_account_number = None
+    user.dva_account_name = None
+    user.dva_bank_name = None
+    user.dva_account_id = None
+    user.dva_assigned_at = None
+    user.paystack_identified = False
+    user.paystack_identification_status = None
+    user.paystack_identification_reason = None
+    user.save(
+        update_fields=[
+            "dva_account_number",
+            "dva_account_name",
+            "dva_bank_name",
+            "dva_account_id",
+            "dva_assigned_at",
+            "paystack_identified",
+            "paystack_identification_status",
+            "paystack_identification_reason",
+        ]
+    )
+
+    return Response(
+        {"message": "Your virtual account has been removed successfully."},
+        status=status.HTTP_200_OK,
+    )
+
+
+>>>>>>> staging
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_user_by_email(request):
     email = request.query_params.get("email", "")
     try:
         user = CustomUser.objects.get(email=email)
+<<<<<<< HEAD
+=======
+        pic = user.profile_picture
+        if hasattr(pic, "url"):
+            pic = pic.url
+        elif not isinstance(pic, str):
+            pic = None
+
+>>>>>>> staging
         user_data = {
             "first_name": user.first_name,
             "last_name": user.last_name,
             "email": user.email,
+<<<<<<< HEAD
             # Add any other user details you want to include
+=======
+            "profile_picture": pic or None,
+            "phone_number": user.phone_number or None,
+>>>>>>> staging
         }
         return Response(user_data, status=status.HTTP_200_OK)
     except CustomUser.DoesNotExist:
@@ -6682,7 +8222,11 @@ def message_admin(request):
         last_name = request.user.last_name
         message = request.data.get("message")
         recipient_email = "care@myfundmobile.com"
+<<<<<<< HEAD
         from_email = "info@myfundmobile.com"
+=======
+        from_email = "info@mg.myfundmobile.com"
+>>>>>>> staging
 
         if not message:
             return JsonResponse(
@@ -6800,7 +8344,11 @@ def send_pin_reset_otp(request):
         send_generic_email(
             subject=subject,
             message=message,
+<<<<<<< HEAD
             from_email="MyFund <info@myfundmobile.com>",
+=======
+            from_email="MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
             recipient_list=[user.email],
         )
 
@@ -6853,7 +8401,11 @@ def verify_otp_and_reset_pin(request):
         send_generic_email(
             subject=subject,
             message=message,
+<<<<<<< HEAD
             from_email="MyFund <info@myfundmobile.com>",
+=======
+            from_email="MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
             recipient_list=[user.email],
         )
 
@@ -6913,7 +8465,11 @@ def paystack_submit_otp(request):
 
                 subject = "QuickInvest Successful!"
                 message = f"Well done {user.first_name},<br><br>Your QuickInvest was successful and ₦{amount} has been successfully added to your INVESTMENTS account. <br><br>Keep growing your funds.🥂"
+<<<<<<< HEAD
                 from_email = "MyFund <info@myfundmobile.com>"
+=======
+                from_email = "MyFund <info@mg.myfundmobile.com>"
+>>>>>>> staging
                 recipient_list = [user.email]
 
                 send_generic_email(
@@ -6929,7 +8485,11 @@ def paystack_submit_otp(request):
                 # Send a confirmation email
                 subject = "QuickSave Successful!"
                 message = f"Well done {user.first_name},<br><br>Your QwickSave was successful and ₦{amount} has been successfully added to your SAVINGS account. <br><br>Keep growing your funds.🥂"
+<<<<<<< HEAD
                 from_email = "MyFund <info@myfundmobile.com>"
+=======
+                from_email = "MyFund <info@mg.myfundmobile.com>"
+>>>>>>> staging
                 recipient_list = [user.email]
 
                 send_generic_email(
@@ -6974,7 +8534,10 @@ from .utils import (
     create_dedicated_account,
 )
 
+<<<<<<< HEAD
 
+=======
+>>>>>>> staging
 paystack_ips = ["52.31.139.75", "52.49.173.169", "52.214.14.220"]
 
 
@@ -6999,7 +8562,10 @@ import json
 import hmac
 import hashlib
 
+<<<<<<< HEAD
 from django.conf import settings
+=======
+>>>>>>> staging
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from rest_framework import status
@@ -7076,8 +8642,13 @@ def paystack_webhook(request):
         send_generic_email(
             subject="Paystack Webhook Error!",
             message=f"Paystack Webhook Internal Server Error: {e}",
+<<<<<<< HEAD
             from_email="MyFund <info@myfundmobile.com>",
             recipient_list=["info@myfundmobile.com", "sammy@myfundmobile.com"],
+=======
+            from_email="MyFund <info@mg.myfundmobile.com>",
+            recipient_list=["info@mg.myfundmobile.com", "sammy@myfundmobile.com"],
+>>>>>>> staging
         )
 
         return JsonResponse(
@@ -7086,6 +8657,166 @@ def paystack_webhook(request):
         )
 
 
+<<<<<<< HEAD
+=======
+def process_dva_credit_from_paystack_event(event):
+    data = event.get("data", {}) or {}
+
+    reference = data.get("reference") or data.get("id")
+    payment_channel = data.get("channel")
+    email = (data.get("customer", {}) or {}).get("email")
+    amount = Decimal(data.get("amount", 0)) / 100
+
+    authorization = data.get("authorization", {}) or {}
+    receiver_account_number = authorization.get("receiver_bank_account_number")
+
+    if not reference or amount <= 0:
+        print("Invalid DVA webhook payload")
+        return False
+
+    # Prevent duplicate credit
+    existing = Transaction.objects.filter(
+        paystack_reference=reference,
+        status="confirmed",
+    ).exists()
+
+    if existing:
+        print("Duplicate DVA payment ignored")
+        return True
+
+    user = None
+
+    if receiver_account_number:
+        user = CustomUser.objects.filter(
+            dva_account_number=receiver_account_number
+        ).first()
+
+    if not user and email:
+        user = CustomUser.objects.filter(email=email).first()
+
+    if not user:
+        print(f"DVA user not found. Email={email}, Account={receiver_account_number}")
+        return False
+
+    intent = (
+        DvaDepositIntent.objects.filter(
+            user=user,
+            amount=amount,
+            status="pending",
+        )
+        .order_by("-created_at")
+        .first()
+    )
+
+    purpose = intent.purpose if intent else "SAVINGS"
+
+    transaction = None
+
+    if intent:
+        transaction = Transaction.objects.filter(
+            user=user,
+            transaction_id=intent.transaction_id,
+            status="pending",
+        ).first()
+
+    # If user paid without an active intent, create confirmed transaction anyway
+    if not transaction:
+        transaction = create_transaction(
+            user=user,
+            amount=amount,
+            transaction_type="credit",
+            status="confirmed",
+            source="DVA",
+            credited_to="INVESTMENT" if purpose == "INVESTMENT" else "SAVINGS",
+            description=(
+                "QuickInvest (Transfer)"
+                if purpose == "INVESTMENT"
+                else "QuickSave (Transfer)"
+            ),
+            service_charge=0,
+            reference=reference,
+        )
+
+        transaction.paystack_reference = reference
+        transaction.paystack_auth_code = authorization.get("authorization_code")
+        transaction.save(update_fields=["paystack_reference", "paystack_auth_code"])
+
+    else:
+        if purpose == "SAVINGS":
+            ok, msg = approve_quicksave_credit(
+                user=user,
+                amount=amount,
+                transaction_id=transaction.transaction_id,
+                description="QuickSave (Transfer)",
+                source="DVA",
+                paystack_reference=reference,
+                paystack_auth_code=authorization.get("authorization_code"),
+            )
+
+            if not ok:
+                print(f"QuickSave DVA approval failed: {msg}")
+                return False
+
+        else:
+            user.refresh_from_db()
+            balance_before = user.investment or Decimal("0.00")
+            balance_after = balance_before + amount
+
+            transaction.transaction_type = "credit"
+            transaction.status = "confirmed"
+            transaction.source = "DVA"
+            transaction.credited_to = "INVESTMENT"
+            transaction.description = "QuickInvest (Transfer)"
+            transaction.paystack_reference = reference
+            transaction.paystack_auth_code = authorization.get("authorization_code")
+            transaction.balance_before = balance_before
+            transaction.balance_after = balance_after
+            transaction.save()
+
+            user.investment = balance_after
+            user.update_total_savings_and_investment_this_month()
+            user.save()
+
+    if intent:
+        intent.status = "confirmed"
+        intent.paystack_reference = reference
+        intent.matched_account_number = receiver_account_number
+        intent.confirmed_at = timezone.now()
+        intent.save(
+            update_fields=[
+                "status",
+                "paystack_reference",
+                "matched_account_number",
+                "confirmed_at",
+            ]
+        )
+
+    send_push_notification(
+        user=user,
+        title=(
+            "QuickInvest Successful ✅"
+            if purpose == "INVESTMENT"
+            else "QuickSave Successful ✅"
+        ),
+        message=(
+            f"Hi {user.first_name}, your transfer of ₦{amount:,.2f} "
+            f"has been added to your {'Investment' if purpose == 'INVESTMENT' else 'Savings'} account."
+        ),
+        data={
+            "amount": str(amount),
+            "transaction_id": transaction.transaction_id,
+            "type": "QuickInvest" if purpose == "INVESTMENT" else "QuickSave",
+            "status": "confirmed",
+        },
+        notif_type="CREDIT",
+    )
+
+    user.confirm_referral_rewards(is_referrer=True)
+    print(f"✅ DVA {purpose} credited successfully for {user.email}")
+    return True
+
+
+>>>>>>> staging
 from .utils import create_transaction
 
 
@@ -7107,7 +8838,11 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
             + " headers:"
             + str(header_data)
         )
+<<<<<<< HEAD
         from_email = "MyFund <info@myfundmobile.com>"
+=======
+        from_email = "MyFund <info@mg.myfundmobile.com>"
+>>>>>>> staging
         recipient_list = ["webhook@myfundmobile.com", "sammy@myfundmobile.com"]
 
         send_generic_email(
@@ -7135,6 +8870,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                 print("FULL PAYSTACK EVENT:", event)
 
                 # --------------------------------------------------
+<<<<<<< HEAD
                 # DVA / bank transfer intent-based handling
                 # --------------------------------------------------
                 if payment_channel in ["dedicated_nuban", "bank_transfer", "bank"]:
@@ -7285,6 +9021,12 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     print(
                         f"✅ DVA {intent.purpose} credited successfully for {user.email}"
                     )
+=======
+                # DVA / bank transfer handling
+                # --------------------------------------------------
+                if payment_channel in ["dedicated_nuban", "bank_transfer", "bank"]:
+                    process_dva_credit_from_paystack_event(event)
+>>>>>>> staging
                     return
 
                 # --------------------------------------------------
@@ -7299,8 +9041,16 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                 except CustomUser.DoesNotExist:
                     subject = "[Webhook Error] User NOT Found in DB"
                     message = f"No user found with email {email}."
+<<<<<<< HEAD
                     from_email = "MyFund <info@myfundmobile.com>"
                     recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
+=======
+                    from_email = "MyFund <info@mg.myfundmobile.com>"
+                    recipient_list = [
+                        "info@mg.myfundmobile.com",
+                        "sammy@myfundmobile.com",
+                    ]
+>>>>>>> staging
 
                     send_generic_email(
                         subject=subject,
@@ -7308,6 +9058,10 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         from_email=from_email,
                         recipient_list=recipient_list,
                     )
+<<<<<<< HEAD
+=======
+
+>>>>>>> staging
                     return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
                 saved_card = None
@@ -7342,9 +9096,15 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             send_generic_email(
                                 subject=subject,
                                 message=message,
+<<<<<<< HEAD
                                 from_email="MyFund <info@myfundmobile.com>",
                                 recipient_list=[
                                     "info@myfundmobile.com",
+=======
+                                from_email="MyFund <info@mg.myfundmobile.com>",
+                                recipient_list=[
+                                    "info@mg.myfundmobile.com",
+>>>>>>> staging
                                     "sammy@myfundmobile.com",
                                 ],
                             )
@@ -7382,9 +9142,15 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             f"No AutoSave/AutoInvest found with reference {reference}, "
                             f"amount {amount}, and plan_code {plan_code}."
                         )
+<<<<<<< HEAD
                         from_email = "MyFund <info@myfundmobile.com>"
                         recipient_list = [
                             "info@myfundmobile.com",
+=======
+                        from_email = "MyFund <info@mg.myfundmobile.com>"
+                        recipient_list = [
+                            "info@mg.myfundmobile.com",
+>>>>>>> staging
                             "sammy@myfundmobile.com",
                         ]
 
@@ -7460,7 +9226,11 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             f"Your AutoSave was successful and ₦{amount:,.2f} "
                             f"has been added to your SAVINGS account."
                         )
+<<<<<<< HEAD
                         from_email = "MyFund <info@myfundmobile.com>"
+=======
+                        from_email = "MyFund <info@mg.myfundmobile.com>"
+>>>>>>> staging
                         recipient_list = [user.email]
 
                         send_generic_email(
@@ -7488,6 +9258,10 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             notif_type="CREDIT",
                         )
 
+<<<<<<< HEAD
+=======
+                        user.confirm_referral_rewards(is_referrer=True)
+>>>>>>> staging
                         print("AutoSave Successfully Credited your Account.")
                         return
 
@@ -7555,7 +9329,11 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             f"Your AutoInvest was successful and ₦{amount:,.2f} "
                             f"has been added to your INVESTMENT account."
                         )
+<<<<<<< HEAD
                         from_email = "MyFund <info@myfundmobile.com>"
+=======
+                        from_email = "MyFund <info@mg.myfundmobile.com>"
+>>>>>>> staging
                         recipient_list = [user.email]
 
                         send_generic_email(
@@ -7583,6 +9361,10 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             notif_type="CREDIT",
                         )
 
+<<<<<<< HEAD
+=======
+                        user.confirm_referral_rewards(is_referrer=True)
+>>>>>>> staging
                         print("AutoInvest Successfully Credited your Account.")
                         return
 
@@ -7618,7 +9400,11 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         f"has been successfully added to your SAVINGS account."
                         f"<br><br>Keep growing your funds.🥂<br><br>"
                     )
+<<<<<<< HEAD
                     from_email = "MyFund <info@myfundmobile.com>"
+=======
+                    from_email = "MyFund <info@mg.myfundmobile.com>"
+>>>>>>> staging
                     recipient_list = [user.email]
 
                     send_generic_email(
@@ -7628,6 +9414,10 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         recipient_list=recipient_list,
                     )
 
+<<<<<<< HEAD
+=======
+                    user.confirm_referral_rewards(is_referrer=True)
+>>>>>>> staging
                     return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
                 elif transaction and transaction.description.lower().startswith(
@@ -7657,7 +9447,11 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         f"has been successfully added to your INVESTMENTS account."
                         f"<br><br>Keep growing your funds.🥂<br><br>"
                     )
+<<<<<<< HEAD
                     from_email = "MyFund <info@myfundmobile.com>"
+=======
+                    from_email = "MyFund <info@mg.myfundmobile.com>"
+>>>>>>> staging
                     recipient_list = [user.email]
 
                     send_generic_email(
@@ -7667,6 +9461,10 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         recipient_list=recipient_list,
                     )
 
+<<<<<<< HEAD
+=======
+                    user.confirm_referral_rewards(is_referrer=True)
+>>>>>>> staging
                     print("QuickInvest Successfully Credited your Account.")
                     return
 
@@ -7830,7 +9628,11 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                                 f"has been successfully added to your SAVINGS account."
                                 f"<br><br>Keep growing your funds.🥂"
                             )
+<<<<<<< HEAD
                             from_email = "MyFund <info@myfundmobile.com>"
+=======
+                            from_email = "MyFund <info@mg.myfundmobile.com>"
+>>>>>>> staging
                             recipient_list = [user.email]
 
                             send_generic_email(
@@ -7850,7 +9652,11 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                                 f"has been successfully added to your INVESTMENT account."
                                 f"<br><br>Keep growing your funds.🥂<br><br>"
                             )
+<<<<<<< HEAD
                             from_email = "MyFund <info@myfundmobile.com>"
+=======
+                            from_email = "MyFund <info@mg.myfundmobile.com>"
+>>>>>>> staging
                             recipient_list = [user.email]
 
                             send_generic_email(
@@ -7875,8 +9681,13 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
 
                 subject = "Paystack Webhook(Payment Failed)"
                 message = f"Invoice Data: <br><br>{event_data}"
+<<<<<<< HEAD
                 from_email = "MyFund <info@myfundmobile.com>"
                 recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
+=======
+                from_email = "MyFund <info@mg.myfundmobile.com>"
+                recipient_list = ["info@mg.myfundmobile.com", "sammy@myfundmobile.com"]
+>>>>>>> staging
 
                 send_generic_email(
                     subject=subject,
@@ -7913,10 +9724,17 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     f"panel for review: "
                     f"https://myfundapi-myfund-07ce351a.koyeb.app/admin/login/?next=/admin/<br><br>"
                 )
+<<<<<<< HEAD
                 from_email = "MyFund <info@myfundmobile.com>"
                 recipient_list = [
                     "company@myfundmobile.com",
                     "info@myfundmobile.com",
+=======
+                from_email = "MyFund <info@mg.myfundmobile.com>"
+                recipient_list = [
+                    "company@myfundmobile.com",
+                    "info@mg.myfundmobile.com",
+>>>>>>> staging
                     "sammy@myfundmobile.com",
                 ]
 
@@ -7931,6 +9749,10 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
 
             case "dedicated_account.credit":
                 print("Received dedicated_account.credit webhook")
+<<<<<<< HEAD
+=======
+                print("DEDICATED ACCOUNT CREDIT PAYLOAD:", event)
+>>>>>>> staging
                 return
 
             case "customeridentification.success":
@@ -7995,7 +9817,11 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                                 f"<b>Account Name:</b> {result.get('account_name')}<br><br>"
                                 f"You can now fund your QuickSave by bank transfer."
                             ),
+<<<<<<< HEAD
                             from_email="MyFund <info@myfundmobile.com>",
+=======
+                            from_email="MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
                             recipient_list=[user.email],
                         )
 
@@ -8007,9 +9833,15 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                                 f"Customer code: {customer_code}<br>"
                                 f"Result: {result}"
                             ),
+<<<<<<< HEAD
                             from_email="MyFund <info@myfundmobile.com>",
                             recipient_list=[
                                 "info@myfundmobile.com",
+=======
+                            from_email="MyFund <info@mg.myfundmobile.com>",
+                            recipient_list=[
+                                "info@mg.myfundmobile.com",
+>>>>>>> staging
                                 "sammy@myfundmobile.com",
                             ],
                         )
@@ -8042,7 +9874,11 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             f"<b>Account Name:</b> {user.dva_account_name}<br><br>"
                             f"You can now fund your QuickSave by bank transfer."
                         ),
+<<<<<<< HEAD
                         from_email="MyFund <info@myfundmobile.com>",
+=======
+                        from_email="MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
                         recipient_list=[user.email],
                     )
 
@@ -8126,7 +9962,11 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                 send_generic_email(
                     subject=email_subject,
                     message=email_message,
+<<<<<<< HEAD
                     from_email="MyFund <info@myfundmobile.com>",
+=======
+                    from_email="MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
                     recipient_list=[user.email],
                 )
 
@@ -8194,7 +10034,11 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             f"<b>Account Name:</b> {user.dva_account_name}<br><br>"
                             f"You can now fund your QuickSave by bank transfer."
                         ),
+<<<<<<< HEAD
                         from_email="MyFund <info@myfundmobile.com>",
+=======
+                        from_email="MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
                         recipient_list=[user.email],
                     )
 
@@ -8235,16 +10079,26 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             f"<b>Reason:</b> {reason}<br><br>"
                             f"Please try again later or contact support."
                         ),
+<<<<<<< HEAD
                         from_email="MyFund <info@myfundmobile.com>",
+=======
+                        from_email="MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
                         recipient_list=[user.email],
                     )
 
                     send_generic_email(
                         subject="[Paystack DVA Failed]",
                         message=f"User: {user.email}<br>Reason: {reason}",
+<<<<<<< HEAD
                         from_email="MyFund <info@myfundmobile.com>",
                         recipient_list=[
                             "info@myfundmobile.com",
+=======
+                        from_email="MyFund <info@mg.myfundmobile.com>",
+                        recipient_list=[
+                            "info@mg.myfundmobile.com",
+>>>>>>> staging
                             "sammy@myfundmobile.com",
                         ],
                     )
@@ -8260,8 +10114,13 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
 
         subject = "Paystack Webhook Error!"
         message = f"Paystack Webhook Internal Server Error: {e}"
+<<<<<<< HEAD
         from_email = "MyFund <info@myfundmobile.com>"
         recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
+=======
+        from_email = "MyFund <info@mg.myfundmobile.com>"
+        recipient_list = ["info@mg.myfundmobile.com", "sammy@myfundmobile.com"]
+>>>>>>> staging
 
         send_generic_email(
             subject=subject,
@@ -8367,7 +10226,10 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
+<<<<<<< HEAD
 from django.conf import settings
+=======
+>>>>>>> staging
 from .utils import send_generic_email
 import logging
 
@@ -8815,7 +10677,11 @@ def create_groupbuy(request):
                             f"— The MyFund Team"
                         )
 
+<<<<<<< HEAD
                         from_email = "MyFund <info@myfundmobile.com>"
+=======
+                        from_email = "MyFund <info@mg.myfundmobile.com>"
+>>>>>>> staging
                         recipient_list = [user.email for user in invited_users]
 
                         try:
@@ -8839,6 +10705,41 @@ def create_groupbuy(request):
                 if invalid_emails:
                     warning_message = f"Some emails were invalid and skipped: {', '.join(invalid_emails)}"
 
+<<<<<<< HEAD
+=======
+        # Step 8b: Notify test users that a new public GroupBuy just went
+        # live. Scoped to a hardcoded test list for now (not all users) -
+        # a handful of Expo push calls is cheap regardless, but we only
+        # want this actually landing on real devices during testing.
+        if group_type == "public":
+            TEST_NOTIFY_EMAILS = [
+                "tolulopeahmed@gmail.com",
+                "valueplusrecords@gmail.com",
+                "valuepluspublishing@gmail.com",
+            ]
+            try:
+                notify_users = get_user_model().objects.filter(
+                    email__in=TEST_NOTIFY_EMAILS
+                )
+                for notify_user in notify_users:
+                    send_push_notification(
+                        user=notify_user,
+                        title="New GroupBuy is Live! 🏠",
+                        message=(
+                            f"A new GroupBuy just opened for {property_obj.name}. "
+                            f"Join now to start owning a share of this property."
+                        ),
+                        data={
+                            "type": "groupbuy_live",
+                            "group_id": str(group.id),
+                            "property_id": str(property_obj.id),
+                        },
+                        notif_type="GROUP",
+                    )
+            except Exception as e:
+                logger.warning(f"GroupBuy-live push failed: {e}")
+
+>>>>>>> staging
         # Step 9: Return the serialized group
         serializer = GroupSerializer(group)
         response_data = serializer.data
@@ -8867,13 +10768,50 @@ def get_groupbuy_by_property(request, property_id):
         )
 
 
+<<<<<<< HEAD
+=======
+# GET /groupbuy/detail/:groupId - Retrieve a single group buy by its own id
+# (used e.g. by the mobile app's groupbuy invite deep link, which only has the
+# Group.id, not the property_id that get_groupbuy_by_property needs)
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def get_groupbuy_by_id(request, group_id):
+    try:
+        group_uuid = uuid.UUID(str(group_id))
+    except ValueError:
+        return Response(
+            {"message": "Invalid group ID. It must be a valid UUID."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        group = Group.objects.get(id=group_uuid)
+    except Group.DoesNotExist:
+        return Response(
+            {"message": "Group not found."}, status=status.HTTP_404_NOT_FOUND
+        )
+
+    return Response(GroupSerializer(group).data)
+
+
+>>>>>>> staging
 # GET /groupbuys/ - Retrieve group buy details for a specific property
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_active_public_groupbuys(request):
     try:
+<<<<<<< HEAD
         groups = Group.objects.filter(
             status__in=["Active", "active"], group_type="public"
+=======
+        # Completed groups are included too (not just active) so a
+        # fully-funded property still shows "Fully Funded" on the Properties
+        # tab for everyone, instead of silently vanishing once its
+        # units_available hits 0.
+        groups = Group.objects.filter(
+            status__in=["Active", "active", "Completed", "completed"],
+            group_type="public",
+>>>>>>> staging
         )
         if groups.exists():
             serializer = GroupSerializer(groups, many=True)
@@ -9045,7 +10983,11 @@ def invite_to_groupbuy(request, group_id):
                 f"— The MyFund Team"
             )
 
+<<<<<<< HEAD
             from_email = "MyFund <info@myfundmobile.com>"
+=======
+            from_email = "MyFund <info@mg.myfundmobile.com>"
+>>>>>>> staging
 
             recipient_list = [invited_user.email for invited_user in invited_users]
             try:
@@ -9120,11 +11062,27 @@ def leave_groupbuy(request, group_id):
             group=group, user=user, payment_status="Confirmed"
         )
 
+<<<<<<< HEAD
         total_refund = Decimal(0)
+=======
+        # Voluntary exit costs a 1% service charge - only 99% is returned to
+        # the user - to discourage casually joining and exiting GroupBuys.
+        # (Expiry refunds, in expire_overdue_groupbuys, apply the same rate
+        # for the same reason; this is separate since exit is user-initiated
+        # while expiry is a deadline-driven sweep.)
+        from decimal import ROUND_HALF_UP
+
+        SERVICE_CHARGE_RATE = Decimal("0.01")
+
+        total_refund = Decimal(0)  # gross amount removed from the group's total_raised
+        total_net_refund = Decimal(0)  # what the user actually receives, net of charge
+        total_service_charge = Decimal(0)
+>>>>>>> staging
 
         for contribution in contributions:
             amount = contribution.amount
             source = contribution.source
+<<<<<<< HEAD
 
             # Refund to correct account
             if source == "Savings":
@@ -9133,16 +11091,48 @@ def leave_groupbuy(request, group_id):
                 user.investment += amount
             elif source == "Wallet":
                 user.wallet += amount
+=======
+            service_charge = (amount * SERVICE_CHARGE_RATE).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            net_amount = amount - service_charge
+
+            # Refund to the correct account and log it as a Transaction, same
+            # as the debit created when the contribution was made - otherwise
+            # the refund silently changes the balance with no record in the
+            # user's transaction history / Notifications feed.
+            create_transaction(
+                user=user,
+                amount=net_amount,
+                transaction_type="credit",
+                credited_to=source.upper(),
+                status="confirmed",
+                service_charge=service_charge,
+                description=(
+                    f"GroupBuy exit refund - {group.property.name} "
+                    f"(1% service charge of ₦{service_charge} applied)"
+                ),
+            )
+>>>>>>> staging
 
             # Mark contribution as refunded
             contribution.payment_status = "Refunded"
             contribution.save()
 
             total_refund += amount
+<<<<<<< HEAD
 
         user.save()
 
         # 5. Update group total_raised
+=======
+            total_net_refund += net_amount
+            total_service_charge += service_charge
+
+        # 5. Update group total_raised (removes the full contributed amount,
+        # not just the net-of-charge refund - the 1% is a penalty on the
+        # user, it doesn't stay counted toward the group's funding goal)
+>>>>>>> staging
         group.total_raised -= total_refund
         group.save()
 
@@ -9158,6 +11148,7 @@ def leave_groupbuy(request, group_id):
             user=user,
             reason=reason,
             additional_details=additional_details,
+<<<<<<< HEAD
             refunded_amount=total_refund,
         )
 
@@ -9165,6 +11156,28 @@ def leave_groupbuy(request, group_id):
             {
                 "message": "Successfully left the group. Contributions refunded.",
                 "refunded_amount": float(total_refund),
+=======
+            refunded_amount=total_net_refund,
+        )
+
+        # 9. Starting a GroupBuy is what activates it; once the last
+        # contributor exits, it shouldn't keep showing as active with 0
+        # participants. Deactivate it and release the unit so the property
+        # can be started fresh - same as an expired GroupBuy.
+        if not group.contributors.exists() and group.status.lower() == "active":
+            group.status = "failed"
+            group.save()
+
+            property_obj = group.property
+            property_obj.units_available += 1
+            property_obj.save()
+
+        return Response(
+            {
+                "message": "Successfully left the group. Contributions refunded (1% service charge applied).",
+                "refunded_amount": float(total_net_refund),
+                "service_charge": float(total_service_charge),
+>>>>>>> staging
             },
             status=status.HTTP_200_OK,
         )
@@ -9184,10 +11197,21 @@ def get_user_groupbuys(request):
         # Get the current user
         user = request.user
 
+<<<<<<< HEAD
         # Get all groups the user created or contributed to
         groups = Group.objects.filter(
             Q(created_by=user) | Q(contributors=user)
         ).distinct()
+=======
+        # "My GroupBuys" = groups the user is currently a contributor of.
+        # Deliberately NOT keyed off created_by too: the creator is always
+        # added as a contributor at creation time (StartGroupBuyModal
+        # immediately contributes after creating the group), so the only
+        # time this would diverge is after the creator exits via
+        # leave_groupbuy - and at that point the group should disappear
+        # from their list, not linger just because they started it.
+        groups = Group.objects.filter(contributors=user).distinct()
+>>>>>>> staging
 
         groups_list = list(groups)
 
@@ -9203,6 +11227,77 @@ def get_user_groupbuys(request):
         )
 
 
+<<<<<<< HEAD
+=======
+# GET /user/groupbuy/invited/ - Groups the current user has been invited to
+# but hasn't joined yet. Exists so private-group invites are discoverable
+# in-app, since the email invite's deep link isn't reliably wired up yet
+# (no iOS/Android native link registration).
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def get_invited_groupbuys(request):
+    try:
+        user = request.user
+
+        groups = Group.objects.filter(
+            invited_users=user,
+            status__in=["Active", "active"],
+        ).exclude(contributors=user).distinct()
+
+        serializer = GroupSerializer(groups, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        return Response(
+            {"message": f"An error occurred: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+# POST /admin/groupbuy/expire-sweep/ - Staff-only manual trigger for the
+# overdue-GroupBuy refund sweep (same logic as `manage.py expire_groupbuys`
+# / the Celery task). Exists so this can be tested/run without shell access
+# to the deployment - pass {"dry_run": true} to preview without saving.
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def trigger_groupbuy_expiry_sweep(request):
+    if not request.user.is_staff:
+        return Response({"message": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+
+    from .utils import expire_overdue_groupbuys
+
+    dry_run = bool(request.data.get("dry_run", False))
+    result = expire_overdue_groupbuys(dry_run=dry_run)
+
+    return Response(
+        {
+            "dry_run": dry_run,
+            "expired_count": result["expired_count"],
+            "total_refunded": float(result["total_refunded"]),
+            "total_service_charge": float(result["total_service_charge"]),
+            "groups": [
+                {
+                    "group_id": g["group_id"],
+                    "property": g["property"],
+                    "contributors": [
+                        {
+                            "email": c["email"],
+                            "amount": float(c["amount"]),
+                            "service_charge": float(c["service_charge"]),
+                            "refund_amount": float(c["refund_amount"]),
+                            "source": c["source"],
+                        }
+                        for c in g["contributors"]
+                    ],
+                }
+                for g in result["groups"]
+            ],
+        },
+        status=status.HTTP_200_OK,
+    )
+
+
+>>>>>>> staging
 # Contribution Related APIs
 
 
@@ -9294,6 +11389,7 @@ def contribute_to_groupbuy(request, group_id):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+<<<<<<< HEAD
         # 8. Handle overfunding
         total_after = group.total_raised + amount
         excess_amount = max(total_after - group.goal_amount, Decimal("0.00"))
@@ -9307,6 +11403,23 @@ def contribute_to_groupbuy(request, group_id):
         # 9. Deduct actual amount
         set_user_balance(user, source, user_balance - amount)
         user.save()
+=======
+        # 8. Cap contribution at the remaining amount needed (overfunding guard)
+        total_after = group.total_raised + amount
+        excess_amount = max(total_after - group.goal_amount, Decimal("0.00"))
+        if excess_amount > 0:
+            amount -= excess_amount
+
+        # 9. Deduct the (possibly capped) amount and log it as a Transaction
+        create_transaction(
+            user=user,
+            amount=amount,
+            transaction_type="debit",
+            source=source.upper(),
+            status="confirmed",
+            description=f"GroupBuy contribution to {group.property.name}",
+        )
+>>>>>>> staging
 
         # 10. Create contribution
         contribution = Contribution.objects.create(
@@ -9317,8 +11430,18 @@ def contribute_to_groupbuy(request, group_id):
             source=source,
         )
 
+<<<<<<< HEAD
         # 11. Update group total raised
         group.total_raised += amount
+=======
+        # 11. Update group total raised, and flip it to completed the moment
+        # it's fully funded - otherwise it stays "active" forever even though
+        # step 7 already blocks further contributions once the goal is hit,
+        # which left the property showing as still-joinable indefinitely.
+        group.total_raised += amount
+        if group.total_raised >= group.goal_amount:
+            group.status = "completed"
+>>>>>>> staging
         group.save()
 
         # 12. Ownership calculation
@@ -9357,17 +11480,56 @@ def get_groupbuy_contributions(request, group_id):
 
         for ownership in ownerships:
             user = ownership.user
+<<<<<<< HEAD
+=======
+            # "Date joined" = their first confirmed contribution to this
+            # group - GroupOwnership itself has no timestamp of its own.
+            first_contribution = (
+                Contribution.objects.filter(
+                    group=group, user=user, payment_status="Confirmed"
+                )
+                .order_by("created_at")
+                .first()
+            )
+            date_joined = first_contribution.created_at if first_contribution else None
+
+>>>>>>> staging
             contributions_list.append(
                 {
                     "user_id": user.id,
                     "email": user.email,
+<<<<<<< HEAD
+=======
+                    "first_name": user.first_name,
+                    "last_name": user.last_name,
+                    "profile_picture": user.profile_picture,
+>>>>>>> staging
                     "total_contributed": float(ownership.total_contributed),
                     "ownership_percentage": round(
                         float(ownership.ownership_percentage), 2
                     ),
+<<<<<<< HEAD
                 }
             )
 
+=======
+                    "date_joined": date_joined.isoformat() if date_joined else None,
+                    "_date_joined_sort": date_joined,
+                }
+            )
+
+        # Ranked by ownership % (highest first); ties broken by whoever
+        # joined earliest.
+        contributions_list.sort(
+            key=lambda c: (
+                -c["ownership_percentage"],
+                c["_date_joined_sort"] or timezone.now(),
+            )
+        )
+        for item in contributions_list:
+            del item["_date_joined_sort"]
+
+>>>>>>> staging
         return Response(contributions_list, status=status.HTTP_200_OK)
 
     except Group.DoesNotExist:
@@ -9399,6 +11561,24 @@ def get_user_groupbuy_contributions(request):
         )
 
 
+<<<<<<< HEAD
+=======
+# GET /user/groupbuy/income-history - Fetch all GroupBuy income payouts the
+# currently authenticated user has received, most recent first.
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def get_user_groupbuy_income_history(request):
+    from .models import GroupIncomeDistribution
+    from .serializers import GroupIncomeDistributionSerializer
+
+    distributions = GroupIncomeDistribution.objects.filter(
+        user=request.user
+    ).order_by("-created_at")
+    serializer = GroupIncomeDistributionSerializer(distributions, many=True)
+    return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+>>>>>>> staging
 from .models import SavingsGoal
 from .serializers import SavingsGoalSerializer
 from django.db import IntegrityError
@@ -9661,7 +11841,11 @@ def add_funds(request, id):
                 f"your Target Savings ({goal.name}).<br><br>"
                 f"Keep going — you're getting closer to your goal. 🌟"
             ),
+<<<<<<< HEAD
             from_email="MyFund <info@myfundmobile.com>",
+=======
+            from_email="MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
             recipient_list=[user.email],
         )
 
@@ -9824,7 +12008,11 @@ def withdraw_savings(request, id):
                         f"Hi {user.first_name},<br><br>"
                         f"₦{net_amount:,.2f} has been sent to your bank account successfully."
                     ),
+<<<<<<< HEAD
                     from_email="MyFund <info@myfundmobile.com>",
+=======
+                    from_email="MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
                     recipient_list=[user.email],
                 )
 
@@ -9955,7 +12143,10 @@ from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIV
 from rest_framework.exceptions import ValidationError
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+<<<<<<< HEAD
 from django.conf import settings
+=======
+>>>>>>> staging
 from django.db.models import Sum
 from decimal import Decimal
 import uuid
@@ -10168,6 +12359,22 @@ class TargetSavingsRetrieveUpdateDestroy(RetrieveUpdateDestroyAPIView):
             is_cancelled=False,
         )
 
+<<<<<<< HEAD
+=======
+    def destroy(self, request, *args, **kwargs):
+        # 🔴 SECURITY: a raw DELETE here would wipe out current_amount with
+        # no refund and no Transaction record - the mobile app never calls
+        # this (it uses POST .../cancel/, which refunds 99% through
+        # create_transaction()). Force every cancellation through that
+        # money-safe path instead of allowing silent fund loss here.
+        return Response(
+            {
+                "detail": "Use POST /target-savings/<id>/cancel/ to close a target savings plan."
+            },
+            status=405,
+        )
+
+>>>>>>> staging
 
 from django.db import transaction
 from decimal import Decimal
@@ -10417,12 +12624,39 @@ def save_expo_push_token(request):
     return Response({"message": "Token saved"})
 
 
+<<<<<<< HEAD
+=======
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def remove_expo_push_token(request):
+    """Counterpart to save_expo_push_token - called on logout. The mobile
+    app (utils/PushNotififaction.js removePushToken) has been posting here
+    since it was built, but this route was never registered, so logout was
+    silently 404ing and stale tokens were never cleaned up.
+    """
+    user = request.user
+    token = request.data.get("expo_push_token")
+
+    if not token:
+        return Response({"error": "No token provided"}, status=400)
+
+    user.expo_push_tokens = [
+        entry for entry in user.expo_push_tokens if entry.get("token") != token
+    ]
+    user.save(update_fields=["expo_push_tokens"])
+    return Response({"message": "Token removed"})
+
+
+>>>>>>> staging
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.utils import timezone
 from django.db.models import Count, Q
+<<<<<<< HEAD
 from django.core.mail import send_mail
+=======
+>>>>>>> staging
 from authentication.utils import send_push_notification
 from authentication.models import CustomUser
 
@@ -10448,6 +12682,7 @@ class TopReferralsAPIView(APIView):
         ).count()
 
     def send_rank_notification(self, user, old_rank, new_rank):
+<<<<<<< HEAD
         """Sends consistent email + push notifications for rank changes."""
         if new_rank < old_rank:
             subject = f"🎉 Congrats! You're Now #{new_rank} on MyFund!"
@@ -10458,12 +12693,18 @@ class TopReferralsAPIView(APIView):
                 "Thank you for using MyFund.<br><br>"
                 "MyFund"
             )
+=======
+        """Push for all rank changes. Email only for Top 3 entry or reaching #1."""
+
+        if new_rank < old_rank:
+>>>>>>> staging
             push_title = f"🎉 Rank Improved! Now #{new_rank}"
             push_message = (
                 f"Hi {user.first_name}, you moved up to #{new_rank} (from #{old_rank}). "
                 "Keep referring to earn more referral rewards!"
             )
         else:
+<<<<<<< HEAD
             subject = f"📉 Your MyFund Rank Changed to #{new_rank}"
             message = (
                 f"Hi {user.first_name},<br><br>"
@@ -10471,12 +12712,15 @@ class TopReferralsAPIView(APIView):
                 "Share your referral link to move back up and earn more referral bonus!<br><br>"
                 "Thank you for using MyFund.<br><br>"
             )
+=======
+>>>>>>> staging
             push_title = f"📉 Referral Rank Changed to #{new_rank}"
             push_message = (
                 f"Hi {user.first_name}, your rank is now #{new_rank} (was #{old_rank}). "
                 "Refer more friends to climb higher and earn more referral bonus!"
             )
 
+<<<<<<< HEAD
         send_generic_email(
             subject=subject,
             message=message,
@@ -10484,6 +12728,9 @@ class TopReferralsAPIView(APIView):
             recipient_list=[user.email],
         )
 
+=======
+        # Always send push
+>>>>>>> staging
         send_push_notification(
             user=user,
             title=push_title,
@@ -10492,15 +12739,59 @@ class TopReferralsAPIView(APIView):
             notif_type="SYSTEM",
         )
 
+<<<<<<< HEAD
+=======
+        # Email only for meaningful milestones
+        just_reached_number1 = new_rank == 1 and old_rank != 1
+        just_entered_top3 = new_rank <= 3 and old_rank > 3
+
+        if just_reached_number1:
+            subject = f"🏆 You're #1 on MyFund This Month!"
+            message = (
+                f"Hi {user.first_name},<br><br>"
+                f"You've hit the top! You're now <strong>#1</strong> on the MyFund referral leaderboard. "
+                "This is a huge deal — keep it up and finish the month strong!<br><br>"
+                "Thank you for using MyFund.<br><br>"
+                "MyFund"
+            )
+            send_generic_email(
+                subject=subject,
+                message=message,
+                from_email="MyFund <info@mg.myfundmobile.com>",
+                recipient_list=[user.email],
+            )
+
+        elif just_entered_top3:
+            subject = f"🎉 Congrats! You're Now #{new_rank} on MyFund!"
+            message = (
+                f"Hi {user.first_name},<br><br>"
+                f"Great news! You've entered the <strong>Top 3</strong> — your referral rank improved from #{old_rank} to #{new_rank}. "
+                "Keep referring friends to stay in the top and earn more referral rewards!<br><br>"
+                "Thank you for using MyFund.<br><br>"
+                "MyFund"
+            )
+            send_generic_email(
+                subject=subject,
+                message=message,
+                from_email="MyFund <info@mg.myfundmobile.com>",
+                recipient_list=[user.email],
+            )
+
+>>>>>>> staging
     def get(self, request):
         user = request.user
         now = timezone.now()
         start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
+<<<<<<< HEAD
         # If logged-in user is ambassador, show only ambassador rankings
         ambassador_view = getattr(user, "is_ambassador", False)
 
         # Get referral performance for the month
+=======
+        ambassador_view = getattr(user, "is_ambassador", False)
+
+>>>>>>> staging
         ref_stats = (
             CustomUser.objects.filter(
                 referral__isnull=False,
@@ -10529,7 +12820,10 @@ class TopReferralsAPIView(APIView):
             if not ref_user:
                 continue
 
+<<<<<<< HEAD
             # If ambassador is viewing, only include ambassadors
+=======
+>>>>>>> staging
             if ambassador_view and not getattr(ref_user, "is_ambassador", False):
                 continue
 
@@ -10539,6 +12833,10 @@ class TopReferralsAPIView(APIView):
                     "first_name": ref_user.first_name,
                     "last_name": ref_user.last_name,
                     "email": ref_user.email,
+<<<<<<< HEAD
+=======
+                    "phone_number": ref_user.phone_number or "",
+>>>>>>> staging
                     "profile_picture": self.get_profile_pic_url(ref_user),
                     "monthly_signups": stat["monthly_signups"],
                     "monthly_confirmed": stat["monthly_confirmed"],
@@ -10550,10 +12848,15 @@ class TopReferralsAPIView(APIView):
                 }
             )
 
+<<<<<<< HEAD
         # Sort final filtered list
         top_users.sort(key=lambda x: (-x["monthly_confirmed"], -x["monthly_signups"]))
 
         # Update rank only based on the correct leaderboard being viewed
+=======
+        top_users.sort(key=lambda x: (-x["monthly_confirmed"], -x["monthly_signups"]))
+
+>>>>>>> staging
         rank_changes = {}
         for index, user_data in enumerate(top_users):
             ranked_user = CustomUser.objects.get(id=user_data["id"])
@@ -10568,7 +12871,10 @@ class TopReferralsAPIView(APIView):
         for user_obj, (old_rank, new_rank) in rank_changes.items():
             self.send_rank_notification(user_obj, old_rank, new_rank)
 
+<<<<<<< HEAD
         # Current user monthly stats
+=======
+>>>>>>> staging
         my_signups = CustomUser.objects.filter(
             referral=user,
             date_joined__gte=start_of_month,
@@ -10692,7 +12998,14 @@ def earnings_summary(request):
     )
 
     # Recent 30 daily ROI records
+<<<<<<< HEAD
     recent_roi = DailyROIAccrual.objects.filter(user=user).order_by("-date")[:30]
+=======
+    year_start = date(today.year, 1, 1)
+    recent_roi = DailyROIAccrual.objects.filter(
+        user=user, date__gte=year_start
+    ).order_by("-date")
+>>>>>>> staging
     roi_data = DailyROISerializer(recent_roi, many=True).data
 
     data = {
@@ -10823,3 +13136,47 @@ def submit_ambassador_attendance(request):
         },
         status=status.HTTP_201_CREATED,
     )
+<<<<<<< HEAD
+=======
+
+
+from .models import FinanceMetricSnapshot
+from .finance_metrics import calculate_finance_metrics
+
+
+class AdminFinanceMetricsView(generics.RetrieveAPIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        if not request.user.is_staff:
+            return Response({"detail": "Permission denied"}, status=403)
+
+        period_type = request.query_params.get("period_type", "monthly")
+        target_date = timezone.now().date()
+
+        snapshot = calculate_finance_metrics(
+            period_type=period_type,
+            target_date=target_date,
+            save=True,
+        )
+
+        return Response(
+            {
+                "period_type": snapshot.period_type,
+                "period_start": snapshot.period_start,
+                "period_end": snapshot.period_end,
+                "abrupt_withdrawal_revenue": snapshot.abrupt_withdrawal_revenue,
+                "float_gross_revenue": snapshot.float_gross_revenue,
+                "roi_payable_to_users": snapshot.roi_payable_to_users,
+                "float_net_profit": snapshot.float_net_profit,
+                "property_sales_revenue": snapshot.property_sales_revenue,
+                "rent_commission_revenue": snapshot.rent_commission_revenue,
+                "total_revenue": snapshot.total_revenue,
+                "total_expenses": snapshot.total_expenses,
+                "net_profit": snapshot.net_profit,
+                "profit_margin": snapshot.profit_margin,
+                "total_savings_balance": snapshot.total_savings_balance,
+                "total_investment_balance": snapshot.total_investment_balance,
+            }
+        )
+>>>>>>> staging

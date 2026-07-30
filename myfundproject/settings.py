@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 
+from decimal import Decimal
 from pathlib import Path
 from datetime import timedelta
 import os
@@ -57,7 +58,8 @@ ALLOWED_HOSTS = [
     "127.0.0.1",
     "192.168.30.34",
     "10.0.101.10",
-    "myfund.onrender.com",
+    "myfundapi-myfund-07ce351a.koyeb.app",
+    ".koyeb.app",
     "localhost",
     "10.10.10.192",
     "192.168.10.60",
@@ -91,6 +93,7 @@ ALLOWED_HOSTS = [
     "192.168.20.99",
     "192.168.20.159",
     "0.0.0.0",
+<<<<<<< HEAD
     '192.168.20.47',
     "10.5.10.179",
     "192.168.20.71",
@@ -101,20 +104,26 @@ ALLOWED_HOSTS = [
     '172.31.64.1',
     '10.5.5.250',
     '10.5.11.82',
+=======
+    "*",  # temporarily for debugging
+>>>>>>> staging
 ]
 
 SECURE_SSL_REDIRECT = False  # Disable forced HTTPS redirect@
 SESSION_COOKIE_SECURE = False  # Prevent forcing HTTPS for cookies
 CSRF_COOKIE_SECURE = False  # Prevent CSRF issues with HTTPS
+<<<<<<< HEAD
 
+=======
+>>>>>>> staging
 
+# Koyeb
 KOYEB_EXTERNAL_HOSTNAME = os.environ.get("KOYEB_PUBLIC_DOMAIN")
 if KOYEB_EXTERNAL_HOSTNAME:
     ALLOWED_HOSTS.append(KOYEB_EXTERNAL_HOSTNAME)
 
 
 # Application definition
-
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",
@@ -296,6 +305,7 @@ if ENVIRONMENT == "production":
     }
 else:
     DATABASES = {
+<<<<<<< HEAD
     "default": {
         "ENGINE": "django.db.backends.postgresql",
         "NAME": os.getenv("DEV_DATABASE_NAME"),
@@ -308,6 +318,16 @@ else:
         },
     }
 }
+=======
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": BASE_DIR / "db.sqlite3",
+            "OPTIONS": {
+                "timeout": 20,  # Increase timeout value (in seconds)
+            },
+        }
+    }
+>>>>>>> staging
 
 
 # Password validation
@@ -400,6 +420,7 @@ CELERY_TASK_ROUTES = {
 }
 
 # ===== EMAIL CONFIGURATION =====
+<<<<<<< HEAD
 EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
 # DEFAULT_FROM_EMAIL = "MyFund <message@myfundmobile.com>"
 DEFAULT_FROM_EMAIL = "MyFund <auth@myfundmobile.com>"
@@ -421,6 +442,19 @@ EMAIL_TIMEOUT = 30
 
 EMAIL_HOST_USER = "auth@myfundmobile.com"
 EMAIL_HOST_PASSWORD = "AdminSecure123..."
+=======
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
+
+# ===== BREVO CONFIGURATION =====
+BREVO_API_KEY = os.environ.get("BREVO_API_KEY")
+
+BREVO_SENDER_EMAIL = "hello@myfundmobile.com"
+BREVO_SENDER_NAME = "MyFund"
+
+EMAIL_BACKEND = "django.core.mail.backends.dummy.EmailBackend"
+
+DEFAULT_FROM_EMAIL = "MyFund <noreply@mg.myfundmobile.com>"
+>>>>>>> staging
 
 
 AUTHENTICATION_BACKENDS = [
@@ -445,6 +479,12 @@ AUTHENTICATION_BACKENDS = [
 # SECURE_HSTS_PRELOAD = True
 # SECURE_HSTS_INCLUDE_SUBDOMAINS = True
 
+<<<<<<< HEAD
+=======
+# UNIT ECONOMICS
+MIN_DEPOSIT_AMOUNT = Decimal("100")
+
+>>>>>>> staging
 # settings.py
 import os
 

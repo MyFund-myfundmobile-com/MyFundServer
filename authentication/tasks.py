@@ -100,6 +100,29 @@ def refund_contributions_if_goal_not_reached():
 
 
 @shared_task
+<<<<<<< HEAD
+=======
+def expire_groupbuys_task():
+    """
+    Celery counterpart to `python manage.py expire_groupbuys`. Scheduled
+    daily via app.conf.beat_schedule in myfundproject/celery.py
+    ("expire-overdue-groupbuys-daily") - runs on the existing Beat/worker,
+    no extra infrastructure. Can also be triggered manually via the
+    management command or the staff-only admin endpoint for testing.
+    """
+    from .utils import expire_overdue_groupbuys
+
+    result = expire_overdue_groupbuys(dry_run=False)
+    logger.info(
+        f"✅ Expired {result['expired_count']} GroupBuy(s), "
+        f"refunded ₦{result['total_refunded']:,.2f}, "
+        f"₦{result['total_service_charge']:,.2f} service charge collected."
+    )
+    return result["expired_count"]
+
+
+@shared_task
+>>>>>>> staging
 def process_target_savings_deductions():
     """Celery task to process all due target savings deductions"""
     now = timezone.now()
@@ -160,13 +183,27 @@ def process_target_savings_deductions():
 
 @shared_task
 def check_completed_targets():
+<<<<<<< HEAD
     """Check and mark completed targets"""
+=======
+    """Safety-net sweep for targets that reached their goal amount without
+    going through process_target_savings_deductions - e.g. a target fully
+    funded by a single upfront payment at creation, which that task's query
+    skips (current_amount is not < target_amount, so there's nothing to
+    "deduct"). Delegates to target.process_deduction(), which now detects
+    the already-funded state and completes it via the shared
+    _complete_target() method - this must never independently flip
+    is_active without awarding the 15% completion bonus the way it
+    previously did here.
+    """
+>>>>>>> staging
     completed_targets = TargetSavings.objects.filter(
         is_active=True,
         is_cancelled=False,
         current_amount__gte=models.F("target_amount"),
     ).select_related("user")
 
+<<<<<<< HEAD
     for target in completed_targets:
         user = target.user
         target.is_active = False
@@ -191,6 +228,19 @@ def check_completed_targets():
         )
 
     return {"completed_count": completed_targets.count()}
+=======
+    processed_count = 0
+    for target in completed_targets:
+        try:
+            if target.process_deduction():
+                processed_count += 1
+        except Exception as e:
+            logger.error(
+                f"Error completing target {target.id} via safety-net sweep: {e}"
+            )
+
+    return {"completed_count": processed_count}
+>>>>>>> staging
 
 
 @shared_task
@@ -396,6 +446,68 @@ def send_batch_roi_notifications(notifications):
     return {"sent": sent_count, "failed": failed_count}
 
 
+<<<<<<< HEAD
+=======
+# HELPER FOR RELEASE_QUARTERLY_ROI
+from datetime import date
+
+
+def get_previous_quarter():
+    """
+    Returns:
+        (quarter_start, quarter_end, quarter_label)
+
+    Examples:
+        Jul 1 2026 -> (Apr 1 2026, Jun 30 2026, "Q2 2026")
+        Oct 1 2026 -> (Jul 1 2026, Sep 30 2026, "Q3 2026")
+        Jan 1 2027 -> (Oct 1 2026, Dec 31 2026, "Q4 2026")
+        Apr 1 2026 -> (Jan 1 2026, Mar 31 2026, "Q1 2026")
+    """
+
+    today = date.today()
+
+    if today.month in (1, 2, 3):
+        year = today.year - 1
+        quarter = 4
+    elif today.month in (4, 5, 6):
+        year = today.year
+        quarter = 1
+    elif today.month in (7, 8, 9):
+        year = today.year
+        quarter = 2
+    else:
+        year = today.year
+        quarter = 3
+
+    if quarter == 1:
+        return (
+            date(year, 1, 1),
+            date(year, 3, 31),
+            f"Q1 {year}",
+        )
+
+    if quarter == 2:
+        return (
+            date(year, 4, 1),
+            date(year, 6, 30),
+            f"Q2 {year}",
+        )
+
+    if quarter == 3:
+        return (
+            date(year, 7, 1),
+            date(year, 9, 30),
+            f"Q3 {year}",
+        )
+
+    return (
+        date(year, 10, 1),
+        date(year, 12, 31),
+        f"Q4 {year}",
+    )
+
+
+>>>>>>> staging
 @shared_task
 def release_quarterly_roi(test_mode=True):
     """
@@ -411,6 +523,7 @@ def release_quarterly_roi(test_mode=True):
     from .utils import send_push_notification
     from .tasks import send_single_email_task
 
+<<<<<<< HEAD
     QUARTER_START = date(2026, 1, 1)
     QUARTER_END = date(2026, 3, 31)
     QUARTER_LABEL = "Q1 2026"
@@ -419,6 +532,38 @@ def release_quarterly_roi(test_mode=True):
         "sammy@myfundmobile.com",
         # "valueplusrecords@gmail.com",
         # "tolulopeahmed@gmail.com",
+=======
+    from datetime import date
+
+    QUARTER_START = date(2026, 4, 1)
+    QUARTER_END = date(2026, 6, 30)
+    from datetime import date
+
+    today = date.today()
+    year = today.year
+
+    # Determine quarter being paid (based on fixed accrual window)
+    if QUARTER_START.month == 4:
+        QUARTER_LABEL = f"Q2 {QUARTER_START.year}"
+        NEXT_PAYOUT_LABEL = f"October {QUARTER_START.year}"
+
+    elif QUARTER_START.month == 1:
+        QUARTER_LABEL = f"Q1 {QUARTER_START.year}"
+        NEXT_PAYOUT_LABEL = f"July {QUARTER_START.year}"
+
+    elif QUARTER_START.month == 7:
+        QUARTER_LABEL = f"Q3 {QUARTER_START.year}"
+        NEXT_PAYOUT_LABEL = f"January {QUARTER_START.year + 1}"
+
+    elif QUARTER_START.month == 10:
+        QUARTER_LABEL = f"Q4 {QUARTER_START.year}"
+        NEXT_PAYOUT_LABEL = f"April {QUARTER_START.year + 1}"
+
+    TEST_EMAILS = [
+        # "valuepluspublishing@gmail.com",
+        # "valueplusrecords@gmail.com",
+        "tolulopeahmed@gmail.com",
+>>>>>>> staging
     ]
 
     logger.info(f"🚀 release_quarterly_roi started. test_mode={test_mode}")
@@ -494,7 +639,11 @@ def release_quarterly_roi(test_mode=True):
                     f"Congratulations {user.first_name}, ₦{total_payout:,.2f} has been added to "
                     f"your wallet as dividends for {QUARTER_LABEL}! "
                     f"(Savings: ₦{savings_roi:,.2f}, Investment: ₦{investment_roi:,.2f}). "
+<<<<<<< HEAD
                     f"Keep growing your funds for better ROI by the next payout by July."
+=======
+                    f"Keep growing your funds for better ROI by the next payout by {NEXT_PAYOUT_LABEL}."
+>>>>>>> staging
                 ),
                 data={
                     "type": "QUARTERLY_PAYOUT",
@@ -511,11 +660,16 @@ def release_quarterly_roi(test_mode=True):
                 f"<b>Savings ROI:</b> ₦{savings_roi:,.2f}<br>"
                 f"<b>Investment ROI:</b> ₦{investment_roi:,.2f}<br><br>"
                 f"This payout covers your earnings for {QUARTER_LABEL}.<br><br>"
+<<<<<<< HEAD
                 f"The next payout will be in July. Keep growing your funds.<br><br>"
+=======
+                f"The next payout will be in {NEXT_PAYOUT_LABEL}. Keep growing your funds.<br><br>"
+>>>>>>> staging
                 f"Thank you for using MyFund.<br><br>"
                 f"The MyFund Team"
             )
 
+<<<<<<< HEAD
             send_single_email_task.apply_async(
                 args=[
                     user.email,
@@ -526,6 +680,14 @@ def release_quarterly_roi(test_mode=True):
                 countdown=processed
                 * 30,  # stagger: user 0 = now, user 1 = 72s, user 2 = 144s...
                 queue="email_queue",
+=======
+            send_generic_email(
+                subject=f"Quarterly ROI Paid! ({QUARTER_LABEL})",
+                message=email_body,
+                recipient_list=[user.email],
+                from_email="MyFund <noreply@mg.myfundmobile.com>",
+                use_celery_threshold=0,  # force direct send
+>>>>>>> staging
             )
 
             processed += 1
@@ -535,7 +697,12 @@ def release_quarterly_roi(test_mode=True):
 
         except Exception as e:
             errors += 1
+<<<<<<< HEAD
             logger.error(f"❌ Error processing user {user_id}: {e}")
+=======
+            logger.exception(f"❌ FULL ERROR for user {user_id}: {e}")
+            print(f"❌ FULL ERROR for user {user_id}: {repr(e)}")
+>>>>>>> staging
 
     result = (
         f"✅ release_quarterly_roi complete. "
@@ -545,6 +712,76 @@ def release_quarterly_roi(test_mode=True):
     return result
 
 
+<<<<<<< HEAD
+=======
+@shared_task
+def distribute_groupbuy_income_notifications(event_id):
+    """
+    Sends push + email notifications for a GroupBuy income distribution that
+    has already been credited to members' wallets. Dispatched after the
+    money-moving transaction commits (see admin_views.distribute_groupbuy_income)
+    so a slow/failed notification can never block or roll back a payout.
+    """
+    from .models import GroupIncomeDistribution
+    from .utils import send_push_notification, send_generic_email
+
+    distributions = GroupIncomeDistribution.objects.filter(
+        income_event_id=event_id
+    ).select_related("user", "income_event", "income_event__group__property")
+
+    processed = 0
+    errors = 0
+
+    for dist in distributions:
+        try:
+            user = dist.user
+            event = dist.income_event
+            property_name = event.group.property.name
+
+            send_push_notification(
+                user=user,
+                title="💰 GroupBuy Income Received!",
+                message=(
+                    f"₦{dist.amount:,.2f} has been added to your wallet from "
+                    f"{property_name} ({dist.ownership_percentage}% ownership)."
+                ),
+                data={
+                    "type": "GROUPBUY_INCOME",
+                    "amount": float(dist.amount),
+                    "group_id": str(event.group_id),
+                },
+            )
+
+            email_body = (
+                f"Hi {user.first_name},<br><br>"
+                f"Great news — <b>{property_name}</b> earned income for the period "
+                f"{event.period_start} to {event.period_end}, and your share has "
+                f"been credited to your MyFund wallet.<br><br>"
+                f"<b>Your ownership:</b> {dist.ownership_percentage}%<br>"
+                f"<b>Amount credited:</b> ₦{dist.amount:,.2f}<br><br>"
+                f"Thank you for investing with MyFund.<br><br>"
+                f"The MyFund Team"
+            )
+            send_generic_email(
+                subject=f"GroupBuy Income Paid — {property_name}",
+                message=email_body,
+                recipient_list=[user.email],
+                from_email="MyFund <noreply@mg.myfundmobile.com>",
+                use_celery_threshold=0,
+            )
+            processed += 1
+        except Exception as e:
+            errors += 1
+            logger.exception(
+                f"❌ Failed to notify user {dist.user_id} for GroupIncomeDistribution {dist.id}: {e}"
+            )
+
+    result = f"✅ distribute_groupbuy_income_notifications complete for event {event_id}. Processed: {processed}, Errors: {errors}"
+    logger.info(result)
+    return result
+
+
+>>>>>>> staging
 # ✅ tasks.py
 from celery import shared_task
 from django.utils import timezone
@@ -623,7 +860,11 @@ def reward_top_savers_of_month():
                 send_generic_email(
                     subject=f"🏆 Congrats! You are the #{rank} Top Saver for {prev_month_name}!",
                     message=email_message,
+<<<<<<< HEAD
                     from_email="MyFund <info@myfundmobile.com>",
+=======
+                    from_email="MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
                     recipient_list=[user.email],
                 )
                 logger.info(
@@ -652,7 +893,11 @@ def reward_top_savers_of_month():
                 send_generic_email(
                     subject=f"You're the #{rank} Top Saver for {prev_month_name}! 🚀",
                     message=email_message,
+<<<<<<< HEAD
                     from_email="MyFund <info@myfundmobile.com>",
+=======
+                    from_email="MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
                     recipient_list=[user.email],
                 )
                 logger.info(
@@ -696,7 +941,11 @@ def send_birthday_greetings():
             — The MyFund Team
             """
             send_generic_email(
+<<<<<<< HEAD
                 subject, message, "MyFund <info@myfundmobile.com>", [user.email]
+=======
+                subject, message, "MyFund <info@mg.myfundmobile.com>", [user.email]
+>>>>>>> staging
             )
 
             # 🎊 Push notification
@@ -819,6 +1068,7 @@ def send_large_email_batch_task(batches, from_email, batch_size=50, delay_second
             time.sleep(delay_seconds)
 
 
+<<<<<<< HEAD
 from django.utils import timezone
 from celery import shared_task
 from authentication.models import WithdrawalsRequestToAdmin
@@ -830,11 +1080,98 @@ def process_due_scheduled_withdrawals():
     today = timezone.now().date()
 
     withdrawals = WithdrawalsRequestToAdmin.objects.filter(
+=======
+import logging
+
+from celery import shared_task
+from django.utils import timezone
+
+from authentication.models import WithdrawalsRequestToAdmin, CustomUser
+from .utils import (
+    process_scheduled_withdrawal,
+    send_generic_email,
+    send_push_notification,
+)
+
+logger = logging.getLogger(__name__)
+
+ADMIN_ALERT_EMAILS = [
+    "tolulopeahmed@gmail.com",
+    "janet.adegbenro@gmail.com",
+]
+
+
+def alert_admins_of_failed_scheduled_withdrawals(failed_withdrawals):
+    if not failed_withdrawals:
+        return
+
+    failed_count = len(failed_withdrawals)
+
+    rows = []
+    for item in failed_withdrawals:
+        rows.append(
+            f"Transaction ID: {item['transaction_id']}<br>"
+            f"User: {item['user_email']}<br>"
+            f"Amount: ₦{item['amount']}<br>"
+            f"Error: {item['error']}<br>"
+            f"<br>"
+        )
+
+    message = (
+        f"Hello Admin,<br><br>"
+        f"{failed_count} scheduled withdrawal(s) failed during Celery processing.<br><br>"
+        f"Please check Django Admin, filter by overdue scheduled withdrawals, "
+        f"and force credit where necessary.<br><br>"
+        f"{''.join(rows)}"
+        f"MyFund System"
+    )
+
+    try:
+        send_generic_email(
+            subject="[ACTION REQUIRED] Scheduled Withdrawal Failed",
+            message=message,
+            from_email="MyFund <info@mg.myfundmobile.com>",
+            recipient_list=ADMIN_ALERT_EMAILS,
+        )
+    except Exception:
+        logger.exception("Failed to send scheduled withdrawal failure email to admins")
+
+    admin_users = CustomUser.objects.filter(email__in=ADMIN_ALERT_EMAILS)
+
+    for admin_user in admin_users:
+        try:
+            send_push_notification(
+                user=admin_user,
+                title="Scheduled Withdrawal Failed",
+                message=(
+                    f"{failed_count} scheduled withdrawal(s) failed in Celery. "
+                    f"Check overdue withdrawals in admin."
+                ),
+                data={
+                    "type": "scheduled_withdrawal_failed",
+                    "failed_count": str(failed_count),
+                },
+                notif_type="SUCCESS",
+            )
+        except Exception:
+            logger.exception(
+                "Failed to send scheduled withdrawal failure push to admin %s",
+                admin_user.email,
+            )
+
+
+@shared_task(bind=True, max_retries=3)
+def process_due_scheduled_withdrawals(self):
+    today = timezone.localdate()
+
+    withdrawals = WithdrawalsRequestToAdmin.objects.select_related("user").filter(
+>>>>>>> staging
         withdrawal_type="scheduled",
         scheduled_processing_date__lte=today,
         is_processed=False,
     )
 
+<<<<<<< HEAD
     for withdrawal in withdrawals:
         try:
             process_scheduled_withdrawal(withdrawal)
@@ -843,6 +1180,52 @@ def process_due_scheduled_withdrawals():
                 f"Failed to process scheduled withdrawal {withdrawal.id}: {str(e)}"
             )
 
+=======
+    failed_withdrawals = []
+    processed_count = 0
+
+    for withdrawal in withdrawals:
+        try:
+            result = process_scheduled_withdrawal(
+                withdrawal,
+                triggered_by="celery",
+            )
+
+            if result in ["processed", "already_credited", "already_processed"]:
+                processed_count += 1
+
+        except Exception as e:
+            failed_withdrawals.append(
+                {
+                    "pk": withdrawal.pk,
+                    "transaction_id": withdrawal.transaction_id,
+                    "user_email": withdrawal.user.email,
+                    "amount": withdrawal.total_amount or withdrawal.amount,
+                    "error": str(e),
+                }
+            )
+
+            logger.exception(
+                "Failed scheduled withdrawal %s: %s",
+                withdrawal.transaction_id,
+                str(e),
+            )
+
+    if failed_withdrawals:
+        # Alert admins only on the first failed attempt to avoid repeated emails/push alerts.
+        if self.request.retries == 0:
+            alert_admins_of_failed_scheduled_withdrawals(failed_withdrawals)
+
+        failed_ids = [str(item["pk"]) for item in failed_withdrawals]
+
+        raise self.retry(
+            exc=Exception(f"Failed scheduled withdrawals: {', '.join(failed_ids)}"),
+            countdown=60,
+        )
+
+    return f"Processed {processed_count} due scheduled withdrawal(s)"
+
+>>>>>>> staging
 
 from celery import shared_task
 from django.core.mail import send_mail
@@ -888,6 +1271,7 @@ def send_single_email_task(email, subject, message, from_email):
         return {"status": "failed", "email": email, "error": str(e)}
 
 
+<<<<<<< HEAD
 from celery import shared_task
 import time
 import logging
@@ -989,6 +1373,109 @@ def send_namecheap_safe_email_task(
         "delay_seconds": delay_seconds,
         "failed_emails": failed_emails if failed_emails else None,
     }
+=======
+# from celery import shared_task
+# import time
+# import logging
+# from django.core.mail import send_mail
+# from django.template.loader import render_to_string
+# from django.utils.html import strip_tags
+
+# logger = logging.getLogger(__name__)
+# from celery import shared_task
+# from django.core.mail import send_mail, get_connection
+# from django.conf import settings
+# import time
+# import logging
+
+# logger = logging.getLogger(__name__)
+
+
+# @shared_task(bind=True, max_retries=3)
+# def send_namecheap_safe_email_task(
+#     self, emails, from_email, reuse_connection=False, batch_size=15, delay_seconds=2
+# ):
+#     """
+#     Namecheap-safe email sending with single SMTP connection per batch.
+#     """
+#     total_emails = len(emails)
+#     sent_count = 0
+#     failed_emails = []
+
+#     logger.info(
+#         f"🛡️ Namecheap-safe: Processing {total_emails} emails in ultra-safe mode"
+#     )
+
+#     # Open SMTP connection if reuse_connection is True
+#     connection = None
+#     if reuse_connection:
+#         connection = get_connection(
+#             username=from_email,
+#             password=settings.EMAIL_HOST_PASSWORD,
+#             fail_silently=False,
+#         )
+#         connection.open()
+
+#     try:
+#         for i, email_data in enumerate(emails):
+#             try:
+#                 to_email = email_data.get("to", "")
+#                 subject = email_data.get("subject", "")
+#                 plain_message = email_data.get("plain_message", "")
+#                 html_message = email_data.get("html_message", "")
+
+#                 if not to_email:
+#                     logger.warning("Skipping email with no recipient")
+#                     continue
+
+#                 send_mail(
+#                     subject=subject,
+#                     message=plain_message,
+#                     from_email=from_email,
+#                     recipient_list=[to_email],
+#                     html_message=html_message,
+#                     fail_silently=False,
+#                     connection=connection,  # <-- USE the connection here
+#                     timeout=30,  # optional, prevents hanging
+#                 )
+
+#                 sent_count += 1
+
+#                 if (i + 1) % 5 == 0:
+#                     logger.info(f"✅ Sent {i+1}/{total_emails} emails in this batch")
+
+#                 time.sleep(delay_seconds)
+
+#             except Exception as e:
+#                 error_info = {"email": to_email, "error": str(e)}
+#                 failed_emails.append(error_info)
+#                 logger.error(f"❌ Email failed for {to_email}: {e}")
+
+#                 # Retry if rate limit
+#                 if "rate limit" in str(e).lower() or "quota" in str(e).lower():
+#                     logger.warning(f"⚠️ Rate limit detected, waiting 5 minutes...")
+#                     time.sleep(300)
+#                     try:
+#                         self.retry(countdown=300, max_retries=2)
+#                     except self.MaxRetriesExceededError:
+#                         logger.error(f"Max retries exceeded for {to_email}")
+#                         continue
+
+#     finally:
+#         if connection:
+#             connection.close()  # <-- close connection at the end
+
+#     logger.info(f"📊 Namecheap-safe batch complete: {sent_count}/{total_emails} sent")
+
+#     return {
+#         "sent": sent_count,
+#         "failed": len(failed_emails),
+#         "total": total_emails,
+#         "batch_size": batch_size,
+#         "delay_seconds": delay_seconds,
+#         "failed_emails": failed_emails if failed_emails else None,
+#     }
+>>>>>>> staging
 
 
 from celery import shared_task
@@ -998,6 +1485,20 @@ from django.core.mail import send_mail
 
 logger = logging.getLogger(__name__)
 
+<<<<<<< HEAD
+=======
+from celery import shared_task
+import logging
+import time
+import os
+import resend
+
+logger = logging.getLogger(__name__)
+
+# ===== RESEND INIT =====
+resend.api_key = os.environ.get("RESEND_API_KEY")
+
+>>>>>>> staging
 
 @shared_task(bind=True, max_retries=3, queue="email_queue")
 def send_bulk_email_task(self, emails, from_email, batch_size=45, delay_seconds=300):
@@ -1014,6 +1515,7 @@ def send_bulk_email_task(self, emails, from_email, batch_size=45, delay_seconds=
 
         for e in batch:
             try:
+<<<<<<< HEAD
                 send_mail(
                     subject=e["subject"],
                     message=e["plain_message"],
@@ -1023,6 +1525,21 @@ def send_bulk_email_task(self, emails, from_email, batch_size=45, delay_seconds=
                     fail_silently=False,
                 )
                 sent += 1
+=======
+                # ===== RESEND REPLACEMENT (NO SMTP) =====
+                resend.Emails.send(
+                    {
+                        "from": from_email or "MyFund <noreply@myfundmobile.com>",
+                        "to": [e["to"]],
+                        "subject": e["subject"],
+                        "html": e["html_message"],
+                    }
+                )
+
+                sent += 1
+                logger.info(f"✅ Sent via Resend: {e['to']}")
+
+>>>>>>> staging
             except Exception as ex:
                 failed.append({"email": e["to"], "error": str(ex)})
                 logger.error(f"❌ Failed {e['to']}: {ex}")
@@ -1032,7 +1549,17 @@ def send_bulk_email_task(self, emails, from_email, batch_size=45, delay_seconds=
             time.sleep(delay_seconds)
 
     logger.info(f"📊 Done: {sent}/{total} sent")
+<<<<<<< HEAD
     return {"sent": sent, "failed": len(failed)}
+=======
+
+    return {
+        "sent": sent,
+        "failed": len(failed),
+        "failed_emails": failed,
+        "total": total,
+    }
+>>>>>>> staging
 
 
 from celery import shared_task
@@ -1160,6 +1687,7 @@ def apply_withholding_tax_q1_2026(test_mode=True):
     from django.db.models import Sum
     from .models import CustomUser, Transaction, ROITransaction
 
+<<<<<<< HEAD
     QUARTER_START = date(2026, 1, 1)
     QUARTER_END = date(2026, 3, 31)
     QUARTER_LABEL = "Q1 2026"
@@ -1168,6 +1696,18 @@ def apply_withholding_tax_q1_2026(test_mode=True):
     TEST_EMAILS = [
         "company@myfundmobile.com",
         "valueplusrecords@gmail.com",
+=======
+    from dateutil.relativedelta import relativedelta
+
+    QUARTER_START = date(2026, 4, 1)
+    QUARTER_END = date(2026, 6, 30)
+    QUARTER_LABEL = "Q2 2026"
+    WHT_RATE = Decimal("0.10")
+
+    TEST_EMAILS = [
+        # "company@myfundmobile.com",
+        # "valuepluspublishing@gmail.com",
+>>>>>>> staging
         "tolulopeahmed@gmail.com",
     ]
 
@@ -1214,9 +1754,16 @@ def apply_withholding_tax_q1_2026(test_mode=True):
         # Skip if WHT already applied for this user this quarter
         already_charged = Transaction.objects.filter(
             user_id=user_id,
+<<<<<<< HEAD
             description=f"WHT: {QUARTER_LABEL} Dividends",
             transaction_type="debit",
             status="confirmed",
+=======
+            transaction_type="debit",
+            status="confirmed",
+            source="WALLET",
+            description__icontains=f"WHT|{QUARTER_LABEL}",
+>>>>>>> staging
         ).exists()
 
         if already_charged:
@@ -1235,8 +1782,12 @@ def apply_withholding_tax_q1_2026(test_mode=True):
                     transaction_type="debit",
                     source="WALLET",
                     status="confirmed",
+<<<<<<< HEAD
                     service_charge=Decimal("0.00"),
                     description=f"WHT: {QUARTER_LABEL} Dividends",
+=======
+                    description=f"WHT|{QUARTER_LABEL}|10%",
+>>>>>>> staging
                 )
 
             processed += 1
@@ -1282,7 +1833,11 @@ def send_ambassador_report_notifications_task(self, report_id, user_id):
                 "It is now under review. We’ll notify you once it has been approved.<br><br>"
                 "Thank you for using MyFund.<br><br>"
             ),
+<<<<<<< HEAD
             from_email="MyFund <info@myfundmobile.com>",
+=======
+            from_email="MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
             recipient_list=[user.email],
         )
 
@@ -1307,8 +1862,13 @@ def send_ambassador_report_notifications_task(self, report_id, user_id):
                 f"{user.first_name} {user.last_name} ({user.email}) submitted an ambassador report for {report.month}. "
                 "Please review it in Django admin.<br><br>"
             ),
+<<<<<<< HEAD
             from_email="MyFund <info@myfundmobile.com>",
             recipient_list=["info@myfundmobile.com", "company@myfundmobile.com"],
+=======
+            from_email="MyFund <info@mg.myfundmobile.com>",
+            recipient_list=["info@mg.myfundmobile.com", "company@myfundmobile.com"],
+>>>>>>> staging
         )
 
         # ADMIN PUSH
@@ -1565,7 +2125,11 @@ def send_shortlisted_ambassador_emails(test_mode=True, only_email=None):
     from_email = getattr(
         settings,
         "DEFAULT_FROM_EMAIL",
+<<<<<<< HEAD
         "MyFund <info@myfundmobile.com>",
+=======
+        "MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
     )
 
     if only_email:
@@ -1652,7 +2216,11 @@ def send_second_batch_ambassador_emails(test_mode=True, only_email=None):
     from_email = getattr(
         settings,
         "DEFAULT_FROM_EMAIL",
+<<<<<<< HEAD
         "MyFund <info@myfundmobile.com>",
+=======
+        "MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
     )
 
     if only_email:
@@ -1742,6 +2310,7 @@ def autosubmit_missing_ambassador_reports_task():
     return result
 
 
+<<<<<<< HEAD
 @shared_task
 def send_inactive_signup_reminders():
     """
@@ -1778,3 +2347,164 @@ def send_inactive_signup_reminders():
             recipient_list=[user.email],
             template="email/email.html",
         )
+=======
+def send_batch_b_ambassador_email(test=True):
+    from authentication.utils import send_generic_email
+
+    subject = "🎉Congratulations! You’ve Been Selected for MyFund Ambassador Program"
+
+    message = """
+    <p>Hi {first_name},</p>
+
+    <p><strong>Congratulations!</strong></p>
+
+    <p>We’re excited to inform you that you have been selected for <strong>Batch B of the MyFund Ambassador Program (Cohort 3)</strong>.</p>
+
+    <p>After reviewing applications, your profile stood out, and we’re confident in your potential to grow, contribute, and make meaningful impact within the MyFund community.</p>
+
+    <p>As part of the next step, you are required to join the official ambassadors group where all updates, onboarding details, and activities will be shared.</p>
+
+    <p>
+    <a href="https://chat.whatsapp.com/K6ydqeE0zKuGX0Sek87tkW"
+        style="background:#4c28bc;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;display:inline-block;font-weight:600;">
+        Join Ambassadors Group
+    </a>
+    </p>
+
+    <p><strong>Onboarding Video:</strong></p>
+
+    <p>
+    <a href="https://youtu.be/bTb3I6GAmFA?feature=shared" target="_blank">
+        <img src="https://img.youtube.com/vi/bTb3I6GAmFA/maxresdefault.jpg"
+            alt="Watch onboarding video"
+            style="width:100%;max-width:500px;border-radius:12px;display:block;margin:auto;" />
+    </a>
+    </p>
+
+    <p style="text-align:center;">
+    <a href="https://youtu.be/bTb3I6GAmFA?feature=shared"
+        style="background:#4c28bc;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;display:inline-block;font-weight:600;">
+        ▶ Watch Onboarding Video
+    </a>
+    </p>
+
+    <p>Further details and the meeting link will be shared in the group.</p>
+
+    <p>We look forward to having you actively participate as we begin this journey together.</p>
+
+    <p>Welcome on board.</p>
+
+    <p>Best regards,<br>
+    Chubi<br>
+    DME, MyFund</p>
+    """
+
+    test_emails = [
+        "josephgideon95@gmail.com",
+        "valueplusrecords@gmail.com",
+        "janet.adegbenro@gmail.com",
+    ]
+
+    batch_b_emails = [
+        "ijiwandepaul2020@gmail.com",
+        "ozegesilverdiamond@gmail.com",
+        "annaliu352@gmail.com",
+        "owolabitt@yahoo.com",
+    ]
+
+    recipients = test_emails if test else batch_b_emails
+
+    return send_generic_email(
+        subject=subject,
+        message=message,
+        recipient_list=recipients,
+        use_celery_threshold=0,
+    )
+
+
+from datetime import timedelta
+from django.utils import timezone
+from .models import BankTransferRequest, Transaction
+
+
+def cleanup_abandoned_manual_quicksaves():
+    cutoff = timezone.now() - timedelta(hours=24)
+
+    old_requests = BankTransferRequest.objects.filter(
+        is_approved=False,
+        created_at__lt=cutoff,
+    )
+
+    cleaned_count = 0
+
+    for req in old_requests:
+        transaction = Transaction.objects.filter(
+            user=req.user,
+            transaction_id=req.transaction_id,
+            status__iexact="pending",
+            description__icontains="QuickSave",
+        ).first()
+
+        if transaction:
+            transaction.status = "abandoned"
+            transaction.description = "QuickSave (Abandoned)"
+            transaction.save(update_fields=["status", "description"])
+            cleaned_count += 1
+
+    return cleaned_count
+
+
+from celery import shared_task
+
+from authentication.metrics.services import (
+    generate_metric_snapshot,
+)
+
+from authentication.metrics.push import (
+    send_metrics_push,
+)
+
+
+@shared_task
+def daily_metrics_task():
+
+    snapshot = generate_metric_snapshot(period_type="daily")
+
+    send_metrics_push(snapshot)
+
+
+@shared_task
+def weekly_metrics_task():
+
+    snapshot = generate_metric_snapshot(period_type="weekly")
+
+    send_metrics_push(snapshot)
+
+
+@shared_task
+def monthly_metrics_task():
+
+    snapshot = generate_metric_snapshot(period_type="monthly")
+
+    send_metrics_push(snapshot)
+
+
+@shared_task(bind=True, max_retries=3, default_retry_delay=300)
+def sync_user_to_brevo(self, user_id):
+
+    from authentication.models import CustomUser
+    from authentication.services.brevo_service import sync_contact_to_brevo
+
+    try:
+        user = CustomUser.objects.get(id=user_id)
+
+        response = sync_contact_to_brevo(user)
+
+        if response:
+            return {"status": "success", "email": user.email}
+
+        raise Exception("Brevo sync failed")
+
+    except Exception as exc:
+        raise self.retry(exc=exc)
+>>>>>>> staging

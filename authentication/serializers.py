@@ -9,7 +9,10 @@ from django.contrib.auth.hashers import make_password
 import logging
 from django.db.models import Q
 
+<<<<<<< HEAD
 
+=======
+>>>>>>> staging
 logger = logging.getLogger(__name__)
 
 
@@ -401,6 +404,41 @@ class TargetSavingsSerializer(serializers.ModelSerializer):
 
         return data
 
+<<<<<<< HEAD
+=======
+    def update(self, instance, validated_data):
+        # 🔴 SECURITY: target_amount/end_date drive process_deduction()'s
+        # completion check and the 15% bonus's prorated-months calculation.
+        # They can't be marked read_only (the create flow needs to accept
+        # them from the client), but they - along with monthly_payment/
+        # funding_source/frequency, which drive the debit schedule - must
+        # never be editable on an *existing* plan via this same serializer.
+        # Without this guard, a user could PATCH target_amount down below
+        # their already-saved current_amount to fake instant completion,
+        # and/or push end_date years out to inflate the bonus multiplier,
+        # collecting an arbitrarily large bonus for money they never
+        # actually saved for the stated term. No mobile client currently
+        # sends PATCH/PUT to this endpoint, so this closes the hole with no
+        # behavior change for legitimate use - only "name" and "category"
+        # remain editable post-creation.
+        locked_fields = {
+            "target_amount",
+            "end_date",
+            "monthly_payment",
+            "funding_source",
+            "frequency",
+        }
+        attempted = locked_fields & set(validated_data.keys())
+        if attempted:
+            raise serializers.ValidationError(
+                {
+                    field: "This field cannot be changed after the plan is created."
+                    for field in attempted
+                }
+            )
+        return super().update(instance, validated_data)
+
+>>>>>>> staging
     class Meta:
         model = TargetSavings
         fields = [
@@ -518,7 +556,11 @@ class CardSerializer(serializers.ModelSerializer):
 
     #         subject = "New Card Added Successfully"
     #         message = f"Well done {user.first_name},\n\nYour card has been successfully added to your account. \n\nKeep growing your funds.🥂\n\nMyFund"
+<<<<<<< HEAD
     #         from_email = "MyFund <info@myfundmobile.com>"
+=======
+    #         from_email = "MyFund <info@mg.myfundmobile.com>"
+>>>>>>> staging
     #         recipient_list = [user.email]
 
     #         send_mail(subject, message, from_email, recipient_list, fail_silently=False)
@@ -543,14 +585,31 @@ class CardSerializer(serializers.ModelSerializer):
     #         )
 
 
-from .models import Transaction
+from .models import Transaction, WithdrawalsRequestToAdmin
 
 
 class TransactionSerializer(serializers.ModelSerializer):
+    # Add is_processed as a SerializerMethodField
+    is_processed = serializers.SerializerMethodField()
+
     class Meta:
         model = Transaction
         fields = "__all__"
         extra_kwargs = {"transaction_id": {"read_only": True}}
+<<<<<<< HEAD
+=======
+
+    def get_is_processed(self, obj):
+        # Check if this transaction has a corresponding withdrawal request
+        try:
+            withdrawal = WithdrawalsRequestToAdmin.objects.get(
+                transaction_id=obj.transaction_id
+            )
+            return withdrawal.is_processed
+        except WithdrawalsRequestToAdmin.DoesNotExist:
+            # If no withdrawal request, it's not a scheduled withdrawal
+            return True  # Or False depending on your logic
+>>>>>>> staging
 
 
 class QuickSaveSerializer(serializers.Serializer):
@@ -667,6 +726,26 @@ from .models import Group
 from authentication.models import CustomUser
 
 
+<<<<<<< HEAD
+=======
+def _resolve_profile_picture_url(profile_picture):
+    """Same resolution rules as UserSerializer.get_profile_picture, factored
+    out so GroupSerializer can attach contributor avatars without dragging in
+    the full UserSerializer."""
+    if isinstance(profile_picture, str):
+        if profile_picture and "http" not in profile_picture:
+            return f"{settings.MEDIA_URL}{profile_picture}"
+        return profile_picture or None
+
+    if profile_picture and hasattr(profile_picture, "url"):
+        if "http" not in profile_picture.url:
+            return f"{settings.MEDIA_URL}{profile_picture.url}"
+        return profile_picture.url
+
+    return None
+
+
+>>>>>>> staging
 class GroupSerializer(serializers.ModelSerializer):
     # You may want to serialize user-related fields as well. For example, including the creator's username.
     created_by = serializers.SerializerMethodField()
@@ -686,9 +765,36 @@ class GroupSerializer(serializers.ModelSerializer):
         )  # Get unique emails of invited users
 
     def get_contributors(self, obj):
+<<<<<<< HEAD
         return list(
             set(user.email for user in obj.contributors.all())
         )  # Get unique emails of contributors
+=======
+        # Returns contributor identity + avatar so clients can render a
+        # profile-picture stack instead of a plain headcount.
+        seen_emails = set()
+        contributors = []
+        for user in obj.contributors.all():
+            if user.email in seen_emails:
+                continue
+            seen_emails.add(user.email)
+            contributors.append(
+                {
+                    "email": user.email,
+                    "first_name": user.first_name,
+                    "profile_picture": _resolve_profile_picture_url(
+                        user.profile_picture
+                    ),
+                }
+            )
+        return contributors
+
+    # Nest the property details so clients don't need a second round-trip
+    property = serializers.SerializerMethodField()
+
+    def get_property(self, obj):
+        return PropertySerializer(obj.property).data
+>>>>>>> staging
 
     status = serializers.ChoiceField(
         choices=Group.GROUP_STATUS
@@ -703,6 +809,10 @@ class GroupSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "property_id",
+<<<<<<< HEAD
+=======
+            "property",
+>>>>>>> staging
             "created_by",
             "goal_amount",
             "minimum_contribution",
@@ -769,6 +879,70 @@ class ContributionSerializer(serializers.ModelSerializer):
         ]
 
 
+<<<<<<< HEAD
+=======
+from .models import GroupIncomeEvent, GroupIncomeDistribution
+
+
+class GroupIncomeEventSerializer(serializers.ModelSerializer):
+    property_name = serializers.SerializerMethodField()
+    recorded_by_email = serializers.SerializerMethodField()
+
+    def get_property_name(self, obj):
+        return obj.group.property.name
+
+    def get_recorded_by_email(self, obj):
+        return obj.recorded_by.email if obj.recorded_by else None
+
+    class Meta:
+        model = GroupIncomeEvent
+        fields = [
+            "id",
+            "group_id",
+            "property_name",
+            "recorded_by_email",
+            "amount",
+            "period_start",
+            "period_end",
+            "description",
+            "status",
+            "total_distributed",
+            "created_at",
+            "completed_at",
+        ]
+
+
+class GroupIncomeDistributionSerializer(serializers.ModelSerializer):
+    property_name = serializers.SerializerMethodField()
+    group_id = serializers.SerializerMethodField()
+    period_start = serializers.DateField(source="income_event.period_start", read_only=True)
+    period_end = serializers.DateField(source="income_event.period_end", read_only=True)
+    description = serializers.CharField(source="income_event.description", read_only=True)
+
+    def get_property_name(self, obj):
+        return obj.income_event.group.property.name
+
+    def get_group_id(self, obj):
+        return obj.income_event.group_id
+
+    class Meta:
+        model = GroupIncomeDistribution
+        fields = [
+            "id",
+            "income_event",
+            "group_id",
+            "property_name",
+            "period_start",
+            "period_end",
+            "description",
+            "ownership_percentage",
+            "amount",
+            "status",
+            "created_at",
+        ]
+
+
+>>>>>>> staging
 from .models import SavingsGoal
 
 

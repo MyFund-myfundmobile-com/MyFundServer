@@ -26,11 +26,14 @@ logger = logging.getLogger(__name__)
 
 EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
 
+<<<<<<< HEAD
 ADMIN_PUSH_EMAILS = [
     "tolulopeahmed@gmail.com",
     "ceo@myfundmobile.com",
 ]
 
+=======
+>>>>>>> staging
 
 class SafeDict(dict):
     """
@@ -167,6 +170,19 @@ def send_push_notification(
             "priority": "high",
         }
 
+<<<<<<< HEAD
+=======
+        # Expo only renders a notification's action buttons (registered via
+        # setNotificationCategoryAsync on-device) when the push carries a
+        # top-level categoryId - a "category" key buried inside `data` (as
+        # set by push_deep_links.py) is not the same thing and gets
+        # silently ignored by Expo, so the buttons never appear no matter
+        # how correctly they're registered client-side.
+        category = data.get("category")
+        if category:
+            payload["categoryId"] = category
+
+>>>>>>> staging
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
@@ -218,7 +234,16 @@ def send_admin_push_notification(
     Supports personalization too.
     """
     User = get_user_model()
+<<<<<<< HEAD
     admins = User.objects.filter(email__in=ADMIN_PUSH_EMAILS)
+=======
+    # Single source of truth: is_staff already gates the actual
+    # admin-action endpoints (action_views.py's _require_staff), so it's
+    # also what should gate who gets notified - a hardcoded email list
+    # drifts out of sync with real staff status and silently drops new
+    # admins from alerts (or keeps notifying former ones).
+    admins = User.objects.filter(is_staff=True)
+>>>>>>> staging
 
     if not admins.exists():
         logger.warning("No admin users found for push notification")
@@ -248,16 +273,33 @@ def send_admin_push_notification(
 import logging
 import re
 import time
+<<<<<<< HEAD
 from datetime import date
 from django.conf import settings
 from django.core.mail import send_mail
 from django.template.loader import render_to_string
 from django.utils.html import strip_tags
 from django.utils import timezone
+=======
+import os
+import resend
+from datetime import date
+from django.conf import settings
+from django.utils import timezone
+from django.utils.html import strip_tags
+from django.template.loader import render_to_string
+
+>>>>>>> staging
 from .models import CustomUser, ROITransaction
 
 logger = logging.getLogger(__name__)
 
+<<<<<<< HEAD
+=======
+# ===== RESEND INIT =====
+resend.api_key = os.environ.get("RESEND_API_KEY")
+
+>>>>>>> staging
 
 def validate_email(email):
     """Validate email format"""
@@ -272,10 +314,19 @@ def send_generic_email(
     from_email=None,
     use_celery_threshold=30,
     template="email/email.html",
+<<<<<<< HEAD
 ):
     """
     Smart, universal email sender with Namecheap-safe bulk sending.
     """
+=======
+    extra_context=None,
+):
+    """
+    Smart, universal email sender (RESEND VERSION - SMTP REMOVED)
+    """
+
+>>>>>>> staging
     logger.info(
         f"📧 START send_generic_email - Subject: '{subject}', Recipients: {len(recipient_list) if isinstance(recipient_list, list) else 'single'}"
     )
@@ -308,11 +359,21 @@ def send_generic_email(
 
     from_email = from_email or settings.DEFAULT_FROM_EMAIL
     total_valid = len(valid_recipients)
+<<<<<<< HEAD
+=======
+
+    extra_context = extra_context or {}
+
+>>>>>>> staging
     logger.info(
         f"📧 Valid recipients: {total_valid}, Invalid skipped: {len(invalid_recipients)}"
     )
 
+<<<<<<< HEAD
     # ---------- Personalization ----------
+=======
+    # ---------- PERSONALIZATION (UNCHANGED) ----------
+>>>>>>> staging
     def personalize(email_addr):
         try:
             user = CustomUser.objects.filter(email=email_addr).first()
@@ -358,8 +419,18 @@ def send_generic_email(
                 "{quarter_label}": ql,
             }
 
+<<<<<<< HEAD
             p_subject = subject
             p_message = message
+=======
+            # Add custom dynamic values
+            for key, value in extra_context.items():
+                placeholders[f"{{{key}}}"] = value
+
+            p_subject = subject
+            p_message = message
+
+>>>>>>> staging
             for k, v in placeholders.items():
                 p_subject = p_subject.replace(k, v)
                 p_message = p_message.replace(k, v)
@@ -396,16 +467,27 @@ def send_generic_email(
             }
 
     payloads = [personalize(e) for e in valid_recipients]
+<<<<<<< HEAD
     logger.info(f"📧 Personalization complete. Payloads: {len(payloads)}")
 
     # ---------- INLINE SEND (≤30 recipients) ----------
     if use_celery_threshold == 0 or total_valid <= use_celery_threshold:
         logger.info(f"📧 Using INLINE send for {total_valid} recipients")
+=======
+
+    logger.info(f"📧 Personalization complete. Payloads: {len(payloads)}")
+
+    # ---------- INLINE SEND (RESEND REPLACEMENT) ----------
+    if use_celery_threshold == 0 or total_valid <= use_celery_threshold:
+        logger.info(f"📧 Using INLINE Resend send for {total_valid} recipients")
+
+>>>>>>> staging
         sent_count = 0
         failed_emails = []
 
         for p in payloads:
             try:
+<<<<<<< HEAD
                 email = EmailMultiAlternatives(
                     subject=p["subject"],
                     body=p["plain_message"],
@@ -420,6 +502,25 @@ def send_generic_email(
             except Exception as e:
                 logger.error(f"❌ Email failed for {p['to']}: {e}")
                 failed_emails.append(p["to"])
+=======
+                # ===== RESEND (REPLACES SMTP COMPLETELY) =====
+                resend.Emails.send(
+                    {
+                        "from": from_email or "MyFund <noreply@myfundmobile.com>",
+                        "to": [p["to"]],
+                        "subject": p["subject"],
+                        "html": p["html_message"],
+                    }
+                )
+
+                sent_count += 1
+                logger.info(f"✅ Email sent via Resend to {p['to']}")
+
+            except Exception as e:
+                logger.error(f"❌ Resend failed for {p['to']}: {e}")
+                failed_emails.append(p["to"])
+
+>>>>>>> staging
             time.sleep(1)
 
         return {
@@ -432,6 +533,7 @@ def send_generic_email(
             "invalid_emails": invalid_recipients,
         }
 
+<<<<<<< HEAD
     # ---------- CELERY BATCH SEND (>30 recipients) ----------
     logger.info(f"📧 Using CELERY batch send for {total_valid} recipients")
     try:
@@ -441,15 +543,36 @@ def send_generic_email(
         BATCH_SIZE = 45
         DELAY_BETWEEN_EMAILS = 72  # seconds (~50/hour)
         num_batches = (total_valid + BATCH_SIZE - 1) // BATCH_SIZE
+=======
+    # ---------- CELERY BATCH SEND (UNCHANGED LOGIC) ----------
+    logger.info(f"📧 Using CELERY batch send for {total_valid} recipients")
+
+    try:
+        from .tasks import send_bulk_email_task
+
+        BATCH_SIZE = 45
+        DELAY_BETWEEN_EMAILS = 72
+        num_batches = (total_valid + BATCH_SIZE - 1) // BATCH_SIZE
+
+>>>>>>> staging
         batches = [
             payloads[i : i + BATCH_SIZE] for i in range(0, total_valid, BATCH_SIZE)
         ]
 
         for i, batch in enumerate(batches):
+<<<<<<< HEAD
             countdown_seconds = i * 900  # 15 minutes between batches
             logger.info(
                 f"⏱ Scheduling batch {i+1}/{num_batches} to run in {countdown_seconds}s ({len(batch)} emails)"
             )
+=======
+            countdown_seconds = i * 900
+
+            logger.info(
+                f"⏱ Scheduling batch {i+1}/{num_batches} in {countdown_seconds}s ({len(batch)} emails)"
+            )
+
+>>>>>>> staging
             send_bulk_email_task.apply_async(
                 args=[batch, from_email],
                 kwargs={
@@ -464,8 +587,13 @@ def send_generic_email(
             "status": "queued",
             "total": total_valid,
             "invalid_skipped": len(invalid_recipients),
+<<<<<<< HEAD
             "method": "namecheap_safe_batches",
             "note": f"Emails queued in safe batches (50/hr, ~12-14h total)",
+=======
+            "method": "resend_batched",
+            "note": "Emails queued in safe batches",
+>>>>>>> staging
             "estimated_hours": f"{num_batches} hours",
         }
 
@@ -494,6 +622,55 @@ def set_user_balance(user, source, amount):
         user.wallet = amount
 
 
+<<<<<<< HEAD
+=======
+def split_amount_by_percentage(total_amount, user_percentage_pairs):
+    """Split total_amount across users proportionally to their percentage share.
+
+    user_percentage_pairs: iterable of (user_id, percentage) tuples, where
+    percentage is out of 100 (does not need to sum to exactly 100).
+
+    Uses the largest-remainder method so the returned shares always sum to
+    exactly total_amount (to the cent) - straight proportional rounding can
+    otherwise lose or invent pennies.
+
+    Returns: dict of {user_id: Decimal share}, rounded to 2 decimal places.
+    """
+    from decimal import Decimal, ROUND_DOWN
+
+    total_amount = Decimal(str(total_amount))
+    pairs = [(user_id, Decimal(str(pct))) for user_id, pct in user_percentage_pairs]
+    total_percentage = sum(pct for _, pct in pairs)
+
+    if total_percentage <= 0 or not pairs:
+        return {user_id: Decimal("0.00") for user_id, _ in pairs}
+
+    shares = {}
+    remainders = []
+    cents_allocated = Decimal("0.00")
+
+    for user_id, pct in pairs:
+        exact_share = (total_amount * pct) / total_percentage
+        floored_share = exact_share.quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+        shares[user_id] = floored_share
+        cents_allocated += floored_share
+        remainders.append((exact_share - floored_share, user_id))
+
+    leftover_cents = int(
+        ((total_amount - cents_allocated) * 100).to_integral_value()
+    )
+
+    # Distribute leftover pennies to the largest fractional remainders first,
+    # tie-broken deterministically by user_id.
+    remainders.sort(key=lambda item: (-item[0], item[1]))
+    for i in range(leftover_cents):
+        _, user_id = remainders[i % len(remainders)]
+        shares[user_id] += Decimal("0.01")
+
+    return shares
+
+
+>>>>>>> staging
 def generate_reference(length=20):
     """Generate a unique reference string with allowed characters."""
     allowed_chars = string.ascii_lowercase + string.digits + "-_"
@@ -578,39 +755,95 @@ import requests
 import logging
 import phonenumbers
 from django.conf import settings
+<<<<<<< HEAD
 from phonenumbers.phonenumberutil import number_type, PhoneNumberType
+=======
+from phonenumbers import number_type, PhoneNumberType
+>>>>>>> staging
 import urllib.parse
 
 logger = logging.getLogger(__name__)
 
 
+<<<<<<< HEAD
 def send_sms_via_payless(phone_number, message):
     """
     Send SMS via Payless SPC API.
     Returns True if SMS delivered successfully, False otherwise.
     """
+=======
+# --------------------------------------------------
+# PHONE NORMALIZATION (STRICT SINGLE SOURCE OF TRUTH)
+# --------------------------------------------------
+def normalize_phone(phone_number, region="NG"):
+    try:
+        phone_number = phone_number.strip().replace(" ", "").replace("-", "")
+
+        if phone_number.startswith("0") and region.upper() == "NG":
+            phone_number = "+234" + phone_number[1:]
+
+        parsed = phonenumbers.parse(phone_number, region)
+
+        if not phonenumbers.is_valid_number(parsed):
+            return None
+
+        formatted = phonenumbers.format_number(
+            parsed, phonenumbers.PhoneNumberFormat.E164
+        )
+
+        # FORCE 234 FORMAT ONLY (NO +)
+        return formatted.replace("+", "")
+
+    except Exception:
+        return None
+
+
+# --------------------------------------------------
+# SMS SENDER (FINAL FIXED VERSION)
+# --------------------------------------------------
+def send_sms_via_payless(phone_number, message):
+>>>>>>> staging
     base_url = settings.PAYLESS_SMS_URL
     username = settings.PAYLESS_SMS_USERNAME
     password = settings.PAYLESS_SMS_PASSWORD
     sender = settings.PAYLESS_SMS_SENDER_ID
 
+<<<<<<< HEAD
     encoded_message = urllib.parse.quote(message)
     recipients = phone_number.replace(" ", "")
+=======
+    clean_number = normalize_phone(phone_number)
+
+    if not clean_number:
+        logger.error(f"❌ Invalid phone number: {phone_number}")
+        return False
+
+    encoded_message = urllib.parse.quote(message)
+>>>>>>> staging
 
     full_url = (
         f"{base_url}?option=com_spc&comm=spc_api"
         f"&username={username}"
         f"&password={password}"
         f"&sender={sender}"
+<<<<<<< HEAD
         f"&recipient={recipients}"
         f"&message={encoded_message}"
     )
 
     logger.info(f"🔗 Sending SMS via: {full_url}")
+=======
+        f"&recipient={clean_number}"
+        f"&message={encoded_message}"
+    )
+
+    logger.info(f"📲 Sending SMS to {clean_number}")
+>>>>>>> staging
 
     try:
         response = requests.get(full_url, timeout=20)
         text = response.text.strip()
+<<<<<<< HEAD
         logger.info(f"✅ Payless Response: {text}")
 
         return text.upper().startswith("OK")
@@ -654,6 +887,29 @@ def validate_phone_number(phone_number, region="NG"):
 
     except phonenumbers.NumberParseException:
         return {"valid": False, "error": "Could not parse phone number."}
+=======
+
+        logger.info(f"✅ Payless Response: {text}")
+
+        # STRICT SUCCESS CHECK
+        return text.upper().startswith("OK")
+
+    except Exception as e:
+        logger.error(f"❌ SMS Error: {e}")
+        return False
+
+
+# --------------------------------------------------
+# VALIDATION WRAPPER (USED BY API)
+# --------------------------------------------------
+def validate_phone_number(phone_number, region="NG"):
+    cleaned = normalize_phone(phone_number, region)
+
+    if not cleaned:
+        return {"valid": False, "error": "Invalid phone number format."}
+
+    return {"valid": True, "formatted": cleaned, "error": None}
+>>>>>>> staging
 
 
 import urllib.parse
@@ -701,6 +957,13 @@ def send_bulk_sms(numbers, message):
         return {"success": False, "error": str(e)}
 
 
+<<<<<<< HEAD
+=======
+def send_sms(phone_number, message):
+    return send_sms_via_payless(phone_number, message)
+
+
+>>>>>>> staging
 import logging
 from django.db.models import Q
 from rest_framework.exceptions import AuthenticationFailed
@@ -899,6 +1162,7 @@ def calculate_withdrawal_charges(amount: Decimal, source_account: str):
     return rate, charge_amount, net_amount
 
 
+<<<<<<< HEAD
 from django.db import transaction
 from django.utils import timezone
 from decimal import Decimal
@@ -921,11 +1185,76 @@ def process_scheduled_withdrawal(withdrawal):
         user.save()
 
         # 2️⃣ Create credit transaction
+=======
+import logging
+from datetime import date
+from decimal import Decimal
+
+from django.db import transaction
+from django.utils import timezone
+
+from .models import WithdrawalsRequestToAdmin, CustomUser, Transaction
+
+logger = logging.getLogger(__name__)
+
+ADMIN_ALERT_EMAILS = [
+    "tolulopeahmed@gmail.com",
+    "janet.adegbenro@gmail.com",
+]
+
+
+def process_scheduled_withdrawal(withdrawal, triggered_by="celery"):
+    """
+    Safely processes a scheduled withdrawal.
+
+    - Credits user.wallet, not user.savings
+    - Creates a separate wallet credit transaction record
+    - Marks withdrawal as processed
+    - Prevents double-crediting
+    - Sends push notification and email after DB commit
+    """
+
+    amount = Decimal(withdrawal.total_amount or withdrawal.amount or 0)
+
+    if amount <= 0:
+        raise ValueError("Scheduled withdrawal amount must be greater than zero.")
+
+    with transaction.atomic():
+        withdrawal = WithdrawalsRequestToAdmin.objects.select_for_update().get(
+            pk=withdrawal.pk
+        )
+
+        if withdrawal.is_processed:
+            return "already_processed"
+
+        user = CustomUser.objects.select_for_update().get(pk=withdrawal.user_id)
+
+        credit_transaction_id = f"SWC-{withdrawal.transaction_id}"
+
+        existing_credit = Transaction.objects.filter(
+            user=user,
+            transaction_id=credit_transaction_id,
+            transaction_type="credit",
+            status="confirmed",
+        ).first()
+
+        if existing_credit:
+            withdrawal.is_processed = True
+            withdrawal.save(update_fields=["is_processed"])
+            return "already_credited"
+
+        previous_wallet = user.wallet or Decimal("0.00")
+
+        user.wallet = previous_wallet + amount
+        user.save(update_fields=["wallet"])
+
+>>>>>>> staging
         Transaction.objects.create(
             user=user,
             transaction_type="credit",
             status="confirmed",
             amount=amount,
+<<<<<<< HEAD
             source="WALLET",
             description="Scheduled withdrawal ✅",
         )
@@ -986,6 +1315,120 @@ def process_scheduled_withdrawal(withdrawal):
 
 
 from datetime import date
+=======
+            total_amount=amount,
+            source="SCHEDULED_WITHDRAWAL",
+            credited_to="WALLET",
+            description="Scheduled Withdrawal Credited to Wallet",
+            balance_before=previous_wallet,
+            balance_after=user.wallet,
+            transaction_id=credit_transaction_id,
+        )
+
+        withdrawal.is_processed = True
+        withdrawal.save(update_fields=["is_processed"])
+
+        # The original debit Transaction (created when the withdrawal was
+        # first scheduled) was otherwise never touched by this function -
+        # it stayed "pending" forever even after the wallet credit above
+        # completed the withdrawal. That ledger gap is exactly what
+        # management/commands/fix_scheduled_withdrawals.py had to be
+        # written to hand-patch after the fact; closing it here means new
+        # withdrawals won't need that patch going forward.
+        Transaction.objects.filter(
+            user=user,
+            transaction_id=withdrawal.transaction_id,
+            transaction_type="debit",
+        ).exclude(status="confirmed").update(status="confirmed")
+
+    try:
+        send_push_notification(
+            user=user,
+            title="Withdrawal Completed ✅",
+            message=(
+                f"Your scheduled withdrawal of ₦{amount:,.2f} "
+                f"has been credited to your MyFund wallet."
+            ),
+            data={
+                "amount": str(amount),
+                "type": "scheduled_withdrawal_completed",
+                "transaction_id": credit_transaction_id,
+            },
+            notif_type="SUCCESS",
+        )
+    except Exception:
+        logger.exception(
+            "Push notification failed for scheduled withdrawal %s", withdrawal.pk
+        )
+
+    try:
+        send_generic_email(
+            subject="Scheduled Withdrawal Completed ✅",
+            message=(
+                f"Hi {user.first_name},<br><br>"
+                f"Your scheduled withdrawal of ₦{amount:,.2f} has been successfully "
+                f"credited to your MyFund wallet.<br><br>"
+                "You can now use or withdraw the funds anytime.<br><br>"
+                "Thank you for using MyFund."
+            ),
+            from_email="MyFund <info@mg.myfundmobile.com>",
+            recipient_list=[user.email],
+        )
+    except Exception:
+        logger.exception("User email failed for scheduled withdrawal %s", withdrawal.pk)
+
+    try:
+        send_generic_email(
+            subject="[AUTO] Scheduled Withdrawal Processed ✅",
+            message=(
+                f"Scheduled withdrawal processed successfully.<br><br>"
+                f"User: {user.first_name} {user.last_name} ({user.email})<br>"
+                f"Amount credited: ₦{amount:,.2f}<br>"
+                f"Original Transaction ID: {withdrawal.transaction_id}<br>"
+                f"Credit Transaction ID: {credit_transaction_id}<br>"
+                f"Triggered by: {triggered_by}<br>"
+            ),
+            from_email="MyFund <info@mg.myfundmobile.com>",
+            recipient_list=ADMIN_ALERT_EMAILS,
+        )
+    except Exception:
+        logger.exception(
+            "Admin email failed for scheduled withdrawal %s", withdrawal.pk
+        )
+
+    if triggered_by == "celery":
+        # Same is_staff consolidation as send_admin_push_notification()'s
+        # recipient targeting - a hardcoded email list silently drops
+        # whichever admin isn't on it.
+        admin_users = CustomUser.objects.filter(is_staff=True, is_active=True)
+
+        for admin_user in admin_users:
+            try:
+                send_push_notification(
+                    user=admin_user,
+                    title="Scheduled Withdrawal Completed",
+                    message=(
+                        f"{user.first_name} {user.last_name}'s scheduled withdrawal "
+                        f"of ₦{amount:,.2f} has been credited to wallet by Celery."
+                    ),
+                    data={
+                        "type": "scheduled_withdrawal_completed_admin",
+                        "customer_user_id": str(user.pk),
+                        "customer_email": user.email,
+                        "amount": str(amount),
+                        "transaction_id": credit_transaction_id,
+                    },
+                    notif_type="SUCCESS",
+                )
+            except Exception:
+                logger.exception(
+                    "Admin push failed for scheduled withdrawal %s to %s",
+                    withdrawal.pk,
+                    admin_user.email,
+                )
+
+    return "processed"
+>>>>>>> staging
 
 
 def get_next_payout_date(today: date) -> date:
@@ -1001,7 +1444,10 @@ def get_next_payout_date(today: date) -> date:
         if today < payout:
             return payout
 
+<<<<<<< HEAD
     # If we've passed Oct 1, next payout is Jan 1 of next year
+=======
+>>>>>>> staging
     return date(year + 1, 1, 1)
 
 
@@ -1584,6 +2030,11 @@ def approve_quicksave_credit(
     transaction_id,
     description="QuickSave (Transfer)",
     source="BANK_TRANSFER",
+<<<<<<< HEAD
+=======
+    paystack_reference=None,
+    paystack_auth_code=None,
+>>>>>>> staging
 ):
     amount = Decimal(str(amount))
 
@@ -1618,6 +2069,11 @@ def approve_quicksave_credit(
         tx.total_amount = amount
         tx.balance_before = previous_balance
         tx.balance_after = new_balance
+<<<<<<< HEAD
+=======
+        tx.paystack_reference = paystack_reference
+        tx.paystack_auth_code = paystack_auth_code
+>>>>>>> staging
         tx.save(
             update_fields=[
                 "status",
@@ -1629,6 +2085,11 @@ def approve_quicksave_credit(
                 "total_amount",
                 "balance_before",
                 "balance_after",
+<<<<<<< HEAD
+=======
+                "paystack_reference",
+                "paystack_auth_code",
+>>>>>>> staging
             ]
         )
 
@@ -1636,6 +2097,15 @@ def approve_quicksave_credit(
         locked_user.confirm_referral_rewards(is_referrer=False)
 
     locked_user.update_total_savings_and_investment_this_month()
+<<<<<<< HEAD
+=======
+    locked_user.save(
+        update_fields=[
+            "total_savings_and_investments_this_month",
+            "updated_at",
+        ]
+    )
+>>>>>>> staging
 
     send_generic_email(
         subject="QuickSave Updated! ✅",
@@ -1644,7 +2114,11 @@ def approve_quicksave_credit(
             f"Your QuickSave deposit of ₦{amount:,.2f} "
             f"has been confirmed and added to your Savings account."
         ),
+<<<<<<< HEAD
         from_email="MyFund <info@myfundmobile.com>",
+=======
+        from_email="MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
         recipient_list=[locked_user.email],
     )
 
@@ -1661,6 +2135,10 @@ def approve_quicksave_credit(
             "type": "QuickSave",
             "source": source,
             "status": "confirmed",
+<<<<<<< HEAD
+=======
+            "paystack_reference": paystack_reference,
+>>>>>>> staging
         },
         notif_type="CREDIT",
     )
@@ -1740,7 +2218,11 @@ def approve_quickinvest_credit(
             f"Your QuickInvest deposit of ₦{amount:,.2f} "
             f"has been confirmed and added to your Investment account."
         ),
+<<<<<<< HEAD
         from_email="MyFund <info@myfundmobile.com>",
+=======
+        from_email="MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
         recipient_list=[locked_user.email],
     )
 
@@ -1849,7 +2331,11 @@ def send_ambassador_status_notification(user, became_ambassador=True):
             send_generic_email(
                 subject=email_subject,
                 message=email_message,
+<<<<<<< HEAD
                 from_email="MyFund <info@myfundmobile.com>",
+=======
+                from_email="MyFund <info@mg.myfundmobile.com>",
+>>>>>>> staging
                 recipient_list=[user.email],
             )
         except Exception as email_error:
@@ -1861,6 +2347,47 @@ def send_ambassador_status_notification(user, became_ambassador=True):
         logger.error(f"Ambassador notification error for {user.email}: {e}")
 
 
+<<<<<<< HEAD
+=======
+def grant_user_ambassador_status(user):
+    """
+    Grant ambassador status and notify the user.
+    Returns True if the status changed.
+    """
+    if user.is_ambassador:
+        return False
+
+    user.is_ambassador = True
+    user.save(update_fields=["is_ambassador"])
+
+    send_ambassador_status_notification(
+        user=user,
+        became_ambassador=True,
+    )
+
+    return True
+
+
+def revoke_user_ambassador_status(user):
+    """
+    Revoke ambassador status and notify the user.
+    Returns True if the status changed.
+    """
+    if not user.is_ambassador:
+        return False
+
+    user.is_ambassador = False
+    user.save(update_fields=["is_ambassador"])
+
+    send_ambassador_status_notification(
+        user=user,
+        became_ambassador=False,
+    )
+
+    return True
+
+
+>>>>>>> staging
 from django.utils import timezone
 from .models import AmbassadorAttendanceSubmission
 
@@ -1874,6 +2401,7 @@ def get_user_monthly_attendance_count(user):
     ).count()
 
 
+<<<<<<< HEAD
 from decimal import Decimal
 import uuid
 from django.db import transaction
@@ -1985,6 +2513,8 @@ def credit_employee_wallet_allowance(email, amount, credited_by="Admin"):
     }
 
 
+=======
+>>>>>>> staging
 from datetime import timedelta
 from decimal import Decimal
 from django.db import transaction
@@ -2007,7 +2537,11 @@ def autosubmit_missing_ambassador_reports_for_previous_month():
     Manual / evidence-based fields are forced to 0.
     Safe to run multiple times because it skips users who already have a report.
     """
+<<<<<<< HEAD
     now = timezone.now()
+=======
+    now = timezone.localtime(timezone.now())
+>>>>>>> staging
 
     current_month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     previous_month_end = current_month_start - timedelta(seconds=1)
@@ -2162,6 +2696,7 @@ def create_transaction(
         setattr(user, balance_field, new_balance)
         user.save(update_fields=[balance_field])
 
+<<<<<<< HEAD
         tx = Transaction.objects.create(
             user=user,
             amount=amount,
@@ -2175,7 +2710,148 @@ def create_transaction(
             balance_after=new_balance,
             transaction_id=reference if reference else None,
         )
+=======
+        transaction_data = {
+            "user": user,
+            "amount": amount,
+            "transaction_type": transaction_type,
+            "status": status,
+            "source": source,
+            "credited_to": credited_to,
+            "description": description,
+            "service_charge": service_charge,
+            "balance_before": previous_balance,
+            "balance_after": new_balance,
+        }
+
+        # Only set transaction_id when a reference was actually supplied.
+        if reference:
+            transaction_data["transaction_id"] = reference
+
+        tx = Transaction.objects.create(**transaction_data)
+>>>>>>> staging
 
         print("✅ TX SAVED:", tx.balance_before, tx.balance_after)
 
     return tx
+<<<<<<< HEAD
+=======
+
+
+# GroupBuy minimum duration is 3 months (enforced in create_groupbuy). A
+# GroupBuy that reaches its deadline without hitting 100% funding is expired
+# here: every confirmed contributor is refunded (minus a 1% service charge),
+# the group is marked failed, and the property's unit is released so a new
+# GroupBuy can be started against it. Shared by both the management command
+# (authentication/management/commands/expire_groupbuys.py) and the Celery
+# task (authentication.tasks.expire_groupbuys_task) so there's one source of
+# truth for the sweep logic regardless of how it's triggered.
+def expire_overdue_groupbuys(dry_run=False):
+    from decimal import Decimal, ROUND_HALF_UP
+
+    from django.utils import timezone
+
+    from .models import Group, Contribution, GroupOwnership
+
+    SERVICE_CHARGE_RATE = Decimal("0.01")  # 1%
+
+    now = timezone.now()
+    overdue_groups = Group.objects.filter(
+        status__in=["Active", "active"],
+        deadline__lt=now,
+    ).select_related("property")
+
+    expired_groups = []
+    total_refunded = Decimal("0")
+    total_service_charge = Decimal("0")
+
+    for group in overdue_groups:
+        # Fully (or over-)funded by the deadline is a success, not an
+        # expiry - leave it for the normal completion flow to handle.
+        if group.total_raised >= group.goal_amount:
+            continue
+
+        contributions = Contribution.objects.filter(
+            group=group, payment_status="Confirmed"
+        ).select_related("user")
+
+        contributor_details = []
+
+        for contribution in contributions:
+            amount = contribution.amount
+            service_charge = (amount * SERVICE_CHARGE_RATE).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            refund_amount = amount - service_charge
+
+            contributor_details.append(
+                {
+                    "email": contribution.user.email,
+                    "amount": amount,
+                    "service_charge": service_charge,
+                    "refund_amount": refund_amount,
+                    "source": contribution.source,
+                }
+            )
+
+            if not dry_run:
+                create_transaction(
+                    user=contribution.user,
+                    amount=refund_amount,
+                    transaction_type="credit",
+                    credited_to=contribution.source.upper(),
+                    status="confirmed",
+                    service_charge=service_charge,
+                    description=(
+                        f"GroupBuy expired - refund for {group.property.name} "
+                        f"(1% service charge of ₦{service_charge} applied)"
+                    ),
+                )
+                contribution.payment_status = "Refunded"
+                contribution.save()
+
+                try:
+                    send_push_notification(
+                        user=contribution.user,
+                        title="GroupBuy Expired - Refunded",
+                        message=(
+                            f"The GroupBuy for {group.property.name} didn't reach its "
+                            f"goal before the deadline. ₦{refund_amount:,.2f} has been "
+                            f"refunded to your {contribution.source} account (1% "
+                            f"service charge applied)."
+                        ),
+                        notif_type="CREDIT",
+                        data={"group_id": str(group.id), "type": "GROUPBUY_EXPIRED"},
+                    )
+                except Exception:
+                    pass
+
+            total_refunded += refund_amount
+            total_service_charge += service_charge
+
+        if not dry_run:
+            group.status = "failed"
+            group.save()
+
+            GroupOwnership.objects.filter(group=group).delete()
+
+            # Release the unit so the property is available to start again.
+            property_obj = group.property
+            property_obj.units_available += 1
+            property_obj.save()
+
+        expired_groups.append(
+            {
+                "group_id": str(group.id),
+                "property": group.property.name,
+                "contributors": contributor_details,
+            }
+        )
+
+    return {
+        "expired_count": len(expired_groups),
+        "total_refunded": total_refunded,
+        "total_service_charge": total_service_charge,
+        "groups": expired_groups,
+    }
+>>>>>>> staging

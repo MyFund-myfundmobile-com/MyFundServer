@@ -178,6 +178,7 @@ newenv/
 *.sqlite3
 *.pyc
 __pycache__/
+<<<<<<< HEAD
 
 
 data.json
@@ -185,3 +186,5 @@ data.json
 .env
 .env.*
 !.env.example
+=======
+>>>>>>> staging
