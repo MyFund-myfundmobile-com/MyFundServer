@@ -1017,43 +1017,67 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         return user_percentage
 
     def update_total_savings_and_investment_this_month(self):
+        """Net new money the user brought into Savings/Investment this
+        calendar month: genuine deposits minus genuine withdrawals.
+
+        Deposits are identified by description prefix ("QuickSave",
+        "QuickInvest", "AutoSave", "AutoInvest") rather than the
+        source/credited_to fields, because those fields are inconsistently
+        populated across deposit code paths - notably the main card-charge
+        webhook completion branch (views.py, the "quicksave"/"quickinvest"
+        description-prefix branches) never sets credited_to at all, so
+        filtering on it silently drops every card-funded deposit.
+
+        Withdrawals are identified as confirmed debits sourced from
+        SAVINGS/INVESTMENT whose description contains " > " (e.g. "Savings
+        > Bank", "Investment > Wallet") - this deliberately excludes
+        TargetSavings funding debits, which also set source="SAVINGS"/
+        "INVESTMENT" but describe themselves by the plan's name, not a
+        "X > Y" transfer description. Without this, withdrawals were never
+        subtracted at all, so the figure only ever went up.
+        """
         now = timezone.now()
         current_month = now.month
         current_year = now.year
 
-        # Use first_name or email instead of username
-        print(f"Calculating savings for User: {self.first_name} (ID: {self.id})")
-
         try:
-            # Filter confirmed credit transactions for the current month
-            savings_and_investment_credits = Transaction.objects.filter(
+            base_filter = dict(
                 user=self,
-                transaction_type="credit",
                 status="confirmed",
                 date__month=current_month,
                 date__year=current_year,
             )
 
-            print(f"Total Transactions Found: {savings_and_investment_credits.count()}")
+            deposit_prefixes = models.Q()
+            for prefix in ("QuickSave", "QuickInvest", "AutoSave", "AutoInvest"):
+                deposit_prefixes |= models.Q(description__istartswith=prefix)
 
-            # Sum the credit amounts
-            total_credits = savings_and_investment_credits.aggregate(
-                total_credits=Sum("amount")
-            )["total_credits"]
-
-            print(f"Total Credits Calculated: {total_credits}")
-
-            if total_credits is not None:
-                self.total_savings_and_investments_this_month = total_credits
-            else:
-                self.total_savings_and_investments_this_month = 0
-
-            self.save()
-            print(
-                f"User {self.first_name} - Updated total savings: {self.total_savings_and_investments_this_month}"
+            total_deposits = (
+                Transaction.objects.filter(
+                    transaction_type="credit", **base_filter
+                )
+                .filter(deposit_prefixes)
+                .aggregate(total=Sum("amount"))["total"]
+                or Decimal("0.00")
             )
+
+            total_withdrawals = (
+                Transaction.objects.filter(
+                    transaction_type="debit",
+                    source__in=["SAVINGS", "INVESTMENT"],
+                    description__icontains=" > ",
+                    **base_filter,
+                ).aggregate(total=Sum("amount"))["total"]
+                or Decimal("0.00")
+            )
+
+            net = total_deposits - total_withdrawals
+            self.total_savings_and_investments_this_month = max(net, Decimal("0.00"))
+            self.save(update_fields=["total_savings_and_investments_this_month"])
         except Exception as e:
-            print(f"Error calculating savings for {self.first_name}: {e}")
+            logger.error(
+                f"Error calculating monthly savings+investment for user {self.id}: {e}"
+            )
 
     def set_password(self, raw_password):
         with transaction.atomic():

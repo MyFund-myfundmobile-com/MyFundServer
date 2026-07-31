@@ -1454,6 +1454,15 @@ def get_user_profile(request):
 
         logger.info("Fetching profile data for user: %s", user.email)
 
+        # Safety net: total_savings_and_investments_this_month is a cached
+        # field, refreshed by the specific deposit/withdrawal code paths
+        # that know to call update_total_savings_and_investment_this_month()
+        # after moving money. Recomputing it fresh here too means the
+        # Ambassador Report screen (which reads this field via the profile
+        # endpoint) is always accurate regardless of whether some other
+        # money-movement path forgets to call that refresh.
+        user.update_total_savings_and_investment_this_month()
+
         bank_accounts = BankAccount.objects.filter(user=user)
 
         profile_data = {

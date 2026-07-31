@@ -832,7 +832,7 @@ def authenticate_user_by_email_or_phone(username: str, password: str) -> CustomU
     return user
 
 
-from django.db.models import Sum, F, DecimalField, Q, Window
+from django.db.models import Sum, F, DecimalField, Q, Window, Case, When
 from django.db.models.functions import Coalesce, RowNumber
 from django.db import transaction
 from django.db import connection
@@ -850,18 +850,43 @@ def _update_top_savers_worker():
     try:
         logger.info(f"Starting top savers update for {current_month}/{current_year}")
 
+        # Same net-of-withdrawals logic as
+        # CustomUser.update_total_savings_and_investment_this_month() - see
+        # that method's docstring for why deposits are matched by
+        # description prefix rather than credited_to (unreliable/unset on
+        # the main card-charge webhook path) and withdrawals are matched by
+        # source + " > " in the description (excludes TargetSavings
+        # funding debits, which share the same source but not that
+        # description shape). Previously this only ever summed credits, so
+        # a user's rank never went down after a withdrawal.
+        deposit_prefixes = Q()
+        for prefix in ("QuickSave", "QuickInvest", "AutoSave", "AutoInvest"):
+            deposit_prefixes |= Q(description__istartswith=prefix)
+        is_withdrawal = Q(
+            transaction_type="debit",
+            source__in=["SAVINGS", "INVESTMENT"],
+            description__icontains=" > ",
+        )
+
         user_amounts = (
             Transaction.objects.filter(
                 date__month=current_month,
                 date__year=current_year,
                 status="confirmed",
-                transaction_type="credit",
-                credited_to__in=["SAVINGS", "INVESTMENT"],
+            )
+            .filter(
+                (Q(transaction_type="credit") & deposit_prefixes) | is_withdrawal
             )
             .values("user_id")
             .annotate(
                 total=Coalesce(
-                    Sum("amount"),
+                    Sum(
+                        Case(
+                            When(transaction_type="credit", then=F("amount")),
+                            When(transaction_type="debit", then=-F("amount")),
+                            output_field=DecimalField(max_digits=14, decimal_places=2),
+                        )
+                    ),
                     Decimal("0.00"),
                     output_field=DecimalField(max_digits=14, decimal_places=2),
                 )
@@ -1087,6 +1112,12 @@ def process_scheduled_withdrawal(withdrawal, triggered_by="celery"):
             transaction_id=withdrawal.transaction_id,
             transaction_type="debit",
         ).exclude(status="confirmed").update(status="confirmed")
+
+    # Same refresh every deposit-completion path already does - without
+    # this, a withdrawal debits savings/investment but the ambassador
+    # report's cached "Savings + Investment (this month)" figure never
+    # goes back down until the user's next deposit happens to trigger it.
+    user.update_total_savings_and_investment_this_month()
 
     try:
         send_push_notification(

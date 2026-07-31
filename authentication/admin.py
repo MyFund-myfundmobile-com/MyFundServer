@@ -1864,6 +1864,13 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
                     transaction.balance_after = balance_after
                     transaction.save()
 
+                    # Same refresh every deposit-completion path already
+                    # triggers - without it, an approved immediate
+                    # withdrawal debits savings/investment but the
+                    # ambassador report's cached monthly figure never
+                    # reflects it until the user's next deposit.
+                    user.update_total_savings_and_investment_this_month()
+
                     approved_count += 1
 
                     # Push notification
