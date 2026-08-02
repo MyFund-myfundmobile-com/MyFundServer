@@ -42,6 +42,8 @@ app.conf.task_routes = {
         "queue": "default"
     },
     "authentication.tasks.expire_groupbuys_task": {"queue": "default"},
+    "authentication.tasks.auto_distribute_groupbuy_income_task": {"queue": "default"},
+    "authentication.tasks.send_groupbuy_deadline_reminders_task": {"queue": "default"},
     "authentication.tasks.process_due_scheduled_withdrawals": {"queue": "default"},
     "authentication.tasks.send_birthday_greetings": {"queue": "default"},
     "authentication.tasks.reward_top_savers_of_month": {"queue": "default"},
@@ -85,6 +87,17 @@ app.conf.beat_schedule = {
     "expire-overdue-groupbuys-daily": {
         "task": "authentication.tasks.expire_groupbuys_task",
         "schedule": crontab(hour=0, minute=15),
+    },
+    # Checks daily but only moves money for a given group once/month (see
+    # auto_distribute_groupbuy_income_task docstring) - cheap no-op on most
+    # days.
+    "auto-distribute-groupbuy-income-daily": {
+        "task": "authentication.tasks.auto_distribute_groupbuy_income_task",
+        "schedule": crontab(hour=1, minute=0),
+    },
+    "groupbuy-deadline-reminders-daily": {
+        "task": "authentication.tasks.send_groupbuy_deadline_reminders_task",
+        "schedule": crontab(hour=9, minute=0),
     },
     # ROI & Payouts
     "calculate-daily-roi": {

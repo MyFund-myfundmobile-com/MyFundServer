@@ -2811,6 +2811,13 @@ class Group(models.Model):
     )
     deadline = models.DateTimeField()
     created_at = models.DateTimeField(auto_now_add=True)
+    # Set the moment total_raised first hits goal_amount (contribute_to_groupbuy).
+    # Anchors both the monthly income-payout cadence and the rent escalation
+    # schedule (5%/year compounding on each anniversary of this date).
+    completed_at = models.DateTimeField(null=True, blank=True)
+    # Guards the single deadline-approaching reminder push so the daily sweep
+    # doesn't re-send it every day of the 3-day window before expiry.
+    reminder_sent = models.BooleanField(default=False)
 
     def __str__(self):
         return (
@@ -2942,6 +2949,42 @@ class GroupIncomeDistribution(models.Model):
 
     def __str__(self):
         return f"Distribution of {self.amount} to {self.user.email} from event {self.income_event_id}"
+
+
+class AdminNotifyRecipient(models.Model):
+    """
+    Single source of truth for "who gets admin/system push notifications" -
+    replaces the old pattern of filtering CustomUser.objects.filter(is_staff=True)
+    (which wrongly conflated Django admin/API authorization with notification
+    preference - see EmployeeAdmin.save_model's former is_staff sync) and the
+    various hardcoded email lists scattered across views.py/utils.py.
+
+    tolulopeahmed@gmail.com is a hardcoded floor in
+    utils.get_admin_notify_users() regardless of what's in this table, so the
+    founder can never be accidentally locked out of admin alerts - everyone
+    else is opt-in here, with a toggle per notification category so a
+    recipient can be excluded from just one type of alert instead of all.
+    """
+
+    email = models.EmailField(unique=True)
+    label = models.CharField(max_length=100, blank=True)
+    notify_transactions = models.BooleanField(
+        default=True, help_text="QuickSave/QuickInvest initiation alerts"
+    )
+    notify_groupbuy = models.BooleanField(
+        default=True, help_text="New GroupBuy live alerts"
+    )
+    notify_signups = models.BooleanField(
+        default=True, help_text="New user signup alerts"
+    )
+    notify_system = models.BooleanField(
+        default=True, help_text="General admin/system broadcasts"
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.label or self.email} ({self.email})"
 
 
 class SavingsGoal(models.Model):

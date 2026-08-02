@@ -1,4 +1,6 @@
 import requests
+from decimal import Decimal, ROUND_HALF_UP
+from datetime import timedelta
 from .models import PushNotifications, TopSaverHistory, Transaction
 from .models import PushNotifications
 from django.utils import timezone
@@ -211,24 +213,62 @@ def send_push_notification(
     }
 
 
+ALWAYS_ADMIN_NOTIFY_EMAIL = "tolulopeahmed@gmail.com"
+
+
+def get_admin_notify_users(category=None):
+    """
+    Single source of truth for "who gets admin/system push notifications" -
+    deliberately separate from is_staff (which gates real Django
+    admin/API authorization and must never be inferred from notification
+    preference, or vice versa - see the EmployeeAdmin.save_model incident
+    where syncing is_staff to payroll-employee-active status silently gave
+    admin push alerts, exposing other users' transaction details, to
+    ordinary staff).
+
+    ALWAYS_ADMIN_NOTIFY_EMAIL is a hard floor included no matter what's in
+    AdminNotifyRecipient, so the founder can never be accidentally dropped
+    from alerts. Everyone else is opt-in via that table, with a per-category
+    toggle so a recipient can be excluded from just one notification type
+    (e.g. transactions) without losing others (e.g. groupbuy).
+
+    category: None (no extra filter - any active recipient) or one of
+    "transactions" / "groupbuy" / "signups" / "system".
+    """
+    from .models import AdminNotifyRecipient
+
+    User = get_user_model()
+
+    emails = {ALWAYS_ADMIN_NOTIFY_EMAIL}
+
+    qs = AdminNotifyRecipient.objects.filter(is_active=True)
+    category_field = {
+        "transactions": "notify_transactions",
+        "groupbuy": "notify_groupbuy",
+        "signups": "notify_signups",
+        "system": "notify_system",
+    }.get(category)
+    if category_field:
+        qs = qs.filter(**{category_field: True})
+
+    emails |= set(qs.values_list("email", flat=True))
+
+    return User.objects.filter(email__in=emails)
+
+
 def send_admin_push_notification(
     title,
     message,
     data=None,
     notif_type="ADMIN_ALERT",
     extra_context=None,
+    category="system",
 ):
     """
-    Send push notifications to all admin users.
-    Supports personalization too.
+    Send push notifications to the central admin notification list (see
+    get_admin_notify_users). Supports personalization too.
     """
-    User = get_user_model()
-    # Single source of truth: is_staff already gates the actual
-    # admin-action endpoints (action_views.py's _require_staff), so it's
-    # also what should gate who gets notified - a hardcoded email list
-    # drifts out of sync with real staff status and silently drops new
-    # admins from alerts (or keeps notifying former ones).
-    admins = User.objects.filter(is_staff=True)
+    admins = get_admin_notify_users(category=category)
 
     if not admins.exists():
         logger.warning("No admin users found for push notification")
@@ -1175,10 +1215,7 @@ def process_scheduled_withdrawal(withdrawal, triggered_by="celery"):
         )
 
     if triggered_by == "celery":
-        # Same is_staff consolidation as send_admin_push_notification()'s
-        # recipient targeting - a hardcoded email list silently drops
-        # whichever admin isn't on it.
-        admin_users = CustomUser.objects.filter(is_staff=True, is_active=True)
+        admin_users = get_admin_notify_users(category="transactions")
 
         for admin_user in admin_users:
             try:
@@ -2461,3 +2498,240 @@ def expire_overdue_groupbuys(dry_run=False):
         "total_service_charge": total_service_charge,
         "groups": expired_groups,
     }
+
+
+RENT_ESCALATION_RATE = Decimal("0.05")  # 5% compounding per completed year
+
+
+def get_monthly_rent_for_group(group, as_of=None):
+    """Escalated monthly rent for a completed GroupBuy.
+
+    Property.rent_reward is treated as the year-1 annual rent. It is never
+    mutated in place (a Property can back multiple concurrent Groups with
+    their own completion dates via units_available, so escalation must be
+    tracked per-Group, not on the shared Property row). Each full year since
+    group.completed_at compounds the annual rent by RENT_ESCALATION_RATE
+    before it's divided into a monthly figure.
+    """
+    from django.utils import timezone
+
+    if not group.completed_at:
+        return Decimal("0.00")
+
+    as_of = as_of or timezone.now()
+    years_elapsed = (as_of.date() - group.completed_at.date()).days // 365
+    annual_rent = group.property.rent_reward * (
+        (1 + RENT_ESCALATION_RATE) ** years_elapsed
+    )
+    return (annual_rent / 12).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+# Monthly GroupBuy income distribution, automated. For every completed Group,
+# works out whether a new monthly period is due (anchored to completed_at,
+# or to the end of its last recorded GroupIncomeEvent), and if so credits
+# each member's wallet per GroupOwnership.ownership_percentage using the
+# escalated rent from get_monthly_rent_for_group. Mirrors the shape of the
+# staff-only distribute_groupbuy_income endpoint (admin_views.py) so both the
+# automatic and manual paths write identical GroupIncomeEvent/
+# GroupIncomeDistribution records - a manual correction never conflicts
+# with what this sweep would have created for the same period.
+# Shared by the daily Celery task and the staff-only manual-trigger endpoint.
+def auto_distribute_groupbuy_income(dry_run=False):
+    from dateutil.relativedelta import relativedelta
+    from django.db import transaction as db_transaction, IntegrityError
+    from django.utils import timezone
+
+    from .models import Group, GroupOwnership, GroupIncomeEvent, GroupIncomeDistribution, CustomUser
+
+    now = timezone.now()
+    today = now.date()
+
+    completed_groups = Group.objects.filter(
+        status="completed", completed_at__isnull=False
+    ).select_related("property")
+
+    events_created = []
+    total_distributed = Decimal("0.00")
+
+    for group in completed_groups:
+        last_event = (
+            GroupIncomeEvent.objects.filter(group=group).order_by("-period_end").first()
+        )
+        period_start = last_event.period_end if last_event else group.completed_at.date()
+        period_end = period_start + relativedelta(months=1)
+
+        if period_end > today:
+            continue  # this monthly period isn't over yet
+
+        amount = get_monthly_rent_for_group(group, as_of=now)
+        if amount <= 0:
+            continue
+
+        ownership_rows = list(GroupOwnership.objects.filter(group=group))
+        pct_by_user = {}
+        for row in ownership_rows:
+            pct_by_user[row.user_id] = (
+                pct_by_user.get(row.user_id, Decimal("0")) + row.ownership_percentage
+            )
+        ownership_pairs = [(uid, pct) for uid, pct in pct_by_user.items() if pct > 0]
+        if not ownership_pairs:
+            continue
+
+        if dry_run:
+            events_created.append(
+                {
+                    "group_id": str(group.id),
+                    "property": group.property.name,
+                    "period_start": str(period_start),
+                    "period_end": str(period_end),
+                    "amount": amount,
+                }
+            )
+            total_distributed += amount
+            continue
+
+        try:
+            with db_transaction.atomic():
+                event = GroupIncomeEvent.objects.create(
+                    group=group,
+                    recorded_by=None,
+                    amount=amount,
+                    period_start=period_start,
+                    period_end=period_end,
+                    description="Automatic monthly GroupBuy rent payout",
+                )
+
+                shares = split_amount_by_percentage(amount, ownership_pairs)
+                pct_lookup = dict(ownership_pairs)
+                user_lookup = {
+                    u.id: u for u in CustomUser.objects.filter(id__in=shares.keys())
+                }
+                event_total = Decimal("0.00")
+
+                for user_id, share in shares.items():
+                    if share <= 0:
+                        continue
+                    member = user_lookup[user_id]
+                    tx = create_transaction(
+                        user=member,
+                        amount=share,
+                        transaction_type="credit",
+                        source="WALLET",
+                        credited_to="WALLET",
+                        status="confirmed",
+                        description=(
+                            f"GroupBuy monthly rent: {group.property.name} "
+                            f"({period_start} - {period_end})"
+                        ),
+                    )
+                    GroupIncomeDistribution.objects.create(
+                        income_event=event,
+                        user=member,
+                        ownership_percentage=pct_lookup[user_id],
+                        amount=share,
+                        transaction=tx,
+                        status="paid",
+                    )
+                    event_total += share
+
+                event.status = "completed"
+                event.total_distributed = event_total
+                event.completed_at = now
+                event.save()
+        except IntegrityError:
+            # Same period already recorded (e.g. a manual distribution beat
+            # the sweep to it this month) - skip, not an error.
+            continue
+
+        events_created.append(
+            {
+                "group_id": str(group.id),
+                "property": group.property.name,
+                "period_start": str(period_start),
+                "period_end": str(period_end),
+                "amount": amount,
+                "event_id": str(event.id),
+            }
+        )
+        total_distributed += amount
+
+    return {
+        "distributed_count": len(events_created),
+        "total_distributed": total_distributed,
+        "events": events_created,
+    }
+
+
+GROUPBUY_REMINDER_WINDOW_DAYS = 3
+
+
+# Single reminder push, 3 days before an active GroupBuy's deadline, to
+# everyone who has contributed so far - so they can top up (or top up other
+# members) before the deadline sweep (expire_overdue_groupbuys) auto-refunds
+# everyone at a 1% charge. Guarded by Group.reminder_sent so the daily sweep
+# only ever sends it once per group. Shared by the daily Celery task and the
+# staff-only manual-trigger endpoint, same pattern as the expiry sweep.
+def send_groupbuy_deadline_reminders(dry_run=False):
+    from django.utils import timezone
+
+    from .models import Group, GroupOwnership
+
+    now = timezone.now()
+    window_end = now + timedelta(days=GROUPBUY_REMINDER_WINDOW_DAYS)
+
+    due_groups = Group.objects.filter(
+        status="active",
+        reminder_sent=False,
+        deadline__gt=now,
+        deadline__lte=window_end,
+    ).select_related("property")
+
+    notified_groups = []
+    total_notified = 0
+
+    for group in due_groups:
+        remaining = max(group.goal_amount - group.total_raised, Decimal("0.00"))
+        percentage_complete = (
+            (group.total_raised / group.goal_amount * 100) if group.goal_amount else 0
+        )
+        hours_left = max(int((group.deadline - now).total_seconds() // 3600), 0)
+
+        contributor_users = list(
+            {row.user for row in GroupOwnership.objects.filter(group=group).select_related("user")}
+        )
+
+        for member in contributor_users:
+            if not dry_run:
+                try:
+                    send_push_notification(
+                        user=member,
+                        title="⏳ GroupBuy Deadline Approaching",
+                        message=(
+                            f"The GroupBuy for {group.property.name} is "
+                            f"{percentage_complete:.1f}% funded with about "
+                            f"{hours_left}h left. ₦{remaining:,.2f} still needed - "
+                            f"contribute more now or it will auto-refund "
+                            f"(1% service charge) when the deadline passes."
+                        ),
+                        notif_type="GROUP",
+                        data={"group_id": str(group.id), "type": "GROUPBUY_DEADLINE_SOON"},
+                    )
+                except Exception:
+                    pass
+            total_notified += 1
+
+        if not dry_run:
+            group.reminder_sent = True
+            group.save(update_fields=["reminder_sent"])
+
+        notified_groups.append(
+            {
+                "group_id": str(group.id),
+                "property": group.property.name,
+                "contributors_notified": len(contributor_users),
+                "percentage_complete": float(percentage_complete),
+                "hours_left": hours_left,
+            }
+        )
+
+    return {"groups_notified": len(notified_groups), "total_notified": total_notified, "groups": notified_groups}

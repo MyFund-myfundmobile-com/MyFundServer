@@ -298,6 +298,11 @@ urlpatterns = [
         views.get_active_public_groupbuys,
         name="get_active_public_groupbuys",
     ),
+    path(
+        "groupbuy/slideshow/",
+        views.get_groupbuy_slideshow,
+        name="get_groupbuy_slideshow",
+    ),
     path("groupbuy/create/", views.create_groupbuy, name="create_groupbuy"),
     path(
         "groupbuy/<int:property_id>/",
@@ -336,6 +341,16 @@ urlpatterns = [
         "admin/groupbuy/expire-sweep/",
         views.trigger_groupbuy_expiry_sweep,
         name="trigger_groupbuy_expiry_sweep",
+    ),
+    path(
+        "admin/groupbuy/income-sweep/",
+        views.trigger_groupbuy_income_sweep,
+        name="trigger_groupbuy_income_sweep",
+    ),
+    path(
+        "admin/groupbuy/reminder-sweep/",
+        views.trigger_groupbuy_reminder_sweep,
+        name="trigger_groupbuy_reminder_sweep",
     ),
     path(
         "user/groupbuy/contributions/",

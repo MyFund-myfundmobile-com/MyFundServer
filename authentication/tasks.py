@@ -120,6 +120,46 @@ def expire_groupbuys_task():
 
 
 @shared_task
+def auto_distribute_groupbuy_income_task():
+    """
+    Scheduled daily via app.conf.beat_schedule ("auto-distribute-groupbuy-
+    income-daily"). Cheap to run daily even though payouts are monthly: the
+    sweep itself checks each completed Group's last GroupIncomeEvent and
+    only actually creates a new event (and moves money) once that group's
+    monthly period has elapsed, so most days it's a fast no-op query.
+    """
+    from .utils import auto_distribute_groupbuy_income
+
+    result = auto_distribute_groupbuy_income(dry_run=False)
+    for event in result["events"]:
+        if event.get("event_id"):
+            distribute_groupbuy_income_notifications.delay(event["event_id"])
+
+    logger.info(
+        f"✅ Auto-distributed GroupBuy income for {result['distributed_count']} "
+        f"group(s), ₦{result['total_distributed']:,.2f} total."
+    )
+    return result["distributed_count"]
+
+
+@shared_task
+def send_groupbuy_deadline_reminders_task():
+    """
+    Scheduled daily via app.conf.beat_schedule ("groupbuy-deadline-reminders-
+    daily"). Group.reminder_sent guards against re-notifying the same group
+    on subsequent daily runs within its 3-day pre-deadline window.
+    """
+    from .utils import send_groupbuy_deadline_reminders
+
+    result = send_groupbuy_deadline_reminders(dry_run=False)
+    logger.info(
+        f"✅ Sent GroupBuy deadline reminders for {result['groups_notified']} "
+        f"group(s), {result['total_notified']} push(es) sent."
+    )
+    return result["groups_notified"]
+
+
+@shared_task
 def process_target_savings_deductions():
     """Celery task to process all due target savings deductions"""
     now = timezone.now()
@@ -642,13 +682,20 @@ def release_quarterly_roi(test_mode=True):
 @shared_task
 def distribute_groupbuy_income_notifications(event_id):
     """
-    Sends push + email notifications for a GroupBuy income distribution that
-    has already been credited to members' wallets. Dispatched after the
-    money-moving transaction commits (see admin_views.distribute_groupbuy_income)
-    so a slow/failed notification can never block or roll back a payout.
+    Sends a push notification for a GroupBuy income distribution that has
+    already been credited to members' wallets. Dispatched after the
+    money-moving transaction commits (see admin_views.distribute_groupbuy_income
+    and utils.auto_distribute_groupbuy_income) so a slow/failed notification
+    can never block or roll back a payout.
+
+    Push-only, deliberately: this fires for every member on every monthly
+    payout once auto-distribution is live, so it's a routine, expected,
+    non-urgent event. Members can always see the full breakdown via
+    GET /user/groupbuy/income-history/ - an email per member per month here
+    would just be recurring cost/latency for something push already covers.
     """
     from .models import GroupIncomeDistribution
-    from .utils import send_push_notification, send_generic_email
+    from .utils import send_push_notification
 
     distributions = GroupIncomeDistribution.objects.filter(
         income_event_id=event_id
@@ -675,24 +722,6 @@ def distribute_groupbuy_income_notifications(event_id):
                     "amount": float(dist.amount),
                     "group_id": str(event.group_id),
                 },
-            )
-
-            email_body = (
-                f"Hi {user.first_name},<br><br>"
-                f"Great news — <b>{property_name}</b> earned income for the period "
-                f"{event.period_start} to {event.period_end}, and your share has "
-                f"been credited to your MyFund wallet.<br><br>"
-                f"<b>Your ownership:</b> {dist.ownership_percentage}%<br>"
-                f"<b>Amount credited:</b> ₦{dist.amount:,.2f}<br><br>"
-                f"Thank you for investing with MyFund.<br><br>"
-                f"The MyFund Team"
-            )
-            send_generic_email(
-                subject=f"GroupBuy Income Paid — {property_name}",
-                message=email_body,
-                recipient_list=[user.email],
-                from_email="MyFund <noreply@mg.myfundmobile.com>",
-                use_celery_threshold=0,
             )
             processed += 1
         except Exception as e:

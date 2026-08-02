@@ -414,15 +414,9 @@ def confirm_otp(request):
             # -----------------------
             try:
 
-                # Single source of truth: is_staff is what actually gates
-                # the admin-action endpoints, so it's also what gates who
-                # gets notified - hardcoded email lists drift out of sync
-                # (this one didn't even match the other admin push blocks)
-                # and silently drop new admins from alerts.
-                admin_users = CustomUser.objects.filter(
-                    is_staff=True,
-                    is_active=True,
-                )
+                from .utils import get_admin_notify_users
+
+                admin_users = get_admin_notify_users(category="signups")
 
                 from django.utils import timezone
                 import calendar
@@ -4761,7 +4755,9 @@ def withdraw_to_local_bank(request):
                 recipient_list=["admin@myfundmobile.com"],
             )
 
-            admin_users = CustomUser.objects.filter(is_staff=True, is_active=True)
+            from .utils import get_admin_notify_users
+
+            admin_users = get_admin_notify_users(category="transactions")
 
             admin_push_message = (
                 f"{user.first_name} {user.last_name} wants to withdraw ₦{amount:,.2f} "
@@ -5209,7 +5205,9 @@ def process_withdrawal_to_local_bank(request):
             ],
         )
 
-        admin_users = CustomUser.objects.filter(is_staff=True, is_active=True)
+        from .utils import get_admin_notify_users
+
+        admin_users = get_admin_notify_users(category="transactions")
 
         for admin_user in admin_users:
             if hasattr(admin_user, "expo_push_tokens") and admin_user.expo_push_tokens:
@@ -6297,7 +6295,9 @@ class KYCUpdateView(generics.UpdateAPIView):
         )
 
         # 4️⃣ Push notification to admin (KYC alert)
-        admin_users = CustomUser.objects.filter(is_staff=True, is_active=True)
+        from .utils import get_admin_notify_users
+
+        admin_users = get_admin_notify_users(category="transactions")
 
         for admin_user in admin_users:
             if hasattr(admin_user, "expo_push_tokens") and admin_user.expo_push_tokens:
@@ -6611,7 +6611,9 @@ def initiate_bank_transfer(request):
                 )
 
                 # 4. Push notification to admins
-                admin_users = CustomUser.objects.filter(is_staff=True, is_active=True)
+                from .utils import get_admin_notify_users
+
+                admin_users = get_admin_notify_users(category="transactions")
 
                 for admin_user in admin_users:
                     if (
@@ -6776,7 +6778,9 @@ def initiate_invest_transfer(request):
         ).start()
 
         # 🔔 ADMIN PUSH
-        admin_users = CustomUser.objects.filter(is_staff=True, is_active=True)
+        from .utils import get_admin_notify_users
+
+        admin_users = get_admin_notify_users(category="transactions")
 
         for admin in admin_users:
             if hasattr(admin, "expo_push_tokens") and admin.expo_push_tokens:
@@ -9390,32 +9394,40 @@ def create_groupbuy(request):
                 if invalid_emails:
                     warning_message = f"Some emails were invalid and skipped: {', '.join(invalid_emails)}"
 
-        # Step 8b: Notify test users that a new public GroupBuy just went
-        # live. Scoped to a hardcoded test list for now (not all users) -
-        # a handful of Expo push calls is cheap regardless, but we only
-        # want this actually landing on real devices during testing.
+        # Step 8b: Notify admin users that a new public GroupBuy just went
+        # live. Scoped to the central admin notification list (see
+        # utils.get_admin_notify_users) until the public launch on
+        # 2026-08-29 - switch to "all users with push tokens" once that's
+        # live. Push-only (no email) since this is a routine, non-urgent
+        # broadcast.
         if group_type == "public":
-            TEST_NOTIFY_EMAILS = [
-                "tolulopeahmed@gmail.com",
-                "valueplusrecords@gmail.com",
-                "valuepluspublishing@gmail.com",
-            ]
+            from .utils import get_admin_notify_users
+
             try:
-                notify_users = get_user_model().objects.filter(
-                    email__in=TEST_NOTIFY_EMAILS
+                percentage_complete = (
+                    (group.total_raised / group.goal_amount * 100)
+                    if group.goal_amount
+                    else 0
                 )
+                notify_users = get_admin_notify_users(category="groupbuy")
                 for notify_user in notify_users:
                     send_push_notification(
                         user=notify_user,
                         title="New GroupBuy is Live! 🏠",
                         message=(
-                            f"A new GroupBuy just opened for {property_obj.name}. "
-                            f"Join now to start owning a share of this property."
+                            f"A new GroupBuy just opened for {property_obj.name} - "
+                            f"₦{property_obj.price:,.2f} property value, "
+                            f"₦{property_obj.rent_reward:,.2f}/year potential returns. "
+                            f"{percentage_complete:.1f}% funded so far. Join now to "
+                            f"start owning a share of this property."
                         ),
                         data={
                             "type": "groupbuy_live",
                             "group_id": str(group.id),
                             "property_id": str(property_obj.id),
+                            "percentage_complete": float(percentage_complete),
+                            "property_value": float(property_obj.price),
+                            "expected_annual_return": float(property_obj.rent_reward),
                         },
                         notif_type="GROUP",
                     )
@@ -9499,6 +9511,46 @@ def get_active_public_groupbuys(request):
             {"message": f"An error occurred: {str(e)}"},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
+
+
+# GET /groupbuy/slideshow/ - One summary object for the mobile app's
+# homescreen slideshow, so GroupBuy availability can appear as a single
+# slide rotating alongside its other slides instead of the client having to
+# fetch and reduce the full /groupbuy/ list itself. Featured group is the
+# most-funded still-active public group (closest to completion is the most
+# compelling "join now" pitch); falls back to the most recently created one
+# if none are active.
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def get_groupbuy_slideshow(request):
+    active_public = Group.objects.filter(status="active", group_type="public")
+    active_count = active_public.count()
+
+    if active_count == 0:
+        return Response({"has_active_groupbuys": False, "active_count": 0})
+
+    featured = active_public.order_by("-total_raised", "-created_at").first()
+    percentage_complete = (
+        (featured.total_raised / featured.goal_amount * 100)
+        if featured.goal_amount
+        else 0
+    )
+
+    return Response(
+        {
+            "has_active_groupbuys": True,
+            "active_count": active_count,
+            "featured": {
+                "group_id": str(featured.id),
+                "property_id": featured.property_id,
+                "property_name": featured.property.name,
+                "property_value": float(featured.goal_amount),
+                "expected_annual_return": float(featured.property.rent_reward),
+                "percentage_complete": float(percentage_complete),
+                "deadline": featured.deadline,
+            },
+        }
+    )
 
 
 # POST /groups/:groupId/join - Allow a user to join a group
@@ -9926,6 +9978,59 @@ def trigger_groupbuy_expiry_sweep(request):
     )
 
 
+# POST /admin/groupbuy/income-sweep/ - Staff-only manual trigger for the
+# monthly auto-payout sweep (same logic as the daily Celery task). Lets a
+# distribution be tested/run on demand without waiting for Beat, or without
+# a completed group's monthly period actually having elapsed yet in dry-run
+# mode - pass {"dry_run": true} to preview without moving money.
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def trigger_groupbuy_income_sweep(request):
+    if not request.user.is_staff:
+        return Response({"message": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+
+    from .utils import auto_distribute_groupbuy_income
+
+    dry_run = bool(request.data.get("dry_run", False))
+    result = auto_distribute_groupbuy_income(dry_run=dry_run)
+
+    return Response(
+        {
+            "dry_run": dry_run,
+            "distributed_count": result["distributed_count"],
+            "total_distributed": float(result["total_distributed"]),
+            "events": [
+                {
+                    "group_id": e["group_id"],
+                    "property": e["property"],
+                    "period_start": e["period_start"],
+                    "period_end": e["period_end"],
+                    "amount": float(e["amount"]),
+                }
+                for e in result["events"]
+            ],
+        },
+        status=status.HTTP_200_OK,
+    )
+
+
+# POST /admin/groupbuy/reminder-sweep/ - Staff-only manual trigger for the
+# pre-deadline reminder sweep. {"dry_run": true} previews who would be
+# notified without sending pushes or setting reminder_sent.
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def trigger_groupbuy_reminder_sweep(request):
+    if not request.user.is_staff:
+        return Response({"message": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+
+    from .utils import send_groupbuy_deadline_reminders
+
+    dry_run = bool(request.data.get("dry_run", False))
+    result = send_groupbuy_deadline_reminders(dry_run=dry_run)
+
+    return Response({"dry_run": dry_run, **result}, status=status.HTTP_200_OK)
+
+
 # Contribution Related APIs
 
 
@@ -10023,45 +10128,93 @@ def contribute_to_groupbuy(request, group_id):
         if excess_amount > 0:
             amount -= excess_amount
 
-        # 9. Deduct the (possibly capped) amount and log it as a Transaction
-        create_transaction(
-            user=user,
-            amount=amount,
-            transaction_type="debit",
-            source=source.upper(),
-            status="confirmed",
-            description=f"GroupBuy contribution to {group.property.name}",
-        )
+        # 9-13 are wrapped in a single atomic block: two concurrent
+        # contributions to the same group could otherwise both read
+        # total_raised before either write lands, letting the group
+        # overshoot its goal or double-flip to "completed".
+        just_completed = False
+        with transaction.atomic():
+            group = Group.objects.select_for_update().get(id=group.id)
 
-        # 10. Create contribution
-        contribution = Contribution.objects.create(
-            group=group,
-            user=user,
-            amount=amount,
-            payment_status="Confirmed",
-            source=source,
-        )
+            # Re-check under the lock - another request may have completed
+            # or filled the group between our first read and now.
+            if group.status.lower() != "active":
+                return Response(
+                    {"message": "You can only contribute to active groups."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            if group.total_raised >= group.goal_amount:
+                return Response(
+                    {"message": "This group has already reached its funding goal."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
-        # 11. Update group total raised, and flip it to completed the moment
-        # it's fully funded - otherwise it stays "active" forever even though
-        # step 7 already blocks further contributions once the goal is hit,
-        # which left the property showing as still-joinable indefinitely.
-        group.total_raised += amount
-        if group.total_raised >= group.goal_amount:
-            group.status = "completed"
-        group.save()
+            # 9. Deduct the (possibly capped) amount and log it as a Transaction
+            create_transaction(
+                user=user,
+                amount=amount,
+                transaction_type="debit",
+                source=source.upper(),
+                status="confirmed",
+                description=f"GroupBuy contribution to {group.property.name}",
+            )
 
-        # 12. Ownership calculation
-        ownership_obj, _ = GroupOwnership.objects.get_or_create(group=group, user=user)
-        ownership_obj.total_contributed += amount
-        ownership_obj.ownership_percentage = (
-            ownership_obj.total_contributed / group.goal_amount
-        ) * 100
-        ownership_obj.save()
+            # 10. Create contribution
+            contribution = Contribution.objects.create(
+                group=group,
+                user=user,
+                amount=amount,
+                payment_status="Confirmed",
+                source=source,
+            )
 
-        # 13. Add user to contributors
-        if not group.contributors.filter(id=user.id).exists():
-            group.contributors.add(user)
+            # 11. Update group total raised, and flip it to completed the
+            # moment it's fully funded - otherwise it stays "active" forever
+            # even though step 7 already blocks further contributions once
+            # the goal is hit, which left the property showing as
+            # still-joinable indefinitely.
+            group.total_raised += amount
+            if group.total_raised >= group.goal_amount:
+                group.status = "completed"
+                group.completed_at = timezone.now()
+                just_completed = True
+            group.save()
+
+            # 12. Ownership calculation
+            ownership_obj, _ = GroupOwnership.objects.get_or_create(
+                group=group, user=user
+            )
+            ownership_obj.total_contributed += amount
+            ownership_obj.ownership_percentage = (
+                ownership_obj.total_contributed / group.goal_amount
+            ) * 100
+            ownership_obj.save()
+
+            # 13. Add user to contributors
+            if not group.contributors.filter(id=user.id).exists():
+                group.contributors.add(user)
+
+        # The property is now fully owned by its contributors - let everyone
+        # who put money in know, and record their final ownership % (already
+        # written to GroupOwnership above). Sent after the atomic block
+        # commits so a push failure can never roll back the completion.
+        if just_completed:
+            for owner in GroupOwnership.objects.filter(group=group).select_related("user"):
+                try:
+                    send_push_notification(
+                        user=owner.user,
+                        title="🏠 GroupBuy Fully Funded!",
+                        message=(
+                            f"{group.property.name} is fully funded and now owned by "
+                            f"its contributors. Your ownership share: "
+                            f"{owner.ownership_percentage:.2f}%. Monthly rental income "
+                            f"will be paid out automatically going forward."
+                        ),
+                        notif_type="GROUP",
+                        data={"group_id": str(group.id), "type": "GROUPBUY_COMPLETED"},
+                    )
+                except Exception:
+                    pass
 
         return Response(
             {"message": "Contribution successful."}, status=status.HTTP_201_CREATED

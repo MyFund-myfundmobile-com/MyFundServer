@@ -3437,9 +3437,13 @@ class EmployeeAdmin(admin.ModelAdmin):
 
             user = User.objects.get(email__iexact=obj.email)
 
-            # Sync employee status with user staff access
-            user.is_staff = obj.is_active
-            user.save(update_fields=["is_staff"])
+            # NOTE: this used to also sync user.is_staff = obj.is_active,
+            # silently granting real Django admin/API access to anyone
+            # marked as an active payroll employee. That's what caused
+            # ordinary staff to start receiving admin-only push
+            # notifications (other users' transaction alerts). Payroll
+            # status must never grant admin/API access - is_staff is set
+            # manually per-account when someone is actually made an admin.
 
             status_changed = old_status is None or old_status != obj.is_active
 
@@ -3785,6 +3789,8 @@ class GroupAdmin(admin.ModelAdmin):
         "group_type",
         "deadline",
         "created_at",
+        "completed_at",
+        "reminder_sent",
     ]
     list_editable = ["status"]
     list_filter = ["status", "group_type"]
@@ -3853,3 +3859,28 @@ admin.site.register(Contribution, ContributionAdmin)
 admin.site.register(GroupDeparture, GroupDepartureAdmin)
 admin.site.register(GroupIncomeEvent, GroupIncomeEventAdmin)
 admin.site.register(GroupIncomeDistribution, GroupIncomeDistributionAdmin)
+
+
+from .models import AdminNotifyRecipient
+
+
+@admin.register(AdminNotifyRecipient)
+class AdminNotifyRecipientAdmin(admin.ModelAdmin):
+    list_display = [
+        "email",
+        "label",
+        "notify_transactions",
+        "notify_groupbuy",
+        "notify_signups",
+        "notify_system",
+        "is_active",
+        "created_at",
+    ]
+    list_editable = [
+        "notify_transactions",
+        "notify_groupbuy",
+        "notify_signups",
+        "notify_system",
+        "is_active",
+    ]
+    search_fields = ["email", "label"]
