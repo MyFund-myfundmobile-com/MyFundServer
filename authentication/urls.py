@@ -206,6 +206,11 @@ urlpatterns = [
     ),
     path("delete-my-account/", delete_my_account, name="delete-my-account"),
     path("get-user-by-email/", get_user_by_email, name="get-user-by-email"),
+    path(
+        "app-version/",
+        views.get_app_version_config,
+        name="get_app_version_config",
+    ),
     # Property-related APIs
     path("buy-property/", BuyPropertyView.as_view(), name="buy-property"),
     path(
@@ -321,6 +326,11 @@ urlpatterns = [
         name="invite_to_groupbuy",
     ),
     path(
+        "groupbuy/share/<str:group_id>/",
+        views.share_groupbuy,
+        name="share_groupbuy",
+    ),
+    path(
         "groupbuy/contribute/<str:group_id>/",
         views.contribute_to_groupbuy,
         name="contribute_to_groupbuy",
@@ -380,6 +390,11 @@ urlpatterns = [
     ),
     path(
         "target-savings/total/", views.target_savings_total, name="target-savings-total"
+    ),
+    path(
+        "target-savings/category-stats/",
+        views.target_savings_category_stats,
+        name="target-savings-category-stats",
     ),
     path(
         "target-savings/<int:target_id>/force/",

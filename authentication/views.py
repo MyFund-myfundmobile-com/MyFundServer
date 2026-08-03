@@ -2801,19 +2801,33 @@ class TransactionCreateView(generics.CreateAPIView):
 
 
 from .models import Transaction
+from rest_framework.pagination import PageNumberPagination
 
 channel_layer = get_channel_layer()
+
+
+# 20 per page keeps the default "browse recent transactions" response small
+# (this used to ship a user's ENTIRE transaction history - 767 rows / 451KB
+# for a real account - in one response). page_size_query_param lets a caller
+# ask for more in one shot when it genuinely needs a complete-but-naturally-
+# small subset (e.g. ?descriptions=Referral+Reward&page_size=200) instead of
+# paging through it.
+class TransactionPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = "page_size"
+    max_page_size = 200
 
 
 # Modify UserTransactionListView to use the Transaction model
 class UserTransactionListView(generics.ListAPIView):
     serializer_class = TransactionSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = TransactionPagination
 
     def get_queryset(self):
         user = self.request.user
 
-        return (
+        queryset = (
             Transaction.objects.filter(user=user)
             .exclude(status__iexact="abandoned")
             .exclude(
@@ -2822,6 +2836,33 @@ class UserTransactionListView(generics.ListAPIView):
             )
             .order_by("-date", "-time")
         )
+
+        # Lets a caller fetch a complete, naturally-bounded subset (e.g. all
+        # of a user's referral-reward transactions, or their legacy
+        # property-purchase transactions) by exact description match,
+        # instead of relying on client-side filtering of the full/paginated
+        # history - which would silently miss anything not on the loaded
+        # page(s). Comma-separated, exact match (mirrors how these
+        # transactions are created - see CustomUser.create_pending_referral_reward,
+        # description="Referral Reward").
+        descriptions_param = self.request.query_params.get("descriptions")
+        if descriptions_param:
+            descriptions = [d.strip() for d in descriptions_param.split(",") if d.strip()]
+            if descriptions:
+                queryset = queryset.filter(description__in=descriptions)
+
+        # Same "complete, naturally-bounded subset" escape hatch as above,
+        # for Target Savings transactions specifically - mirrors the
+        # frontend's isTargetSavingsTx() check (linked via the target_savings
+        # FK, or a description fallback for older rows created before that
+        # FK existed).
+        if self.request.query_params.get("target_savings_only") in ("1", "true", "True"):
+            queryset = queryset.filter(
+                Q(target_savings__isnull=False)
+                | Q(description__icontains="target savings")
+            )
+
+        return queryset
 
 
 from .serializers import AccountBalancesSerializer
@@ -7187,6 +7228,29 @@ def remove_dva_account(request):
     )
 
 
+# GET /api/app-version/ - Drives the mobile app's force/soft update prompt
+# (App.js's checkAppVersion). Public/unauthenticated on purpose: this needs
+# to work before login too, and there's nothing sensitive in it. Replaces a
+# version.json file that used to be manually edited then deployed to
+# Firebase Hosting - editing AppVersionConfig in Django admin now takes
+# effect immediately, no separate deploy step to forget.
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def get_app_version_config(request):
+    from .models import AppVersionConfig
+
+    config = AppVersionConfig.get_solo()
+    return Response(
+        {
+            "minimum_required_version": config.minimum_required_version,
+            "latest_version": config.latest_version,
+            "play_store_url": config.play_store_url,
+            "app_store_url": config.app_store_url,
+        },
+        status=status.HTTP_200_OK,
+    )
+
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_user_by_email(request):
@@ -9742,6 +9806,155 @@ def invite_to_groupbuy(request, group_id):
         )
 
 
+# POST /groupbuy/share/<group_id>/ - Lets any current contributor (not just
+# the creator, unlike invite_to_groupbuy above which is the private-group
+# access-control invite) share a groupbuy they're already part of with
+# other people. Deliberately auto-detects per email whether it belongs to a
+# registered MyFund user (push + email, and - for private groups - grants
+# access by adding them to invited_users) or not (email only, inviting them
+# to sign up) - the two "Invite MyFund Users" / "Invite External" flows on
+# the frontend are really just different input UX (the MyFund flow resolves
+# names as you type via get_user_by_email) funneling into this one endpoint.
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def share_groupbuy(request, group_id):
+    try:
+        group = Group.objects.get(id=group_id)
+    except Group.DoesNotExist:
+        return Response(
+            {"message": "GroupBuy not found."}, status=status.HTTP_404_NOT_FOUND
+        )
+
+    user = request.user
+    if not group.contributors.filter(id=user.id).exists():
+        return Response(
+            {"message": "Only contributors to this GroupBuy can invite others."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    raw_emails = request.data.get("emails", [])
+    if not raw_emails:
+        return Response(
+            {"message": "No email addresses provided."}, status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # Explicit alias: this module's module-level `ValidationError` name gets
+    # rebound later in the file (line ~11050, `from rest_framework.exceptions
+    # import ValidationError`), so by the time any view actually runs, a bare
+    # `except ValidationError` here would silently catch DRF's exception
+    # class instead of the one validate_email() actually raises - it would
+    # never match, and a bad email would propagate as an unhandled 500
+    # instead of landing in invalid_emails.
+    from django.core.exceptions import ValidationError as DjangoValidationError
+
+    cleaned_emails = set()
+    invalid_emails = []
+    for email in raw_emails:
+        email = str(email).strip().lower()
+        try:
+            validate_email(email)
+            cleaned_emails.add(email)
+        except DjangoValidationError:
+            invalid_emails.append(email)
+
+    # Don't let someone "invite" themselves.
+    cleaned_emails.discard(user.email.lower())
+
+    if not cleaned_emails:
+        return Response(
+            {"message": "No valid email addresses provided.", "invalidEmails": invalid_emails},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    inviter_name = f"{user.first_name} {user.last_name}".strip() or user.email
+    property_name = group.property.name
+    join_link = f"https://myfundmobile.com/groupbuy-invite/{group.id}"
+
+    registered_users = {
+        u.email.lower(): u
+        for u in get_user_model().objects.filter(email__in=cleaned_emails)
+    }
+
+    invited_myfund_emails = []
+    invited_external_emails = []
+
+    for email in cleaned_emails:
+        member = registered_users.get(email)
+
+        if member:
+            # Registered MyFund user - push + email. Private groups also
+            # need invited_users grant, otherwise they'd get notified but
+            # be unable to actually join.
+            if group.group_type == "private":
+                group.invited_users.add(member)
+
+            try:
+                send_push_notification(
+                    user=member,
+                    title="🏠 You've been invited to a GroupBuy!",
+                    message=(
+                        f"{inviter_name} invited you to co-own {property_name} "
+                        f"on MyFund. Tap to view."
+                    ),
+                    data={
+                        "type": "groupbuy_invite",
+                        "group_id": str(group.id),
+                        "property_id": str(group.property_id),
+                    },
+                    notif_type="GROUP",
+                )
+            except Exception as e:
+                logger.warning(f"GroupBuy share push failed for {email}: {e}")
+
+            subject = f"{inviter_name} invited you to a GroupBuy on MyFund"
+            message = (
+                f"Hi {member.first_name or 'there'},<br><br>"
+                f"<strong>{inviter_name}</strong> invited you to co-own "
+                f"<strong>{property_name}</strong> with them on MyFund.<br><br>"
+                f"<a href='{join_link}' style='display:inline-block; padding:10px 20px; background-color:#2c7be5; color:#ffffff; "
+                f"text-decoration:none; border-radius:5px;'>View the GroupBuy</a><br><br>"
+                f"If the button doesn't work, copy and paste this link into your browser:<br>"
+                f"{join_link}<br><br>"
+                f"— The MyFund Team"
+            )
+            invited_myfund_emails.append(email)
+        else:
+            # Not a registered user - email only, inviting them to sign up.
+            subject = f"{inviter_name} invited you to co-own property on MyFund"
+            message = (
+                f"Hello,<br><br>"
+                f"<strong>{inviter_name}</strong> invited you to co-own "
+                f"<strong>{property_name}</strong> with them on MyFund - an app "
+                f"where people pool funds together to buy property and share the rent.<br><br>"
+                f"<a href='{join_link}' style='display:inline-block; padding:10px 20px; background-color:#2c7be5; color:#ffffff; "
+                f"text-decoration:none; border-radius:5px;'>Get Started on MyFund</a><br><br>"
+                f"If the button doesn't work, copy and paste this link into your browser:<br>"
+                f"{join_link}<br><br>"
+                f"— The MyFund Team"
+            )
+            invited_external_emails.append(email)
+
+        try:
+            send_generic_email(
+                subject=subject,
+                message=message,
+                from_email="MyFund <info@mg.myfundmobile.com>",
+                recipient_list=[email],
+            )
+        except Exception as e:
+            logger.warning(f"GroupBuy share email failed for {email}: {e}")
+
+    return Response(
+        {
+            "message": "Invitations sent.",
+            "invited_myfund_users": invited_myfund_emails,
+            "invited_external": invited_external_emails,
+            "invalid_emails": invalid_emails,
+        },
+        status=status.HTTP_200_OK,
+    )
+
+
 # POST /groups/:groupId/leave - Allow users to exit a group before funding completion
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
@@ -10947,7 +11160,11 @@ class TargetSavingsListCreate(ListCreateAPIView):
             )
 
             instance.next_deduction = instance.calculate_next_deduction_time()
-            instance.save(update_fields=["next_deduction"])
+            # Fixed forever - future cycles always land on this same
+            # schedule slot (e.g. same day of month), even if a particular
+            # cycle ends up processed late. See update_next_deduction_date().
+            instance.schedule_anchor = instance.next_deduction
+            instance.save(update_fields=["next_deduction", "schedule_anchor"])
 
             # 3) Optional target-linked mirror record for history on the target itself
             Transaction.objects.create(
@@ -11025,6 +11242,28 @@ def target_savings_total(request):
     return Response({"total_target_savings": float(total)})
 
 
+# GET /api/target-savings/category-stats/ - real (never fabricated)
+# per-category participation counts for the Popular Targets picker: how
+# many distinct users have ever started a target savings plan in each
+# category, regardless of active/completed/cancelled status. Categories
+# with zero participants are omitted entirely (not returned as 0) so the
+# frontend can quietly skip the stat line for those rather than show a
+# discouraging "0 people" - the platform is early, so most categories will
+# have small real numbers, and that's fine; the point is the number shown
+# is always true.
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def target_savings_category_stats(request):
+    from django.db.models import Count
+
+    rows = (
+        TargetSavings.objects.values("category")
+        .annotate(member_count=Count("user", distinct=True))
+        .filter(member_count__gt=0)
+    )
+    return Response({row["category"]: row["member_count"] for row in rows})
+
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def completed_target_savings(request):
@@ -11059,11 +11298,21 @@ def completed_target_savings(request):
     return Response({"completed_targets": data})
 
 
+from rest_framework.permissions import IsAdminUser
+
+
+# Staff-only: any user calling this on their own target was letting them
+# self-trigger a deduction outside the normal schedule, which is exactly
+# what was silently dragging that user's whole future schedule later (see
+# update_next_deduction_date()/schedule_anchor) every time it got used to
+# "fix" a missed cycle. Not wired to any frontend flow (confirmed unused in
+# the mobile app) - restricting it to staff keeps it available for support
+# use without letting users repeatedly re-trigger the same drift.
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAdminUser])
 def force_target_deduction(request, target_id):
-    """Force deduction for a specific target savings (for testing)"""
-    target = get_object_or_404(TargetSavings, id=target_id, user=request.user)
+    """Force deduction for a specific target savings (staff/support use)"""
+    target = get_object_or_404(TargetSavings, id=target_id)
 
     # Set next_deduction to now to force processing
     target.next_deduction = timezone.now()

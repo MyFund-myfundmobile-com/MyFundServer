@@ -276,7 +276,10 @@ def retry_failed_deductions():
                 "Keep going! You're doing great. 🚀"
             )
             send_generic_email(
-                subject, message, settings.DEFAULT_FROM_EMAIL, [user.email]
+                subject=subject,
+                message=message,
+                recipient_list=[user.email],
+                from_email=settings.DEFAULT_FROM_EMAIL,
             )
 
             send_push_notification(

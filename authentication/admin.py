@@ -3884,3 +3884,24 @@ class AdminNotifyRecipientAdmin(admin.ModelAdmin):
         "is_active",
     ]
     search_fields = ["email", "label"]
+
+
+from .models import AppVersionConfig
+
+
+@admin.register(AppVersionConfig)
+class AppVersionConfigAdmin(admin.ModelAdmin):
+    list_display = [
+        "minimum_required_version",
+        "latest_version",
+        "updated_at",
+    ]
+
+    def has_add_permission(self, request):
+        # Singleton - block "Add" once the one row exists (get_solo() also
+        # auto-creates it on first read, so in practice this is almost
+        # always already there).
+        return not AppVersionConfig.objects.exists()
+
+    def has_delete_permission(self, request, obj=None):
+        return False

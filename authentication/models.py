@@ -1496,6 +1496,8 @@ class TargetSavings(models.Model):
         ("GADGETS", "Gadgets"),
         ("BIRTHDAY", "Birthday"),
         ("ANNIVERSARY", "Anniversary"),
+        ("WEDDING", "Wedding"),
+        ("FESTIVE", "Festive Season (Sallah/Christmas/Eid)"),
         ("OTHERS", "Others"),
     ]
 
@@ -1545,6 +1547,16 @@ class TargetSavings(models.Model):
         max_length=10, choices=FREQUENCY_CHOICES, default="MONTHLY"
     )
     next_deduction = models.DateTimeField(null=True, blank=True)
+    # Fixed reference point for this schedule, set once (at creation, or
+    # backfilled for pre-existing records) and never moved afterward.
+    # next_deduction always advances from here in whole intervals - see
+    # update_next_deduction_date() - instead of from last_processed
+    # (whenever a deduction actually happened to run), which used to let a
+    # single late/manual deduction permanently drag a user's entire future
+    # schedule later. E.g. a user who started on the 1st of the month keeps
+    # landing on the 1st every cycle, even if one particular month's
+    # deduction actually posted on the 9th.
+    schedule_anchor = models.DateTimeField(null=True, blank=True)
     next_retry = models.DateTimeField(null=True, blank=True)
     cancellation_charge = models.DecimalField(
         max_digits=12, decimal_places=2, default=0
@@ -1587,18 +1599,40 @@ class TargetSavings(models.Model):
             return now + relativedelta(months=1)
 
     def update_next_deduction_date(self):
-        """Update next deduction date based on frequency and last processing time"""
-        base_time = self.last_processed if self.last_processed else timezone.now()
+        """
+        Advance next_deduction to the next slot on the FIXED schedule grid
+        anchored at schedule_anchor (backfilling it from last_processed/now
+        if somehow still unset on an old record) - never from
+        last_processed itself, which is what let one late/manual deduction
+        permanently drag a user's whole future schedule later (e.g. someone
+        who started on the 1st of the month drifting to landing on the 9th
+        after a single delayed cycle). Steps forward from the anchor by
+        whole intervals until landing after "now", so it also correctly
+        catches up if multiple cycles were somehow missed, rather than just
+        adding a single interval that might still land in the past.
+        """
+        if not self.schedule_anchor:
+            self.schedule_anchor = self.last_processed or timezone.now()
+
+        now = timezone.now()
+        candidate = self.schedule_anchor
 
         if self.frequency == "HOURLY":
-            self.next_deduction = base_time + timedelta(hours=1)
+            step = lambda d: d + relativedelta(hours=1)
         elif self.frequency == "DAILY":
-            self.next_deduction = base_time + timedelta(days=1)
+            step = lambda d: d + relativedelta(days=1)
         elif self.frequency == "WEEKLY":
-            self.next_deduction = base_time + timedelta(weeks=1)
-        elif self.frequency == "MONTHLY":
-            # For monthly, use relativedelta for proper month handling
-            self.next_deduction = base_time + relativedelta(months=1)
+            step = lambda d: d + relativedelta(weeks=1)
+        else:  # MONTHLY
+            step = lambda d: d + relativedelta(months=1)
+
+        # Safety cap so a corrupted/far-off anchor can never loop excessively.
+        for _ in range(1000):
+            if candidate > now:
+                break
+            candidate = step(candidate)
+
+        self.next_deduction = candidate
 
     def schedule_retry(self):
         """Schedule retry based on frequency"""
@@ -1904,7 +1938,10 @@ class TargetSavings(models.Model):
                             f"Next autosave: {target.next_deduction.strftime('%Y-%m-%d %H:%M') if target.next_deduction else 'scheduled soon'}"
                         )
                         send_generic_email(
-                            subject, message, settings.DEFAULT_FROM_EMAIL, [user.email]
+                            subject=subject,
+                            message=message,
+                            recipient_list=[user.email],
+                            from_email=settings.DEFAULT_FROM_EMAIL,
                         )
                     except Exception as e:
                         logger.exception(
@@ -2080,7 +2117,10 @@ class TargetSavings(models.Model):
                 )
 
             send_generic_email(
-                subject, message, settings.DEFAULT_FROM_EMAIL, [self.user.email]
+                subject=subject,
+                message=message,
+                recipient_list=[self.user.email],
+                from_email=settings.DEFAULT_FROM_EMAIL,
             )
 
         except Exception as e:
@@ -2120,7 +2160,10 @@ class TargetSavings(models.Model):
             )
 
             send_generic_email(
-                subject, message, settings.DEFAULT_FROM_EMAIL, [self.user.email]
+                subject=subject,
+                message=message,
+                recipient_list=[self.user.email],
+                from_email=settings.DEFAULT_FROM_EMAIL,
             )
 
         except Exception as e:
@@ -2985,6 +3028,54 @@ class AdminNotifyRecipient(models.Model):
 
     def __str__(self):
         return f"{self.label or self.email} ({self.email})"
+
+
+class AppVersionConfig(models.Model):
+    """
+    Drives the mobile app's force-update / soft-update prompt (App.js's
+    checkAppVersion, fetching GET /api/app-version/). Used to live as a
+    version.json file manually edited and deployed to Firebase Hosting -
+    that meant an edit here did nothing until someone remembered to also run
+    `firebase deploy`, which is exactly what went stale and silently broke
+    the whole feature. A Django-admin-edited row takes effect on save, no
+    separate deploy step to forget.
+
+    Singleton: save()/get_solo() pin this to a single row (pk=1) since
+    there's only ever one "current" config, not a list.
+    """
+
+    minimum_required_version = models.CharField(
+        max_length=20,
+        default="1.0.0",
+        help_text="Users on a version below this are force-blocked until they update.",
+    )
+    latest_version = models.CharField(
+        max_length=20,
+        default="1.0.0",
+        help_text="Users on a version below this (but >= minimum) see a dismissible 'update available' prompt.",
+    )
+    play_store_url = models.URLField(
+        default="https://play.google.com/store/apps/details?id=com.tolulopeahmed.MyFundMobile"
+    )
+    app_store_url = models.URLField(
+        default="https://apps.apple.com/ng/app/myfund-save-co-own-properties/id6747445574"
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        pass  # singleton - never actually delete the row
+
+    @classmethod
+    def get_solo(cls):
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj
+
+    def __str__(self):
+        return f"App Version Config (min={self.minimum_required_version}, latest={self.latest_version})"
 
 
 class SavingsGoal(models.Model):
