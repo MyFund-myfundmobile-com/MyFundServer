@@ -299,7 +299,6 @@ import logging
 import re
 import time
 import os
-import resend
 from datetime import date
 from django.conf import settings
 from django.utils import timezone
@@ -309,9 +308,6 @@ from django.template.loader import render_to_string
 from .models import CustomUser, ROITransaction
 
 logger = logging.getLogger(__name__)
-
-# ===== RESEND INIT =====
-resend.api_key = os.environ.get("RESEND_API_KEY")
 
 
 def validate_email(email):
@@ -464,30 +460,37 @@ def send_generic_email(
 
     logger.info(f"📧 Personalization complete. Payloads: {len(payloads)}")
 
-    # ---------- INLINE SEND (RESEND REPLACEMENT) ----------
-    if use_celery_threshold == 0 or total_valid <= use_celery_threshold:
-        logger.info(f"📧 Using INLINE Resend send for {total_valid} recipients")
+    from .services.brevo_service import send_email_via_brevo, DAILY_EMAIL_LIMIT
+
+    # A send larger than Brevo's daily cap can never safely go out inline
+    # in one shot regardless of use_celery_threshold - it has to be spread
+    # across days. use_celery_threshold only gets to pick inline-vs-queued
+    # for sends that already fit in a single day.
+    send_inline = total_valid <= DAILY_EMAIL_LIMIT and (
+        use_celery_threshold == 0 or total_valid <= use_celery_threshold
+    )
+
+    # ---------- INLINE SEND (BREVO) ----------
+    if send_inline:
+        logger.info(f"📧 Using INLINE Brevo send for {total_valid} recipients")
 
         sent_count = 0
         failed_emails = []
 
         for p in payloads:
             try:
-                # ===== RESEND (REPLACES SMTP COMPLETELY) =====
-                resend.Emails.send(
-                    {
-                        "from": from_email or "MyFund <noreply@myfundmobile.com>",
-                        "to": [p["to"]],
-                        "subject": p["subject"],
-                        "html": p["html_message"],
-                    }
+                send_email_via_brevo(
+                    to_email=p["to"],
+                    subject=p["subject"],
+                    html_content=p["html_message"],
+                    from_email=from_email,
                 )
 
                 sent_count += 1
-                logger.info(f"✅ Email sent via Resend to {p['to']}")
+                logger.info(f"✅ Email sent via Brevo to {p['to']}")
 
             except Exception as e:
-                logger.error(f"❌ Resend failed for {p['to']}: {e}")
+                logger.error(f"❌ Brevo failed for {p['to']}: {e}")
                 failed_emails.append(p["to"])
 
             time.sleep(1)
@@ -502,44 +505,28 @@ def send_generic_email(
             "invalid_emails": invalid_recipients,
         }
 
-    # ---------- CELERY BATCH SEND (UNCHANGED LOGIC) ----------
+    # ---------- CELERY BATCH SEND (daily-capped, via Brevo) ----------
     logger.info(f"📧 Using CELERY batch send for {total_valid} recipients")
 
     try:
         from .tasks import send_bulk_email_task
 
-        BATCH_SIZE = 45
-        DELAY_BETWEEN_EMAILS = 72
-        num_batches = (total_valid + BATCH_SIZE - 1) // BATCH_SIZE
+        num_days = (total_valid + DAILY_EMAIL_LIMIT - 1) // DAILY_EMAIL_LIMIT
 
-        batches = [
-            payloads[i : i + BATCH_SIZE] for i in range(0, total_valid, BATCH_SIZE)
-        ]
-
-        for i, batch in enumerate(batches):
-            countdown_seconds = i * 900
-
-            logger.info(
-                f"⏱ Scheduling batch {i+1}/{num_batches} in {countdown_seconds}s ({len(batch)} emails)"
-            )
-
-            send_bulk_email_task.apply_async(
-                args=[batch, from_email],
-                kwargs={
-                    "batch_size": len(batch),
-                    "delay_seconds": DELAY_BETWEEN_EMAILS,
-                },
-                countdown=countdown_seconds,
-                queue="email_queue",
-            )
+        # One task call - it chunks into DAILY_EMAIL_LIMIT-sized batches and
+        # reschedules itself a day later for any remainder. See tasks.py.
+        send_bulk_email_task.apply_async(
+            args=[payloads, from_email],
+            queue="email_queue",
+        )
 
         return {
             "status": "queued",
             "total": total_valid,
             "invalid_skipped": len(invalid_recipients),
-            "method": "resend_batched",
-            "note": "Emails queued in safe batches",
-            "estimated_hours": f"{num_batches} hours",
+            "method": "brevo_batched",
+            "note": f"Emails queued in daily batches of up to {DAILY_EMAIL_LIMIT} to stay within Brevo's daily sending limit.",
+            "estimated_days": num_days,
         }
 
     except Exception as e:

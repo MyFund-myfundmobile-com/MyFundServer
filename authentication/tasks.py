@@ -1303,58 +1303,77 @@ logger = logging.getLogger(__name__)
 from celery import shared_task
 import logging
 import time
-import os
-import resend
 
 logger = logging.getLogger(__name__)
 
-# ===== RESEND INIT =====
-resend.api_key = os.environ.get("RESEND_API_KEY")
+# Seconds to wait between individual sends within a single day's batch -
+# gentle pacing against Brevo's per-request rate limits (distinct from the
+# separate daily-total cap, see DAILY_EMAIL_LIMIT below).
+SECONDS_BETWEEN_SENDS = 2
 
 
 @shared_task(bind=True, max_retries=3, queue="email_queue")
-def send_bulk_email_task(self, emails, from_email, batch_size=45, delay_seconds=300):
+def send_bulk_email_task(self, emails, from_email, batch_size=None, delay_seconds=None):
+    """
+    Sends `emails` via Brevo, capped at DAILY_EMAIL_LIMIT (300) for today.
+    Any remainder beyond that is rescheduled as a follow-up call to this
+    same task exactly 1 day later, so a large recipient list spreads across
+    as many days as it needs without ever crossing Brevo's daily sending
+    limit. batch_size/delay_seconds are accepted for backwards
+    compatibility with any existing scheduled calls, but are no longer used
+    - the daily cap is fixed and pacing is handled internally.
+    """
+    from .services.brevo_service import send_email_via_brevo, DAILY_EMAIL_LIMIT
+
     total = len(emails)
+    todays_batch = emails[:DAILY_EMAIL_LIMIT]
+    remaining = emails[DAILY_EMAIL_LIMIT:]
+
+    logger.info(
+        f"📦 Sending {len(todays_batch)} of {total} emails today "
+        f"({len(remaining)} deferred to later days)"
+    )
+
     sent = 0
     failed = []
 
-    logger.info(f"📦 Sending {total} emails in batches of {batch_size}")
+    for e in todays_batch:
+        try:
+            send_email_via_brevo(
+                to_email=e["to"],
+                subject=e["subject"],
+                html_content=e["html_message"],
+                from_email=from_email,
+            )
 
-    for i in range(0, total, batch_size):
-        batch = emails[i : i + batch_size]
+            sent += 1
+            logger.info(f"✅ Sent via Brevo: {e['to']}")
 
-        logger.info(f"🚀 Processing batch {i//batch_size + 1}")
+        except Exception as ex:
+            failed.append({"email": e["to"], "error": str(ex)})
+            logger.error(f"❌ Failed {e['to']}: {ex}")
 
-        for e in batch:
-            try:
-                # ===== RESEND REPLACEMENT (NO SMTP) =====
-                resend.Emails.send(
-                    {
-                        "from": from_email or "MyFund <noreply@myfundmobile.com>",
-                        "to": [e["to"]],
-                        "subject": e["subject"],
-                        "html": e["html_message"],
-                    }
-                )
+        time.sleep(SECONDS_BETWEEN_SENDS)
 
-                sent += 1
-                logger.info(f"✅ Sent via Resend: {e['to']}")
+    if remaining:
+        logger.info(
+            f"⏭ Scheduling remaining {len(remaining)} emails for 1 day from now"
+        )
+        send_bulk_email_task.apply_async(
+            args=[remaining, from_email],
+            countdown=86400,  # 1 day
+            queue="email_queue",
+        )
 
-            except Exception as ex:
-                failed.append({"email": e["to"], "error": str(ex)})
-                logger.error(f"❌ Failed {e['to']}: {ex}")
-
-        if i + batch_size < total:
-            logger.info(f"⏳ Sleeping {delay_seconds}s before next batch")
-            time.sleep(delay_seconds)
-
-    logger.info(f"📊 Done: {sent}/{total} sent")
+    logger.info(f"📊 Done today: {sent}/{len(todays_batch)} sent")
 
     return {
         "sent": sent,
         "failed": len(failed),
         "failed_emails": failed,
-        "total": total,
+        "total_today": len(todays_batch),
+        "total_overall": total,
+        "remaining_scheduled": len(remaining),
     }
 
 

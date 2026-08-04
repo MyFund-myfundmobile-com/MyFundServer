@@ -9043,14 +9043,19 @@ def send_email(request):
 
         logger.info(f"📧 Cleaned recipients: {cleaned_recipients}")
 
-        # Use the smart email sender - FIXED PARAMETER NAME
+        # Use the smart email sender. use_celery_threshold is left at its
+        # default (30) rather than forced to 0 - forcing inline-always
+        # meant a large campaign would try to send synchronously within
+        # this HTTP request (timeout risk) and skip the daily-300 batching
+        # entirely. send_generic_email now handles routing: small sends go
+        # out immediately, anything bigger is queued and automatically
+        # spread across days to respect Brevo's daily sending limit.
         logger.info("📧 Calling send_generic_email...")
         result = send_generic_email(
             subject=subject,
             message=body,  # CHANGED FROM 'message' TO ''
             recipient_list=cleaned_recipients,
             from_email=sender,
-            use_celery_threshold=0,
         )
 
         logger.info(f"📧 send_generic_email result: {result}")
@@ -9149,7 +9154,16 @@ def save_template(request):
         design_html = data.get("designHTML")
         last_update = data.get("lastUpdate")
 
-        # Create or update template
+        # design_body arrives as a parsed dict (DRF parses the JSON request
+        # body), not a string. design_body is a plain TextField, so writing
+        # the dict straight into it lets Django silently coerce it with
+        # str() - producing Python repr ("{'key': 'val'}", single-quoted,
+        # True/False/None) instead of valid JSON. That's unparseable by
+        # JSON.parse() on the way back out, which is why reopening a saved
+        # design for editing was silently falling back to a blank canvas.
+        if not isinstance(design_body, str):
+            design_body = json.dumps(design_body)
+
         template = EmailTemplate.objects.create(
             title=title,
             design_body=design_body,
@@ -9217,7 +9231,12 @@ def update_template(request, template_id):
         template = EmailTemplate.objects.get(id=template_id)
 
         template.title = request.data.get("title", template.title)
-        template.design_body = request.data.get("designBody", template.design_body)
+
+        design_body = request.data.get("designBody", template.design_body)
+        if not isinstance(design_body, str):
+            design_body = json.dumps(design_body)
+        template.design_body = design_body
+
         template.design_html = request.data.get("designHTML", template.design_html)
         template.last_update = request.data.get("lastUpdate", template.last_update)
 

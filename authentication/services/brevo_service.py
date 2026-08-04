@@ -1,4 +1,6 @@
 import logging
+from email.utils import parseaddr
+
 import sib_api_v3_sdk
 
 from django.conf import settings
@@ -12,6 +14,11 @@ logger = logging.getLogger(__name__)
 
 BREVO_LIST_ID = 4
 
+# Brevo's free-tier daily sending cap. Bulk sends larger than this get
+# chunked into same-day-safe batches, one calendar day apart - see
+# tasks.send_bulk_email_task.
+DAILY_EMAIL_LIMIT = 300
+
 
 def get_brevo_client():
 
@@ -20,6 +27,38 @@ def get_brevo_client():
     configuration.api_key["api-key"] = settings.BREVO_API_KEY
 
     return sib_api_v3_sdk.ApiClient(configuration)
+
+
+# ==========================================
+# TRANSACTIONAL EMAIL SENDING
+# ==========================================
+
+
+def send_email_via_brevo(to_email, subject, html_content, from_email=None):
+    """
+    Send a single transactional email through Brevo's Transactional Emails
+    API. Raises on failure - callers decide how to log/track that.
+    """
+    from_email = from_email or settings.DEFAULT_FROM_EMAIL
+
+    # from_email is often "Display Name <address@domain>" (Django's
+    # convention) - Brevo wants name/email as separate fields.
+    sender_name, sender_email = parseaddr(from_email)
+    if not sender_email:
+        sender_email = from_email
+    if not sender_name:
+        sender_name = "MyFund"
+
+    api_instance = sib_api_v3_sdk.TransactionalEmailsApi(get_brevo_client())
+
+    send_smtp_email = sib_api_v3_sdk.SendSmtpEmail(
+        to=[{"email": to_email}],
+        sender={"name": sender_name, "email": sender_email},
+        subject=subject,
+        html_content=html_content,
+    )
+
+    return api_instance.send_transac_email(send_smtp_email)
 
 
 # ==========================================
