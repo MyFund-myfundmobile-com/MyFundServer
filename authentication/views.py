@@ -880,21 +880,27 @@ def test_email(request):
     This is a test email body.
 
     Thank you,
-    
+
     MyFund
     """
 
     from_email = "MyFund <info@mg.myfundmobile.com>"
     recipient_list = ["sammy@myfundmobile.com"]
 
-    send_generic_email(
+    # Return the actual result instead of a static success string - this
+    # view used to report "Test email sent" unconditionally regardless of
+    # whether the underlying send actually succeeded, which is exactly the
+    # silent-failure pattern that let real OTP emails get marked "sent" in
+    # the DB while never reaching Brevo.
+    result = send_generic_email(
         subject=subject,
         message=message,
         from_email=from_email,
         recipient_list=recipient_list,
+        use_celery_threshold=0,
     )
 
-    return HttpResponse("Test email sent. This shows the email system is working")
+    return JsonResponse(result)
 
 
 from rest_framework.test import force_authenticate
