@@ -476,6 +476,7 @@ def send_generic_email(
 
         sent_count = 0
         failed_emails = []
+        failure_reasons = []
 
         for p in payloads:
             try:
@@ -492,6 +493,10 @@ def send_generic_email(
             except Exception as e:
                 logger.error(f"❌ Brevo failed for {p['to']}: {e}")
                 failed_emails.append(p["to"])
+                # Temporary - surfaced in the response, not just logs, to
+                # diagnose why Koyeb's Brevo sends were failing while
+                # working fine locally.
+                failure_reasons.append(f"{p['to']}: {type(e).__name__}: {e}")
 
             time.sleep(1)
 
@@ -500,6 +505,7 @@ def send_generic_email(
             "sent": sent_count,
             "failed": len(failed_emails),
             "failed_emails": failed_emails,
+            "failure_reasons": failure_reasons,
             "total": total_valid,
             "invalid_skipped": len(invalid_recipients),
             "invalid_emails": invalid_recipients,
