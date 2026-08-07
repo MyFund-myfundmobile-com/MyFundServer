@@ -585,7 +585,7 @@ def send_otp_email(user, otp):
     """
 
     try:
-        send_generic_email(
+        result = send_generic_email(
             subject=subject,
             message=inner_html,
             recipient_list=[user.email],
@@ -593,6 +593,14 @@ def send_otp_email(user, otp):
             use_celery_threshold=0,
             template="email/email.html",
         )
+
+        # send_generic_email catches per-recipient send failures internally
+        # and returns a result dict instead of raising, so a failed Brevo
+        # send here was silently falling through as if it succeeded - the
+        # OTP got marked "sent" in OTPDeliveryLog even though it never
+        # actually reached Brevo. Real signups were affected by this.
+        if not result or result.get("sent", 0) < 1:
+            raise Exception(f"send_generic_email reported no successful send: {result}")
 
         logger.info(f"✅ Signup OTP email sent to {user.email}")
 
