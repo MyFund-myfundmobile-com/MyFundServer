@@ -1233,7 +1233,7 @@ def _send_otp(user, otp, purpose="signup"):
 
         # Send email
         try:
-            send_generic_email(
+            result = send_generic_email(
                 subject=subject,
                 message=inner_html,  # pass HTML content directly
                 recipient_list=[user.email],
@@ -1241,7 +1241,16 @@ def _send_otp(user, otp, purpose="signup"):
                 use_celery_threshold=30,
                 template="email/email.html",
             )
-            logger.info(f"OTP email sent to {user.email} for {purpose}")
+            # send_generic_email catches per-recipient send failures
+            # internally and returns a result dict rather than raising, so
+            # this needs an explicit check - a failed Brevo send was
+            # otherwise indistinguishable from a successful one here.
+            if not result or result.get("sent", 0) < 1:
+                logger.error(
+                    f"OTP email to {user.email} for {purpose} did not actually send: {result}"
+                )
+            else:
+                logger.info(f"OTP email sent to {user.email} for {purpose}")
         except Exception as e:
             logger.error(f"Error sending OTP email to {user.email}: {e}")
 
