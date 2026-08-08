@@ -915,17 +915,51 @@ def test_sms(request):
     """
     Diagnostic twin of test_email, for verifying PAYLESS_SMS_URL and
     sender ID approval against whatever environment this is actually
-    running in (env vars aren't visible from outside, this is).
+    running in (env vars aren't visible from outside, this is). Makes the
+    raw request directly (not via send_sms_via_payless) so the actual
+    response body/URL used is visible, not just a collapsed True/False.
     """
-    from .utils import send_sms_via_payless
+    import requests as _requests
+    import urllib.parse as _urllib_parse
+    from .utils import normalize_phone
 
     phone_number = request.GET.get("phone", "08033924595")
-    success = send_sms_via_payless(
-        phone_number,
-        "MyFund SMS diagnostic test - if you received this, delivery is working.",
+    clean_number = normalize_phone(phone_number)
+
+    base_url = settings.PAYLESS_SMS_URL
+    username = settings.PAYLESS_SMS_USERNAME
+    sender = settings.PAYLESS_SMS_SENDER_ID
+    message = "MyFund SMS diagnostic test - if you received this, delivery is working."
+    encoded_message = _urllib_parse.quote(message)
+
+    full_url = (
+        f"{base_url}?option=com_spc&comm=spc_api"
+        f"&username={username}"
+        f"&password={settings.PAYLESS_SMS_PASSWORD}"
+        f"&sender={sender}"
+        f"&recipient={clean_number}"
+        f"&message={encoded_message}"
     )
 
-    return JsonResponse({"phone": phone_number, "success": success})
+    try:
+        response = _requests.get(full_url, timeout=20)
+        body = response.text.strip()
+        status_code = response.status_code
+    except Exception as e:
+        body = f"{type(e).__name__}: {e}"
+        status_code = None
+
+    return JsonResponse(
+        {
+            "phone_input": phone_number,
+            "clean_number": clean_number,
+            "base_url": base_url,
+            "sender": sender,
+            "http_status": status_code,
+            "body": body,
+            "success": body.upper().startswith("OK") if body else False,
+        }
+    )
 
 
 from rest_framework.test import force_authenticate
