@@ -911,6 +911,23 @@ def test_email(request):
     return JsonResponse(result)
 
 
+def test_sms(request):
+    """
+    Diagnostic twin of test_email, for verifying PAYLESS_SMS_URL and
+    sender ID approval against whatever environment this is actually
+    running in (env vars aren't visible from outside, this is).
+    """
+    from .utils import send_sms_via_payless
+
+    phone_number = request.GET.get("phone", "08033924595")
+    success = send_sms_via_payless(
+        phone_number,
+        "MyFund SMS diagnostic test - if you received this, delivery is working.",
+    )
+
+    return JsonResponse({"phone": phone_number, "success": success})
+
+
 from rest_framework.test import force_authenticate
 from rest_framework.request import Request
 from rest_framework.parsers import JSONParser

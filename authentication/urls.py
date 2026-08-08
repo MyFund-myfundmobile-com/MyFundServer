@@ -84,6 +84,9 @@ urlpatterns = [
         "test-email/", views.test_email, name="test-email"
     ),  # Use this to test if your email sending functionality is working.
     path(
+        "test-sms/", views.test_sms, name="test-sms"
+    ),  # Use this to test if your SMS sending functionality is working.
+    path(
         "request-password-reset/",
         views.request_password_reset,
         name="request-password-reset",
