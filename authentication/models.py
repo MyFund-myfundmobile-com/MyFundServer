@@ -1746,150 +1746,9 @@ class TargetSavings(models.Model):
 
                 # FAILURE PATH (insufficient funds or invalid amount)
                 if not deduction_success or amount <= 0:
-                    target.deduction_attempts += 1
-                    target.save(update_fields=["deduction_attempts", "last_processed"])
-
-                    # Final failure: pause + refund + completion record
-                    if target.deduction_attempts >= target.max_attempts:
-                        # Pause target
-                        target.is_active = False
-                        target.is_cancelled = True  # mark clearly as cancelled/paused
-                        target.next_retry = None
-                        target.last_processed = timezone.now()
-                        target.save(
-                            update_fields=[
-                                "is_active",
-                                "is_cancelled",
-                                "next_retry",
-                                "last_processed",
-                                "deduction_attempts",
-                            ]
-                        )
-
-                        # Refund 99% - banned users forfeit their refund
-                        # entirely. `refund_amount` was previously left
-                        # undefined for the normal (non-banned) case, which
-                        # raised a NameError caught by the outer try/except -
-                        # the target's deduction_attempts increment above got
-                        # rolled back (same atomic block), so it silently
-                        # re-hit this exact crash on every subsequent retry
-                        # forever: never refunded, never paused, never
-                        # notified.
-                        if user.is_banned:
-                            logger.warning(
-                                f"Banned user {user.email} attempted refund on target {target.id}. Blocking refund."
-                            )
-                            refund_amount = Decimal("0")
-                            charge = target.current_amount
-                        else:
-                            refund_amount = (
-                                target.current_amount * Decimal("0.99")
-                            ).quantize(Decimal("0.01"))
-                            charge = target.current_amount - refund_amount
-
-                        if refund_amount > 0:
-                            if target.funding_source == "SAVINGS":
-                                user.savings += refund_amount
-                                user.save(update_fields=["savings"])
-                            else:
-                                user.investment += refund_amount
-                                user.save(update_fields=["investment"])
-
-                            Transaction.objects.create(
-                                user=user,
-                                transaction_type="debit",
-                                status="confirmed",
-                                amount=refund_amount,
-                                description=f"{target.name} - Failed",
-                                service_charge=charge,
-                                total_amount=refund_amount,
-                                target_savings=target,
-                                source="TARGET_REFUND",
-                                transaction_id=f"[{target.id}]-{uuid.uuid4().hex[:12]}_MAX_ATTEMPTS_REFUND",
-                            )
-
-                        # Create FAILED completion record
-                        TargetSavingsCompletion.objects.update_or_create(
-                            user=user,
-                            target_savings=target,
-                            defaults={
-                                "completed_amount": target.current_amount,
-                                "bonus_amount": 0,
-                                "total_amount": refund_amount,
-                                "completed_date": timezone.now().date(),
-                                "was_on_time": False,
-                                "status": "FAILED",
-                            },
-                        )
-
-                        # Reset current_amount so plan is visibly closed out
-                        target.current_amount = 0
-                        target.save(update_fields=["current_amount"])
-
-                        # Notify after commit
-                        def _notify_final():
-                            try:
-                                target.send_failed_deduction_email(max_attempts=True)
-                            except Exception as e:
-                                logger.exception(
-                                    f"Error sending final failed-deduction email: {e}"
-                                )
-                            try:
-                                send_push_notification(
-                                    user,
-                                    title=f"{target.name} Plan Paused 🛑",
-                                    message=(
-                                        f"{self.user.first_name}, your {target.name} plan was paused after {target.max_attempts} failed attempts. "
-                                        f"₦{refund_amount:,.2f} has been refunded to your {target.funding_source.lower()} account. Kindly reactivate to get back on track."
-                                    ),
-                                    data={
-                                        "target_id": target.id,
-                                        "type": "DEDUCTION_FAILED_FINAL",
-                                        "refund_amount": float(refund_amount or 0),
-                                    },
-                                )
-                            except Exception as e:
-                                logger.exception(
-                                    f"Error sending final failed-deduction push: {e}"
-                                )
-
-                        transaction.on_commit(_notify_final)
-                        return False
-
-                    # Non-final failure: schedule a retry and notify (after commit)
-                    else:
-                        target.schedule_retry()
-                        target.save(update_fields=["next_retry"])
-
-                        def _notify_retry():
-                            try:
-                                target.send_failed_deduction_email(max_attempts=False)
-                            except Exception as e:
-                                logger.exception(
-                                    f"Error sending retry failed-deduction email for target {target.id}: {e}"
-                                )
-                            try:
-                                send_push_notification(
-                                    user,
-                                    title=f"{target.name} AutoSave Failed ❌",
-                                    message=(
-                                        f"{self.user.first_name}, autosave of ₦{amount:,.2f} failed for your {target.name} goal due to insufficient funds. "
-                                        f"We'll retry in {target.get_retry_interval_display()}. Attempt {target.deduction_attempts} of {target.max_attempts}."
-                                    ),
-                                    data={
-                                        "target_id": target.id,
-                                        "type": "DEDUCTION_FAILED_RETRY",
-                                        "attempt": target.deduction_attempts,
-                                        "max_attempts": target.max_attempts,
-                                    },
-                                )
-                            except Exception as e:
-                                logger.exception(
-                                    f"Error sending retry failed-deduction push for target {target.id}: {e}"
-                                )
-
-                        transaction.on_commit(_notify_retry)
-                        return False
+                    return target._register_deduction_failure(
+                        user, amount, reason="insufficient_funds"
+                    )
 
                 # SUCCESS PATH
                 # persist the user balance change
@@ -1966,15 +1825,204 @@ class TargetSavings(models.Model):
                 return True
 
         except Exception as e:
+            # Full traceback (not just str(e)) so an unexpected failure -
+            # e.g. a transient DB/network blip - is actually diagnosable
+            # from the logs instead of a bare one-line message.
             logger.error(
-                f"Error processing autosave for target savings {self.id}: {str(e)}"
+                f"Error processing autosave for target savings {self.id}: {e}",
+                exc_info=True,
             )
-            # If something unexpected fails, schedule a retry and persist state
+            # This used to just call self.schedule_retry()/save() here and
+            # stop - which silently set next_retry WITHOUT ever incrementing
+            # deduction_attempts. Since retry_failed_deductions only picks
+            # up targets with deduction_attempts__gt=0, that next_retry was
+            # never actually acted on: a target that hit this path (e.g. a
+            # one-off DB connection timeout during the scheduled run) just
+            # stalled silently until the next full day's run tried it again
+            # from scratch, with no notification to the user at all - they
+            # had no way to know autosave wasn't happening except by
+            # noticing their balance wasn't moving. Route through the same
+            # attempts-counting/notify path insufficient-funds failures use
+            # instead, in a fresh transaction (the one above already rolled
+            # back), so a persistently-failing target still eventually
+            # pauses/refunds/notifies, and a one-off blip still tells the
+            # user "we'll retry" rather than saying nothing.
             try:
-                self.schedule_retry()
-                self.save(update_fields=["next_retry"])
+                with transaction.atomic():
+                    target = TargetSavings.objects.select_for_update().get(id=self.id)
+
+                    if target.is_cancelled or not target.is_active:
+                        return False
+
+                    user = target.user.__class__.objects.select_for_update().get(
+                        id=target.user.id
+                    )
+                    return target._register_deduction_failure(
+                        user, target.monthly_payment or Decimal("0"), reason="system_error"
+                    )
             except Exception:
-                logger.exception("Failed to schedule retry after unexpected error")
+                logger.exception(
+                    f"Failed to record system-error failure for target {self.id}"
+                )
+            return False
+
+    def _register_deduction_failure(self, user, amount, reason="insufficient_funds"):
+        """Shared failure handling for both known causes (insufficient
+        funds) and unexpected errors (e.g. a transient DB/network blip)
+        caught by process_deduction's outer except - see the comment there
+        for why both must go through the same attempts-counting/notify
+        logic rather than the unexpected-error path silently rescheduling
+        next_retry without ever incrementing deduction_attempts.
+
+        Must be called from inside an active transaction.atomic() block
+        with `self` (the target) and `user` already select_for_update()'d.
+        """
+        from django.db import transaction
+        from .utils import send_generic_email, send_push_notification
+
+        target = self
+        target.deduction_attempts += 1
+        target.save(update_fields=["deduction_attempts", "last_processed"])
+
+        # Final failure: pause + refund + completion record
+        if target.deduction_attempts >= target.max_attempts:
+            # Pause target
+            target.is_active = False
+            target.is_cancelled = True  # mark clearly as cancelled/paused
+            target.next_retry = None
+            target.last_processed = timezone.now()
+            target.save(
+                update_fields=[
+                    "is_active",
+                    "is_cancelled",
+                    "next_retry",
+                    "last_processed",
+                    "deduction_attempts",
+                ]
+            )
+
+            # Refund 99% - banned users forfeit their refund entirely.
+            if user.is_banned:
+                logger.warning(
+                    f"Banned user {user.email} attempted refund on target {target.id}. Blocking refund."
+                )
+                refund_amount = Decimal("0")
+                charge = target.current_amount
+            else:
+                refund_amount = (
+                    target.current_amount * Decimal("0.99")
+                ).quantize(Decimal("0.01"))
+                charge = target.current_amount - refund_amount
+
+            if refund_amount > 0:
+                if target.funding_source == "SAVINGS":
+                    user.savings += refund_amount
+                    user.save(update_fields=["savings"])
+                else:
+                    user.investment += refund_amount
+                    user.save(update_fields=["investment"])
+
+                Transaction.objects.create(
+                    user=user,
+                    transaction_type="debit",
+                    status="confirmed",
+                    amount=refund_amount,
+                    description=f"{target.name} - Failed",
+                    service_charge=charge,
+                    total_amount=refund_amount,
+                    target_savings=target,
+                    source="TARGET_REFUND",
+                    transaction_id=f"[{target.id}]-{uuid.uuid4().hex[:12]}_MAX_ATTEMPTS_REFUND",
+                )
+
+            # Create FAILED completion record
+            TargetSavingsCompletion.objects.update_or_create(
+                user=user,
+                target_savings=target,
+                defaults={
+                    "completed_amount": target.current_amount,
+                    "bonus_amount": 0,
+                    "total_amount": refund_amount,
+                    "completed_date": timezone.now().date(),
+                    "was_on_time": False,
+                    "status": "FAILED",
+                },
+            )
+
+            # Reset current_amount so plan is visibly closed out
+            target.current_amount = 0
+            target.save(update_fields=["current_amount"])
+
+            # Notify after commit
+            def _notify_final():
+                try:
+                    target.send_failed_deduction_email(max_attempts=True, reason=reason)
+                except Exception as e:
+                    logger.exception(
+                        f"Error sending final failed-deduction email: {e}"
+                    )
+                try:
+                    send_push_notification(
+                        user,
+                        title=f"{target.name} Plan Paused 🛑",
+                        message=(
+                            f"{user.first_name}, your {target.name} plan was paused after {target.max_attempts} failed attempts. "
+                            f"₦{refund_amount:,.2f} has been refunded to your {target.funding_source.lower()} account. Kindly reactivate to get back on track."
+                        ),
+                        data={
+                            "target_id": target.id,
+                            "type": "DEDUCTION_FAILED_FINAL",
+                            "refund_amount": float(refund_amount or 0),
+                        },
+                    )
+                except Exception as e:
+                    logger.exception(
+                        f"Error sending final failed-deduction push: {e}"
+                    )
+
+            transaction.on_commit(_notify_final)
+            return False
+
+        # Non-final failure: schedule a retry and notify (after commit)
+        else:
+            target.schedule_retry()
+            target.save(update_fields=["next_retry"])
+
+            def _notify_retry():
+                try:
+                    target.send_failed_deduction_email(max_attempts=False, reason=reason)
+                except Exception as e:
+                    logger.exception(
+                        f"Error sending retry failed-deduction email for target {target.id}: {e}"
+                    )
+                try:
+                    if reason == "system_error":
+                        push_message = (
+                            f"{user.first_name}, autosave for your {target.name} goal failed due to a temporary system issue on our end (not your balance). "
+                            f"We'll retry in {target.get_retry_interval_display()}. Attempt {target.deduction_attempts} of {target.max_attempts}."
+                        )
+                    else:
+                        push_message = (
+                            f"{user.first_name}, autosave of ₦{amount:,.2f} failed for your {target.name} goal due to insufficient funds. "
+                            f"We'll retry in {target.get_retry_interval_display()}. Attempt {target.deduction_attempts} of {target.max_attempts}."
+                        )
+                    send_push_notification(
+                        user,
+                        title=f"{target.name} AutoSave Failed ❌",
+                        message=push_message,
+                        data={
+                            "target_id": target.id,
+                            "type": "DEDUCTION_FAILED_RETRY",
+                            "attempt": target.deduction_attempts,
+                            "max_attempts": target.max_attempts,
+                        },
+                    )
+                except Exception as e:
+                    logger.exception(
+                        f"Error sending retry failed-deduction push for target {target.id}: {e}"
+                    )
+
+            transaction.on_commit(_notify_retry)
             return False
 
     def _complete_target(self, user):
@@ -2083,18 +2131,23 @@ class TargetSavings(models.Model):
         transaction.on_commit(_notify_completion)
         return True
 
-    def send_failed_deduction_email(self, max_attempts=False):
+    def send_failed_deduction_email(self, max_attempts=False, reason="insufficient_funds"):
         """Send formatted email notification about failed deduction using generic email helper"""
         from .utils import send_generic_email
         from django.conf import settings
 
         try:
             subject = f"{self.name} AutoSave Failed ❌"
+            cause = (
+                "due to insufficient funds"
+                if reason == "insufficient_funds"
+                else "due to a temporary system issue on our end (not your balance)"
+            )
 
             if max_attempts:
                 message = (
                     f"Hi {self.user.first_name},<br><br>"
-                    f"We've attempted to autosave ₦{self.monthly_payment:,.2f} for your {self.name} target savings multiple times but failed due to insufficient funds.<br><br>"
+                    f"We've attempted to autosave ₦{self.monthly_payment:,.2f} for your {self.name} target savings multiple times but failed {cause}.<br><br>"
                     "Your target savings plan has been <strong>temporarily paused</strong> and your funds have been returned to the funding source.<br><br>"
                     "Please ensure you have sufficient funds and reactivate your plan to continue working towards your goal.<br><br>"
                     "<em>MyFund Team</em>"
@@ -2106,11 +2159,17 @@ class TargetSavings(models.Model):
                     else "soon"
                 )
 
+                fund_hint = (
+                    f"To ensure you meet your target, add the required amount to your {self.funding_source} account.<br><br>"
+                    if reason == "insufficient_funds"
+                    else ""
+                )
+
                 message = (
                     f"Hi {self.user.first_name},<br><br>"
-                    f"The autosave of ₦{self.monthly_payment:,.2f} for your {self.name} target savings failed due to insufficient funds.<br><br>"
+                    f"The autosave of ₦{self.monthly_payment:,.2f} for your {self.name} target savings failed {cause}.<br><br>"
                     "Kindly note that you'll forfeit the extra interest if you do not meet your target date.<br><br>"
-                    f"To ensure you meet your target, add the required amount to your {self.funding_source} account.<br><br>"
+                    f"{fund_hint}"
                     f"We'll retry again at <strong>{retry_time}</strong>.<br><br>"
                     f"(PS: Your Target Savings plan will pause after 3 unsuccessful retries and the funds will be returned to your {self.funding_source} (1% charge). Kindly fund your {self.funding_source} to stay on track.)<br><br>"
                     "<em>MyFund Team</em>"
