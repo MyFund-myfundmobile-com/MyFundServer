@@ -66,59 +66,80 @@ app.autodiscover_tasks()
 # -----------------------------
 # Beat schedules
 # -----------------------------
+# All hours below are UTC (see enable_utc/timezone at the bottom of this
+# file) and are written 1 hour earlier than the Africa/Lagos (WAT, UTC+1)
+# wall-clock time they're meant to represent - e.g. hour=5 here fires at
+# 06:00 WAT. This keeps every job's real-world Lagos-time firing point
+# unchanged from before, while making the *crontab evaluation* timezone
+# match UTC - the timezone next_deduction/last_processed/etc. are actually
+# stored in (Django's timezone.now() is always UTC-aware). Previously both
+# were WAT (enable_utc=False, timezone="Africa/Lagos"), which produced a
+# recurring ~12h lag/mismatch pattern for any DAILY target-savings plan
+# whose scheduled slot time-of-day fell after the deduction sweep's WAT
+# run time - see process_target_savings_deductions().
+#
+# The two monthly jobs whose day_of_month range spans a month boundary
+# (reward-top-savers-monthly, autosubmit-missing-ambassador-reports-
+# monthly) have that range shifted back by one calendar day for the same
+# reason (00:xx WAT on day D is 23:xx UTC on day D-1). Both underlying
+# tasks are safe to fire more than once near the boundary in short/leap
+# months - autosubmit_missing_ambassador_reports_for_previous_month() is
+# explicitly idempotent (skips users who already have a report), and this
+# range already produced the same multiplicity in most/all months before
+# this change, just under the old WAT-evaluated schedule.
 app.conf.beat_schedule = {
     # Target savings
     "process-target-savings-daily": {
         "task": "authentication.tasks.process_target_savings_deductions",
-        "schedule": crontab(hour=6, minute=0),
+        "schedule": crontab(hour=5, minute=0),
     },
     "retry-failed-deductions-daily": {
         "task": "authentication.tasks.retry_failed_deductions",
-        "schedule": crontab(hour=18, minute=0),
+        "schedule": crontab(hour=17, minute=0),
     },
     "check-completed-targets-daily": {
         "task": "authentication.tasks.check_completed_targets",
-        "schedule": crontab(hour=2, minute=0),
+        "schedule": crontab(hour=1, minute=0),
     },
     "refund-contributions": {
         "task": "authentication.tasks.refund_contributions_if_goal_not_reached",
-        "schedule": crontab(hour=0, minute=0),
+        "schedule": crontab(hour=23, minute=0),
     },
     "expire-overdue-groupbuys-daily": {
         "task": "authentication.tasks.expire_groupbuys_task",
-        "schedule": crontab(hour=0, minute=15),
+        "schedule": crontab(hour=23, minute=15),
     },
     # Checks daily but only moves money for a given group once/month (see
     # auto_distribute_groupbuy_income_task docstring) - cheap no-op on most
     # days.
     "auto-distribute-groupbuy-income-daily": {
         "task": "authentication.tasks.auto_distribute_groupbuy_income_task",
-        "schedule": crontab(hour=1, minute=0),
+        "schedule": crontab(hour=0, minute=0),
     },
     "groupbuy-deadline-reminders-daily": {
         "task": "authentication.tasks.send_groupbuy_deadline_reminders_task",
-        "schedule": crontab(hour=9, minute=0),
+        "schedule": crontab(hour=8, minute=0),
     },
     # ROI & Payouts
     "calculate-daily-roi": {
         "task": "authentication.tasks.calculate_daily_roi_task",
-        "schedule": crontab(hour=12, minute=0),
+        "schedule": crontab(hour=11, minute=0),
         "options": {"queue": "default"},
     },
     "process-quarterly-payouts": {
         "task": "authentication.tasks.release_quarterly_roi",
-        "schedule": crontab(minute=0, hour=9, day_of_month=1, month_of_year="1,4,7,10"),
+        "schedule": crontab(minute=0, hour=8, day_of_month=1, month_of_year="1,4,7,10"),
         "kwargs": {"test_mode": False},
     },
     # Top Saver Rewards
     "reward-top-savers-monthly": {
         "task": "authentication.tasks.reward_top_savers_of_month",
-        "schedule": crontab(hour=0, minute=10, day_of_month="28-31"),
+        "schedule": crontab(hour=23, minute=10, day_of_month="27-30"),
     },
     # Birthday Greetings
     "send-birthday-greetings-daily": {
         "task": "authentication.tasks.send_birthday_greetings",
-        "schedule": crontab(hour=8, minute=0),
+        "schedule": crontab(hour=7, minute=0),
     },
     # Scheduled withdrawals - hourly rather than once/day. The model only
     # stores a date (no time), so hourly is already far finer than needed
@@ -134,7 +155,7 @@ app.conf.beat_schedule = {
     },
     "autosubmit-missing-ambassador-reports-monthly": {
         "task": "authentication.tasks.autosubmit_missing_ambassador_reports_task",
-        "schedule": crontab(minute=5, hour=0, day_of_month=1),
+        "schedule": crontab(minute=5, hour=23, day_of_month="28-31"),
     },
 }
 
@@ -171,6 +192,9 @@ app.conf.update(
     worker_prefetch_multiplier=1,  # Prevent task hoarding
     worker_max_tasks_per_child=100,  # Avoid memory leaks
     task_acks_late=True,  # Ack after task completes
-    timezone="Africa/Lagos",
-    enable_utc=False,
+    # timezone/enable_utc are NOT set here on purpose - config_from_object()
+    # above already resolved app.conf.timezone from settings.CELERY_TIMEZONE
+    # (UTC), and that resolution wins over a later app.conf.update() call in
+    # this Celery version - setting it again here is a silent no-op. Change
+    # CELERY_TIMEZONE in settings.py if this ever needs to move.
 )
