@@ -399,9 +399,9 @@ CELERY_TASK_ROUTES = {
 }
 
 # ===== EMAIL CONFIGURATION =====
-RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
-
-# ===== BREVO CONFIGURATION =====
+# All transactional email (OTPs, notifications, etc.) goes through Brevo -
+# see authentication/utils.py's send_generic_email() and
+# authentication/services/brevo_service.py. Resend is no longer used.
 BREVO_API_KEY = os.environ.get("BREVO_API_KEY")
 
 BREVO_SENDER_EMAIL = "hello@myfundmobile.com"
