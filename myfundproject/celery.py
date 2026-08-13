@@ -197,4 +197,23 @@ app.conf.update(
     # (UTC), and that resolution wins over a later app.conf.update() call in
     # this Celery version - setting it again here is a silent no-op. Change
     # CELERY_TIMEZONE in settings.py if this ever needs to move.
+    #
+    # Celery's default PersistentScheduler tracks "did this periodic task
+    # already run today" in a local file (celerybeat-schedule) that lives
+    # on the beat process's own container filesystem. Every time that
+    # container restarts (redeploy, crash, platform-level restart) it loses
+    # that bookkeeping and treats every already-due task as brand new -
+    # which, for a target-savings deduction/retry sweep that's still
+    # "overdue" because its last attempt failed, means beat re-enqueues it
+    # again immediately. Repeated restarts within a short window (observed
+    # in PushNotifications history going back to Sept 2025, across many
+    # unrelated users - always in bursts of 2-6 near-identical
+    # "AutoSave Failed" notifications minutes apart, always on days a
+    # deduction failed) burn through a plan's max_attempts far faster than
+    # the intended once-daily/every-2-days cadence, sometimes cancelling a
+    # plan after a few minutes instead of the intended several days.
+    # django_celery_beat's DatabaseScheduler (already an installed
+    # dependency, tables already migrated) tracks the same "last run" state
+    # in the database instead, so it survives container restarts.
+    beat_scheduler="django_celery_beat.schedulers:DatabaseScheduler",
 )
