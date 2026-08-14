@@ -1635,7 +1635,18 @@ class TargetSavings(models.Model):
         self.next_deduction = candidate
 
     def schedule_retry(self):
-        """Schedule retry based on frequency"""
+        """Schedule retry based on frequency.
+
+        Spacing is sized as a meaningful fraction of the plan's own cycle
+        length, not a fixed short gap - with max_attempts=4 (1 initial
+        failure + 3 retries), a MONTHLY plan used to get only 3 * 2 = 6
+        days total grace before being cancelled and refunded (20% of its
+        ~30-day cycle) - not much room for a user's income timing to catch
+        up. WEEKLY/MONTHLY now get 3 * 2 = 6 days and 3 * 5 = 15 days
+        respectively (comfortably inside a week and about half a month).
+        HOURLY/DAILY were already a reasonable fraction of their own cycle
+        and are unchanged.
+        """
         now = timezone.now()
 
         if self.frequency == "HOURLY":
@@ -1643,9 +1654,9 @@ class TargetSavings(models.Model):
         elif self.frequency == "DAILY":
             self.next_retry = now + timedelta(hours=6)  # Retry in 6 hours
         elif self.frequency == "WEEKLY":
-            self.next_retry = now + timedelta(days=1)  # Retry in 1 day
-        elif self.frequency == "MONTHLY":
             self.next_retry = now + timedelta(days=2)  # Retry in 2 days
+        elif self.frequency == "MONTHLY":
+            self.next_retry = now + timedelta(days=5)  # Retry in 5 days
 
     def get_retry_interval_display(self):
         """Get human-readable retry interval"""
@@ -1654,9 +1665,9 @@ class TargetSavings(models.Model):
         elif self.frequency == "DAILY":
             return "6 hours"
         elif self.frequency == "WEEKLY":
-            return "1 day"
-        elif self.frequency == "MONTHLY":
             return "2 days"
+        elif self.frequency == "MONTHLY":
+            return "5 days"
         return "soon"
 
     def process_deduction(self):

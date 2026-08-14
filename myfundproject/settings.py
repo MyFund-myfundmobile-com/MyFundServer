@@ -176,7 +176,18 @@ CELERY_RESULT_BACKEND = os.environ.get("REDIS_URL")
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
-CELERY_TIMEZONE = "Africa/Lagos"  # Keep your preferred timezone
+# UTC, matching how every datetime is actually stored (USE_TZ=True -
+# timezone.now() is always UTC-aware regardless of TIME_ZONE below, which
+# only affects local-time *display*). This is the value that actually
+# takes effect for beat's crontab evaluation - django-celery's
+# config_from_object() call in celery.py resolves this key before any
+# later app.conf.update() in that file can override it, so change it here,
+# not there. Was "Africa/Lagos" (WAT, UTC+1), which made every crontab
+# hour in celery.py's beat_schedule mean WAT wall-clock time while the
+# fields those tasks compare against (e.g. TargetSavings.next_deduction)
+# are UTC - see the comment on beat_schedule in celery.py for what that
+# broke for target-savings deductions.
+CELERY_TIMEZONE = "UTC"
 
 # Additional Celery settings for better performance
 CELERY_TASK_ALWAYS_EAGER = False
@@ -389,9 +400,9 @@ CELERY_TASK_ROUTES = {
 }
 
 # ===== EMAIL CONFIGURATION =====
-RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
-
-# ===== BREVO CONFIGURATION =====
+# All transactional email (OTPs, notifications, etc.) goes through Brevo -
+# see authentication/utils.py's send_generic_email() and
+# authentication/services/brevo_service.py. Resend is no longer used.
 BREVO_API_KEY = os.environ.get("BREVO_API_KEY")
 
 BREVO_SENDER_EMAIL = "hello@myfundmobile.com"

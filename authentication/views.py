@@ -559,7 +559,7 @@ def generate_otp():
 
 def send_otp_email(user, otp):
     """
-    Sends signup OTP email using Resend2 via send_generic_email.
+    Sends signup OTP email via send_generic_email (Brevo).
     """
 
     subject = f"[OTP-{otp}] Did You Just Signup?"

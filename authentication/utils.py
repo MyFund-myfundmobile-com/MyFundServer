@@ -326,7 +326,10 @@ def send_generic_email(
     extra_context=None,
 ):
     """
-    Smart, universal email sender (RESEND VERSION - SMTP REMOVED)
+    Smart, universal email sender - sends via Brevo (see
+    authentication/services/brevo_service.py). Single/small sends go out
+    inline; sends larger than Brevo's daily cap are queued via Celery and
+    spread across multiple days.
     """
 
     logger.info(
