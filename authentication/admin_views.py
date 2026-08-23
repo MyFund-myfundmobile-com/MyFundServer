@@ -19,7 +19,7 @@ from .models import (
     WithdrawalsRequestToAdmin,
     Property,
 )
-from .serializers import UserSerializer, AdminUserListSerializer
+from .serializers import UserSerializer, AdminUserListSerializer, AdminTransactionListSerializer
 from .utils import grant_user_ambassador_status, revoke_user_ambassador_status
 from django.db.models.functions import ExtractMonth, ExtractYear, Coalesce, Cast
  
@@ -810,6 +810,41 @@ USER_LIST_BOOLEAN_FILTERS = (
 )
 
 
+def _build_admin_user_queryset(request):
+    """
+    Shared search/filter logic behind all_users_list and
+    admin_user_emails_for_segment, so the two endpoints (paginated browse
+    vs. capped email-recipient lookup) can't drift out of sync on what
+    "matches this segment" means. Returns (queryset, filters_applied),
+    ordered by -date_joined; callers paginate/slice/cap as needed.
+    """
+    search = request.GET.get('search', '').strip()
+    queryset = CustomUser.objects.filter(is_deleted=False)
+
+    if search:
+        queryset = queryset.filter(
+            Q(first_name__icontains=search) |
+            Q(last_name__icontains=search) |
+            Q(email__icontains=search) |
+            Q(phone_number__icontains=search)
+        )
+
+    filters_applied = {"search": search}
+
+    for field in USER_LIST_BOOLEAN_FILTERS:
+        parsed = _parse_bool_param(request.GET.get(field))
+        if parsed is not None:
+            queryset = queryset.filter(**{field: parsed})
+            filters_applied[field] = parsed
+
+    kyc_status = request.GET.get('kyc_status', '').strip()
+    if kyc_status:
+        queryset = queryset.filter(kyc_status=kyc_status)
+        filters_applied["kyc_status"] = kyc_status
+
+    return queryset.order_by('-date_joined'), filters_applied
+
+
 @api_view(['GET'])
 @permission_classes([IsAdminUser])
 def all_users_list(request):
@@ -832,33 +867,8 @@ def all_users_list(request):
         limit = 50
     limit = min(max(limit, 1), 200)  # keep a single page request cheap
 
-    search = request.GET.get('search', '').strip()
-
     try:
-        queryset = CustomUser.objects.filter(is_deleted=False)
-
-        if search:
-            queryset = queryset.filter(
-                Q(first_name__icontains=search) |
-                Q(last_name__icontains=search) |
-                Q(email__icontains=search) |
-                Q(phone_number__icontains=search)
-            )
-
-        filters_applied = {"search": search}
-
-        for field in USER_LIST_BOOLEAN_FILTERS:
-            parsed = _parse_bool_param(request.GET.get(field))
-            if parsed is not None:
-                queryset = queryset.filter(**{field: parsed})
-                filters_applied[field] = parsed
-
-        kyc_status = request.GET.get('kyc_status', '').strip()
-        if kyc_status:
-            queryset = queryset.filter(kyc_status=kyc_status)
-            filters_applied["kyc_status"] = kyc_status
-
-        queryset = queryset.order_by('-date_joined')
+        queryset, filters_applied = _build_admin_user_queryset(request)
 
         total_count = queryset.count()
         total_pages = (total_count + limit - 1) // limit if total_count else 0
@@ -878,6 +888,57 @@ def all_users_list(request):
             "total_pages": total_pages,
             "filters_applied": filters_applied,
             "data": serializer.data
+        })
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
+
+
+# Cap on how many recipient emails a single campaign send can pull back in
+# one go - protects against an accidental "no filters" blast being built
+# from an unbounded in-memory list. 10,000 is comfortably above the current
+# user base while still being a sane hard ceiling.
+MAX_SEGMENT_EMAIL_RECIPIENTS = 10000
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def admin_user_emails_for_segment(request):
+    """
+    GET /api/admin/users/emails/?is_ambassador=true&count_only=true
+    Same filters as all_users_list (via _build_admin_user_queryset), but
+    returns matching emails instead of a paginated user list - backs the
+    mobile admin Email tab's "who am I about to send this to" recipient
+    picker. With count_only=true, only a cheap count is computed (no email
+    list built) - used to show a live "N recipients" preview before the
+    admin actually commits to sending.
+    """
+    try:
+        queryset, filters_applied = _build_admin_user_queryset(request)
+        # Only ever email users who can actually receive mail.
+        queryset = queryset.exclude(email__isnull=True).exclude(email__exact='')
+
+        count_only = _parse_bool_param(request.GET.get('count_only')) or False
+
+        total_count = queryset.count()
+
+        if count_only:
+            return Response({
+                "count": total_count,
+                "filters_applied": filters_applied,
+            })
+
+        truncated = total_count > MAX_SEGMENT_EMAIL_RECIPIENTS
+        emails = list(
+            queryset.values_list('email', flat=True)[:MAX_SEGMENT_EMAIL_RECIPIENTS]
+        )
+
+        return Response({
+            "count": total_count,
+            "returned_count": len(emails),
+            "truncated": truncated,
+            "emails": emails,
+            "filters_applied": filters_applied,
         })
 
     except Exception as e:
@@ -2320,6 +2381,87 @@ def property_inventory(request):
 
         cache.set(cache_key, response_data, 900)
         return Response(response_data)
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
+
+
+# Exact-match filters exposed here, matching Django's own TransactionAdmin
+# list_filter fields, for the mobile admin Transactions tab's filter chips.
+TRANSACTION_LIST_EXACT_FILTERS = ('transaction_type', 'status', 'source', 'credited_to')
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def all_transactions_list(request):
+    """
+    GET /api/admin/transactions/list?page=1&limit=50&search=john
+        &transaction_type=credit&status=confirmed&source=WALLET
+        &credited_to=SAVINGS&date_from=YYYY-MM-DD&date_to=YYYY-MM-DD
+    Paginated, searchable, filterable transaction list - same shape and
+    conventions as all_users_list, for the mobile admin Transactions tab.
+    """
+    try:
+        page = max(1, int(request.GET.get('page', 1)))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        limit = int(request.GET.get('limit', 50))
+    except (TypeError, ValueError):
+        limit = 50
+    limit = min(max(limit, 1), 200)
+
+    search = request.GET.get('search', '').strip()
+
+    try:
+        queryset = Transaction.objects.select_related('user').all()
+
+        if search:
+            queryset = queryset.filter(
+                Q(user__first_name__icontains=search) |
+                Q(user__last_name__icontains=search) |
+                Q(user__email__icontains=search) |
+                Q(transaction_id__icontains=search) |
+                Q(description__icontains=search)
+            )
+
+        filters_applied = {"search": search}
+
+        for field in TRANSACTION_LIST_EXACT_FILTERS:
+            value = request.GET.get(field, '').strip()
+            if value:
+                queryset = queryset.filter(**{field: value})
+                filters_applied[field] = value
+
+        date_from = request.GET.get('date_from', '').strip()
+        if date_from:
+            queryset = queryset.filter(date__date__gte=date_from)
+            filters_applied['date_from'] = date_from
+
+        date_to = request.GET.get('date_to', '').strip()
+        if date_to:
+            queryset = queryset.filter(date__date__lte=date_to)
+            filters_applied['date_to'] = date_to
+
+        queryset = queryset.order_by('-date')
+
+        total_count = queryset.count()
+        total_pages = (total_count + limit - 1) // limit if total_count else 0
+
+        start_idx = (page - 1) * limit
+        end_idx = start_idx + limit
+        transactions = queryset[start_idx:end_idx]
+
+        serializer = AdminTransactionListSerializer(transactions, many=True)
+
+        return Response({
+            "page": page,
+            "limit": limit,
+            "total_count": total_count,
+            "total_pages": total_pages,
+            "filters_applied": filters_applied,
+            "data": serializer.data,
+        })
 
     except Exception as e:
         return Response({"error": str(e)}, status=500)

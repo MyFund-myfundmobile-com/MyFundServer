@@ -234,3 +234,58 @@ class UpdateUserStatusTest(TestCase):
     def test_nonexistent_user_404(self):
         response = self._post("is_ambassador", True, user_id=999999)
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class AdminUserEmailsForSegmentTest(TestCase):
+    """
+    GET /api/admin/users/emails/ - backs the mobile Email tab's recipient
+    picker. Reuses the same filter helper as all_users_list, so this only
+    needs to check the parts that differ: count_only mode, the emails
+    list, and users with no email being excluded.
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        self.staff = _make_user("staff20@example.com", "94000000001", is_staff=True)
+        self.client.force_authenticate(user=self.staff)
+
+        _make_user(
+            "amb.segment@example.com",
+            "94000000002",
+            is_ambassador=True,
+        )
+        _make_user("plain.segment@example.com", "94000000003")
+
+    def test_non_staff_rejected(self):
+        regular = _make_user("regular20@example.com", "94000000004")
+        self.client.force_authenticate(user=regular)
+        response = self.client.get(reverse("admin_user_emails_for_segment"))
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_count_only_returns_no_email_list(self):
+        response = self.client.get(
+            reverse("admin_user_emails_for_segment"),
+            {"is_ambassador": "true", "count_only": "true"},
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertNotIn("emails", response.data)
+
+    def test_full_list_returns_matching_emails(self):
+        response = self.client.get(reverse("admin_user_emails_for_segment"))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        # staff + ambassador + plain = 3
+        self.assertEqual(response.data["count"], 3)
+        self.assertIn("amb.segment@example.com", response.data["emails"])
+        self.assertIn("plain.segment@example.com", response.data["emails"])
+        self.assertFalse(response.data["truncated"])
+
+    def test_users_without_email_excluded(self):
+        # CustomUser.email is unique/required in practice, but guard the
+        # endpoint itself against a blank email slipping into a send.
+        blank_email_user = _make_user("placeholder1@example.com", "94000000005")
+        blank_email_user.email = ""
+        blank_email_user.save(update_fields=["email"])
+
+        response = self.client.get(reverse("admin_user_emails_for_segment"))
+        self.assertNotIn("", response.data["emails"])

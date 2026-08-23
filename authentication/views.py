@@ -9058,7 +9058,7 @@ def resubscribe_user(request):
 
 
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 from rest_framework import status
 from .utils import send_generic_email
@@ -9068,7 +9068,7 @@ logger = logging.getLogger(__name__)
 
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAdminUser])
 def send_email(request):
     """
     Admin sends email via Unlayer modal.
@@ -9220,6 +9220,7 @@ import logging
 
 
 @api_view(["POST"])
+@permission_classes([IsAdminUser])
 def save_template(request):
     try:
         data = request.data
@@ -9253,6 +9254,7 @@ def save_template(request):
 
 
 @api_view(["GET"])
+@permission_classes([IsAdminUser])
 def get_templates(request):
     try:
         templates = EmailTemplate.objects.all()
@@ -9264,6 +9266,7 @@ def get_templates(request):
 
 
 @api_view(["DELETE"])
+@permission_classes([IsAdminUser])
 def delete_template(request, template_id):
     try:
         logger.info(
@@ -9287,6 +9290,7 @@ def delete_template(request, template_id):
 
 
 @api_view(["GET"])
+@permission_classes([IsAdminUser])
 def get_template(request, template_id):
     try:
         template = EmailTemplate.objects.get(id=template_id)
@@ -9300,6 +9304,7 @@ def get_template(request, template_id):
 
 @csrf_exempt
 @api_view(["PUT"])
+@permission_classes([IsAdminUser])
 def update_template(request, template_id):
     try:
         template = EmailTemplate.objects.get(id=template_id)

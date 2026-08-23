@@ -245,6 +245,45 @@ class AdminUserListSerializer(UserSerializer):
         ]
 
 
+from .models import Transaction as _AdminTransaction
+
+
+class AdminTransactionListSerializer(serializers.ModelSerializer):
+    """
+    Transaction fields plus nested minimal user identity (email/name) -
+    used only by the admin-gated all_transactions_list endpoint, which
+    needs to show who a transaction belongs to without a second lookup.
+    """
+
+    user_email = serializers.EmailField(source="user.email", read_only=True)
+    user_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = _AdminTransaction
+        fields = [
+            "id",
+            "transaction_id",
+            "user",
+            "user_email",
+            "user_name",
+            "transaction_type",
+            "status",
+            "source",
+            "credited_to",
+            "amount",
+            "service_charge",
+            "total_amount",
+            "balance_before",
+            "balance_after",
+            "description",
+            "date",
+            "time",
+        ]
+
+    def get_user_name(self, obj):
+        return f"{obj.user.first_name} {obj.user.last_name}".strip()
+
+
 from authentication.models import CustomUser
 
 
