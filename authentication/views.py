@@ -9134,35 +9134,61 @@ def send_email(request):
 
         logger.info(f"📧 send_generic_email result: {result}")
 
-        # Handle the result based on status
+        # Handle the result based on status. send_generic_email's inline
+        # path always reports status "completed" even when every single
+        # send failed at Brevo (each failure is caught per-recipient and
+        # tallied into `failed`/`failed_emails`, not raised) - so
+        # "completed" on its own does NOT mean delivered. Must check
+        # sent/failed counts to actually confirm Brevo accepted the send,
+        # otherwise a total Brevo failure (bad API key, unverified sender,
+        # etc.) silently reports back as success.
         if result["status"] == "completed":
-            logger.info(f"✅ Email send completed: {result['sent']} sent")
+            sent = result["sent"]
+            failed = result.get("failed", 0)
+
+            if sent == 0:
+                reason = (result.get("failure_reasons") or ["Unknown error"])[0]
+                logger.error(f"❌ Brevo delivered to none of {failed} recipient(s): {reason}")
+                return Response(
+                    {
+                        "status": "error",
+                        "message": f"Brevo did not deliver to any recipient. {reason}",
+                        "sent": 0,
+                        "failed": failed,
+                        "total": len(cleaned_recipients),
+                        "failed_emails": result.get("failed_emails", []),
+                        "failure_reasons": result.get("failure_reasons", []),
+                        "method": "inline",
+                    },
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+
+            if failed > 0:
+                logger.warning(f"⚠️ Partial email send: {sent} sent, {failed} failed")
+                return Response(
+                    {
+                        "status": "partial",
+                        "message": f"Email sent to {sent} recipient(s), {failed} failed via Brevo.",
+                        "sent": sent,
+                        "failed": failed,
+                        "total": len(cleaned_recipients),
+                        "failed_emails": result.get("failed_emails", []),
+                        "failure_reasons": result.get("failure_reasons", []),
+                        "method": "inline",
+                    },
+                    status=status.HTTP_207_MULTI_STATUS,
+                )
+
+            logger.info(f"✅ Email confirmed delivered via Brevo: {sent} sent")
             return Response(
                 {
                     "status": "success",
-                    "message": f"Email sent successfully to {result['sent']} recipients!",
-                    "sent": result["sent"],
+                    "message": f"Brevo confirmed delivery to {sent} recipient(s).",
+                    "sent": sent,
                     "total": len(cleaned_recipients),
                     "method": "inline",
                 },
                 status=status.HTTP_200_OK,
-            )
-
-        elif result["status"] == "partial":
-            logger.warning(
-                f"⚠️ Partial email send: {result['sent']} sent, {result['failed']} failed"
-            )
-            return Response(
-                {
-                    "status": "partial",
-                    "message": f"Email sent to {result['sent']} recipients, {result['failed']} failed.",
-                    "sent": result["sent"],
-                    "failed": result["failed"],
-                    "total": len(cleaned_recipients),
-                    "failed_emails": result.get("failed_emails", []),
-                    "method": "inline",
-                },
-                status=status.HTTP_207_MULTI_STATUS,
             )
 
         elif result["status"] == "queued":

@@ -97,4 +97,55 @@ class AdminEmailPermissionTest(TestCase):
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], "success")
         mock_send.assert_called_once()
+
+    @patch("authentication.views.send_generic_email")
+    def test_send_reports_error_when_brevo_delivers_to_no_one(self, mock_send):
+        # send_generic_email's inline path reports "completed" even when
+        # every recipient failed at Brevo (each failure is caught and
+        # tallied, not raised) - the view must not translate that into a
+        # false "success" just because nothing raised.
+        mock_send.return_value = {
+            "status": "completed",
+            "sent": 0,
+            "failed": 1,
+            "failed_emails": ["recipient@example.com"],
+            "failure_reasons": ["recipient@example.com: ApiException: Unauthorized"],
+        }
+        self.client.force_authenticate(user=self.staff)
+        response = self.client.post(
+            reverse("send_email"),
+            {
+                "subject": "Hello",
+                "body": "<p>Hello</p>",
+                "recipients": ["recipient@example.com"],
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        self.assertEqual(response.data["status"], "error")
+        self.assertIn("Unauthorized", response.data["message"])
+
+    @patch("authentication.views.send_generic_email")
+    def test_send_reports_partial_when_some_recipients_fail(self, mock_send):
+        mock_send.return_value = {
+            "status": "completed",
+            "sent": 1,
+            "failed": 1,
+            "failed_emails": ["bad@example.com"],
+            "failure_reasons": ["bad@example.com: ApiException: Invalid email"],
+        }
+        self.client.force_authenticate(user=self.staff)
+        response = self.client.post(
+            reverse("send_email"),
+            {
+                "subject": "Hello",
+                "body": "<p>Hello</p>",
+                "recipients": ["good@example.com", "bad@example.com"],
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_207_MULTI_STATUS)
+        self.assertEqual(response.data["status"], "partial")
+        self.assertEqual(response.data["failed_emails"], ["bad@example.com"])
