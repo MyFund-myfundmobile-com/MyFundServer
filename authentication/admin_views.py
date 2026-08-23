@@ -9,7 +9,16 @@ from datetime import timedelta, datetime
 from dateutil.relativedelta import relativedelta
 from django.core.cache import cache
 from decimal import Decimal
-from .models import CustomUser, Transaction, MonthlySavings, TopSaverHistory
+from .models import (
+    CustomUser,
+    Transaction,
+    MonthlySavings,
+    TopSaverHistory,
+    TargetSavings,
+    TargetSavingsCompletion,
+    WithdrawalsRequestToAdmin,
+    Property,
+)
 from .serializers import UserSerializer
 from django.db.models.functions import ExtractMonth, ExtractYear, Coalesce, Cast
  
@@ -24,7 +33,7 @@ from django.db.models.functions import ExtractMonth, ExtractYear, Coalesce, Cast
 from dateutil.relativedelta import relativedelta
 from django.db.models import Sum, Count, Q, F, Value, DecimalField
 from django.db.models.functions import Coalesce
-from django.db.models import OuterRef, Subquery, IntegerField
+from django.db.models import OuterRef, Subquery, Exists, IntegerField
 from django.db.models.functions import TruncMonth
 
 def get_monthly_advanced_metrics(months=12):
@@ -1671,9 +1680,432 @@ def churn_rate(request):
             "churn_rate": round(churn_rate, 2),
             "retention_rate": round(100 - churn_rate, 2)
         }
-        
+
         cache.set(cache_key, response_data, 900)
         return Response(response_data)
-        
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
+
+
+# ============================================================================
+# ADMIN METRICS DASHBOARD (mobile app - 7-category overview)
+# ============================================================================
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def signup_metrics(request):
+    """
+    GET /api/admin/metrics/signups?month=current
+    Returns new-signup totals for the month vs the prior month, a
+    week-by-week breakdown within the month, and how many of the month's
+    new signups have made at least one confirmed SAVINGS/INVESTMENT credit
+    transaction (i.e. "started saving").
+    """
+    month_param = request.GET.get('month', 'current')
+
+    cache_key = f"metrics:signups:{month_param}"
+    cached_data = cache.get(cache_key)
+
+    if cached_data:
+        return Response(cached_data)
+
+    try:
+        if month_param == 'current':
+            month_start = timezone.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        else:
+            date_obj = datetime.strptime(month_param, '%Y-%m')
+            month_start = timezone.make_aware(date_obj.replace(day=1))
+
+        month_end = month_start + relativedelta(months=1)
+        prev_month_start = month_start - relativedelta(months=1)
+
+        this_month_total = CustomUser.objects.filter(
+            date_joined__gte=month_start, date_joined__lt=month_end, is_deleted=False
+        ).count()
+        last_month_total = CustomUser.objects.filter(
+            date_joined__gte=prev_month_start, date_joined__lt=month_start, is_deleted=False
+        ).count()
+
+        if last_month_total > 0:
+            growth_rate = ((this_month_total - last_month_total) / last_month_total) * 100
+        else:
+            growth_rate = 100.0 if this_month_total > 0 else 0.0
+        growth_rate_str = f"{'+' if growth_rate >= 0 else ''}{round(growth_rate, 1)}%"
+
+        # Week-by-week breakdown within the month. Week 4 absorbs any
+        # trailing days in months longer than 28 days, rather than trying
+        # to create a partial 5th week.
+        days_in_month = (month_end - month_start).days
+        weekly_counts = [0, 0, 0, 0]
+        new_users_qs = CustomUser.objects.filter(
+            date_joined__gte=month_start, date_joined__lt=month_end, is_deleted=False
+        )
+        for user in new_users_qs.only('date_joined'):
+            day_of_month = user.date_joined.day
+            week_index = min(3, (day_of_month - 1) // 7)
+            weekly_counts[week_index] += 1
+
+        weekly_breakdown = []
+        for i in range(4):
+            week_start_day = i * 7 + 1
+            week_end_day = days_in_month if i == 3 else min(days_in_month, (i + 1) * 7)
+            weekly_breakdown.append({
+                "week": i + 1,
+                "label": f"{month_start.strftime('%b')} {week_start_day}-{week_end_day}",
+                "count": weekly_counts[i],
+            })
+
+        activated_count = Transaction.objects.filter(
+            user__in=new_users_qs,
+            source__in=['SAVINGS', 'INVESTMENT'],
+            transaction_type='credit',
+            status='confirmed',
+        ).values('user').distinct().count()
+
+        activation_rate = (activated_count / this_month_total * 100) if this_month_total > 0 else 0
+
+        response_data = {
+            "period": month_start.strftime('%B %Y'),
+            "this_month_total": this_month_total,
+            "last_month_total": last_month_total,
+            "growth_rate": growth_rate_str,
+            "weekly_breakdown": weekly_breakdown,
+            "activated_count": activated_count,
+            "activation_rate": round(activation_rate, 2),
+            "not_yet_saved_count": this_month_total - activated_count,
+        }
+
+        cache.set(cache_key, response_data, 300)
+        return Response(response_data)
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def cashflow_summary(request):
+    """
+    GET /api/admin/financial/cashflow-summary
+    Returns total saved, invested, and withdrawn this month vs last month,
+    plus a snapshot of scheduled withdrawal requests. Withdrawals are
+    defined as confirmed debit transactions out of SAVINGS/INVESTMENT,
+    mirroring net_fum_change's "money_withdrawn" definition.
+    """
+    cache_key = "financial:cashflow-summary"
+    cached_data = cache.get(cache_key)
+
+    if cached_data:
+        return Response(cached_data)
+
+    try:
+        now = timezone.now()
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        prev_month_start = month_start - relativedelta(months=1)
+
+        def rate_str(current, previous):
+            if previous > 0:
+                rate = ((current - previous) / previous) * 100
+            else:
+                rate = 100.0 if current > 0 else 0.0
+            return f"{'+' if rate >= 0 else ''}{round(rate, 1)}%"
+
+        def sum_for_range(start, end, transaction_type, source=None, source__in=None):
+            qs = Transaction.objects.filter(
+                date__gte=start, date__lt=end,
+                transaction_type=transaction_type, status='confirmed',
+            )
+            if source:
+                qs = qs.filter(source=source)
+            if source__in:
+                qs = qs.filter(source__in=source__in)
+            return float(qs.aggregate(total=Sum('amount'))['total'] or 0)
+
+        def build_metric(source):
+            this_month = sum_for_range(month_start, now, 'credit', source=source)
+            last_month = sum_for_range(prev_month_start, month_start, 'credit', source=source)
+            return {
+                "this_month": this_month,
+                "last_month": last_month,
+                "growth_rate": rate_str(this_month, last_month),
+            }
+
+        total_saved = build_metric('SAVINGS')
+        total_invested = build_metric('INVESTMENT')
+
+        this_month_withdrawals = sum_for_range(
+            month_start, now, 'debit', source__in=['SAVINGS', 'INVESTMENT']
+        )
+        last_month_withdrawals = sum_for_range(
+            prev_month_start, month_start, 'debit', source__in=['SAVINGS', 'INVESTMENT']
+        )
+        total_withdrawals = {
+            "this_month": this_month_withdrawals,
+            "last_month": last_month_withdrawals,
+            "growth_rate": rate_str(this_month_withdrawals, last_month_withdrawals),
+        }
+
+        scheduled_agg = WithdrawalsRequestToAdmin.objects.filter(
+            withdrawal_type='scheduled'
+        ).aggregate(
+            count=Count('id'),
+            total_amount=Sum('total_amount'),
+            pending_count=Count('id', filter=Q(status='pending')),
+            processing_count=Count('id', filter=Q(status='processing')),
+        )
+
+        response_data = {
+            "period": month_start.strftime('%B %Y'),
+            "total_saved": total_saved,
+            "total_invested": total_invested,
+            "total_withdrawals": total_withdrawals,
+            "scheduled_withdrawals": {
+                "count": scheduled_agg['count'] or 0,
+                "total_amount": float(scheduled_agg['total_amount'] or 0),
+                "pending_count": scheduled_agg['pending_count'] or 0,
+                "processing_count": scheduled_agg['processing_count'] or 0,
+            },
+        }
+
+        cache.set(cache_key, response_data, 300)
+        return Response(response_data)
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def target_savings_breakdown(request):
+    """
+    GET /api/admin/metrics/target-savings
+    Returns target savings counts by outcome: in_progress (still active,
+    not cancelled), and completed/failed/cancelled read from
+    TargetSavingsCompletion - the authoritative record for finished
+    targets, distinct from the live TargetSavings row.
+    """
+    cache_key = "metrics:target-savings-breakdown"
+    cached_data = cache.get(cache_key)
+
+    if cached_data:
+        return Response(cached_data)
+
+    try:
+        in_progress = TargetSavings.objects.filter(is_active=True, is_cancelled=False).count()
+
+        completion_counts = TargetSavingsCompletion.objects.values('status').annotate(count=Count('id'))
+        status_map = {row['status']: row['count'] for row in completion_counts}
+
+        completed = status_map.get('SUCCESS', 0)
+        failed = status_map.get('FAILED', 0)
+        cancelled = status_map.get('CANCELLED', 0)
+
+        response_data = {
+            "in_progress": in_progress,
+            "completed": completed,
+            "failed": failed,
+            "cancelled": cancelled,
+            "total": in_progress + completed + failed + cancelled,
+        }
+
+        cache.set(cache_key, response_data, 900)
+        return Response(response_data)
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def user_activity_segments(request):
+    """
+    GET /api/admin/metrics/user-activity
+    Segments users into active/dormant/inactive:
+      - active: made a confirmed transaction in the last 30 days
+      - dormant: not active, but has a non-zero balance or has made a
+        confirmed transaction at some point (i.e. not a clean zero)
+      - inactive: never made a confirmed transaction and has zero balance
+    Also returns the same breakdown as of the last day of the previous
+    month for a month-over-month comparison. That comparison recomputes
+    transaction recency at that past point in time, but balance fields
+    (savings/investment/wallet) only reflect their CURRENT values - there's
+    no historical balance snapshot table, so the "last month" balance-based
+    half of the dormant/inactive split is an approximation, not a true
+    historical reconstruction.
+    Deliberately NOT using CustomUser.updated_at as an activity proxy (see
+    user_metrics_chart) - that field changes on almost any save and doesn't
+    reflect real transaction activity.
+    """
+    cache_key = "metrics:user-activity-segments"
+    cached_data = cache.get(cache_key)
+
+    if cached_data:
+        return Response(cached_data)
+
+    try:
+        def segment_counts(as_of):
+            recent_threshold = as_of - timedelta(days=30)
+
+            recent_tx = Transaction.objects.filter(
+                user=OuterRef('pk'), status='confirmed',
+                date__gte=recent_threshold, date__lte=as_of,
+            )
+            any_tx = Transaction.objects.filter(
+                user=OuterRef('pk'), status='confirmed', date__lte=as_of,
+            )
+
+            users = CustomUser.objects.filter(is_deleted=False).annotate(
+                has_recent_tx=Exists(recent_tx),
+                has_any_tx=Exists(any_tx),
+            )
+
+            total = users.count()
+            active = users.filter(has_recent_tx=True).count()
+            has_balance_q = Q(savings__gt=0) | Q(investment__gt=0) | Q(wallet__gt=0)
+            dormant = users.filter(
+                Q(has_recent_tx=False) & (has_balance_q | Q(has_any_tx=True))
+            ).count()
+            inactive = total - active - dormant
+
+            return active, dormant, inactive, total
+
+        now = timezone.now()
+        this_active, this_dormant, this_inactive, total_users = segment_counts(now)
+
+        last_month_point = now.replace(day=1) - timedelta(days=1)
+        last_active, last_dormant, last_inactive, _ = segment_counts(last_month_point)
+
+        def rate_str(current, previous):
+            if previous > 0:
+                rate = ((current - previous) / previous) * 100
+            else:
+                rate = 100.0 if current > 0 else 0.0
+            return f"{'+' if rate >= 0 else ''}{round(rate, 1)}%"
+
+        response_data = {
+            "as_of": now.date().isoformat(),
+            "active": {
+                "this_month": this_active, "last_month": last_active,
+                "growth_rate": rate_str(this_active, last_active),
+            },
+            "dormant": {
+                "this_month": this_dormant, "last_month": last_dormant,
+                "growth_rate": rate_str(this_dormant, last_dormant),
+            },
+            "inactive": {
+                "this_month": this_inactive, "last_month": last_inactive,
+                "growth_rate": rate_str(this_inactive, last_inactive),
+            },
+            "total_users": total_users,
+        }
+
+        cache.set(cache_key, response_data, 1800)
+        return Response(response_data)
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def transaction_type_breakdown(request):
+    """
+    GET /api/admin/metrics/transaction-types?period=current_month
+    Returns confirmed transaction counts/amounts split by credit vs debit
+    for the given period, plus how many carried a service charge.
+    """
+    period = request.GET.get('period', 'current_month')
+
+    cache_key = f"metrics:transaction-types:{period}"
+    cached_data = cache.get(cache_key)
+
+    if cached_data:
+        return Response(cached_data)
+
+    try:
+        now = timezone.now()
+        if period == '30days':
+            start_date = now - timedelta(days=30)
+        elif period == '7days':
+            start_date = now - timedelta(days=7)
+        else:
+            period = 'current_month'
+            start_date = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+        base_qs = Transaction.objects.filter(status='confirmed', date__gte=start_date)
+
+        credit_agg = base_qs.filter(transaction_type='credit').aggregate(
+            count=Count('id'), total_amount=Sum('amount')
+        )
+        debit_agg = base_qs.filter(transaction_type='debit').aggregate(
+            count=Count('id'), total_amount=Sum('amount')
+        )
+        charges_agg = base_qs.filter(service_charge__gt=0).aggregate(
+            count=Count('id'), total_service_charge=Sum('service_charge')
+        )
+
+        response_data = {
+            "period": period,
+            "credit": {
+                "count": credit_agg['count'] or 0,
+                "total_amount": float(credit_agg['total_amount'] or 0),
+            },
+            "debit": {
+                "count": debit_agg['count'] or 0,
+                "total_amount": float(debit_agg['total_amount'] or 0),
+            },
+            "with_charges": {
+                "count": charges_agg['count'] or 0,
+                "total_service_charge": float(charges_agg['total_service_charge'] or 0),
+            },
+        }
+
+        cache.set(cache_key, response_data, 300)
+        return Response(response_data)
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def property_inventory(request):
+    """
+    GET /api/admin/metrics/properties
+    Returns total properties bought (direct purchases only -
+    CustomUser.properties is incremented on every successful
+    BuyPropertyView purchase) and total units still available across
+    listings. GroupBuy-acquired ownership is reported separately by
+    /api/admin/multipliers/groupbuys and never touches
+    CustomUser.properties, so these two figures don't overlap.
+    """
+    cache_key = "metrics:property-inventory"
+    cached_data = cache.get(cache_key)
+
+    if cached_data:
+        return Response(cached_data)
+
+    try:
+        total_properties_bought = CustomUser.objects.filter(is_deleted=False).aggregate(
+            total=Sum('properties')
+        )['total'] or 0
+
+        property_agg = Property.objects.aggregate(
+            total_units_available=Sum('units_available'),
+            total_listings=Count('id'),
+        )
+        listings_with_availability = Property.objects.filter(units_available__gt=0).count()
+
+        response_data = {
+            "total_properties_bought": total_properties_bought,
+            "total_units_available": property_agg['total_units_available'] or 0,
+            "listings_with_availability": listings_with_availability,
+            "total_listings": property_agg['total_listings'] or 0,
+        }
+
+        cache.set(cache_key, response_data, 900)
+        return Response(response_data)
+
     except Exception as e:
         return Response({"error": str(e)}, status=500)

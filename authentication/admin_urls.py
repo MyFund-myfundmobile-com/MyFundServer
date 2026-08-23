@@ -105,4 +105,37 @@ urlpatterns = [
     # ========================================================================
     path("users/recent", admin_views.recent_signups, name="admin_recent_signups"),
     path("users/list", admin_views.all_users_list, name="admin_all_users_list"),
+    # ========================================================================
+    # ADMIN METRICS DASHBOARD (mobile app - 7-category overview)
+    # ========================================================================
+    path(
+        "metrics/signups",
+        admin_views.signup_metrics,
+        name="admin_signup_metrics",
+    ),
+    path(
+        "financial/cashflow-summary",
+        admin_views.cashflow_summary,
+        name="admin_cashflow_summary",
+    ),
+    path(
+        "metrics/target-savings",
+        admin_views.target_savings_breakdown,
+        name="admin_target_savings_breakdown",
+    ),
+    path(
+        "metrics/user-activity",
+        admin_views.user_activity_segments,
+        name="admin_user_activity_segments",
+    ),
+    path(
+        "metrics/transaction-types",
+        admin_views.transaction_type_breakdown,
+        name="admin_transaction_type_breakdown",
+    ),
+    path(
+        "metrics/properties",
+        admin_views.property_inventory,
+        name="admin_property_inventory",
+    ),
 ]
