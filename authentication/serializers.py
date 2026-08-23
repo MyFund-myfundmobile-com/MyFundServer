@@ -173,24 +173,6 @@ class UserSerializer(serializers.ModelSerializer):
     def get_date_joined(self, obj):
         return obj.date_joined.strftime("%d %b. %Y   |   %I:%M%p")
 
-
-class AdminUserListSerializer(UserSerializer):
-    """
-    UserSerializer plus the admin-only status flags (is_banned, is_active,
-    is_staff, is_deleted) that regular self-profile serialization
-    deliberately leaves out - used only by admin-gated endpoints
-    (all_users_list, admin_user_detail) so these fields never leak into a
-    user's own profile view.
-    """
-
-    class Meta(UserSerializer.Meta):
-        fields = UserSerializer.Meta.fields + [
-            "is_banned",
-            "is_active",
-            "is_staff",
-            "is_deleted",
-        ]
-
     def get_profile_picture(self, obj):
         if isinstance(obj.profile_picture, str):
             if "http" not in obj.profile_picture:
@@ -243,6 +225,24 @@ class AdminUserListSerializer(UserSerializer):
                 UserPassword.objects.create(user=instance, password=password)
 
         return super().update(instance, validated_data)
+
+
+class AdminUserListSerializer(UserSerializer):
+    """
+    UserSerializer plus the admin-only status flags (is_banned, is_active,
+    is_staff, is_deleted) that regular self-profile serialization
+    deliberately leaves out - used only by admin-gated endpoints
+    (all_users_list, admin_user_detail) so these fields never leak into a
+    user's own profile view.
+    """
+
+    class Meta(UserSerializer.Meta):
+        fields = UserSerializer.Meta.fields + [
+            "is_banned",
+            "is_active",
+            "is_staff",
+            "is_deleted",
+        ]
 
 
 from authentication.models import CustomUser
