@@ -19,7 +19,8 @@ from .models import (
     WithdrawalsRequestToAdmin,
     Property,
 )
-from .serializers import UserSerializer
+from .serializers import UserSerializer, AdminUserListSerializer
+from .utils import grant_user_ambassador_status, revoke_user_ambassador_status
 from django.db.models.functions import ExtractMonth, ExtractYear, Coalesce, Cast
  
 
@@ -789,59 +790,183 @@ def recent_signups(request):
         return Response({"error": str(e)}, status=500)
 
 
+def _parse_bool_param(value):
+    """None means "not provided, don't filter on this" - distinct from an
+    explicit false, which must still filter."""
+    if value is None or value == '':
+        return None
+    return value.strip().lower() in ('true', '1', 'yes')
+
+
+# Boolean CustomUser fields exposed as filters here, matching the same
+# ones Django's own CustomUserAdmin.list_filter exposes (admin.py) so this
+# endpoint can back a "filter like in Django" list UI.
+USER_LIST_BOOLEAN_FILTERS = (
+    'is_ambassador',
+    'is_staff',
+    'is_banned',
+    'is_active',
+    'is_hired_referrer',
+)
+
+
 @api_view(['GET'])
 @permission_classes([IsAdminUser])
 def all_users_list(request):
     """
-    GET /api/admin/users/list?page=1&limit=50&search=john&wealth_stage=5
-    Paginated list with filters
+    GET /api/admin/users/list?page=1&limit=50&search=john
+        &is_ambassador=true&is_staff=false&is_banned=false&is_active=true
+        &is_hired_referrer=true&kyc_status=approved
+    Paginated, searchable, filterable user list. Filters mirror Django's
+    own CustomUserAdmin.list_filter (is_staff/is_active/is_banned/
+    is_ambassador/is_hired_referrer/kyc_status) so the mobile admin Users
+    screen can offer the same filtering Django admin does.
     """
-    page = int(request.GET.get('page', 1))
-    limit = int(request.GET.get('limit', 50))
-    search = request.GET.get('search', '')
-    wealth_stage = request.GET.get('wealth_stage', '')
-    
+    try:
+        page = max(1, int(request.GET.get('page', 1)))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        limit = int(request.GET.get('limit', 50))
+    except (TypeError, ValueError):
+        limit = 50
+    limit = min(max(limit, 1), 200)  # keep a single page request cheap
+
+    search = request.GET.get('search', '').strip()
+
     try:
         queryset = CustomUser.objects.filter(is_deleted=False)
-        
-        # Apply search filter
+
         if search:
             queryset = queryset.filter(
                 Q(first_name__icontains=search) |
                 Q(last_name__icontains=search) |
-                Q(email__icontains=search)
+                Q(email__icontains=search) |
+                Q(phone_number__icontains=search)
             )
-        
-        # Apply wealth stage filter (simplified)
-        if wealth_stage:
-            # Implement wealth stage filtering based on your logic
-            pass
-        
+
+        filters_applied = {"search": search}
+
+        for field in USER_LIST_BOOLEAN_FILTERS:
+            parsed = _parse_bool_param(request.GET.get(field))
+            if parsed is not None:
+                queryset = queryset.filter(**{field: parsed})
+                filters_applied[field] = parsed
+
+        kyc_status = request.GET.get('kyc_status', '').strip()
+        if kyc_status:
+            queryset = queryset.filter(kyc_status=kyc_status)
+            filters_applied["kyc_status"] = kyc_status
+
         queryset = queryset.order_by('-date_joined')
-        
+
         total_count = queryset.count()
-        total_pages = (total_count + limit - 1) // limit
-        
-        # Pagination
+        total_pages = (total_count + limit - 1) // limit if total_count else 0
+
         start_idx = (page - 1) * limit
         end_idx = start_idx + limit
         users = queryset[start_idx:end_idx]
-        
-        # Serialize users
-        serializer = UserSerializer(users, many=True)
-        
+
+        serializer = AdminUserListSerializer(
+            users, many=True, context={"request": request}
+        )
+
         return Response({
             "page": page,
             "limit": limit,
             "total_count": total_count,
             "total_pages": total_pages,
-            "filters_applied": {
-                "search": search,
-                "wealth_stage": wealth_stage
-            },
+            "filters_applied": filters_applied,
             "data": serializer.data
         })
-        
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def admin_user_detail(request, user_id):
+    """
+    GET /api/admin/users/<user_id>/
+    Full profile for a single user - no dedicated per-user admin detail
+    endpoint existed before this (the webapp's admin Users page has no
+    detail view at all, just a table).
+    """
+    try:
+        user = CustomUser.objects.get(pk=user_id, is_deleted=False)
+    except CustomUser.DoesNotExist:
+        return Response({"error": "User not found."}, status=404)
+    except (ValueError, TypeError):
+        return Response({"error": "Invalid user id."}, status=400)
+
+    serializer = AdminUserListSerializer(user, context={"request": request})
+    return Response(serializer.data)
+
+
+# Fields an admin can toggle for a user, same set Django's own /admin/
+# exposes as bulk actions (make/revoke ambassador, ban/unban, staff
+# toggle) - kept as an explicit whitelist rather than allowing arbitrary
+# field mass-assignment.
+USER_STATUS_TOGGLEABLE_FIELDS = {'is_ambassador', 'is_banned', 'is_staff', 'is_active'}
+
+
+@api_view(['POST'])
+@permission_classes([IsAdminUser])
+def update_user_status(request, user_id):
+    """
+    POST /api/admin/users/<user_id>/update-status/
+    Body: {"field": "is_ambassador", "value": true}
+    Toggles one whitelisted boolean status field on a user - the same
+    actions Django's own /admin/ panel exposes as bulk actions on
+    CustomUserAdmin. is_ambassador goes through
+    grant_user_ambassador_status/revoke_user_ambassador_status (utils.py)
+    so the same push/email notification fires as when this is done via
+    Django admin; is_banned also flips is_active off (matching
+    CustomUserAdmin.ban_user's exact behavior); the rest are a plain
+    attribute set.
+    """
+    field = request.data.get('field')
+    value = request.data.get('value')
+
+    if field not in USER_STATUS_TOGGLEABLE_FIELDS:
+        return Response(
+            {"error": f"Unsupported field '{field}'. Must be one of {sorted(USER_STATUS_TOGGLEABLE_FIELDS)}."},
+            status=400,
+        )
+    if not isinstance(value, bool):
+        return Response({"error": "'value' must be true or false."}, status=400)
+
+    try:
+        user = CustomUser.objects.get(pk=user_id, is_deleted=False)
+    except CustomUser.DoesNotExist:
+        return Response({"error": "User not found."}, status=404)
+    except (ValueError, TypeError):
+        return Response({"error": "Invalid user id."}, status=400)
+
+    try:
+        if field == 'is_ambassador':
+            if value:
+                grant_user_ambassador_status(user)
+            else:
+                revoke_user_ambassador_status(user)
+        elif field == 'is_banned':
+            user.is_banned = value
+            update_fields = ['is_banned']
+            if value:
+                user.is_active = False
+                update_fields.append('is_active')
+            user.save(update_fields=update_fields)
+        else:
+            setattr(user, field, value)
+            user.save(update_fields=[field])
+
+        return Response({
+            "id": user.id,
+            "field": field,
+            "value": getattr(user, field),
+        })
+
     except Exception as e:
         return Response({"error": str(e)}, status=500)
 

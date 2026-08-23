@@ -110,6 +110,16 @@ urlpatterns = [
     # ========================================================================
     path("users/recent", admin_views.recent_signups, name="admin_recent_signups"),
     path("users/list", admin_views.all_users_list, name="admin_all_users_list"),
+    path(
+        "users/<int:user_id>/",
+        admin_views.admin_user_detail,
+        name="admin_user_detail",
+    ),
+    path(
+        "users/<int:user_id>/update-status/",
+        admin_views.update_user_status,
+        name="admin_update_user_status",
+    ),
     # ========================================================================
     # ADMIN METRICS DASHBOARD (mobile app - 7-category overview)
     # ========================================================================
