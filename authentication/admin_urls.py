@@ -100,6 +100,11 @@ urlpatterns = [
         admin_views.financial_history_chart,
         name="admin_financial_history_chart",
     ),
+    path(
+        "charts/withdrawals-trend",
+        admin_views.withdrawals_trend_chart,
+        name="admin_withdrawals_trend_chart",
+    ),
     # ========================================================================
     # PRIORITY 3: List Data (Paginated)
     # ========================================================================

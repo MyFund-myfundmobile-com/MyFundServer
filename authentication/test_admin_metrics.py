@@ -31,6 +31,7 @@ ADMIN_METRIC_URL_NAMES = [
     "admin_user_activity_segments",
     "admin_transaction_type_breakdown",
     "admin_property_inventory",
+    "admin_withdrawals_trend_chart",
 ]
 
 
@@ -337,3 +338,35 @@ class SignupMetricsTest(TestCase):
         self.assertEqual(data["weekly_breakdown"][1]["count"], 1)  # w2 (day 10)
         self.assertEqual(data["activated_count"], 1)
         self.assertEqual(data["not_yet_saved_count"], 2)
+
+
+class WithdrawalsTrendChartTest(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.staff = _make_user("staff7@example.com", "80000000001", is_staff=True)
+        self.client.force_authenticate(user=self.staff)
+        user = _make_user("trenduser@example.com", "80000000002")
+
+        now = timezone.now()
+        this_month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        last_month_point = this_month_start - timedelta(days=15)
+
+        _make_transaction(user, "debit", "SAVINGS", 1000, when=now)
+        _make_transaction(user, "debit", "INVESTMENT", 500, when=now)
+        _make_transaction(user, "debit", "SAVINGS", 2000, when=last_month_point)
+        # Wrong type/source - should be excluded from the trend.
+        _make_transaction(user, "credit", "SAVINGS", 9999, when=now)
+        _make_transaction(user, "debit", "WALLET", 9999, when=now)
+
+    def test_withdrawals_trend(self):
+        response = self.client.get(
+            reverse("admin_withdrawals_trend_chart"), {"period": "6months"}
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        data = response.data
+        self.assertEqual(data["period"], "6months")
+        self.assertEqual(len(data["data"]), 2)  # this month + last month
+        # Grouped by (year, month) ascending, so last month sorts first.
+        self.assertEqual(data["data"][0]["amount"], 2000.0)
+        self.assertEqual(data["data"][-1]["amount"], 1500.0)  # 1000 + 500
+        self.assertEqual(data["summary"]["total"], 3500.0)

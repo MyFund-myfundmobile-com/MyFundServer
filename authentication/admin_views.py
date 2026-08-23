@@ -633,6 +633,95 @@ def financial_history_chart(request):
         return Response({"error": str(e)}, status=500)
 
 
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def withdrawals_trend_chart(request):
+    """
+    GET /api/admin/charts/withdrawals-trend?period=6months
+    Shows monthly withdrawal trends using the Transaction model - confirmed
+    debit transactions out of SAVINGS/INVESTMENT, mirroring
+    cashflow_summary's and net_fum_change's withdrawal definition. Same
+    shape/logic as financial_history_chart, just for money going out
+    instead of coming in.
+    """
+    period = request.GET.get('period', '6months')
+
+    cache_key = f"chart:withdrawals-trend:{period}"
+    cached_data = cache.get(cache_key)
+
+    if cached_data:
+        return Response(cached_data)
+
+    try:
+        months = int(period.replace('months', ''))
+        start_date = timezone.now() - relativedelta(months=months)
+
+        queryset = (
+            Transaction.objects.filter(
+                date__gte=start_date,
+                source__in=["SAVINGS", "INVESTMENT"],
+                transaction_type="debit",
+                status="confirmed",
+            )
+            .annotate(month=ExtractMonth("date"), year=ExtractYear("date"))
+            .values("month", "year")
+            .annotate(
+                amount=Sum("amount"),
+                user_count=Count("user", distinct=True),
+            )
+            .order_by("year", "month")
+        )
+
+        data = []
+        prev_amount = None
+        highest = {"month": "", "amount": 0}
+        lowest = {"month": "", "amount": float("inf")}
+
+        for entry in queryset:
+            amount = float(entry["amount"] or 0)
+            month_str = datetime(entry["year"], entry["month"], 1).strftime("%B %Y")
+
+            growth_rate = 0
+            if prev_amount and prev_amount > 0:
+                growth_rate = ((amount - prev_amount) / prev_amount) * 100
+
+            data.append(
+                {
+                    "month": month_str,
+                    "amount": amount,
+                    "growth_rate": f"+{growth_rate:.1f}%" if growth_rate > 0 else f"{growth_rate:.1f}%",
+                    "user_count": entry["user_count"],
+                }
+            )
+
+            if amount > highest["amount"]:
+                highest = {"month": month_str, "amount": amount}
+            if 0 < amount < lowest["amount"]:
+                lowest = {"month": month_str, "amount": amount}
+
+            prev_amount = amount
+
+        total = sum(d["amount"] for d in data)
+        avg_monthly = total / len(data) if data else 0
+
+        response_data = {
+            "period": period,
+            "data": data,
+            "summary": {
+                "total": round(total, 2),
+                "average_monthly": round(avg_monthly, 2),
+                "highest_month": highest["month"],
+                "lowest_month": lowest["month"],
+            },
+        }
+
+        cache.set(cache_key, response_data, 900)  # Cache 15 min
+        return Response(response_data)
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
+
+
 # ============================================================================
 # PRIORITY 3: LIST DATA (Paginated - load on demand)
 # ============================================================================
