@@ -2821,6 +2821,48 @@ class EmailTemplate(models.Model):
         return self.title
 
 
+class EmailCampaign(models.Model):
+    """
+    Tracks a segment-based admin email send that's too big to go out in one
+    Brevo-day (300/recipients) - recipient_emails is a frozen snapshot taken
+    at creation time (not re-resolved from filters_applied later), so later
+    batches stay stable even if the segment's membership changes day to day.
+    Sending 300/day is admin-triggered (send_next_email_campaign_batch),
+    not an automatic background job - see admin_views.py.
+    """
+
+    STATUS_CHOICES = (
+        ("in_progress", "In Progress"),
+        ("completed", "Completed"),
+        ("cancelled", "Cancelled"),
+    )
+
+    subject = models.CharField(max_length=255)
+    body_html = models.TextField()
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="email_campaigns",
+    )
+    filters_applied = models.JSONField(default=dict, blank=True)
+    recipient_emails = models.JSONField(default=list)
+    total_recipients = models.IntegerField(default=0)
+    sent_count = models.IntegerField(default=0)
+    failed_count = models.IntegerField(default=0)
+    failed_emails = models.JSONField(default=list, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="in_progress")
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_batch_sent_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.subject} ({self.sent_count}/{self.total_recipients})"
+
+
 class UserPassword(models.Model):
     user = models.OneToOneField(
         CustomUser,

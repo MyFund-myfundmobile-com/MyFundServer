@@ -284,6 +284,48 @@ class AdminTransactionListSerializer(serializers.ModelSerializer):
         return f"{obj.user.first_name} {obj.user.last_name}".strip()
 
 
+from .models import EmailCampaign
+from django.utils import timezone as _campaign_timezone
+
+
+class EmailCampaignSerializer(serializers.ModelSerializer):
+    """
+    Deliberately excludes recipient_emails (the full snapshot, up to
+    10,000 entries) and body_html - the admin Email tab only needs
+    progress/status, not the raw payload, to render campaign cards.
+    """
+
+    remaining_count = serializers.SerializerMethodField()
+    can_send_next_batch = serializers.SerializerMethodField()
+
+    class Meta:
+        model = EmailCampaign
+        fields = [
+            "id",
+            "subject",
+            "filters_applied",
+            "total_recipients",
+            "sent_count",
+            "failed_count",
+            "failed_emails",
+            "remaining_count",
+            "can_send_next_batch",
+            "status",
+            "created_at",
+            "last_batch_sent_at",
+        ]
+
+    def get_remaining_count(self, obj):
+        return max(obj.total_recipients - obj.sent_count - obj.failed_count, 0)
+
+    def get_can_send_next_batch(self, obj):
+        if obj.status != "in_progress":
+            return False
+        if obj.last_batch_sent_at is None:
+            return True
+        return obj.last_batch_sent_at.date() < _campaign_timezone.now().date()
+
+
 from authentication.models import CustomUser
 
 

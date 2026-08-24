@@ -163,4 +163,28 @@ urlpatterns = [
         admin_views.property_inventory,
         name="admin_property_inventory",
     ),
+    # ========================================================================
+    # EMAIL CAMPAIGNS (mobile app - segment sends batched at Brevo's
+    # daily cap, admin-triggered day to day)
+    # ========================================================================
+    path(
+        "email-campaigns/create/",
+        admin_views.create_email_campaign,
+        name="admin_create_email_campaign",
+    ),
+    path(
+        "email-campaigns/",
+        admin_views.list_email_campaigns,
+        name="admin_list_email_campaigns",
+    ),
+    path(
+        "email-campaigns/<int:campaign_id>/send-next-batch/",
+        admin_views.send_next_email_campaign_batch,
+        name="admin_send_next_email_campaign_batch",
+    ),
+    path(
+        "email-campaigns/<int:campaign_id>/cancel/",
+        admin_views.cancel_email_campaign,
+        name="admin_cancel_email_campaign",
+    ),
 ]

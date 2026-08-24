@@ -18,9 +18,15 @@ from .models import (
     TargetSavingsCompletion,
     WithdrawalsRequestToAdmin,
     Property,
+    EmailCampaign,
 )
-from .serializers import UserSerializer, AdminUserListSerializer, AdminTransactionListSerializer
-from .utils import grant_user_ambassador_status, revoke_user_ambassador_status
+from .serializers import (
+    UserSerializer,
+    AdminUserListSerializer,
+    AdminTransactionListSerializer,
+    EmailCampaignSerializer,
+)
+from .utils import grant_user_ambassador_status, revoke_user_ambassador_status, send_generic_email
 from django.db.models.functions import ExtractMonth, ExtractYear, Coalesce, Cast
  
 
@@ -792,10 +798,15 @@ def recent_signups(request):
 
 def _parse_bool_param(value):
     """None means "not provided, don't filter on this" - distinct from an
-    explicit false, which must still filter."""
+    explicit false, which must still filter. Accepts both query-string
+    values (always strings) and JSON request-body values (native bools),
+    since _build_admin_user_queryset now serves both GET query params and
+    POST JSON bodies."""
     if value is None or value == '':
         return None
-    return value.strip().lower() in ('true', '1', 'yes')
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ('true', '1', 'yes')
 
 
 # Boolean CustomUser fields exposed as filters here, matching the same
@@ -810,15 +821,18 @@ USER_LIST_BOOLEAN_FILTERS = (
 )
 
 
-def _build_admin_user_queryset(request):
+def _build_admin_user_queryset(params):
     """
-    Shared search/filter logic behind all_users_list and
-    admin_user_emails_for_segment, so the two endpoints (paginated browse
-    vs. capped email-recipient lookup) can't drift out of sync on what
-    "matches this segment" means. Returns (queryset, filters_applied),
-    ordered by -date_joined; callers paginate/slice/cap as needed.
+    Shared search/filter logic behind all_users_list,
+    admin_user_emails_for_segment, and create_email_campaign, so none of
+    them can drift out of sync on what "matches this segment" means.
+    `params` is anything dict-like with .get() - request.GET (query
+    string, values always strings) for the GET endpoints, or request.data
+    (JSON body, values may be native bools) for the POST campaign-create
+    endpoint. Returns (queryset, filters_applied), ordered by
+    -date_joined; callers paginate/slice/cap as needed.
     """
-    search = request.GET.get('search', '').strip()
+    search = (params.get('search') or '').strip()
     queryset = CustomUser.objects.filter(is_deleted=False)
 
     if search:
@@ -832,12 +846,12 @@ def _build_admin_user_queryset(request):
     filters_applied = {"search": search}
 
     for field in USER_LIST_BOOLEAN_FILTERS:
-        parsed = _parse_bool_param(request.GET.get(field))
+        parsed = _parse_bool_param(params.get(field))
         if parsed is not None:
             queryset = queryset.filter(**{field: parsed})
             filters_applied[field] = parsed
 
-    kyc_status = request.GET.get('kyc_status', '').strip()
+    kyc_status = (params.get('kyc_status') or '').strip()
     if kyc_status:
         queryset = queryset.filter(kyc_status=kyc_status)
         filters_applied["kyc_status"] = kyc_status
@@ -868,7 +882,7 @@ def all_users_list(request):
     limit = min(max(limit, 1), 200)  # keep a single page request cheap
 
     try:
-        queryset, filters_applied = _build_admin_user_queryset(request)
+        queryset, filters_applied = _build_admin_user_queryset(request.GET)
 
         total_count = queryset.count()
         total_pages = (total_count + limit - 1) // limit if total_count else 0
@@ -914,7 +928,7 @@ def admin_user_emails_for_segment(request):
     admin actually commits to sending.
     """
     try:
-        queryset, filters_applied = _build_admin_user_queryset(request)
+        queryset, filters_applied = _build_admin_user_queryset(request.GET)
         # Only ever email users who can actually receive mail.
         queryset = queryset.exclude(email__isnull=True).exclude(email__exact='')
 
@@ -2462,6 +2476,177 @@ def all_transactions_list(request):
             "filters_applied": filters_applied,
             "data": serializer.data,
         })
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
+
+
+# Brevo's daily sending cap (see authentication/services/brevo_service.py:
+# DAILY_EMAIL_LIMIT) - a campaign batch never exceeds this, and
+# send_next_email_campaign_batch enforces at most one batch per calendar
+# day server-side (not just a client-side courtesy), since that's the
+# actual thing protecting the account from a Brevo overage.
+CAMPAIGN_DAILY_BATCH_LIMIT = 300
+
+
+@api_view(['POST'])
+@permission_classes([IsAdminUser])
+def create_email_campaign(request):
+    """
+    POST /api/admin/email-campaigns/create/
+    Body: {"subject": ..., "body": "<html>...", "is_ambassador": true, ...}
+    Resolves the matching segment via the same filters all_users_list/
+    admin_user_emails_for_segment use, freezes the matching emails into a
+    snapshot (so later daily batches stay stable even if segment
+    membership changes), and immediately sends the first batch (<=300)
+    inline. If the whole segment fits in one batch, the campaign is
+    already "completed" on return - no further action needed. Larger
+    segments stay "in_progress" until send_next_email_campaign_batch is
+    called on subsequent days.
+    """
+    try:
+        subject = (request.data.get('subject') or '').strip()
+        body = (request.data.get('body') or '').strip()
+        if not subject or not body:
+            return Response({"error": "Subject and body are required."}, status=400)
+
+        queryset, filters_applied = _build_admin_user_queryset(request.data)
+        queryset = queryset.exclude(email__isnull=True).exclude(email__exact='')
+
+        total_count = queryset.count()
+        if total_count == 0:
+            return Response({"error": "No users match this segment."}, status=400)
+
+        emails = list(
+            queryset.values_list('email', flat=True)[:MAX_SEGMENT_EMAIL_RECIPIENTS]
+        )
+
+        campaign = EmailCampaign.objects.create(
+            subject=subject,
+            body_html=body,
+            created_by=request.user,
+            filters_applied=filters_applied,
+            recipient_emails=emails,
+            total_recipients=len(emails),
+        )
+
+        first_batch = emails[:CAMPAIGN_DAILY_BATCH_LIMIT]
+        result = send_generic_email(
+            subject=subject,
+            message=body,
+            recipient_list=first_batch,
+            use_celery_threshold=0,  # always inline - this call IS the batch
+        )
+
+        campaign.sent_count = result.get('sent', 0)
+        campaign.failed_count = result.get('failed', 0)
+        campaign.failed_emails = result.get('failed_emails', [])
+        campaign.last_batch_sent_at = timezone.now()
+        if campaign.sent_count + campaign.failed_count >= campaign.total_recipients:
+            campaign.status = 'completed'
+        campaign.save()
+
+        return Response(EmailCampaignSerializer(campaign).data, status=201)
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def list_email_campaigns(request):
+    """
+    GET /api/admin/email-campaigns/
+    Most recent 50 campaigns - this is an internal tool used by two
+    people, not a paginated-at-scale list.
+    """
+    try:
+        campaigns = EmailCampaign.objects.all()[:50]
+        return Response(EmailCampaignSerializer(campaigns, many=True).data)
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
+
+
+@api_view(['POST'])
+@permission_classes([IsAdminUser])
+def send_next_email_campaign_batch(request, campaign_id):
+    """
+    POST /api/admin/email-campaigns/<campaign_id>/send-next-batch/
+    Admin-triggered - there is no automatic background job advancing a
+    campaign. Enforces at most one batch per calendar day.
+    """
+    try:
+        try:
+            campaign = EmailCampaign.objects.get(pk=campaign_id)
+        except EmailCampaign.DoesNotExist:
+            return Response({"error": "Campaign not found."}, status=404)
+
+        if campaign.status != 'in_progress':
+            return Response(
+                {"error": f"Campaign is already {campaign.status}."}, status=400
+            )
+
+        if (
+            campaign.last_batch_sent_at is not None
+            and campaign.last_batch_sent_at.date() >= timezone.now().date()
+        ):
+            return Response(
+                {"error": "A batch was already sent today for this campaign. Try again tomorrow."},
+                status=400,
+            )
+
+        already_attempted = campaign.sent_count + campaign.failed_count
+        next_batch = campaign.recipient_emails[
+            already_attempted:already_attempted + CAMPAIGN_DAILY_BATCH_LIMIT
+        ]
+
+        if not next_batch:
+            campaign.status = 'completed'
+            campaign.save()
+            return Response(EmailCampaignSerializer(campaign).data)
+
+        result = send_generic_email(
+            subject=campaign.subject,
+            message=campaign.body_html,
+            recipient_list=next_batch,
+            use_celery_threshold=0,
+        )
+
+        campaign.sent_count += result.get('sent', 0)
+        campaign.failed_count += result.get('failed', 0)
+        campaign.failed_emails = list(campaign.failed_emails) + result.get('failed_emails', [])
+        campaign.last_batch_sent_at = timezone.now()
+        if campaign.sent_count + campaign.failed_count >= campaign.total_recipients:
+            campaign.status = 'completed'
+        campaign.save()
+
+        return Response(EmailCampaignSerializer(campaign).data)
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
+
+
+@api_view(['POST'])
+@permission_classes([IsAdminUser])
+def cancel_email_campaign(request, campaign_id):
+    """
+    POST /api/admin/email-campaigns/<campaign_id>/cancel/
+    Stops future daily batches - whatever's already been sent stays sent.
+    """
+    try:
+        try:
+            campaign = EmailCampaign.objects.get(pk=campaign_id)
+        except EmailCampaign.DoesNotExist:
+            return Response({"error": "Campaign not found."}, status=404)
+
+        if campaign.status != 'in_progress':
+            return Response(
+                {"error": f"Campaign is already {campaign.status}."}, status=400
+            )
+
+        campaign.status = 'cancelled'
+        campaign.save(update_fields=['status'])
+        return Response(EmailCampaignSerializer(campaign).data)
 
     except Exception as e:
         return Response({"error": str(e)}, status=500)
