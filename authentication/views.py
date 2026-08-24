@@ -2114,6 +2114,33 @@ class BankAccountViewSet(viewsets.ModelViewSet):
             logger.error("Failed to resolve account: %s", str(e))
             return None
 
+    @action(detail=False, methods=["get"])
+    def resolve(self, request):
+        """
+        Resolve a bank account name for live preview while the user is
+        entering account details, proxying Paystack's own resolve
+        endpoint server-side so the secret key never has to leave the
+        backend (this replaces a mobile-side direct call that had the
+        live secret key hardcoded in the app itself - see AddBankModal.js).
+        """
+        account_number = request.query_params.get("account_number")
+        bank_code = request.query_params.get("bank_code")
+        if not account_number or not bank_code:
+            return Response(
+                {"error": "account_number and bank_code are required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        account_name = self.resolve_account(account_number, bank_code)
+        if account_name:
+            return Response(
+                {"account_name": account_name}, status=status.HTTP_200_OK
+            )
+        return Response(
+            {"error": "Could not resolve account."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
     def perform_create(self, serializer):
         """
         Create a bank account, resolving account details if possible.
