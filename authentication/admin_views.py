@@ -79,7 +79,7 @@ def get_monthly_advanced_metrics(months=12):
         mas_users=Count(
             'user_id',
             filter=Q(
-                source__in=['SAVINGS', 'INVESTMENT'],
+                credited_to__in=['SAVINGS', 'INVESTMENT'],
                 transaction_type='credit',
                 status='confirmed'
             ),
@@ -87,7 +87,7 @@ def get_monthly_advanced_metrics(months=12):
         ),
         mas_amount=Coalesce(
             Sum('amount', filter=Q(
-                source__in=['SAVINGS', 'INVESTMENT'],
+                credited_to__in=['SAVINGS', 'INVESTMENT'],
                 transaction_type='credit',
                 status='confirmed'
             )),
@@ -105,7 +105,7 @@ def get_monthly_advanced_metrics(months=12):
         user=OuterRef('pk'),
         transaction_type='credit',
         status='confirmed',
-        source__in=['SAVINGS', 'INVESTMENT'],
+        credited_to__in=['SAVINGS', 'INVESTMENT'],
         date__gte=OuterRef('cohort_start'),
         date__lt=OuterRef('cohort_end')
     ).values('user').distinct().values('pk')
@@ -158,7 +158,7 @@ def get_monthly_advanced_metrics(months=12):
                 user__in=cohort_users,
                 transaction_type='credit',
                 status='confirmed',
-                source__in=['SAVINGS', 'INVESTMENT'],
+                credited_to__in=['SAVINGS', 'INVESTMENT'],
                 date__gte=month_start,
                 date__lt=month_end
             ).values('user').distinct().count()
@@ -224,7 +224,7 @@ def dashboard_summary(request):
             "user",
             distinct=True,
             filter=Q(
-                source__in=["SAVINGS", "INVESTMENT"],
+                credited_to__in=["SAVINGS", "INVESTMENT"],
                 transaction_type="credit",
                 status="confirmed",
             ),
@@ -233,7 +233,7 @@ def dashboard_summary(request):
             Sum(
                 "amount",
                 filter=Q(
-                    source__in=["SAVINGS", "INVESTMENT"],
+                    credited_to__in=["SAVINGS", "INVESTMENT"],
                     transaction_type="credit",
                     status="confirmed",
                 ),
@@ -464,7 +464,7 @@ def new_savers_chart(request):
             date__gte=start_date,
             transaction_type='credit',
             status='confirmed',
-            source__in=['SAVINGS', 'INVESTMENT']
+            credited_to__in=['SAVINGS', 'INVESTMENT']
         ).values('user').annotate(
             first_save_month=TruncMonth('date')
         ).values('first_save_month').annotate(
@@ -564,14 +564,17 @@ def financial_history_chart(request):
         months = int(period.replace('months', ''))
         start_date = timezone.now() - relativedelta(months=months)
 
-        # Determine which source we're aggregating
-        source_filter = "SAVINGS" if fin_type == "savings" else "INVESTMENT"
+        # Determine which bucket we're aggregating - credited_to is where
+        # the money ended up, not source (which is the funding channel -
+        # bank transfer/card/wallet - and would incorrectly exclude nearly
+        # every real deposit).
+        credited_to_filter = "SAVINGS" if fin_type == "savings" else "INVESTMENT"
 
         # Only CONFIRMED credit transactions represent money coming in
         queryset = (
             Transaction.objects.filter(
                 date__gte=start_date,
-                source=source_filter,
+                credited_to=credited_to_filter,
                 transaction_type="credit",
                 status="confirmed",
             )
@@ -1117,43 +1120,46 @@ def monthly_active_savers(request):
         
         month_end = month_start + relativedelta(months=1)
         
-        # Get savers (people who made credit transactions to SAVINGS)
+        # Get savers (people who made credit transactions to SAVINGS) -
+        # credited_to is the destination bucket; source is the funding
+        # channel (bank transfer/card/wallet) and would wrongly exclude
+        # nearly every real deposit.
         savers_data = Transaction.objects.filter(
             date__gte=month_start,
             date__lt=month_end,
-            source='SAVINGS',
+            credited_to='SAVINGS',
             transaction_type='credit',
             status='confirmed'
         ).aggregate(
             unique_savers=Count('user', distinct=True),
             total_amount=Sum('amount')
         )
-        
+
         # Get investors (people who made credit transactions to INVESTMENT)
         investors_data = Transaction.objects.filter(
             date__gte=month_start,
             date__lt=month_end,
-            source='INVESTMENT',
+            credited_to='INVESTMENT',
             transaction_type='credit',
             status='confirmed'
         ).aggregate(
             unique_investors=Count('user', distinct=True),
             total_amount=Sum('amount')
         )
-        
+
         # Get users who did both
         savers_ids = set(Transaction.objects.filter(
             date__gte=month_start,
             date__lt=month_end,
-            source='SAVINGS',
+            credited_to='SAVINGS',
             transaction_type='credit',
             status='confirmed'
         ).values_list('user', flat=True))
-        
+
         investors_ids = set(Transaction.objects.filter(
             date__gte=month_start,
             date__lt=month_end,
-            source='INVESTMENT',
+            credited_to='INVESTMENT',
             transaction_type='credit',
             status='confirmed'
         ).values_list('user', flat=True))
@@ -1216,20 +1222,24 @@ def activated_users_percentage(request):
         )
         total_new_signups = new_users.count()
         
-        # Get new users who made at least one confirmed transaction
-        activated_user_ids = Transaction.objects.filter(
+        # Get new users who made at least one confirmed transaction -
+        # credited_to is the destination bucket (source is the funding
+        # channel and would wrongly exclude nearly every real deposit).
+        # distinct() matters here: a user with 2 confirmed deposits must
+        # only count once, not be double-counted.
+        activated_user_ids = list(Transaction.objects.filter(
             user__in=new_users,
-            source__in=['SAVINGS', 'INVESTMENT'],
+            credited_to__in=['SAVINGS', 'INVESTMENT'],
             transaction_type='credit',
             status='confirmed'
-        ).values_list('user', )
-        
+        ).values_list('user', flat=True).distinct())
+
         activated_count = len(activated_user_ids)
-        
+
         # Calculate total amount saved by activated users
         total_saved = Transaction.objects.filter(
             user__in=activated_user_ids,
-            source__in=['SAVINGS', 'INVESTMENT'],
+            credited_to__in=['SAVINGS', 'INVESTMENT'],
             transaction_type='credit',
             status='confirmed'
         ).aggregate(total=Sum('amount'))['total'] or 0
@@ -1280,16 +1290,18 @@ def retention_rate(request):
         )
         cohort_count = cohort_users.count()
         
-        # Get users from cohort who made transactions in the last 30 days
+        # Get users from cohort who made transactions in the last 30 days -
+        # credited_to (destination bucket), not source (funding channel);
+        # distinct() so a user with 2 confirmed deposits counts once.
         retained_user_ids = Transaction.objects.filter(
             user__in=cohort_users,
             date__gte=thirty_days_ago,
-            source__in=['SAVINGS', 'INVESTMENT'],
+            credited_to__in=['SAVINGS', 'INVESTMENT'],
             transaction_type='credit',
             status='confirmed'
-        ).values_list('user',)
-        
-        retained_count = len(retained_user_ids)
+        ).values_list('user', flat=True).distinct()
+
+        retained_count = retained_user_ids.count()
         
         # Calculate retention rate
         retention_rate = (retained_count / cohort_count * 100) if cohort_count > 0 else 0
@@ -1875,15 +1887,19 @@ def net_fum_change(request):
             start_date = now - timedelta(days=7)
             period_label = "This Week"
         
-        # Calculate money added (credit transactions)
+        # Calculate money added (credit transactions) - credited_to is the
+        # destination bucket; source is the funding channel (bank
+        # transfer/card/wallet) and would wrongly exclude nearly every
+        # real deposit.
         money_added = Transaction.objects.filter(
             date__gte=start_date,
             transaction_type='credit',
             status='confirmed',
-            source__in=['SAVINGS', 'INVESTMENT']
+            credited_to__in=['SAVINGS', 'INVESTMENT']
         ).aggregate(total=Sum('amount'))['total'] or 0
-        
-        # Calculate money withdrawn (debit transactions)
+
+        # Calculate money withdrawn (debit transactions) - source is
+        # correct here: it's the bucket funds were withdrawn FROM.
         money_withdrawn = Transaction.objects.filter(
             date__gte=start_date,
             transaction_type='debit',
@@ -2045,9 +2061,13 @@ def signup_metrics(request):
                 "count": weekly_counts[i],
             })
 
+        # credited_to is the destination bucket a deposit landed in;
+        # source is the funding channel (bank transfer/card/wallet) and
+        # would wrongly exclude nearly every real deposit - this was the
+        # actual bug behind "new savers this month" undercounting.
         activated_count = Transaction.objects.filter(
             user__in=new_users_qs,
-            source__in=['SAVINGS', 'INVESTMENT'],
+            credited_to__in=['SAVINGS', 'INVESTMENT'],
             transaction_type='credit',
             status='confirmed',
         ).values('user').distinct().count()
@@ -2067,6 +2087,82 @@ def signup_metrics(request):
 
         cache.set(cache_key, response_data, 300)
         return Response(response_data)
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
+
+
+SIGNUP_USER_LIST_CAP = 500
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def signup_segment_users(request):
+    """
+    GET /api/admin/metrics/signups/users?segment=new|activated|not_yet_saved&month=current
+    Drill-down list behind signup_metrics's aggregate counts - "new" is
+    every signup in the month, "activated" is the same credited_to-based
+    check signup_metrics uses (kept in lockstep so the list and the count
+    can never disagree), "not_yet_saved" is the complement.
+    """
+    segment = request.GET.get('segment', 'new')
+    month_param = request.GET.get('month', 'current')
+
+    if segment not in ('new', 'activated', 'not_yet_saved'):
+        return Response({"error": f"Unknown segment '{segment}'."}, status=400)
+
+    try:
+        if month_param == 'current':
+            month_start = timezone.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        else:
+            date_obj = datetime.strptime(month_param, '%Y-%m')
+            month_start = timezone.make_aware(date_obj.replace(day=1))
+
+        month_end = month_start + relativedelta(months=1)
+
+        new_users_qs = CustomUser.objects.filter(
+            date_joined__gte=month_start, date_joined__lt=month_end, is_deleted=False
+        )
+
+        activated_ids = Transaction.objects.filter(
+            user__in=new_users_qs,
+            credited_to__in=['SAVINGS', 'INVESTMENT'],
+            transaction_type='credit',
+            status='confirmed',
+        ).values_list('user', flat=True).distinct()
+
+        if segment == 'activated':
+            users_qs = new_users_qs.filter(id__in=list(activated_ids))
+        elif segment == 'not_yet_saved':
+            users_qs = new_users_qs.exclude(id__in=list(activated_ids))
+        else:
+            users_qs = new_users_qs
+
+        total_count = users_qs.count()
+        activated_id_set = set(activated_ids)
+        users = users_qs.order_by('-date_joined')[:SIGNUP_USER_LIST_CAP]
+
+        data = [
+            {
+                "id": u.id,
+                "first_name": u.first_name,
+                "last_name": u.last_name,
+                "email": u.email,
+                "phone_number": u.phone_number,
+                "date_joined": u.date_joined,
+                "kyc_status": u.kyc_status,
+                "has_saved": u.id in activated_id_set,
+            }
+            for u in users
+        ]
+
+        return Response({
+            "segment": segment,
+            "period": month_start.strftime('%B %Y'),
+            "total_count": total_count,
+            "truncated": total_count > SIGNUP_USER_LIST_CAP,
+            "data": data,
+        })
 
     except Exception as e:
         return Response({"error": str(e)}, status=500)
@@ -2100,7 +2196,7 @@ def cashflow_summary(request):
                 rate = 100.0 if current > 0 else 0.0
             return f"{'+' if rate >= 0 else ''}{round(rate, 1)}%"
 
-        def sum_for_range(start, end, transaction_type, source=None, source__in=None):
+        def sum_for_range(start, end, transaction_type, source=None, source__in=None, credited_to=None):
             qs = Transaction.objects.filter(
                 date__gte=start, date__lt=end,
                 transaction_type=transaction_type, status='confirmed',
@@ -2109,11 +2205,17 @@ def cashflow_summary(request):
                 qs = qs.filter(source=source)
             if source__in:
                 qs = qs.filter(source__in=source__in)
+            if credited_to:
+                qs = qs.filter(credited_to=credited_to)
             return float(qs.aggregate(total=Sum('amount'))['total'] or 0)
 
-        def build_metric(source):
-            this_month = sum_for_range(month_start, now, 'credit', source=source)
-            last_month = sum_for_range(prev_month_start, month_start, 'credit', source=source)
+        # Deposits: credited_to is the destination bucket (source is the
+        # funding channel - bank transfer/card/wallet - and would wrongly
+        # exclude nearly every real deposit). Withdrawals below correctly
+        # use source, since that's the bucket funds were withdrawn FROM.
+        def build_metric(credited_to):
+            this_month = sum_for_range(month_start, now, 'credit', credited_to=credited_to)
+            last_month = sum_for_range(prev_month_start, month_start, 'credit', credited_to=credited_to)
             return {
                 "this_month": this_month,
                 "last_month": last_month,

@@ -139,6 +139,11 @@ urlpatterns = [
         name="admin_signup_metrics",
     ),
     path(
+        "metrics/signups/users",
+        admin_views.signup_segment_users,
+        name="admin_signup_segment_users",
+    ),
+    path(
         "financial/cashflow-summary",
         admin_views.cashflow_summary,
         name="admin_cashflow_summary",

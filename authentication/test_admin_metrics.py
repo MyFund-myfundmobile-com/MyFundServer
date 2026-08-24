@@ -74,11 +74,12 @@ def _set_date_joined(user, when):
     CustomUser.objects.filter(pk=user.pk).update(date_joined=when)
 
 
-def _make_transaction(user, transaction_type, source, amount, status_="confirmed", service_charge=0, when=None):
+def _make_transaction(user, transaction_type, source, amount, status_="confirmed", service_charge=0, when=None, credited_to=None):
     tx = Transaction.objects.create(
         user=user,
         transaction_type=transaction_type,
         source=source,
+        credited_to=credited_to,
         amount=amount,
         service_charge=service_charge,
         status=status_,
@@ -272,9 +273,9 @@ class CashflowSummaryTest(TestCase):
         this_month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         last_month_point = this_month_start - timedelta(days=15)
 
-        _make_transaction(user, "credit", "SAVINGS", 4000, when=now)
-        _make_transaction(user, "credit", "SAVINGS", 2000, when=last_month_point)
-        _make_transaction(user, "credit", "INVESTMENT", 1000, when=now)
+        _make_transaction(user, "credit", "BANK_TRANSFER", 4000, when=now, credited_to="SAVINGS")
+        _make_transaction(user, "credit", "BANK_TRANSFER", 2000, when=last_month_point, credited_to="SAVINGS")
+        _make_transaction(user, "credit", "CARD", 1000, when=now, credited_to="INVESTMENT")
         _make_transaction(user, "debit", "SAVINGS", 300, when=now)
 
         wr = WithdrawalsRequestToAdmin.objects.create(
@@ -315,10 +316,12 @@ class SignupMetricsTest(TestCase):
         # it happens to run on.
         _set_date_joined(self.staff, this_month_start)
 
-        # Week 1 signup (day 3), who also started saving.
+        # Week 1 signup (day 3), who also started saving - funded via bank
+        # transfer (source), landing in SAVINGS (credited_to), exactly
+        # like a real deposit.
         w1_user = _make_user("w1@example.com", "70000000002")
         _set_date_joined(w1_user, this_month_start + timedelta(days=2))
-        _make_transaction(w1_user, "credit", "SAVINGS", 1000, when=now)
+        _make_transaction(w1_user, "credit", "BANK_TRANSFER", 1000, when=now, credited_to="SAVINGS")
 
         # Week 2 signup (day 10), who has NOT started saving.
         w2_user = _make_user("w2@example.com", "70000000003")
@@ -338,6 +341,48 @@ class SignupMetricsTest(TestCase):
         self.assertEqual(data["weekly_breakdown"][1]["count"], 1)  # w2 (day 10)
         self.assertEqual(data["activated_count"], 1)
         self.assertEqual(data["not_yet_saved_count"], 2)
+
+    def test_segment_users_new(self):
+        response = self.client.get(
+            reverse("admin_signup_segment_users"), {"segment": "new"}
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        emails = {u["email"] for u in response.data["data"]}
+        self.assertEqual(
+            emails, {"staff6@example.com", "w1@example.com", "w2@example.com"}
+        )
+        self.assertEqual(response.data["total_count"], 3)
+
+    def test_segment_users_activated(self):
+        response = self.client.get(
+            reverse("admin_signup_segment_users"), {"segment": "activated"}
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        emails = {u["email"] for u in response.data["data"]}
+        self.assertEqual(emails, {"w1@example.com"})
+        self.assertTrue(response.data["data"][0]["has_saved"])
+
+    def test_segment_users_not_yet_saved(self):
+        response = self.client.get(
+            reverse("admin_signup_segment_users"), {"segment": "not_yet_saved"}
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        emails = {u["email"] for u in response.data["data"]}
+        self.assertEqual(emails, {"staff6@example.com", "w2@example.com"})
+
+    def test_segment_users_invalid_segment_rejected(self):
+        response = self.client.get(
+            reverse("admin_signup_segment_users"), {"segment": "bogus"}
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_segment_users_non_staff_rejected(self):
+        regular = _make_user("signupregular@example.com", "70000000005")
+        self.client.force_authenticate(user=regular)
+        response = self.client.get(
+            reverse("admin_signup_segment_users"), {"segment": "new"}
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
 
 class WithdrawalsTrendChartTest(TestCase):
