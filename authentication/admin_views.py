@@ -2752,3 +2752,42 @@ def cancel_email_campaign(request, campaign_id):
 
     except Exception as e:
         return Response({"error": str(e)}, status=500)
+
+
+MAX_CAMPAIGN_IMAGE_BYTES = 5 * 1024 * 1024  # matches profile_picture_update's cap
+
+
+@api_view(['POST'])
+@permission_classes([IsAdminUser])
+def upload_campaign_image(request):
+    """
+    POST /api/admin/email-campaigns/upload-image/
+    Body: {"image_base64": "...", "filename": "photo.jpg"}
+    Uploads to ImageKit (same pipeline as profile picture uploads - see
+    upload_to_imagekit in views.py) and returns a public HTTPS URL, for
+    embedding as an <img> in a composed campaign email. Doesn't persist
+    anywhere - the URL is only ever used inline in that one email's HTML.
+    """
+    from .views import upload_to_imagekit
+
+    image_base64 = request.data.get('image_base64')
+    filename = request.data.get('filename', 'campaign_image.jpg')
+
+    if not image_base64:
+        return Response({"error": "No image data provided."}, status=400)
+
+    if "," in image_base64:
+        image_base64 = image_base64.split(",")[1]
+
+    # Rough size check before spending time on the upload - base64 is
+    # ~4/3 the size of the raw bytes.
+    if len(image_base64) * 3 / 4 > MAX_CAMPAIGN_IMAGE_BYTES:
+        return Response({"error": "Image too large. Max size is 5MB."}, status=400)
+
+    try:
+        public_url = upload_to_imagekit(
+            image_base64, request.user.id, filename, prefix="campaign"
+        )
+        return Response({"url": public_url})
+    except Exception as e:
+        return Response({"error": f"Upload failed: {str(e)}"}, status=500)

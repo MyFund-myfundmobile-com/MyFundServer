@@ -227,3 +227,58 @@ class ListEmailCampaignsTest(TestCase):
         # recipient_emails/body_html must never be serialized back out.
         self.assertNotIn("recipient_emails", response.data[0])
         self.assertNotIn("body_html", response.data[0])
+
+
+class UploadCampaignImageTest(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.staff = _make_user("imagestaff@example.com", "98000000001", is_staff=True)
+        self.client.force_authenticate(user=self.staff)
+
+    def test_non_staff_rejected(self):
+        regular = _make_user("imageregular@example.com", "98000000002")
+        self.client.force_authenticate(user=regular)
+        response = self.client.post(
+            reverse("admin_upload_campaign_image"),
+            {"image_base64": "abc", "filename": "a.jpg"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_missing_image_rejected(self):
+        response = self.client.post(
+            reverse("admin_upload_campaign_image"), {"filename": "a.jpg"}, format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_oversized_image_rejected(self):
+        # Base64 is ~4/3 the size of the decoded bytes, so this needs to
+        # clear 5MB * 4/3 (~6.99MB) of base64 text to actually exceed the
+        # 5MB decoded cap - anything smaller falls through to a real
+        # (and here, un-mocked) ImageKit call instead of the size guard.
+        oversized = "A" * (8 * 1024 * 1024)
+        response = self.client.post(
+            reverse("admin_upload_campaign_image"),
+            {"image_base64": oversized, "filename": "a.jpg"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    @patch("authentication.views.upload_to_imagekit")
+    def test_uploads_and_strips_data_url_prefix(self, mock_upload):
+        mock_upload.return_value = "https://ik.imagekit.io/myfundmobile/campaign_1_123_abcd.jpg"
+        response = self.client.post(
+            reverse("admin_upload_campaign_image"),
+            {"image_base64": "data:image/jpeg;base64,ZmFrZWRhdGE=", "filename": "photo.jpg"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data["url"],
+            "https://ik.imagekit.io/myfundmobile/campaign_1_123_abcd.jpg",
+        )
+        # The data: URL prefix must be stripped before handing off to
+        # ImageKit, and the "campaign" prefix must be used, not "profile".
+        called_data, called_user_id, called_filename = mock_upload.call_args.args
+        self.assertEqual(called_data, "ZmFrZWRhdGE=")
+        self.assertEqual(mock_upload.call_args.kwargs.get("prefix"), "campaign")

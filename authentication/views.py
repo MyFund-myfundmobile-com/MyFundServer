@@ -1720,7 +1720,7 @@ imagekit = ImageKit(
 )
 
 
-def upload_to_imagekit(file_data, user_id, filename):
+def upload_to_imagekit(file_data, user_id, filename, prefix="profile"):
     """Shared upload logic"""
     timestamp = int(time.time())
     unique_id = str(uuid.uuid4())[:8]
@@ -1728,7 +1728,7 @@ def upload_to_imagekit(file_data, user_id, filename):
     if ext not in ["jpg", "jpeg", "png", "gif", "webp"]:
         ext = "jpg"
 
-    final_filename = f"profile_{user_id}_{timestamp}_{unique_id}.{ext}"
+    final_filename = f"{prefix}_{user_id}_{timestamp}_{unique_id}.{ext}"
 
     upload_options = UploadFileRequestOptions()
     upload_options.use_unique_file_name = False

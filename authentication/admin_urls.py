@@ -178,6 +178,11 @@ urlpatterns = [
         name="admin_create_email_campaign",
     ),
     path(
+        "email-campaigns/upload-image/",
+        admin_views.upload_campaign_image,
+        name="admin_upload_campaign_image",
+    ),
+    path(
         "email-campaigns/",
         admin_views.list_email_campaigns,
         name="admin_list_email_campaigns",
