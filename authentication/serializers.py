@@ -812,6 +812,7 @@ class EmailTemplateSerializer(serializers.ModelSerializer):
             "design_html",  # HTML (for preview/send)
             "last_update",
             "was_sent",
+            "recipient_count",
         ]
 
     def get_design(self, obj):

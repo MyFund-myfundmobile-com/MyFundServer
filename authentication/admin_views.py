@@ -2700,7 +2700,7 @@ def create_email_campaign(request):
 
         if campaign.sent_count > 0:
             from .views import auto_save_email_as_template
-            auto_save_email_as_template(subject, body)
+            auto_save_email_as_template(subject, body, campaign.total_recipients)
 
         return Response(EmailCampaignSerializer(campaign).data, status=201)
 

@@ -2821,6 +2821,9 @@ class EmailTemplate(models.Model):
     # via save_template, whether from the webapp editor or the mobile
     # composer's manual "Save as Template" button.
     was_sent = models.BooleanField(default=False)
+    # How many recipients that send targeted - null for drafts (was_sent
+    # False), always set alongside was_sent=True.
+    recipient_count = models.IntegerField(null=True, blank=True)
 
     def __str__(self):
         return self.title

@@ -9199,7 +9199,7 @@ def send_email(request):
             if failed > 0:
                 logger.warning(f"⚠️ Partial email send: {sent} sent, {failed} failed")
                 if save_as_template:
-                    auto_save_email_as_template(subject, body)
+                    auto_save_email_as_template(subject, body, len(cleaned_recipients))
                 return Response(
                     {
                         "status": "partial",
@@ -9216,7 +9216,7 @@ def send_email(request):
 
             logger.info(f"✅ Email confirmed delivered via Brevo: {sent} sent")
             if save_as_template:
-                auto_save_email_as_template(subject, body)
+                auto_save_email_as_template(subject, body, len(cleaned_recipients))
             return Response(
                 {
                     "status": "success",
@@ -9231,7 +9231,7 @@ def send_email(request):
         elif result["status"] == "queued":
             logger.info(f"📦 Email queued to Celery: {result['total']} recipients")
             if save_as_template:
-                auto_save_email_as_template(subject, body)
+                auto_save_email_as_template(subject, body, result["total"])
             return Response(
                 {
                     "status": "queued",
@@ -9284,7 +9284,7 @@ from django.views.decorators.http import require_http_methods
 import logging
 
 
-def auto_save_email_as_template(subject, html):
+def auto_save_email_as_template(subject, html, recipient_count=None):
     """
     Every email actually sent from the admin Email tab (compose or
     segment/individuals sends) gets saved here as a reusable template, so
@@ -9295,6 +9295,10 @@ def auto_save_email_as_template(subject, html):
     only unique field, so a timestamp is always appended (rather than
     only on collision) - simpler, and makes clear at a glance which
     templates were auto-saved from a send vs. deliberately named.
+    recipient_count is the size of the audience that send targeted (not
+    a live delivered-so-far tally, which would go stale as e.g. a
+    segment campaign's later daily batches go out) - shown on the
+    template list's "Sent" badge.
     """
     try:
         base_title = (subject or "Untitled").strip() or "Untitled"
@@ -9315,6 +9319,7 @@ def auto_save_email_as_template(subject, html):
             design_html=html,
             last_update=timezone.now(),
             was_sent=True,
+            recipient_count=recipient_count,
         )
     except Exception as e:
         logger.error(f"Auto-save-as-template failed for subject '{subject}': {e}")
