@@ -9107,6 +9107,12 @@ def send_email(request):
         subject = request.data.get("subject", "").strip()
         body = request.data.get("body", "").strip()  # This is the HTML content
         recipients = request.data.get("recipients", [])
+        # Set by the mobile admin Email tab (never by the webapp's own
+        # Unlayer "send" flow, which would otherwise duplicate its own
+        # already-saved template on every send) - see
+        # authentication.admin_views.create_email_campaign for the other
+        # caller of auto_save_email_as_template.
+        save_as_template = bool(request.data.get("save_as_template", False))
 
         logger.info(
             f"📧 Request data - Subject: '{subject}', Body length: {len(body)}, Recipients: {len(recipients)}"
@@ -9192,6 +9198,8 @@ def send_email(request):
 
             if failed > 0:
                 logger.warning(f"⚠️ Partial email send: {sent} sent, {failed} failed")
+                if save_as_template:
+                    auto_save_email_as_template(subject, body)
                 return Response(
                     {
                         "status": "partial",
@@ -9207,6 +9215,8 @@ def send_email(request):
                 )
 
             logger.info(f"✅ Email confirmed delivered via Brevo: {sent} sent")
+            if save_as_template:
+                auto_save_email_as_template(subject, body)
             return Response(
                 {
                     "status": "success",
@@ -9220,6 +9230,8 @@ def send_email(request):
 
         elif result["status"] == "queued":
             logger.info(f"📦 Email queued to Celery: {result['total']} recipients")
+            if save_as_template:
+                auto_save_email_as_template(subject, body)
             return Response(
                 {
                     "status": "queued",
@@ -9270,6 +9282,41 @@ from .serializers import EmailTemplateSerializer
 from django.views.decorators.http import require_http_methods
 
 import logging
+
+
+def auto_save_email_as_template(subject, html):
+    """
+    Every email actually sent from the admin Email tab (compose or
+    segment/individuals sends) gets saved here as a reusable template, so
+    it can be revisited, edited, and resent to a different audience later
+    - see create_email_campaign (admin_views.py) and send_email below.
+    Never raises: a template-save hiccup must never block or fail the
+    actual send, which is the primary action. title is EmailTemplate's
+    only unique field, so a timestamp is always appended (rather than
+    only on collision) - simpler, and makes clear at a glance which
+    templates were auto-saved from a send vs. deliberately named.
+    """
+    try:
+        base_title = (subject or "Untitled").strip() or "Untitled"
+        timestamp = timezone.now().strftime("%Y-%m-%d %H:%M:%S")
+        title = f"{base_title} - {timestamp}"[:255]
+
+        # Vanishingly unlikely (same subject within the same second), but
+        # cheap to guard against outright since title is unique=True.
+        suffix = 2
+        candidate = title
+        while EmailTemplate.objects.filter(title=candidate).exists():
+            candidate = f"{title} ({suffix})"[:255]
+            suffix += 1
+
+        EmailTemplate.objects.create(
+            title=candidate,
+            design_body=json.dumps({}),
+            design_html=html,
+            last_update=timezone.now(),
+        )
+    except Exception as e:
+        logger.error(f"Auto-save-as-template failed for subject '{subject}': {e}")
 
 
 @api_view(["POST"])

@@ -149,3 +149,105 @@ class AdminEmailPermissionTest(TestCase):
         self.assertEqual(response.status_code, status.HTTP_207_MULTI_STATUS)
         self.assertEqual(response.data["status"], "partial")
         self.assertEqual(response.data["failed_emails"], ["bad@example.com"])
+
+
+class AutoSaveAsTemplateTest(TestCase):
+    """
+    send_email only auto-saves a template when the caller explicitly asks
+    for it (save_as_template=True) - the webapp's own Unlayer "send" flow
+    never sets this, so its already-saved templates don't get duplicated
+    on every send.
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        self.staff = _make_user("autosavestaff@example.com", "96000000003", is_staff=True)
+        self.client.force_authenticate(user=self.staff)
+
+    @patch("authentication.views.send_generic_email")
+    def test_save_as_template_true_creates_template_on_success(self, mock_send):
+        mock_send.return_value = {"status": "completed", "sent": 1}
+        before = EmailTemplate.objects.count()
+
+        response = self.client.post(
+            reverse("send_email"),
+            {
+                "subject": "Quarterly Update",
+                "body": "<p>Hello {first_name}</p>",
+                "recipients": ["recipient@example.com"],
+                "save_as_template": True,
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(EmailTemplate.objects.count(), before + 1)
+
+        created = EmailTemplate.objects.latest("id")
+        self.assertTrue(created.title.startswith("Quarterly Update - "))
+        self.assertEqual(created.design_html, "<p>Hello {first_name}</p>")
+
+    @patch("authentication.views.send_generic_email")
+    def test_omitting_save_as_template_does_not_create_one(self, mock_send):
+        mock_send.return_value = {"status": "completed", "sent": 1}
+        before = EmailTemplate.objects.count()
+
+        response = self.client.post(
+            reverse("send_email"),
+            {
+                "subject": "Webapp Send",
+                "body": "<p>Hi</p>",
+                "recipients": ["recipient@example.com"],
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(EmailTemplate.objects.count(), before)
+
+    @patch("authentication.views.send_generic_email")
+    def test_total_failure_does_not_create_a_template(self, mock_send):
+        mock_send.return_value = {
+            "status": "completed",
+            "sent": 0,
+            "failed": 1,
+            "failed_emails": ["recipient@example.com"],
+            "failure_reasons": ["recipient@example.com: ApiException: Unauthorized"],
+        }
+        before = EmailTemplate.objects.count()
+
+        response = self.client.post(
+            reverse("send_email"),
+            {
+                "subject": "Should Not Save",
+                "body": "<p>Hi</p>",
+                "recipients": ["recipient@example.com"],
+                "save_as_template": True,
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        self.assertEqual(EmailTemplate.objects.count(), before)
+
+    @patch("authentication.views.send_generic_email")
+    def test_duplicate_subject_gets_unique_title(self, mock_send):
+        mock_send.return_value = {"status": "completed", "sent": 1}
+
+        for _ in range(2):
+            response = self.client.post(
+                reverse("send_email"),
+                {
+                    "subject": "Same Subject",
+                    "body": "<p>Hi</p>",
+                    "recipients": ["recipient@example.com"],
+                    "save_as_template": True,
+                },
+                format="json",
+            )
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        titles = list(
+            EmailTemplate.objects.filter(title__startswith="Same Subject").values_list(
+                "title", flat=True
+            )
+        )
+        self.assertEqual(len(titles), 2)
+        self.assertEqual(len(set(titles)), 2)  # both unique, no IntegrityError

@@ -415,3 +415,42 @@ class UploadCampaignImageTest(TestCase):
         called_data, called_user_id, called_filename = mock_upload.call_args.args
         self.assertEqual(called_data, "ZmFrZWRhdGE=")
         self.assertEqual(mock_upload.call_args.kwargs.get("prefix"), "campaign")
+
+
+class BrevoDailyUsageTest(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.staff = _make_user("brevostaff@example.com", "99000000001", is_staff=True)
+        self.client.force_authenticate(user=self.staff)
+
+    def test_non_staff_rejected(self):
+        regular = _make_user("brevoregular@example.com", "99000000002")
+        self.client.force_authenticate(user=regular)
+        response = self.client.get(reverse("admin_brevo_daily_usage"))
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    @patch("sib_api_v3_sdk.TransactionalEmailsApi.get_email_event_report")
+    def test_reports_usage_from_live_brevo_event_log(self, mock_report):
+        from unittest.mock import MagicMock
+        mock_report.return_value = MagicMock(events=[MagicMock() for _ in range(24)])
+
+        response = self.client.get(reverse("admin_brevo_daily_usage"))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["used_today"], 24)
+        self.assertEqual(response.data["daily_limit"], 300)
+        self.assertEqual(response.data["remaining_today"], 276)
+        self.assertFalse(response.data["near_limit"])
+
+        # Confirms this queries Brevo's real event log, not a local
+        # counter - "requests" is the actual send-attempt event.
+        self.assertEqual(mock_report.call_args.kwargs.get("event"), "requests")
+
+    @patch("sib_api_v3_sdk.TransactionalEmailsApi.get_email_event_report")
+    def test_near_limit_flag(self, mock_report):
+        from unittest.mock import MagicMock
+        mock_report.return_value = MagicMock(events=[MagicMock() for _ in range(285)])
+
+        response = self.client.get(reverse("admin_brevo_daily_usage"))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["near_limit"])
+        self.assertEqual(response.data["remaining_today"], 15)

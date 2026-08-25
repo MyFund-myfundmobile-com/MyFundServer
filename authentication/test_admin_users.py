@@ -7,10 +7,16 @@ from unittest.mock import patch
 
 from django.test import TestCase
 from django.urls import reverse
+from django.utils import timezone
+from dateutil.relativedelta import relativedelta
 from rest_framework import status
 from rest_framework.test import APIClient
 
 from .models import CustomUser
+
+
+def _set_date_joined(user, when):
+    CustomUser.objects.filter(pk=user.pk).update(date_joined=when)
 
 
 def _make_user(email, phone, **extra):
@@ -289,3 +295,75 @@ class AdminUserEmailsForSegmentTest(TestCase):
 
         response = self.client.get(reverse("admin_user_emails_for_segment"))
         self.assertNotIn("", response.data["emails"])
+
+
+class SegmentFilterExtensionsTest(TestCase):
+    """
+    non_zero_balance and new_users_months filters on
+    _build_admin_user_queryset, exercised via admin_user_emails_for_segment.
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        self.staff = _make_user("segfilterstaff@example.com", "95000000001", is_staff=True)
+        self.client.force_authenticate(user=self.staff)
+
+        self.funded_user = _make_user(
+            "funded@example.com", "95000000002", savings=1000
+        )
+        self.empty_user = _make_user("empty@example.com", "95000000003")
+
+        now = timezone.now()
+        self.recent_user = _make_user("recent@example.com", "95000000004")
+        _set_date_joined(self.recent_user, now - relativedelta(days=10))
+
+        self.mid_user = _make_user("mid@example.com", "95000000005")
+        _set_date_joined(self.mid_user, now - relativedelta(months=2))
+
+        self.old_user = _make_user("old@example.com", "95000000006")
+        _set_date_joined(self.old_user, now - relativedelta(months=8))
+
+    def test_non_zero_balance_filter(self):
+        response = self.client.get(
+            reverse("admin_user_emails_for_segment"), {"non_zero_balance": "true"}
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("funded@example.com", response.data["emails"])
+        self.assertNotIn("empty@example.com", response.data["emails"])
+
+    def test_new_users_1_month(self):
+        response = self.client.get(
+            reverse("admin_user_emails_for_segment"), {"new_users_months": "1"}
+        )
+        emails = response.data["emails"]
+        self.assertIn("recent@example.com", emails)
+        self.assertNotIn("mid@example.com", emails)
+        self.assertNotIn("old@example.com", emails)
+
+    def test_new_users_3_months(self):
+        response = self.client.get(
+            reverse("admin_user_emails_for_segment"), {"new_users_months": "3"}
+        )
+        emails = response.data["emails"]
+        self.assertIn("recent@example.com", emails)
+        self.assertIn("mid@example.com", emails)
+        self.assertNotIn("old@example.com", emails)
+
+    def test_new_users_6_months(self):
+        response = self.client.get(
+            reverse("admin_user_emails_for_segment"), {"new_users_months": "6"}
+        )
+        emails = response.data["emails"]
+        self.assertIn("recent@example.com", emails)
+        self.assertIn("mid@example.com", emails)
+        self.assertNotIn("old@example.com", emails)
+
+    def test_invalid_new_users_months_ignored(self):
+        # Not one of the supported values (1/3/6) - should just be
+        # ignored rather than 500ing or silently matching everyone/no one
+        # unexpectedly.
+        response = self.client.get(
+            reverse("admin_user_emails_for_segment"), {"new_users_months": "99"}
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertNotIn("new_users_months", response.data["filters_applied"])

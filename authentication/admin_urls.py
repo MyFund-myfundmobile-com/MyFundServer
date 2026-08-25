@@ -183,6 +183,11 @@ urlpatterns = [
         name="admin_upload_campaign_image",
     ),
     path(
+        "brevo-daily-usage/",
+        admin_views.brevo_daily_usage,
+        name="admin_brevo_daily_usage",
+    ),
+    path(
         "email-campaigns/",
         admin_views.list_email_campaigns,
         name="admin_list_email_campaigns",

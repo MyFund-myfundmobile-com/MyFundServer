@@ -859,6 +859,26 @@ def _build_admin_user_queryset(params):
         queryset = queryset.filter(kyc_status=kyc_status)
         filters_applied["kyc_status"] = kyc_status
 
+    non_zero_balance = _parse_bool_param(params.get('non_zero_balance'))
+    if non_zero_balance:
+        queryset = queryset.filter(
+            Q(savings__gt=0) | Q(investment__gt=0) | Q(wallet__gt=0)
+        )
+        filters_applied["non_zero_balance"] = True
+
+    # New-signup segments (1/3/6 months) - matches the "New Users" chips
+    # on the mobile Email tab's segment picker.
+    new_users_months = params.get('new_users_months')
+    if new_users_months not in (None, ''):
+        try:
+            months = int(new_users_months)
+        except (TypeError, ValueError):
+            months = None
+        if months in (1, 3, 6):
+            cutoff = timezone.now() - relativedelta(months=months)
+            queryset = queryset.filter(date_joined__gte=cutoff)
+            filters_applied["new_users_months"] = months
+
     return queryset.order_by('-date_joined'), filters_applied
 
 
@@ -2678,6 +2698,10 @@ def create_email_campaign(request):
             campaign.status = 'completed'
         campaign.save()
 
+        if campaign.sent_count > 0:
+            from .views import auto_save_email_as_template
+            auto_save_email_as_template(subject, body)
+
         return Response(EmailCampaignSerializer(campaign).data, status=201)
 
     except Exception as e:
@@ -2893,3 +2917,44 @@ def upload_campaign_image(request):
         return Response({"url": public_url})
     except Exception as e:
         return Response({"error": f"Upload failed: {str(e)}"}, status=500)
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def brevo_daily_usage(request):
+    """
+    GET /api/admin/brevo-daily-usage/
+    Live count of transactional emails actually sent TODAY across the
+    *whole* Brevo account - not just this app's campaigns, everything
+    sharing the same daily quota (OTPs, notifications, webapp sends,
+    etc.) - queried directly from Brevo's own event log (the "requests"
+    event = an actual send attempt, which is what counts against the
+    quota) so this can never drift out of sync with what Brevo is
+    actually enforcing. Brevo's free-tier cap is 300/day (see
+    services/brevo_service.py: DAILY_EMAIL_LIMIT). limit=500 comfortably
+    covers a full free-tier day; if this account ever moves to a paid
+    tier sending well past that, this would need real pagination.
+    """
+    try:
+        import sib_api_v3_sdk
+        from .services.brevo_service import get_brevo_client, DAILY_EMAIL_LIMIT
+
+        today_str = timezone.now().strftime('%Y-%m-%d')
+        api = sib_api_v3_sdk.TransactionalEmailsApi(get_brevo_client())
+        report = api.get_email_event_report(
+            start_date=today_str,
+            end_date=today_str,
+            event='requests',
+            limit=500,
+        )
+        used_today = len(report.events or [])
+
+        return Response({
+            "date": today_str,
+            "used_today": used_today,
+            "daily_limit": DAILY_EMAIL_LIMIT,
+            "remaining_today": max(DAILY_EMAIL_LIMIT - used_today, 0),
+            "near_limit": used_today >= DAILY_EMAIL_LIMIT * 0.9,
+        })
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
