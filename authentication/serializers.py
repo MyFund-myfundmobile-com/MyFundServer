@@ -811,6 +811,7 @@ class EmailTemplateSerializer(serializers.ModelSerializer):
             "design",  # JSON (for Unlayer)
             "design_html",  # HTML (for preview/send)
             "last_update",
+            "was_sent",
         ]
 
     def get_design(self, obj):

@@ -9314,6 +9314,7 @@ def auto_save_email_as_template(subject, html):
             design_body=json.dumps({}),
             design_html=html,
             last_update=timezone.now(),
+            was_sent=True,
         )
     except Exception as e:
         logger.error(f"Auto-save-as-template failed for subject '{subject}': {e}")
@@ -9357,7 +9358,7 @@ def save_template(request):
 @permission_classes([IsAdminUser])
 def get_templates(request):
     try:
-        templates = EmailTemplate.objects.all()
+        templates = EmailTemplate.objects.all().order_by("-last_update")
         serializer = EmailTemplateSerializer(templates, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
     except Exception as e:

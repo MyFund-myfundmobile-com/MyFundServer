@@ -2816,6 +2816,11 @@ class EmailTemplate(models.Model):
     design_body = models.TextField()
     design_html = models.TextField()
     last_update = models.DateTimeField()
+    # True only for templates auto-saved right after a real send (see
+    # auto_save_email_as_template) - False for anything saved as a draft
+    # via save_template, whether from the webapp editor or the mobile
+    # composer's manual "Save as Template" button.
+    was_sent = models.BooleanField(default=False)
 
     def __str__(self):
         return self.title
