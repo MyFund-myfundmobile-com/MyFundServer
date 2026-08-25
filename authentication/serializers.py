@@ -297,6 +297,8 @@ class EmailCampaignSerializer(serializers.ModelSerializer):
 
     remaining_count = serializers.SerializerMethodField()
     can_send_next_batch = serializers.SerializerMethodField()
+    can_send_extra_today = serializers.SerializerMethodField()
+    extra_remaining_today = serializers.SerializerMethodField()
 
     class Meta:
         model = EmailCampaign
@@ -310,6 +312,9 @@ class EmailCampaignSerializer(serializers.ModelSerializer):
             "failed_emails",
             "remaining_count",
             "can_send_next_batch",
+            "extra_sent_today",
+            "extra_remaining_today",
+            "can_send_extra_today",
             "status",
             "created_at",
             "last_batch_sent_at",
@@ -318,12 +323,31 @@ class EmailCampaignSerializer(serializers.ModelSerializer):
     def get_remaining_count(self, obj):
         return max(obj.total_recipients - obj.sent_count - obj.failed_count, 0)
 
+    def _sent_batch_today(self, obj):
+        return (
+            obj.last_batch_sent_at is not None
+            and obj.last_batch_sent_at.date() == _campaign_timezone.now().date()
+        )
+
     def get_can_send_next_batch(self, obj):
         if obj.status != "in_progress":
             return False
         if obj.last_batch_sent_at is None:
             return True
-        return obj.last_batch_sent_at.date() < _campaign_timezone.now().date()
+        return not self._sent_batch_today(obj)
+
+    def get_extra_remaining_today(self, obj):
+        from .admin_views import CAMPAIGN_EXTRA_DAILY_LIMIT
+        return max(CAMPAIGN_EXTRA_DAILY_LIMIT - obj.extra_sent_today, 0)
+
+    def get_can_send_extra_today(self, obj):
+        if obj.status != "in_progress":
+            return False
+        if not self._sent_batch_today(obj):
+            return False
+        if self.get_extra_remaining_today(obj) <= 0:
+            return False
+        return self.get_remaining_count(obj) > 0
 
 
 from authentication.models import CustomUser

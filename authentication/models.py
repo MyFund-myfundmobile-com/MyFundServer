@@ -2824,11 +2824,15 @@ class EmailTemplate(models.Model):
 class EmailCampaign(models.Model):
     """
     Tracks a segment-based admin email send that's too big to go out in one
-    Brevo-day (300/recipients) - recipient_emails is a frozen snapshot taken
-    at creation time (not re-resolved from filters_applied later), so later
-    batches stay stable even if the segment's membership changes day to day.
-    Sending 300/day is admin-triggered (send_next_email_campaign_batch),
-    not an automatic background job - see admin_views.py.
+    Brevo-day (300 recipients/day) - recipient_emails is a frozen snapshot
+    taken at creation time (not re-resolved from filters_applied later), so
+    later batches stay stable even if the segment's membership changes day
+    to day. The daily base batch is 280 (not the full 300) to leave a
+    buffer for other transactional email sent that same day (OTPs,
+    notifications, etc. share the same Brevo daily cap) - up to 20 more can
+    optionally be sent the same day via send_extra_email_campaign_batch.
+    Both are admin-triggered, not an automatic background job - see
+    admin_views.py.
     """
 
     STATUS_CHOICES = (
@@ -2855,6 +2859,9 @@ class EmailCampaign(models.Model):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="in_progress")
     created_at = models.DateTimeField(auto_now_add=True)
     last_batch_sent_at = models.DateTimeField(null=True, blank=True)
+    # How much of today's optional 20-extra allowance has been used -
+    # reset to 0 whenever a new day's base batch runs.
+    extra_sent_today = models.IntegerField(default=0)
 
     class Meta:
         ordering = ["-created_at"]

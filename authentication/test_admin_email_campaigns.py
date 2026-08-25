@@ -1,8 +1,10 @@
 """
 Tests for the admin Email Campaigns endpoints (authentication/admin_views.py:
 create_email_campaign, list_email_campaigns, send_next_email_campaign_batch,
-cancel_email_campaign) - the day-by-day, admin-triggered batching for
-segment sends larger than Brevo's 300/day cap.
+send_extra_email_campaign_batch, cancel_email_campaign) - the day-by-day,
+admin-triggered batching for segment sends larger than Brevo's 300/day
+cap: 280/day automatically, plus an optional same-day top-up of up to 20
+more via send_extra_email_campaign_batch.
 """
 
 from unittest.mock import patch
@@ -101,15 +103,48 @@ class CreateEmailCampaignTest(TestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         # 320 bulk users + the staff account itself = 321 total matches
-        # (no filters means "everyone").
+        # (no filters means "everyone"). Base batch is 280, not 300.
         self.assertEqual(response.data["total_recipients"], 321)
-        self.assertEqual(response.data["sent_count"], 300)
+        self.assertEqual(response.data["sent_count"], 280)
         self.assertEqual(response.data["status"], "in_progress")
-        self.assertEqual(response.data["remaining_count"], 21)
+        self.assertEqual(response.data["remaining_count"], 41)
         self.assertFalse(response.data["can_send_next_batch"])  # sent today already
+        # The 20-extra top-up is available today, since a base batch and
+        # there's more than 20 left in the queue.
+        self.assertTrue(response.data["can_send_extra_today"])
+        self.assertEqual(response.data["extra_remaining_today"], 20)
 
         sent_recipients = mock_send.call_args.kwargs["recipient_list"]
-        self.assertEqual(len(sent_recipients), 300)
+        self.assertEqual(len(sent_recipients), 280)
+
+    @patch("authentication.admin_views.send_generic_email", side_effect=_fake_send_result)
+    def test_extra_emails_prioritized_into_day_one_batch(self, mock_send):
+        # 300 segment matches (well over the 280 base batch) plus 2 hand-
+        # typed extra emails that aren't in the segment at all - the extras
+        # must still land in day one's batch, not get queued behind 280
+        # segment matches.
+        for i in range(299):
+            _make_user(f"seg{i}@example.com", f"972{i:08d}", is_ambassador=True)
+
+        response = self.client.post(
+            reverse("admin_create_email_campaign"),
+            {
+                "subject": "Hello",
+                "body": "<p>Hi</p>",
+                "is_ambassador": True,
+                "extra_emails": ["outsider1@example.com", "OUTSIDER2@Example.com"],
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        # 299 ambassadors + 2 extras = 301 total.
+        self.assertEqual(response.data["total_recipients"], 301)
+        self.assertEqual(response.data["sent_count"], 280)
+
+        sent_recipients = mock_send.call_args.kwargs["recipient_list"]
+        self.assertIn("outsider1@example.com", sent_recipients)
+        # Extra emails are lowercased/deduped like everything else.
+        self.assertIn("outsider2@example.com", sent_recipients)
 
     def test_rejects_when_no_recipients_match(self):
         response = self.client.post(
@@ -139,7 +174,7 @@ class SendNextBatchTest(TestCase):
             created_by=self.staff,
             recipient_emails=[f"batch{i}@example.com" for i in range(320)],
             total_recipients=320,
-            sent_count=300,
+            sent_count=280,
             failed_count=0,
             status="in_progress",
             last_batch_sent_at=timezone.now(),
@@ -165,7 +200,22 @@ class SendNextBatchTest(TestCase):
         self.assertEqual(response.data["status"], "completed")
 
         sent_recipients = mock_send.call_args.kwargs["recipient_list"]
-        self.assertEqual(len(sent_recipients), 20)
+        self.assertEqual(len(sent_recipients), 40)
+
+    def test_next_day_resets_extra_allowance(self):
+        self.campaign.extra_sent_today = 20
+        self.campaign.last_batch_sent_at = timezone.now() - timedelta(days=1)
+        self.campaign.save(update_fields=["extra_sent_today", "last_batch_sent_at"])
+
+        with patch(
+            "authentication.admin_views.send_generic_email", side_effect=_fake_send_result
+        ):
+            response = self.client.post(
+                reverse("admin_send_next_email_campaign_batch", args=[self.campaign.id])
+            )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["extra_sent_today"], 0)
+        self.assertEqual(response.data["extra_remaining_today"], 20)
 
     def test_completed_campaign_rejects_further_batches(self):
         self.campaign.status = "completed"
@@ -178,6 +228,89 @@ class SendNextBatchTest(TestCase):
     def test_nonexistent_campaign_404(self):
         response = self.client.post(
             reverse("admin_send_next_email_campaign_batch", args=[999999])
+        )
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class SendExtraBatchTest(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.staff = _make_user("campaignstaff5@example.com", "97000000008", is_staff=True)
+        self.client.force_authenticate(user=self.staff)
+        # 320 total, 280 already sent today (the base batch) - 40 remain.
+        self.campaign = EmailCampaign.objects.create(
+            subject="Bulk",
+            body_html="<p>Hi</p>",
+            created_by=self.staff,
+            recipient_emails=[f"batch{i}@example.com" for i in range(320)],
+            total_recipients=320,
+            sent_count=280,
+            failed_count=0,
+            status="in_progress",
+            last_batch_sent_at=timezone.now(),
+        )
+
+    def test_rejects_when_base_batch_not_sent_today(self):
+        self.campaign.last_batch_sent_at = timezone.now() - timedelta(days=1)
+        self.campaign.save(update_fields=["last_batch_sent_at"])
+        response = self.client.post(
+            reverse("admin_send_extra_email_campaign_batch", args=[self.campaign.id])
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    @patch("authentication.admin_views.send_generic_email", side_effect=_fake_send_result)
+    def test_sends_up_to_20_extra(self, mock_send):
+        response = self.client.post(
+            reverse("admin_send_extra_email_campaign_batch", args=[self.campaign.id])
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["sent_count"], 300)
+        self.assertEqual(response.data["extra_sent_today"], 20)
+        self.assertEqual(response.data["extra_remaining_today"], 0)
+        self.assertEqual(response.data["remaining_count"], 20)
+        self.assertEqual(response.data["status"], "in_progress")
+
+        sent_recipients = mock_send.call_args.kwargs["recipient_list"]
+        self.assertEqual(len(sent_recipients), 20)
+
+    @patch("authentication.admin_views.send_generic_email", side_effect=_fake_send_result)
+    def test_rejects_once_extra_allowance_used_up(self, mock_send):
+        self.client.post(
+            reverse("admin_send_extra_email_campaign_batch", args=[self.campaign.id])
+        )
+        response = self.client.post(
+            reverse("admin_send_extra_email_campaign_batch", args=[self.campaign.id])
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    @patch("authentication.admin_views.send_generic_email", side_effect=_fake_send_result)
+    def test_extra_batch_can_complete_a_small_remainder(self, mock_send):
+        # Only 10 left in the queue - the extra batch should send exactly
+        # those 10 and mark the campaign completed, not error out.
+        self.campaign.sent_count = 310
+        self.campaign.save(update_fields=["sent_count"])
+
+        response = self.client.post(
+            reverse("admin_send_extra_email_campaign_batch", args=[self.campaign.id])
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["sent_count"], 320)
+        self.assertEqual(response.data["status"], "completed")
+
+        sent_recipients = mock_send.call_args.kwargs["recipient_list"]
+        self.assertEqual(len(sent_recipients), 10)
+
+    def test_completed_campaign_rejects_extra_batch(self):
+        self.campaign.status = "completed"
+        self.campaign.save(update_fields=["status"])
+        response = self.client.post(
+            reverse("admin_send_extra_email_campaign_batch", args=[self.campaign.id])
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_nonexistent_campaign_404(self):
+        response = self.client.post(
+            reverse("admin_send_extra_email_campaign_batch", args=[999999])
         )
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 

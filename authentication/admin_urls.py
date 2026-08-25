@@ -193,6 +193,11 @@ urlpatterns = [
         name="admin_send_next_email_campaign_batch",
     ),
     path(
+        "email-campaigns/<int:campaign_id>/send-extra-batch/",
+        admin_views.send_extra_email_campaign_batch,
+        name="admin_send_extra_email_campaign_batch",
+    ),
+    path(
         "email-campaigns/<int:campaign_id>/cancel/",
         admin_views.cancel_email_campaign,
         name="admin_cancel_email_campaign",

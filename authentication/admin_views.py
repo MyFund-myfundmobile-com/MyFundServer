@@ -2583,12 +2583,26 @@ def all_transactions_list(request):
         return Response({"error": str(e)}, status=500)
 
 
-# Brevo's daily sending cap (see authentication/services/brevo_service.py:
-# DAILY_EMAIL_LIMIT) - a campaign batch never exceeds this, and
-# send_next_email_campaign_batch enforces at most one batch per calendar
-# day server-side (not just a client-side courtesy), since that's the
-# actual thing protecting the account from a Brevo overage.
-CAMPAIGN_DAILY_BATCH_LIMIT = 300
+# Brevo's real daily sending cap is 300 (see
+# authentication/services/brevo_service.py: DAILY_EMAIL_LIMIT). The
+# automatic base batch only uses 280 of that, leaving a 20-email buffer
+# for other transactional mail sent the same day (OTPs, notifications,
+# etc. share the same Brevo daily cap) - CAMPAIGN_EXTRA_DAILY_LIMIT is
+# that buffer, sendable the same day only via an explicit admin action
+# (send_extra_email_campaign_batch), never automatically.
+CAMPAIGN_BASE_BATCH_LIMIT = 280
+CAMPAIGN_EXTRA_DAILY_LIMIT = 20
+
+
+def _dedupe_preserve_order(emails):
+    seen = set()
+    result = []
+    for email in emails:
+        e = email.strip().lower()
+        if e and e not in seen:
+            seen.add(e)
+            result.append(e)
+    return result
 
 
 @api_view(['POST'])
@@ -2596,15 +2610,20 @@ CAMPAIGN_DAILY_BATCH_LIMIT = 300
 def create_email_campaign(request):
     """
     POST /api/admin/email-campaigns/create/
-    Body: {"subject": ..., "body": "<html>...", "is_ambassador": true, ...}
+    Body: {"subject": ..., "body": "<html>...", "is_ambassador": true, ...,
+           "extra_emails": ["a@example.com", ...]}
     Resolves the matching segment via the same filters all_users_list/
     admin_user_emails_for_segment use, freezes the matching emails into a
     snapshot (so later daily batches stay stable even if segment
-    membership changes), and immediately sends the first batch (<=300)
-    inline. If the whole segment fits in one batch, the campaign is
-    already "completed" on return - no further action needed. Larger
-    segments stay "in_progress" until send_next_email_campaign_batch is
-    called on subsequent days.
+    membership changes) - extra_emails (hand-typed addresses not
+    necessarily in the segment) are placed at the front of that snapshot,
+    guaranteeing they land in day one's batch regardless of segment size.
+    Immediately sends the first batch (<=280) inline. If the whole list
+    fits in one batch, the campaign is already "completed" on return - no
+    further action needed. Larger lists stay "in_progress" until
+    send_next_email_campaign_batch (next day) or
+    send_extra_email_campaign_batch (same day, optional top-up) is
+    called.
     """
     try:
         subject = (request.data.get('subject') or '').strip()
@@ -2612,16 +2631,27 @@ def create_email_campaign(request):
         if not subject or not body:
             return Response({"error": "Subject and body are required."}, status=400)
 
+        extra_emails_raw = request.data.get('extra_emails') or []
+        if not isinstance(extra_emails_raw, list):
+            return Response({"error": "extra_emails must be a list."}, status=400)
+        extra_emails = _dedupe_preserve_order(extra_emails_raw)
+
         queryset, filters_applied = _build_admin_user_queryset(request.data)
         queryset = queryset.exclude(email__isnull=True).exclude(email__exact='')
 
-        total_count = queryset.count()
-        if total_count == 0:
-            return Response({"error": "No users match this segment."}, status=400)
-
-        emails = list(
+        segment_emails = list(
             queryset.values_list('email', flat=True)[:MAX_SEGMENT_EMAIL_RECIPIENTS]
         )
+
+        emails = _dedupe_preserve_order(extra_emails + segment_emails)[
+            :MAX_SEGMENT_EMAIL_RECIPIENTS
+        ]
+
+        if not emails:
+            return Response(
+                {"error": "No users match this segment and no extra emails were given."},
+                status=400,
+            )
 
         campaign = EmailCampaign.objects.create(
             subject=subject,
@@ -2632,7 +2662,7 @@ def create_email_campaign(request):
             total_recipients=len(emails),
         )
 
-        first_batch = emails[:CAMPAIGN_DAILY_BATCH_LIMIT]
+        first_batch = emails[:CAMPAIGN_BASE_BATCH_LIMIT]
         result = send_generic_email(
             subject=subject,
             message=body,
@@ -2674,8 +2704,10 @@ def list_email_campaigns(request):
 def send_next_email_campaign_batch(request, campaign_id):
     """
     POST /api/admin/email-campaigns/<campaign_id>/send-next-batch/
-    Admin-triggered - there is no automatic background job advancing a
-    campaign. Enforces at most one batch per calendar day.
+    Sends the day's base batch (<=280). Admin-triggered - there is no
+    automatic background job advancing a campaign. Enforces at most one
+    base batch per calendar day; see send_extra_email_campaign_batch for
+    the optional same-day top-up.
     """
     try:
         try:
@@ -2699,7 +2731,7 @@ def send_next_email_campaign_batch(request, campaign_id):
 
         already_attempted = campaign.sent_count + campaign.failed_count
         next_batch = campaign.recipient_emails[
-            already_attempted:already_attempted + CAMPAIGN_DAILY_BATCH_LIMIT
+            already_attempted:already_attempted + CAMPAIGN_BASE_BATCH_LIMIT
         ]
 
         if not next_batch:
@@ -2717,6 +2749,76 @@ def send_next_email_campaign_batch(request, campaign_id):
         campaign.sent_count += result.get('sent', 0)
         campaign.failed_count += result.get('failed', 0)
         campaign.failed_emails = list(campaign.failed_emails) + result.get('failed_emails', [])
+        campaign.last_batch_sent_at = timezone.now()
+        campaign.extra_sent_today = 0  # new day - the extra allowance refreshes
+        if campaign.sent_count + campaign.failed_count >= campaign.total_recipients:
+            campaign.status = 'completed'
+        campaign.save()
+
+        return Response(EmailCampaignSerializer(campaign).data)
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
+
+
+@api_view(['POST'])
+@permission_classes([IsAdminUser])
+def send_extra_email_campaign_batch(request, campaign_id):
+    """
+    POST /api/admin/email-campaigns/<campaign_id>/send-extra-batch/
+    Optional same-day top-up: only usable after today's base batch has
+    already gone out, sends up to CAMPAIGN_EXTRA_DAILY_LIMIT (20) more on
+    top of it. This is how an admin can choose to use Brevo's full
+    300/day cap on a day they know nothing else is competing for it,
+    instead of always being capped at the conservative 280 default.
+    """
+    try:
+        try:
+            campaign = EmailCampaign.objects.get(pk=campaign_id)
+        except EmailCampaign.DoesNotExist:
+            return Response({"error": "Campaign not found."}, status=404)
+
+        if campaign.status != 'in_progress':
+            return Response(
+                {"error": f"Campaign is already {campaign.status}."}, status=400
+            )
+
+        today = timezone.now().date()
+        if campaign.last_batch_sent_at is None or campaign.last_batch_sent_at.date() != today:
+            return Response(
+                {"error": "Send today's base batch first before sending extra."},
+                status=400,
+            )
+
+        remaining_allowance = CAMPAIGN_EXTRA_DAILY_LIMIT - campaign.extra_sent_today
+        if remaining_allowance <= 0:
+            return Response(
+                {"error": "Today's extra allowance (20) has already been used."},
+                status=400,
+            )
+
+        already_attempted = campaign.sent_count + campaign.failed_count
+        next_batch = campaign.recipient_emails[
+            already_attempted:already_attempted + remaining_allowance
+        ]
+
+        if not next_batch:
+            campaign.status = 'completed'
+            campaign.save()
+            return Response(EmailCampaignSerializer(campaign).data)
+
+        result = send_generic_email(
+            subject=campaign.subject,
+            message=campaign.body_html,
+            recipient_list=next_batch,
+            use_celery_threshold=0,
+        )
+
+        attempted_this_call = result.get('sent', 0) + result.get('failed', 0)
+        campaign.sent_count += result.get('sent', 0)
+        campaign.failed_count += result.get('failed', 0)
+        campaign.failed_emails = list(campaign.failed_emails) + result.get('failed_emails', [])
+        campaign.extra_sent_today += attempted_this_call
         campaign.last_batch_sent_at = timezone.now()
         if campaign.sent_count + campaign.failed_count >= campaign.total_recipients:
             campaign.status = 'completed'
