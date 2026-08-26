@@ -318,6 +318,7 @@ class EmailCampaignSerializer(serializers.ModelSerializer):
             "status",
             "created_at",
             "last_batch_sent_at",
+            "is_sending",
         ]
 
     def get_remaining_count(self, obj):
@@ -330,7 +331,7 @@ class EmailCampaignSerializer(serializers.ModelSerializer):
         )
 
     def get_can_send_next_batch(self, obj):
-        if obj.status != "in_progress":
+        if obj.status != "in_progress" or obj.is_sending:
             return False
         if obj.last_batch_sent_at is None:
             return True
@@ -341,7 +342,7 @@ class EmailCampaignSerializer(serializers.ModelSerializer):
         return max(CAMPAIGN_EXTRA_DAILY_LIMIT - obj.extra_sent_today, 0)
 
     def get_can_send_extra_today(self, obj):
-        if obj.status != "in_progress":
+        if obj.status != "in_progress" or obj.is_sending:
             return False
         if not self._sent_batch_today(obj):
             return False

@@ -1377,6 +1377,102 @@ def send_bulk_email_task(self, emails, from_email, batch_size=None, delay_second
     }
 
 
+@shared_task(bind=True, queue="email_queue")
+def send_email_campaign_batch_task(
+    self, campaign_id, recipient_emails, from_email=None, is_first_batch=False, is_extra_batch=False
+):
+    """
+    Sends one EmailCampaign batch (admin_views.py's create_email_campaign /
+    send_next_email_campaign_batch / send_extra_email_campaign_batch) in
+    the background, off the request/response cycle entirely.
+
+    Why this exists: those three views used to call send_generic_email
+    inline (use_celery_threshold=0) so a batch of up to 280 recipients -
+    each needing a DB-backed personalization lookup plus a Brevo API call -
+    was sent synchronously within a single HTTP request. That reliably
+    exceeded the platform's request timeout partway through a large batch,
+    which killed the request (surfacing as a 500 to the admin) *after*
+    Brevo had already delivered to however many recipients the loop had
+    reached - but *before* the view's final campaign.save() could persist
+    that progress. Net effect: real people got emailed, but the campaign
+    record still showed 0 sent, so retrying would have re-sent to
+    everyone including the ones already reached (this happened for real
+    on 2026-08-26 - see EmailCampaign id=1's fixed-up sent_count).
+
+    sent_count/failed_count are persisted via an atomic F()-expression
+    update after EVERY single recipient (not batched at the end), so even
+    if this task itself crashes or its worker is killed mid-batch, the
+    campaign record always accurately reflects what actually went out via
+    Brevo - "already_attempted" (used to compute the next batch's slice)
+    can never drift ahead of reality again.
+    """
+    from django.db.models import F
+    from .models import EmailCampaign
+    from .services.brevo_service import send_email_via_brevo
+    from .utils import personalize_email_payload
+
+    try:
+        campaign = EmailCampaign.objects.get(pk=campaign_id)
+    except EmailCampaign.DoesNotExist:
+        logger.error(f"send_email_campaign_batch_task: campaign {campaign_id} not found")
+        return
+
+    from_email = from_email or settings.DEFAULT_FROM_EMAIL
+    subject = campaign.subject
+    body = campaign.body_html
+
+    sent_this_call = 0
+    failed_this_call = 0
+    failed_emails_this_call = []
+
+    for email in recipient_emails:
+        try:
+            payload = personalize_email_payload(email, subject, body)
+            send_email_via_brevo(
+                to_email=payload["to"],
+                subject=payload["subject"],
+                html_content=payload["html_message"],
+                from_email=from_email,
+            )
+            sent_this_call += 1
+            EmailCampaign.objects.filter(pk=campaign_id).update(sent_count=F("sent_count") + 1)
+            logger.info(f"✅ Campaign {campaign_id}: sent to {email}")
+        except Exception as e:
+            failed_this_call += 1
+            failed_emails_this_call.append(email)
+            EmailCampaign.objects.filter(pk=campaign_id).update(failed_count=F("failed_count") + 1)
+            logger.error(f"❌ Campaign {campaign_id}: failed for {email}: {e}")
+
+        time.sleep(SECONDS_BETWEEN_SENDS)
+
+    # Everything above updated counts atomically per-recipient; this final
+    # read-then-write only touches fields that genuinely need it
+    # (failed_emails is a JSON list, status/extra_sent_today need the
+    # now-current totals to decide).
+    campaign.refresh_from_db()
+    if failed_emails_this_call:
+        campaign.failed_emails = list(campaign.failed_emails) + failed_emails_this_call
+    if is_extra_batch:
+        campaign.extra_sent_today = campaign.extra_sent_today + sent_this_call + failed_this_call
+    if campaign.sent_count + campaign.failed_count >= campaign.total_recipients:
+        campaign.status = "completed"
+    # This batch is done either way - clears the guard that keeps
+    # send_next_email_campaign_batch/send_extra_email_campaign_batch from
+    # dispatching an overlapping batch while this one was still running.
+    campaign.is_sending = False
+    campaign.save()
+
+    if is_first_batch and campaign.sent_count > 0:
+        from .views import auto_save_email_as_template
+        auto_save_email_as_template(subject, body, campaign.total_recipients)
+
+    logger.info(
+        f"📊 Campaign {campaign_id} batch done: {sent_this_call} sent, "
+        f"{failed_this_call} failed this call. Totals: "
+        f"{campaign.sent_count}/{campaign.total_recipients}"
+    )
+
+
 from celery import shared_task
 from django.conf import settings
 from .models import CustomUser

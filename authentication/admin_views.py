@@ -27,7 +27,7 @@ from .serializers import (
     AdminTransactionListSerializer,
     EmailCampaignSerializer,
 )
-from .utils import grant_user_ambassador_status, revoke_user_ambassador_status, send_generic_email
+from .utils import grant_user_ambassador_status, revoke_user_ambassador_status
 from django.db.models.functions import ExtractMonth, ExtractYear, Coalesce, Cast
  
 
@@ -2679,9 +2679,13 @@ def create_email_campaign(request):
     membership changes) - extra_emails (hand-typed addresses not
     necessarily in the segment) are placed at the front of that snapshot,
     guaranteeing they land in day one's batch regardless of segment size.
-    Immediately sends the first batch (<=280) inline. If the whole list
-    fits in one batch, the campaign is already "completed" on return - no
-    further action needed. Larger lists stay "in_progress" until
+    Dispatches the first batch (<=280) to send_email_campaign_batch_task
+    (tasks.py) to actually send in the background rather than inline in
+    this request - a batch that size reliably exceeds the platform's
+    request timeout if sent synchronously (see that task's docstring for
+    the incident this fixed). This view returns immediately with the
+    campaign still at sent_count 0; poll/refresh the campaign list to see
+    real progress. Larger lists stay "in_progress" until
     send_next_email_campaign_batch (next day) or
     send_extra_email_campaign_batch (same day, optional top-up) is
     called.
@@ -2724,24 +2728,14 @@ def create_email_campaign(request):
         )
 
         first_batch = emails[:CAMPAIGN_BASE_BATCH_LIMIT]
-        result = send_generic_email(
-            subject=subject,
-            message=body,
-            recipient_list=first_batch,
-            use_celery_threshold=0,  # always inline - this call IS the batch
-        )
-
-        campaign.sent_count = result.get('sent', 0)
-        campaign.failed_count = result.get('failed', 0)
-        campaign.failed_emails = result.get('failed_emails', [])
         campaign.last_batch_sent_at = timezone.now()
-        if campaign.sent_count + campaign.failed_count >= campaign.total_recipients:
-            campaign.status = 'completed'
+        campaign.is_sending = True
         campaign.save()
 
-        if campaign.sent_count > 0:
-            from .views import auto_save_email_as_template
-            auto_save_email_as_template(subject, body, campaign.total_recipients)
+        from .tasks import send_email_campaign_batch_task
+        send_email_campaign_batch_task.delay(
+            campaign.id, first_batch, is_first_batch=True, is_extra_batch=False,
+        )
 
         return Response(EmailCampaignSerializer(campaign).data, status=201)
 
@@ -2794,6 +2788,12 @@ def send_next_email_campaign_batch(request, campaign_id):
                 status=400,
             )
 
+        if campaign.is_sending:
+            return Response(
+                {"error": "A batch is still sending in the background for this campaign - wait for it to finish."},
+                status=400,
+            )
+
         already_attempted = campaign.sent_count + campaign.failed_count
         next_batch = campaign.recipient_emails[
             already_attempted:already_attempted + CAMPAIGN_BASE_BATCH_LIMIT
@@ -2804,21 +2804,15 @@ def send_next_email_campaign_batch(request, campaign_id):
             campaign.save()
             return Response(EmailCampaignSerializer(campaign).data)
 
-        result = send_generic_email(
-            subject=campaign.subject,
-            message=campaign.body_html,
-            recipient_list=next_batch,
-            use_celery_threshold=0,
-        )
-
-        campaign.sent_count += result.get('sent', 0)
-        campaign.failed_count += result.get('failed', 0)
-        campaign.failed_emails = list(campaign.failed_emails) + result.get('failed_emails', [])
         campaign.last_batch_sent_at = timezone.now()
         campaign.extra_sent_today = 0  # new day - the extra allowance refreshes
-        if campaign.sent_count + campaign.failed_count >= campaign.total_recipients:
-            campaign.status = 'completed'
+        campaign.is_sending = True
         campaign.save()
+
+        from .tasks import send_email_campaign_batch_task
+        send_email_campaign_batch_task.delay(
+            campaign.id, next_batch, is_first_batch=False, is_extra_batch=False,
+        )
 
         return Response(EmailCampaignSerializer(campaign).data)
 
@@ -2855,6 +2849,12 @@ def send_extra_email_campaign_batch(request, campaign_id):
                 status=400,
             )
 
+        if campaign.is_sending:
+            return Response(
+                {"error": "A batch is still sending in the background for this campaign - wait for it to finish."},
+                status=400,
+            )
+
         remaining_allowance = CAMPAIGN_EXTRA_DAILY_LIMIT - campaign.extra_sent_today
         if remaining_allowance <= 0:
             return Response(
@@ -2872,22 +2872,13 @@ def send_extra_email_campaign_batch(request, campaign_id):
             campaign.save()
             return Response(EmailCampaignSerializer(campaign).data)
 
-        result = send_generic_email(
-            subject=campaign.subject,
-            message=campaign.body_html,
-            recipient_list=next_batch,
-            use_celery_threshold=0,
-        )
-
-        attempted_this_call = result.get('sent', 0) + result.get('failed', 0)
-        campaign.sent_count += result.get('sent', 0)
-        campaign.failed_count += result.get('failed', 0)
-        campaign.failed_emails = list(campaign.failed_emails) + result.get('failed_emails', [])
-        campaign.extra_sent_today += attempted_this_call
-        campaign.last_batch_sent_at = timezone.now()
-        if campaign.sent_count + campaign.failed_count >= campaign.total_recipients:
-            campaign.status = 'completed'
+        campaign.is_sending = True
         campaign.save()
+
+        from .tasks import send_email_campaign_batch_task
+        send_email_campaign_batch_task.delay(
+            campaign.id, next_batch, is_first_batch=False, is_extra_batch=True,
+        )
 
         return Response(EmailCampaignSerializer(campaign).data)
 

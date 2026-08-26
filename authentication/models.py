@@ -2870,6 +2870,14 @@ class EmailCampaign(models.Model):
     # How much of today's optional 20-extra allowance has been used -
     # reset to 0 whenever a new day's base batch runs.
     extra_sent_today = models.IntegerField(default=0)
+    # True from the moment a batch is dispatched to
+    # send_email_campaign_batch_task until that task finishes - guards
+    # against send_next_email_campaign_batch and
+    # send_extra_email_campaign_batch both being triggered for the same
+    # campaign while a batch is still actively sending in the background,
+    # which would race on "how many have been attempted so far" and could
+    # double-email whoever falls in the overlap.
+    is_sending = models.BooleanField(default=False)
 
     class Meta:
         ordering = ["-created_at"]

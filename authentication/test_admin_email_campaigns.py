@@ -30,15 +30,6 @@ def _make_user(email, phone, **extra):
     )
 
 
-def _fake_send_result(recipient_list, **kwargs):
-    return {
-        "status": "completed",
-        "sent": len(recipient_list),
-        "failed": 0,
-        "failed_emails": [],
-    }
-
-
 class AdminEmailCampaignPermissionTest(TestCase):
     def setUp(self):
         self.client = APIClient()
@@ -67,13 +58,25 @@ class AdminEmailCampaignPermissionTest(TestCase):
 
 
 class CreateEmailCampaignTest(TestCase):
+    """
+    Sending itself happens off-request, in send_email_campaign_batch_task
+    (see EmailCampaignBatchTaskTest below) - a synchronous inline send of
+    up to 280 recipients reliably exceeded the platform's request timeout
+    partway through (real incident, 2026-08-26: 4 people got emailed but
+    the campaign record still showed 0 sent, since the request died
+    before it could save that). These tests only cover what the view
+    itself does: build the recipient snapshot and dispatch the task -
+    mocking send_email_campaign_batch_task.delay so no real Celery broker
+    is needed.
+    """
+
     def setUp(self):
         self.client = APIClient()
         self.staff = _make_user("campaignstaff1@example.com", "97000000002", is_staff=True)
         self.client.force_authenticate(user=self.staff)
 
-    @patch("authentication.admin_views.send_generic_email", side_effect=_fake_send_result)
-    def test_small_segment_completes_immediately(self, mock_send):
+    @patch("authentication.tasks.send_email_campaign_batch_task.delay")
+    def test_small_segment_dispatches_background_task(self, mock_delay):
         _make_user("amb1@example.com", "97000000003", is_ambassador=True)
         _make_user("amb2@example.com", "97000000004", is_ambassador=True)
 
@@ -85,14 +88,23 @@ class CreateEmailCampaignTest(TestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         # staff isn't an ambassador, so only the 2 explicit ambassadors match.
         self.assertEqual(response.data["total_recipients"], 2)
-        self.assertEqual(response.data["sent_count"], 2)
-        self.assertEqual(response.data["status"], "completed")
-        self.assertEqual(response.data["remaining_count"], 0)
+        # Nothing has actually sent yet - that's the task's job, in the
+        # background. is_sending gates both batch buttons off in the
+        # meantime.
+        self.assertEqual(response.data["sent_count"], 0)
+        self.assertEqual(response.data["status"], "in_progress")
+        self.assertTrue(response.data["is_sending"])
         self.assertFalse(response.data["can_send_next_batch"])
-        mock_send.assert_called_once()
+        self.assertFalse(response.data["can_send_extra_today"])
 
-    @patch("authentication.admin_views.send_generic_email", side_effect=_fake_send_result)
-    def test_large_segment_stays_in_progress(self, mock_send):
+        mock_delay.assert_called_once()
+        args, kwargs = mock_delay.call_args
+        self.assertEqual(len(args[1]), 2)
+        self.assertTrue(kwargs.get("is_first_batch"))
+        self.assertFalse(kwargs.get("is_extra_batch"))
+
+    @patch("authentication.tasks.send_email_campaign_batch_task.delay")
+    def test_large_segment_dispatches_280_capped_first_batch(self, mock_delay):
         for i in range(320):
             _make_user(f"bulk{i}@example.com", f"971{i:08d}")
 
@@ -105,20 +117,16 @@ class CreateEmailCampaignTest(TestCase):
         # 320 bulk users + the staff account itself = 321 total matches
         # (no filters means "everyone"). Base batch is 280, not 300.
         self.assertEqual(response.data["total_recipients"], 321)
-        self.assertEqual(response.data["sent_count"], 280)
+        self.assertEqual(response.data["sent_count"], 0)
         self.assertEqual(response.data["status"], "in_progress")
-        self.assertEqual(response.data["remaining_count"], 41)
-        self.assertFalse(response.data["can_send_next_batch"])  # sent today already
-        # The 20-extra top-up is available today, since a base batch and
-        # there's more than 20 left in the queue.
-        self.assertTrue(response.data["can_send_extra_today"])
-        self.assertEqual(response.data["extra_remaining_today"], 20)
+        self.assertTrue(response.data["is_sending"])
 
-        sent_recipients = mock_send.call_args.kwargs["recipient_list"]
-        self.assertEqual(len(sent_recipients), 280)
+        args, kwargs = mock_delay.call_args
+        dispatched_batch = args[1]
+        self.assertEqual(len(dispatched_batch), 280)
 
-    @patch("authentication.admin_views.send_generic_email", side_effect=_fake_send_result)
-    def test_extra_emails_prioritized_into_day_one_batch(self, mock_send):
+    @patch("authentication.tasks.send_email_campaign_batch_task.delay")
+    def test_extra_emails_prioritized_into_day_one_batch(self, mock_delay):
         # 300 segment matches (well over the 280 base batch) plus 2 hand-
         # typed extra emails that aren't in the segment at all - the extras
         # must still land in day one's batch, not get queued behind 280
@@ -139,12 +147,12 @@ class CreateEmailCampaignTest(TestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         # 299 ambassadors + 2 extras = 301 total.
         self.assertEqual(response.data["total_recipients"], 301)
-        self.assertEqual(response.data["sent_count"], 280)
 
-        sent_recipients = mock_send.call_args.kwargs["recipient_list"]
-        self.assertIn("outsider1@example.com", sent_recipients)
+        args, kwargs = mock_delay.call_args
+        dispatched_batch = args[1]
+        self.assertIn("outsider1@example.com", dispatched_batch)
         # Extra emails are lowercased/deduped like everything else.
-        self.assertIn("outsider2@example.com", sent_recipients)
+        self.assertIn("outsider2@example.com", dispatched_batch)
 
     def test_rejects_when_no_recipients_match(self):
         response = self.client.post(
@@ -186,8 +194,8 @@ class SendNextBatchTest(TestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
-    @patch("authentication.admin_views.send_generic_email", side_effect=_fake_send_result)
-    def test_next_day_sends_remainder_and_completes(self, mock_send):
+    @patch("authentication.tasks.send_email_campaign_batch_task.delay")
+    def test_next_day_dispatches_remainder(self, mock_delay):
         self.campaign.last_batch_sent_at = timezone.now() - timedelta(days=1)
         self.campaign.save(update_fields=["last_batch_sent_at"])
 
@@ -195,27 +203,42 @@ class SendNextBatchTest(TestCase):
             reverse("admin_send_next_email_campaign_batch", args=[self.campaign.id])
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["sent_count"], 320)
-        self.assertEqual(response.data["remaining_count"], 0)
-        self.assertEqual(response.data["status"], "completed")
+        # Dispatch, not delivery - sent_count is still whatever it was
+        # (280) until the background task actually runs.
+        self.assertEqual(response.data["sent_count"], 280)
+        self.assertTrue(response.data["is_sending"])
+        self.assertEqual(response.data["status"], "in_progress")
 
-        sent_recipients = mock_send.call_args.kwargs["recipient_list"]
-        self.assertEqual(len(sent_recipients), 40)
+        args, kwargs = mock_delay.call_args
+        dispatched_batch = args[1]
+        self.assertEqual(len(dispatched_batch), 40)
+        self.assertFalse(kwargs.get("is_first_batch"))
+        self.assertFalse(kwargs.get("is_extra_batch"))
 
-    def test_next_day_resets_extra_allowance(self):
+    @patch("authentication.tasks.send_email_campaign_batch_task.delay")
+    def test_next_day_resets_extra_allowance(self, mock_delay):
         self.campaign.extra_sent_today = 20
         self.campaign.last_batch_sent_at = timezone.now() - timedelta(days=1)
         self.campaign.save(update_fields=["extra_sent_today", "last_batch_sent_at"])
 
-        with patch(
-            "authentication.admin_views.send_generic_email", side_effect=_fake_send_result
-        ):
-            response = self.client.post(
-                reverse("admin_send_next_email_campaign_batch", args=[self.campaign.id])
-            )
+        response = self.client.post(
+            reverse("admin_send_next_email_campaign_batch", args=[self.campaign.id])
+        )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["extra_sent_today"], 0)
         self.assertEqual(response.data["extra_remaining_today"], 20)
+
+    @patch("authentication.tasks.send_email_campaign_batch_task.delay")
+    def test_rejects_when_already_sending(self, mock_delay):
+        self.campaign.last_batch_sent_at = timezone.now() - timedelta(days=1)
+        self.campaign.is_sending = True
+        self.campaign.save(update_fields=["last_batch_sent_at", "is_sending"])
+
+        response = self.client.post(
+            reverse("admin_send_next_email_campaign_batch", args=[self.campaign.id])
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        mock_delay.assert_not_called()
 
     def test_completed_campaign_rejects_further_batches(self):
         self.campaign.status = "completed"
@@ -258,35 +281,46 @@ class SendExtraBatchTest(TestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
-    @patch("authentication.admin_views.send_generic_email", side_effect=_fake_send_result)
-    def test_sends_up_to_20_extra(self, mock_send):
+    @patch("authentication.tasks.send_email_campaign_batch_task.delay")
+    def test_dispatches_up_to_20_extra(self, mock_delay):
         response = self.client.post(
             reverse("admin_send_extra_email_campaign_batch", args=[self.campaign.id])
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["sent_count"], 300)
-        self.assertEqual(response.data["extra_sent_today"], 20)
-        self.assertEqual(response.data["extra_remaining_today"], 0)
-        self.assertEqual(response.data["remaining_count"], 20)
+        # Still 280 (unchanged) in the response - the task hasn't run yet.
+        self.assertEqual(response.data["sent_count"], 280)
+        self.assertTrue(response.data["is_sending"])
         self.assertEqual(response.data["status"], "in_progress")
 
-        sent_recipients = mock_send.call_args.kwargs["recipient_list"]
-        self.assertEqual(len(sent_recipients), 20)
+        args, kwargs = mock_delay.call_args
+        dispatched_batch = args[1]
+        self.assertEqual(len(dispatched_batch), 20)
+        self.assertTrue(kwargs.get("is_extra_batch"))
 
-    @patch("authentication.admin_views.send_generic_email", side_effect=_fake_send_result)
-    def test_rejects_once_extra_allowance_used_up(self, mock_send):
-        self.client.post(
-            reverse("admin_send_extra_email_campaign_batch", args=[self.campaign.id])
-        )
+    @patch("authentication.tasks.send_email_campaign_batch_task.delay")
+    def test_rejects_once_extra_allowance_used_up(self, mock_delay):
+        self.campaign.extra_sent_today = 20
+        self.campaign.save(update_fields=["extra_sent_today"])
         response = self.client.post(
             reverse("admin_send_extra_email_campaign_batch", args=[self.campaign.id])
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        mock_delay.assert_not_called()
 
-    @patch("authentication.admin_views.send_generic_email", side_effect=_fake_send_result)
-    def test_extra_batch_can_complete_a_small_remainder(self, mock_send):
-        # Only 10 left in the queue - the extra batch should send exactly
-        # those 10 and mark the campaign completed, not error out.
+    @patch("authentication.tasks.send_email_campaign_batch_task.delay")
+    def test_rejects_when_already_sending(self, mock_delay):
+        self.campaign.is_sending = True
+        self.campaign.save(update_fields=["is_sending"])
+        response = self.client.post(
+            reverse("admin_send_extra_email_campaign_batch", args=[self.campaign.id])
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        mock_delay.assert_not_called()
+
+    @patch("authentication.tasks.send_email_campaign_batch_task.delay")
+    def test_extra_batch_dispatches_a_small_remainder(self, mock_delay):
+        # Only 10 left in the queue - the extra batch should dispatch
+        # exactly those 10, not error out.
         self.campaign.sent_count = 310
         self.campaign.save(update_fields=["sent_count"])
 
@@ -294,11 +328,11 @@ class SendExtraBatchTest(TestCase):
             reverse("admin_send_extra_email_campaign_batch", args=[self.campaign.id])
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["sent_count"], 320)
-        self.assertEqual(response.data["status"], "completed")
+        self.assertTrue(response.data["is_sending"])
 
-        sent_recipients = mock_send.call_args.kwargs["recipient_list"]
-        self.assertEqual(len(sent_recipients), 10)
+        args, kwargs = mock_delay.call_args
+        dispatched_batch = args[1]
+        self.assertEqual(len(dispatched_batch), 10)
 
     def test_completed_campaign_rejects_extra_batch(self):
         self.campaign.status = "completed"
@@ -313,6 +347,136 @@ class SendExtraBatchTest(TestCase):
             reverse("admin_send_extra_email_campaign_batch", args=[999999])
         )
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class EmailCampaignBatchTaskTest(TestCase):
+    """
+    send_email_campaign_batch_task (tasks.py) - the actual send loop that
+    used to run inline inside the view (see module docstring above for
+    why that broke). Called directly as a plain function here (Celery
+    tasks are just callables outside of .delay()/.apply_async()), with
+    send_email_via_brevo and time.sleep mocked so these run fast and
+    without hitting Brevo for real.
+    """
+
+    def setUp(self):
+        self.staff = _make_user("batchtaskstaff@example.com", "97000000009", is_staff=True)
+        self.campaign = EmailCampaign.objects.create(
+            subject="Task Test",
+            body_html="<p>Hi {first_name}</p>",
+            created_by=self.staff,
+            recipient_emails=["a@example.com", "b@example.com", "c@example.com"],
+            total_recipients=3,
+            status="in_progress",
+            is_sending=True,
+        )
+
+    @patch("authentication.tasks.time.sleep")
+    @patch("authentication.services.brevo_service.send_email_via_brevo")
+    def test_persists_progress_incrementally_per_recipient(self, mock_brevo, mock_sleep):
+        # This is the core fix: sent_count must already reflect each send
+        # as it happens, not only once at the very end - otherwise a crash
+        # partway through a batch (the actual 2026-08-26 incident) loses
+        # track of who was really emailed.
+        from .tasks import send_email_campaign_batch_task
+
+        seen_counts = []
+
+        def _record_and_send(**kwargs):
+            seen_counts.append(
+                EmailCampaign.objects.get(pk=self.campaign.id).sent_count
+            )
+
+        mock_brevo.side_effect = _record_and_send
+
+        send_email_campaign_batch_task(
+            self.campaign.id,
+            ["a@example.com", "b@example.com", "c@example.com"],
+            is_first_batch=True,
+        )
+
+        # sent_count seen *during* each call - proves it's incremented
+        # as-we-go (0, then 1, then 2), not stuck at 0 until the end.
+        self.assertEqual(seen_counts, [0, 1, 2])
+
+        self.campaign.refresh_from_db()
+        self.assertEqual(self.campaign.sent_count, 3)
+        self.assertEqual(self.campaign.status, "completed")
+        self.assertFalse(self.campaign.is_sending)
+
+    @patch("authentication.tasks.time.sleep")
+    @patch("authentication.services.brevo_service.send_email_via_brevo")
+    def test_tracks_failures_without_losing_successes(self, mock_brevo, mock_sleep):
+        from .tasks import send_email_campaign_batch_task
+
+        def _side_effect(to_email, **kwargs):
+            if to_email == "b@example.com":
+                raise Exception("Brevo rejected")
+
+        mock_brevo.side_effect = _side_effect
+
+        send_email_campaign_batch_task(
+            self.campaign.id,
+            ["a@example.com", "b@example.com", "c@example.com"],
+            is_first_batch=True,
+        )
+
+        self.campaign.refresh_from_db()
+        self.assertEqual(self.campaign.sent_count, 2)
+        self.assertEqual(self.campaign.failed_count, 1)
+        self.assertEqual(self.campaign.failed_emails, ["b@example.com"])
+        self.assertEqual(self.campaign.status, "completed")
+        self.assertFalse(self.campaign.is_sending)
+
+    @patch("authentication.tasks.time.sleep")
+    @patch("authentication.views.auto_save_email_as_template")
+    @patch("authentication.services.brevo_service.send_email_via_brevo")
+    def test_auto_saves_template_only_on_first_batch_with_sends(
+        self, mock_brevo, mock_autosave, mock_sleep
+    ):
+        from .tasks import send_email_campaign_batch_task
+
+        send_email_campaign_batch_task(
+            self.campaign.id, ["a@example.com"], is_first_batch=True,
+        )
+        mock_autosave.assert_called_once()
+
+    @patch("authentication.tasks.time.sleep")
+    @patch("authentication.views.auto_save_email_as_template")
+    @patch("authentication.services.brevo_service.send_email_via_brevo")
+    def test_does_not_auto_save_on_later_batches(self, mock_brevo, mock_autosave, mock_sleep):
+        from .tasks import send_email_campaign_batch_task
+
+        send_email_campaign_batch_task(
+            self.campaign.id, ["a@example.com"], is_first_batch=False,
+        )
+        mock_autosave.assert_not_called()
+
+    @patch("authentication.tasks.time.sleep")
+    @patch("authentication.services.brevo_service.send_email_via_brevo")
+    def test_extra_batch_increments_extra_sent_today(self, mock_brevo, mock_sleep):
+        from .tasks import send_email_campaign_batch_task
+
+        self.campaign.extra_sent_today = 5
+        self.campaign.save(update_fields=["extra_sent_today"])
+
+        send_email_campaign_batch_task(
+            self.campaign.id,
+            ["a@example.com", "b@example.com"],
+            is_extra_batch=True,
+        )
+
+        self.campaign.refresh_from_db()
+        self.assertEqual(self.campaign.extra_sent_today, 7)
+
+    @patch("authentication.tasks.time.sleep")
+    @patch("authentication.services.brevo_service.send_email_via_brevo")
+    def test_unknown_campaign_id_does_not_raise(self, mock_brevo, mock_sleep):
+        from .tasks import send_email_campaign_batch_task
+
+        # Should log and return quietly, not blow up the Celery worker.
+        send_email_campaign_batch_task(999999, ["a@example.com"])
+        mock_brevo.assert_not_called()
 
 
 class CancelEmailCampaignTest(TestCase):

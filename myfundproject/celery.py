@@ -32,6 +32,7 @@ app.conf.task_queues = (
 app.conf.task_routes = {
     "authentication.tasks.send_bulk_email_task": {"queue": "email_queue"},
     "authentication.tasks.send_single_email_task": {"queue": "email_queue"},
+    "authentication.tasks.send_email_campaign_batch_task": {"queue": "email_queue"},
     "authentication.tasks.sync_user_to_brevo": {"queue": "default"},
     "authentication.tasks.send_namecheap_safe_email_task_v2": {"queue": "default"},
     "authentication.tasks.calculate_daily_roi_task": {"queue": "default"},

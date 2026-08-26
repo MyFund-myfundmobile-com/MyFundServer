@@ -316,6 +316,100 @@ def validate_email(email):
     return re.match(pattern, email) is not None
 
 
+# Extracted from send_generic_email's old nested `personalize` closure so
+# send_email_campaign_batch_task (tasks.py) can reuse the exact same
+# placeholder-substitution logic per-recipient, instead of duplicating it -
+# the two need to match exactly or a campaign's personalized email would
+# look subtly different from a small inline send of the same content.
+def personalize_email_payload(email_addr, subject, message, extra_context=None, template="email/email.html"):
+    extra_context = extra_context or {}
+    try:
+        user = CustomUser.objects.filter(email=email_addr).first()
+
+        today = timezone.now().date()
+        year, month = today.year, today.month
+        if month <= 3:
+            qs, qe, ql = (
+                date(year - 1, 10, 1),
+                date(year - 1, 12, 31),
+                f"Q4 {year-1}",
+            )
+        elif month <= 6:
+            qs, qe, ql = date(year, 1, 1), date(year, 3, 31), f"Q1 {year}"
+        elif month <= 9:
+            qs, qe, ql = date(year, 4, 1), date(year, 6, 30), f"Q2 {year}"
+        else:
+            qs, qe, ql = date(year, 7, 1), date(year, 9, 30), f"Q3 {year}"
+
+        roi_qs = (
+            ROITransaction.objects.filter(
+                user=user, accrued_date__range=[qs, qe], is_paid_out=True
+            )
+            if user
+            else []
+        )
+
+        total_roi = sum(r.amount for r in roi_qs)
+        savings_roi = sum(r.amount for r in roi_qs if r.roi_type == "SAVINGS")
+        investment_roi = sum(r.amount for r in roi_qs if r.roi_type == "INVESTMENT")
+
+        placeholders = {
+            "{first_name}": user.first_name if user else "User",
+            "{last_name}": user.last_name if user else "",
+            "{full_name}": getattr(user, "full_name", email_addr),
+            "{email}": email_addr,
+            "{wallet}": f"{getattr(user, 'wallet', 0):,.2f}",
+            "{savings}": f"{getattr(user, 'savings', 0):,.2f}",
+            "{investment}": f"{getattr(user, 'investment', 0):,.2f}",
+            "{total_payout}": f"{total_roi:,.2f}",
+            "{savings_roi}": f"{savings_roi:,.2f}",
+            "{investment_roi}": f"{investment_roi:,.2f}",
+            "{quarter_label}": ql,
+        }
+
+        # Add custom dynamic values
+        for key, value in extra_context.items():
+            placeholders[f"{{{key}}}"] = value
+
+        p_subject = subject
+        p_message = message
+
+        for k, v in placeholders.items():
+            p_subject = p_subject.replace(k, v)
+            p_message = p_message.replace(k, v)
+
+        context = {
+            "subject": p_subject,
+            "message": p_message,
+            "user": user,
+            "email": email_addr,
+        }
+
+        try:
+            html_message = render_to_string(template, context)
+        except Exception as e:
+            logger.warning(f"Template rendering failed for {email_addr}: {e}")
+            html_message = f"<html><body>{p_message}</body></html>"
+
+        plain_message = strip_tags(html_message) or p_message
+
+        return {
+            "to": email_addr,
+            "subject": p_subject,
+            "html_message": html_message,
+            "plain_message": plain_message,
+        }
+
+    except Exception as e:
+        logger.error(f"Personalization error for {email_addr}: {e}")
+        return {
+            "to": email_addr,
+            "subject": subject,
+            "html_message": f"<html><body>{message}</body></html>",
+            "plain_message": str(message),
+        }
+
+
 def send_generic_email(
     subject,
     message,
@@ -371,95 +465,10 @@ def send_generic_email(
         f"📧 Valid recipients: {total_valid}, Invalid skipped: {len(invalid_recipients)}"
     )
 
-    # ---------- PERSONALIZATION (UNCHANGED) ----------
-    def personalize(email_addr):
-        try:
-            user = CustomUser.objects.filter(email=email_addr).first()
-
-            today = timezone.now().date()
-            year, month = today.year, today.month
-            if month <= 3:
-                qs, qe, ql = (
-                    date(year - 1, 10, 1),
-                    date(year - 1, 12, 31),
-                    f"Q4 {year-1}",
-                )
-            elif month <= 6:
-                qs, qe, ql = date(year, 1, 1), date(year, 3, 31), f"Q1 {year}"
-            elif month <= 9:
-                qs, qe, ql = date(year, 4, 1), date(year, 6, 30), f"Q2 {year}"
-            else:
-                qs, qe, ql = date(year, 7, 1), date(year, 9, 30), f"Q3 {year}"
-
-            roi_qs = (
-                ROITransaction.objects.filter(
-                    user=user, accrued_date__range=[qs, qe], is_paid_out=True
-                )
-                if user
-                else []
-            )
-
-            total_roi = sum(r.amount for r in roi_qs)
-            savings_roi = sum(r.amount for r in roi_qs if r.roi_type == "SAVINGS")
-            investment_roi = sum(r.amount for r in roi_qs if r.roi_type == "INVESTMENT")
-
-            placeholders = {
-                "{first_name}": user.first_name if user else "User",
-                "{last_name}": user.last_name if user else "",
-                "{full_name}": getattr(user, "full_name", email_addr),
-                "{email}": email_addr,
-                "{wallet}": f"{getattr(user, 'wallet', 0):,.2f}",
-                "{savings}": f"{getattr(user, 'savings', 0):,.2f}",
-                "{investment}": f"{getattr(user, 'investment', 0):,.2f}",
-                "{total_payout}": f"{total_roi:,.2f}",
-                "{savings_roi}": f"{savings_roi:,.2f}",
-                "{investment_roi}": f"{investment_roi:,.2f}",
-                "{quarter_label}": ql,
-            }
-
-            # Add custom dynamic values
-            for key, value in extra_context.items():
-                placeholders[f"{{{key}}}"] = value
-
-            p_subject = subject
-            p_message = message
-
-            for k, v in placeholders.items():
-                p_subject = p_subject.replace(k, v)
-                p_message = p_message.replace(k, v)
-
-            context = {
-                "subject": p_subject,
-                "message": p_message,
-                "user": user,
-                "email": email_addr,
-            }
-
-            try:
-                html_message = render_to_string(template, context)
-            except Exception as e:
-                logger.warning(f"Template rendering failed for {email_addr}: {e}")
-                html_message = f"<html><body>{p_message}</body></html>"
-
-            plain_message = strip_tags(html_message) or p_message
-
-            return {
-                "to": email_addr,
-                "subject": p_subject,
-                "html_message": html_message,
-                "plain_message": plain_message,
-            }
-
-        except Exception as e:
-            logger.error(f"Personalization error for {email_addr}: {e}")
-            return {
-                "to": email_addr,
-                "subject": subject,
-                "html_message": f"<html><body>{message}</body></html>",
-                "plain_message": str(message),
-            }
-
-    payloads = [personalize(e) for e in valid_recipients]
+    payloads = [
+        personalize_email_payload(e, subject, message, extra_context, template)
+        for e in valid_recipients
+    ]
 
     logger.info(f"📧 Personalization complete. Payloads: {len(payloads)}")
 
