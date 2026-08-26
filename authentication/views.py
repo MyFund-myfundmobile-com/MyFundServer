@@ -58,6 +58,7 @@ from .utils import (
     send_push_notification,
     set_user_balance,
     update_top_savers,
+    _update_top_savers_worker,
 )
 from .utils import send_generic_email
 from django.db import transaction
@@ -6265,16 +6266,36 @@ def get_top_savers(request):
     is_updating = cache.get(lock_key)
     last_update = cache.get(cache_key)
 
+    # A client can request ?refresh=true right after a user's own deposit
+    # (e.g. a just-confirmed QuickSave) confirms, so the rank it reads back
+    # reflects that deposit immediately instead of waiting out the normal
+    # lazy 180s background-refresh throttle below. The recompute itself is
+    # one windowed aggregate query, cheap enough to run inline here.
+    force_refresh = request.query_params.get("refresh") == "true"
+
     logger.info(
-        "get_top_savers called | month=%s year=%s last_update=%s is_updating=%s user=%s",
+        "get_top_savers called | month=%s year=%s last_update=%s is_updating=%s force_refresh=%s user=%s",
         current_month,
         current_year,
         last_update,
         bool(is_updating),
+        force_refresh,
         request.user.email,
     )
 
-    if not last_update and not is_updating:
+    if force_refresh and not is_updating:
+        cache.set(lock_key, True, timeout=60)
+
+        logger.info(
+            "Force-refresh requested. Running synchronous update for %s/%s",
+            current_month,
+            current_year,
+        )
+
+        _update_top_savers_worker()
+        cache.set(cache_key, now.isoformat(), timeout=180)
+
+    elif not last_update and not is_updating:
         cache.set(lock_key, True, timeout=60)
 
         logger.info(
@@ -9667,6 +9688,15 @@ def create_groupbuy(request):
                         from_email = "MyFund <info@mg.myfundmobile.com>"
                         recipient_list = [user.email for user in invited_users]
 
+                        # The group (and its reserved property unit) already
+                        # exist at this point - a failure to send the
+                        # invite email is a delivery problem, not a group-
+                        # creation one, so it must not turn into a 500 that
+                        # tells the client creation failed when it didn't.
+                        # invited_users are still granted access via
+                        # group.invited_users.add() above regardless, and
+                        # can be re-notified later via the share GroupBuy
+                        # flow.
                         try:
                             send_generic_email(
                                 subject=subject,
@@ -9675,9 +9705,13 @@ def create_groupbuy(request):
                                 recipient_list=recipient_list,
                             )
                         except Exception as e:
-                            return Response(
-                                {"error": f"Failed to send email: {str(e)}"},
-                                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            logger.warning(
+                                f"GroupBuy invite email failed for group {group.id}: {e}"
+                            )
+                            warning_message = (
+                                "GroupBuy created, but the invite email couldn't be "
+                                "sent right now. You can re-invite these users from "
+                                "the GroupBuy's share screen."
                             )
 
                     else:
@@ -10014,9 +10048,15 @@ def invite_to_groupbuy(request, group_id):
                     recipient_list=recipient_list,
                 )
             except Exception as e:
-                return Response(
-                    {"error": f"Failed to send email: {str(e)}"},
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                # invited_users are already granted access via
+                # group.invited_users.add() above - a failed notification
+                # email shouldn't be reported as the invite itself failing.
+                logger.warning(
+                    f"GroupBuy invite email failed for group {group.id}: {e}"
+                )
+                warning_message = (
+                    "Users were invited, but the notification email couldn't be "
+                    "sent right now."
                 )
 
             response_data = {"message": "Invitations sent."}
