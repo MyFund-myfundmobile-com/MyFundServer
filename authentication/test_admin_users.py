@@ -12,7 +12,7 @@ from dateutil.relativedelta import relativedelta
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from .models import CustomUser, Transaction
+from .models import CustomUser, Transaction, Employee
 
 
 def _set_date_joined(user, when):
@@ -387,6 +387,31 @@ class SegmentFilterExtensionsTest(TestCase):
         self.assertIn("notsavedthismonth@example.com", emails)
         self.assertNotIn("savedthismonth@example.com", emails)
         self.assertNotIn("notsavedlastmonth@example.com", emails)
+
+    def test_is_employee_filter(self):
+        staffer = _make_user("staffer@example.com", "95000000010")
+        Employee.objects.create(
+            name="Staffer", email="staffer@example.com", monthly_amount=100000
+        )
+
+        inactive_staffer = _make_user("inactivestaffer@example.com", "95000000011")
+        Employee.objects.create(
+            name="Inactive Staffer",
+            email="inactivestaffer@example.com",
+            monthly_amount=100000,
+            is_active=False,
+        )
+
+        regular = _make_user("notemployee@example.com", "95000000012")
+
+        response = self.client.get(
+            reverse("admin_user_emails_for_segment"), {"is_employee": "true"}
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        emails = response.data["emails"]
+        self.assertIn("staffer@example.com", emails)
+        self.assertNotIn("inactivestaffer@example.com", emails)
+        self.assertNotIn("notemployee@example.com", emails)
 
     def test_invalid_new_users_months_ignored(self):
         # Not one of the supported values (1/3/6) - should just be

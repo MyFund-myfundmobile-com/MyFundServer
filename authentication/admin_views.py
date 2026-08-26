@@ -19,6 +19,7 @@ from .models import (
     WithdrawalsRequestToAdmin,
     Property,
     EmailCampaign,
+    Employee,
 )
 from .serializers import (
     UserSerializer,
@@ -901,6 +902,23 @@ def _build_admin_user_queryset(params):
         ).values_list('user', flat=True).distinct()
         queryset = queryset.exclude(id__in=list(activated_ids))
         filters_applied["not_yet_saved_this_month"] = True
+
+    # Employee is a separate model (payroll/allowance tracking, not a
+    # CustomUser field) matched by email - deliberately NOT is_staff, which
+    # was decoupled from actual employment status on purpose (see
+    # AdminNotifyRecipient's docstring on the old EmployeeAdmin is_staff
+    # sync being removed).
+    is_employee = _parse_bool_param(params.get('is_employee'))
+    if is_employee:
+        employee_emails = list(Employee.objects.filter(is_active=True).values_list('email', flat=True))
+        if employee_emails:
+            email_q = Q()
+            for email in employee_emails:
+                email_q |= Q(email__iexact=email)
+            queryset = queryset.filter(email_q)
+        else:
+            queryset = queryset.none()
+        filters_applied["is_employee"] = True
 
     return queryset.order_by('-date_joined'), filters_applied
 
