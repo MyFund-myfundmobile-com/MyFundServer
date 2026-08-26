@@ -3795,6 +3795,63 @@ class GroupAdmin(admin.ModelAdmin):
     list_editable = ["status"]
     list_filter = ["status", "group_type"]
     search_fields = ["id", "property__name", "created_by__email"]
+    actions = ["trigger_test_rent_payment"]
+
+    @admin.action(description="💰 Trigger test rent payment (distribute this period's income now)")
+    def trigger_test_rent_payment(self, request, queryset):
+        """
+        Runs the real distribution code path (auto_distribute_groupbuy_income,
+        force=True) for just the selected group(s) right now, instead of
+        waiting for the monthly period to actually elapse - for demos/testing.
+        Same GroupIncomeEvent/GroupIncomeDistribution/wallet-credit
+        transactions as the automatic monthly sweep or the staff dashboard's
+        manual distribute-income action, so this is a real payment, not a
+        simulated one.
+        """
+        from .utils import auto_distribute_groupbuy_income
+
+        non_completed = [g for g in queryset if g.status != "completed"]
+        completed_ids = [g.id for g in queryset if g.status == "completed"]
+
+        if non_completed:
+            self.message_user(
+                request,
+                f"Skipped {len(non_completed)} group(s) that aren't 'completed' "
+                f"yet - a GroupBuy has to be fully funded before it can pay rent.",
+                level=messages.WARNING,
+            )
+
+        if not completed_ids:
+            return
+
+        result = auto_distribute_groupbuy_income(group_ids=completed_ids, force=True)
+
+        for event in result["events"]:
+            self.message_user(
+                request,
+                f"✅ Paid ₦{event['amount']:,.2f} for {event['property']} "
+                f"({event['period_start']} – {event['period_end']}), "
+                f"group {event['group_id']}.",
+                level=messages.SUCCESS,
+            )
+            try:
+                from .tasks import distribute_groupbuy_income_notifications
+
+                distribute_groupbuy_income_notifications.delay(event["event_id"])
+            except Exception:
+                pass
+
+        for skip in result["skipped"]:
+            self.message_user(
+                request,
+                f"⚠️ Group {skip['group_id']}: {skip['reason']}",
+                level=messages.WARNING,
+            )
+
+        if not result["events"] and not result["skipped"]:
+            self.message_user(
+                request, "Nothing to distribute.", level=messages.WARNING
+            )
 
 
 class GroupOwnershipAdmin(admin.ModelAdmin):

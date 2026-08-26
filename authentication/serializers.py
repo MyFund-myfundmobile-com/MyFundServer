@@ -907,6 +907,25 @@ class GroupSerializer(serializers.ModelSerializer):
     )  # Assuming choices are defined for group type
     created_at = serializers.DateTimeField(read_only=True)
 
+    # When the next automatic rent payout is due for a completed GroupBuy -
+    # mirrors auto_distribute_groupbuy_income's own period math (utils.py)
+    # exactly, so this is always the same date that sweep would actually
+    # pay on, not an independent guess. None for a group that isn't
+    # completed yet (there's nothing to pay out on).
+    next_payout_date = serializers.SerializerMethodField()
+
+    def get_next_payout_date(self, obj):
+        if obj.status != "completed" or not obj.completed_at:
+            return None
+        from dateutil.relativedelta import relativedelta
+        from .models import GroupIncomeEvent
+
+        last_event = (
+            GroupIncomeEvent.objects.filter(group=obj).order_by("-period_end").first()
+        )
+        period_start = last_event.period_end if last_event else obj.completed_at.date()
+        return (period_start + relativedelta(months=1)).isoformat()
+
     class Meta:
         model = Group
         fields = [
@@ -923,6 +942,8 @@ class GroupSerializer(serializers.ModelSerializer):
             "contributors",
             "deadline",
             "created_at",
+            "completed_at",
+            "next_payout_date",
         ]
 
 

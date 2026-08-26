@@ -2541,8 +2541,23 @@ def get_monthly_rent_for_group(group, as_of=None):
 # GroupIncomeDistribution records - a manual correction never conflicts
 # with what this sweep would have created for the same period.
 # Shared by the daily Celery task and the staff-only manual-trigger endpoint.
-def auto_distribute_groupbuy_income(dry_run=False):
+def auto_distribute_groupbuy_income(dry_run=False, group_ids=None, force=False):
+    """
+    group_ids: optional iterable to restrict the sweep to specific groups
+    (used by the "Trigger test rent payment" Django admin action - see
+    GroupAdmin.trigger_test_rent_payment). Omitted (None), this covers every
+    completed group, as the daily Celery task does.
+
+    force: skip the "has a full monthly period actually elapsed" check and
+    distribute for whatever period is next right now instead - also only
+    for the admin action, so a demo doesn't have to wait out a real month.
+    If the natural period_end (period_start + 1 month) hasn't arrived yet,
+    the period is shortened to end today instead (or to period_start + 1
+    day, if that's today too, e.g. triggered twice same day) rather than
+    faking a full month's rent for a period that hasn't happened.
+    """
     from dateutil.relativedelta import relativedelta
+    from datetime import timedelta
     from django.db import transaction as db_transaction, IntegrityError
     from django.utils import timezone
 
@@ -2554,8 +2569,11 @@ def auto_distribute_groupbuy_income(dry_run=False):
     completed_groups = Group.objects.filter(
         status="completed", completed_at__isnull=False
     ).select_related("property")
+    if group_ids is not None:
+        completed_groups = completed_groups.filter(id__in=group_ids)
 
     events_created = []
+    skipped = []
     total_distributed = Decimal("0.00")
 
     for group in completed_groups:
@@ -2566,10 +2584,13 @@ def auto_distribute_groupbuy_income(dry_run=False):
         period_end = period_start + relativedelta(months=1)
 
         if period_end > today:
-            continue  # this monthly period isn't over yet
+            if not force:
+                continue  # this monthly period isn't over yet
+            period_end = today if today > period_start else period_start + timedelta(days=1)
 
         amount = get_monthly_rent_for_group(group, as_of=now)
         if amount <= 0:
+            skipped.append({"group_id": str(group.id), "reason": "Property has no rent_reward set."})
             continue
 
         ownership_rows = list(GroupOwnership.objects.filter(group=group))
@@ -2580,6 +2601,7 @@ def auto_distribute_groupbuy_income(dry_run=False):
             )
         ownership_pairs = [(uid, pct) for uid, pct in pct_by_user.items() if pct > 0]
         if not ownership_pairs:
+            skipped.append({"group_id": str(group.id), "reason": "No members with a positive ownership share."})
             continue
 
         if dry_run:
@@ -2603,7 +2625,11 @@ def auto_distribute_groupbuy_income(dry_run=False):
                     amount=amount,
                     period_start=period_start,
                     period_end=period_end,
-                    description="Automatic monthly GroupBuy rent payout",
+                    description=(
+                        "Admin-triggered test rent payment"
+                        if force
+                        else "Automatic monthly GroupBuy rent payout"
+                    ),
                 )
 
                 shares = split_amount_by_percentage(amount, ownership_pairs)
@@ -2646,6 +2672,10 @@ def auto_distribute_groupbuy_income(dry_run=False):
         except IntegrityError:
             # Same period already recorded (e.g. a manual distribution beat
             # the sweep to it this month) - skip, not an error.
+            skipped.append({
+                "group_id": str(group.id),
+                "reason": f"Income for {period_start}–{period_end} was already recorded.",
+            })
             continue
 
         events_created.append(
@@ -2664,6 +2694,7 @@ def auto_distribute_groupbuy_income(dry_run=False):
         "distributed_count": len(events_created),
         "total_distributed": total_distributed,
         "events": events_created,
+        "skipped": skipped,
     }
 
 

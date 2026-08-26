@@ -10800,6 +10800,20 @@ def contribute_to_groupbuy(request, group_id):
                     ),
                 )
 
+            # 14. This GroupBuy just tipped over into fully funded - every
+            # member with a real ownership stake now owns a share of a real
+            # property, same as a direct Property purchase already bumps
+            # user.properties (see the num_units flow above). Read
+            # everywhere user.properties is expected to show (Home,
+            # Withdraw, etc), so this is what makes those screens reflect
+            # it without each needing GroupBuy-specific logic of their own.
+            if just_completed:
+                for ownership in GroupOwnership.objects.filter(group=group):
+                    if ownership.ownership_percentage > 0:
+                        CustomUser.objects.filter(id=ownership.user_id).update(
+                            properties=F("properties") + 1
+                        )
+
         # The property is now fully owned by its contributors - let everyone
         # who put money in know, and record their final ownership % (already
         # written to GroupOwnership above). Sent after the atomic block
