@@ -12,7 +12,7 @@ from dateutil.relativedelta import relativedelta
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from .models import CustomUser
+from .models import CustomUser, Transaction
 
 
 def _set_date_joined(user, when):
@@ -357,6 +357,36 @@ class SegmentFilterExtensionsTest(TestCase):
         self.assertIn("recent@example.com", emails)
         self.assertIn("mid@example.com", emails)
         self.assertNotIn("old@example.com", emails)
+
+    def test_not_yet_saved_this_month_filter(self):
+        now = timezone.now()
+
+        saved_this_month = _make_user("savedthismonth@example.com", "95000000007")
+        _set_date_joined(saved_this_month, now - relativedelta(days=2))
+        Transaction.objects.create(
+            user=saved_this_month,
+            transaction_type="credit",
+            source="bank_transfer",
+            credited_to="SAVINGS",
+            amount=5000,
+            status="confirmed",
+        )
+
+        not_saved_this_month = _make_user("notsavedthismonth@example.com", "95000000008")
+        _set_date_joined(not_saved_this_month, now - relativedelta(days=2))
+
+        not_saved_last_month = _make_user("notsavedlastmonth@example.com", "95000000009")
+        _set_date_joined(not_saved_last_month, now - relativedelta(months=2))
+
+        response = self.client.get(
+            reverse("admin_user_emails_for_segment"),
+            {"not_yet_saved_this_month": "true"},
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        emails = response.data["emails"]
+        self.assertIn("notsavedthismonth@example.com", emails)
+        self.assertNotIn("savedthismonth@example.com", emails)
+        self.assertNotIn("notsavedlastmonth@example.com", emails)
 
     def test_invalid_new_users_months_ignored(self):
         # Not one of the supported values (1/3/6) - should just be

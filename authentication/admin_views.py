@@ -879,6 +879,29 @@ def _build_admin_user_queryset(params):
             queryset = queryset.filter(date_joined__gte=cutoff)
             filters_applied["new_users_months"] = months
 
+    # Signed up this calendar month but hasn't made a single confirmed
+    # savings/investment deposit yet - same "not yet saved" definition as
+    # signup_metrics/signup_segment_users (credited_to is the destination
+    # bucket a deposit landed in, not the funding channel - using `source`
+    # here would wrongly exclude nearly every real deposit).
+    not_yet_saved_this_month = _parse_bool_param(params.get('not_yet_saved_this_month'))
+    if not_yet_saved_this_month:
+        month_start = timezone.now().replace(
+            day=1, hour=0, minute=0, second=0, microsecond=0
+        )
+        month_end = month_start + relativedelta(months=1)
+        queryset = queryset.filter(
+            date_joined__gte=month_start, date_joined__lt=month_end
+        )
+        activated_ids = Transaction.objects.filter(
+            user__in=queryset,
+            credited_to__in=['SAVINGS', 'INVESTMENT'],
+            transaction_type='credit',
+            status='confirmed',
+        ).values_list('user', flat=True).distinct()
+        queryset = queryset.exclude(id__in=list(activated_ids))
+        filters_applied["not_yet_saved_this_month"] = True
+
     return queryset.order_by('-date_joined'), filters_applied
 
 

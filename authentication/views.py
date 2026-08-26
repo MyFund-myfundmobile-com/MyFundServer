@@ -446,11 +446,33 @@ def confirm_otp(request):
                 ).count()
 
                 # CURRENT MONTH SIGNUPS
-                month_signup_count = CustomUser.objects.filter(
+                month_signup_qs = CustomUser.objects.filter(
                     date_joined__year=today.year,
                     date_joined__month=today.month,
                     is_active=True,
-                ).count()
+                )
+                month_signup_count = month_signup_qs.count()
+
+                # Of this month's signups, how many have actually made a
+                # confirmed deposit yet - same "activated" definition as
+                # signup_metrics/signup_segment_users (admin_views.py):
+                # credited_to (destination bucket), not source (funding
+                # channel), is what determines a real savings/investment
+                # deposit.
+                from .models import Transaction
+
+                new_saved_count = (
+                    Transaction.objects.filter(
+                        user__in=month_signup_qs,
+                        credited_to__in=["SAVINGS", "INVESTMENT"],
+                        transaction_type="credit",
+                        status="confirmed",
+                    )
+                    .values("user")
+                    .distinct()
+                    .count()
+                )
+                new_not_saved_count = month_signup_count - new_saved_count
 
                 # TOTAL CONFIRMED USERS
                 total_confirmed_users = CustomUser.objects.filter(
@@ -509,7 +531,9 @@ def confirm_otp(request):
                                 f"{u.email}\n"
                                 f"{formatted_phone}\n\n"
                                 f"Today: {today_signup_count} users\n"
-                                f"{current_month_name}: {month_signup_count} users\n"
+                                f"{current_month_name}: {month_signup_count} users "
+                                f"(Saved: {new_saved_count} | "
+                                f"Not Saved: {new_not_saved_count})\n"
                                 f"Total Confirmed: {total_confirmed_users:,}\n"
                                 f"vs Last Month: "
                                 f"{growth_prefix}{growth_percentage}%"
@@ -520,6 +544,8 @@ def confirm_otp(request):
                                 "phone_number": u.phone_number,
                                 "today_signups": today_signup_count,
                                 "month_signups": month_signup_count,
+                                "month_new_saved": new_saved_count,
+                                "month_new_not_saved": new_not_saved_count,
                                 "total_confirmed_users": total_confirmed_users,
                                 "growth_percentage": growth_percentage,
                                 "type": "admin_signup_alert",
