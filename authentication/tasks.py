@@ -159,9 +159,22 @@ def send_groupbuy_deadline_reminders_task():
     return result["groups_notified"]
 
 
-@shared_task
+@shared_task(queue="default")
 def process_target_savings_deductions():
-    """Celery task to process all due target savings deductions"""
+    """Celery task to process all due target savings deductions
+
+    queue="default" is set explicitly here (rather than relying on
+    CELERY_TASK_ROUTES/task_routes resolution) because settings.py's
+    CELERY_TASK_ROUTES used to route this task to a "critical" queue that
+    was never declared in celery.py's task_queues and that no worker
+    consumes - Celery Beat kept "dispatching" it right on schedule
+    (PeriodicTask.total_run_count/last_run_at kept climbing, which is what
+    made it LOOK like it was working), but the messages just piled up in a
+    queue nobody was listening to, so process_deduction() was never
+    actually invoked. A decorator-level queue kwarg is the one thing that
+    reliably wins regardless of that routing confusion - same fix already
+    used for send_bulk_email_task/send_email_campaign_batch_task.
+    """
     now = timezone.now()
     logger.info(f"🕒 Processing target savings at {now}")
 
@@ -306,10 +319,17 @@ from .utils import get_next_payout_date, calculate_daily_roi, send_push_notifica
 from django.db.models import Q
 
 
-@shared_task
+@shared_task(queue="default")
 def calculate_daily_roi_task():
     """
     Calculate and accrue daily ROI only for active users with savings or investment balance above zero.
+
+    queue="default" set explicitly for the same reason as
+    process_target_savings_deductions - this task was previously only kept
+    alive by a manually-set queue="default" override baked directly into
+    its django_celery_beat PeriodicTask row (a fragile, easy-to-lose
+    workaround); the decorator kwarg makes that robust regardless of what
+    the PeriodicTask row's own queue field says.
     """
     today = timezone.now().date()
 
@@ -1091,8 +1111,11 @@ def alert_admins_of_failed_scheduled_withdrawals(failed_withdrawals):
             )
 
 
-@shared_task(bind=True, max_retries=3)
+@shared_task(bind=True, max_retries=3, queue="default")
 def process_due_scheduled_withdrawals(self):
+    # queue="default" set explicitly for the same reason as
+    # process_target_savings_deductions above - CELERY_TASK_ROUTES also
+    # routed this one to the dead "critical" queue.
     today = timezone.localdate()
 
     withdrawals = WithdrawalsRequestToAdmin.objects.select_related("user").filter(

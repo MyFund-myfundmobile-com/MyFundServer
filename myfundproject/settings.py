@@ -391,13 +391,23 @@ PAYLESS_SMS_USERNAME = config("PAYLESS_SMS_USERNAME")
 PAYLESS_SMS_PASSWORD = config("PAYLESS_SMS_PASSWORD")
 PAYLESS_SMS_SENDER_ID = config("PAYLESS_SMS_SENDER_ID")
 
-CELERY_TASK_ROUTES = {
-    "authentication.tasks.send_namecheap_safe_email_task": {"queue": "emails"},
-    "authentication.tasks.send_bulk_email_task": {"queue": "emails"},
-    "authentication.tasks.calculate_daily_roi_task": {"queue": "critical"},
-    "authentication.tasks.process_target_savings_deductions": {"queue": "critical"},
-    "authentication.tasks.process_due_scheduled_withdrawals": {"queue": "critical"},
-}
+# CELERY_TASK_ROUTES used to live here, routing calculate_daily_roi_task/
+# process_target_savings_deductions/process_due_scheduled_withdrawals to a
+# "critical" queue that celery.py's task_queues never declared and that no
+# worker consumed - Celery Beat kept "dispatching" them right on schedule
+# (django_celery_beat.PeriodicTask.total_run_count/last_run_at kept
+# climbing normally, which is what made it look like it was working), but
+# the messages just piled up in a queue nobody was listening to, so
+# process_deduction() etc. were never actually invoked. Per the
+# CELERY_TIMEZONE comment above, this settings-module config (loaded via
+# celery.py's config_from_object(..., namespace="CELERY")) takes
+# precedence over celery.py's own later app.conf.task_routes assignment,
+# not the other way around - so fixing celery.py's dict alone would not
+# have been enough. Routing for those three tasks (plus
+# send_bulk_email_task/send_email_campaign_batch_task, already fixed the
+# same way for the same reason) is now set directly on each task's
+# @shared_task(..., queue=...) decorator instead, which reliably wins
+# regardless of this class of config-precedence surprise.
 
 # ===== EMAIL CONFIGURATION =====
 # All transactional email (OTPs, notifications, etc.) goes through Brevo -
