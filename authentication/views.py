@@ -10139,6 +10139,11 @@ def share_groupbuy(request, group_id):
     inviter_name = f"{user.first_name} {user.last_name}".strip() or user.email
     property_name = group.property.name
     join_link = f"https://myfundmobile.com/groupbuy-invite/{group.id}"
+    percentage_funded = (
+        round((group.total_raised / group.goal_amount) * 100)
+        if group.goal_amount
+        else 0
+    )
 
     registered_users = {
         u.email.lower(): u
@@ -10164,12 +10169,24 @@ def share_groupbuy(request, group_id):
                     title="🏠 You've been invited to a GroupBuy!",
                     message=(
                         f"{inviter_name} invited you to co-own {property_name} "
-                        f"on MyFund. Tap to view."
+                        f"on MyFund - already {percentage_funded}% funded. Tap to view."
                     ),
                     data={
                         "type": "groupbuy_invite",
                         "group_id": str(group.id),
                         "property_id": str(group.property_id),
+                        # Same target the web/email invite link
+                        # (groupbuy-invite/:id, handled in App.js) resolves
+                        # to - straight into this property's own detail
+                        # screen with a join button ready, not a generic
+                        # list the recipient then has to hunt through.
+                        "deep_link": {
+                            "screen": "PropertyDetail",
+                            "screen_params": {
+                                "propertyId": str(group.property_id),
+                                "fromInvite": True,
+                            },
+                        },
                     },
                     notif_type="GROUP",
                 )
@@ -10222,6 +10239,97 @@ def share_groupbuy(request, group_id):
             "invalid_emails": invalid_emails,
         },
         status=status.HTTP_200_OK,
+    )
+
+
+# GET /groupbuy/<group_id>/chat/ - Full message history for a GroupBuy's
+# group chat. Contributors-only, same access check every other
+# contributor-scoped GroupBuy endpoint uses.
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def get_groupbuy_chat_messages(request, group_id):
+    from .models import GroupChatMessage
+    from .serializers import GroupChatMessageSerializer
+
+    try:
+        group = Group.objects.get(id=group_id)
+    except Group.DoesNotExist:
+        return Response(
+            {"message": "GroupBuy not found."}, status=status.HTTP_404_NOT_FOUND
+        )
+
+    if not group.contributors.filter(id=request.user.id).exists():
+        return Response(
+            {"message": "Only contributors to this GroupBuy can view its chat."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    messages = group.chat_messages.select_related("sender").all()
+    return Response(GroupChatMessageSerializer(messages, many=True).data)
+
+
+# POST /groupbuy/<group_id>/chat/send/ - Post a message to a GroupBuy's
+# group chat. Notifies every other contributor by push (best-effort - a
+# notification failure must not fail the send itself, same pattern as
+# every other push call in this file).
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def send_groupbuy_chat_message(request, group_id):
+    from .models import GroupChatMessage
+    from .serializers import GroupChatMessageSerializer
+
+    try:
+        group = Group.objects.get(id=group_id)
+    except Group.DoesNotExist:
+        return Response(
+            {"message": "GroupBuy not found."}, status=status.HTTP_404_NOT_FOUND
+        )
+
+    user = request.user
+    if not group.contributors.filter(id=user.id).exists():
+        return Response(
+            {"message": "Only contributors to this GroupBuy can chat here."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    content = (request.data.get("content") or "").strip()
+    if not content:
+        return Response(
+            {"message": "Message content is required."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if len(content) > 2000:
+        return Response(
+            {"message": "Message is too long."}, status=status.HTTP_400_BAD_REQUEST
+        )
+
+    message = GroupChatMessage.objects.create(group=group, sender=user, content=content)
+
+    sender_name = user.first_name or user.email
+    for contributor in group.contributors.exclude(id=user.id):
+        try:
+            send_push_notification(
+                user=contributor,
+                title=f"💬 {group.property.name} GroupBuy chat",
+                message=f"{sender_name}: {content}"[:180],
+                notif_type="GROUP",
+                data={
+                    "type": "groupbuy_chat",
+                    "group_id": str(group.id),
+                    "deep_link": {
+                        "screen": "GroupBuyChat",
+                        "screen_params": {
+                            "groupId": str(group.id),
+                            "propertyName": group.property.name,
+                        },
+                    },
+                },
+            )
+        except Exception as e:
+            logger.warning(f"GroupBuy chat push failed for {contributor.email}: {e}")
+
+    return Response(
+        GroupChatMessageSerializer(message).data, status=status.HTTP_201_CREATED
     )
 
 
@@ -10673,9 +10781,24 @@ def contribute_to_groupbuy(request, group_id):
             ) * 100
             ownership_obj.save()
 
-            # 13. Add user to contributors
+            # 13. Add user to contributors, and drop a one-time welcome
+            # message into the GroupBuy's group chat so new contributors
+            # land in a thread that already has something in it instead of
+            # a blank screen.
             if not group.contributors.filter(id=user.id).exists():
                 group.contributors.add(user)
+                from .models import GroupChatMessage
+
+                GroupChatMessage.objects.create(
+                    group=group,
+                    sender=None,
+                    is_system=True,
+                    content=(
+                        f"Welcome {user.first_name or 'there'} to the "
+                        f"{group.property.name} GroupBuy chat! Say hi to your "
+                        f"co-owners 👋"
+                    ),
+                )
 
         # The property is now fully owned by its contributors - let everyone
         # who put money in know, and record their final ownership % (already

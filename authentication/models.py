@@ -3003,6 +3003,38 @@ class Group(models.Model):
         )
 
 
+class GroupChatMessage(models.Model):
+    """
+    Simple group chat, one thread per GroupBuy, open to its contributors
+    only (see get_groupbuy_chat_messages/send_groupbuy_chat_message).
+    sender is null for the auto-posted welcome message when someone new
+    joins (contribute_to_groupbuy) - is_system distinguishes that from a
+    real contributor's message so the UI can render it differently (e.g.
+    attributed to "MyFund" instead of a person).
+    """
+
+    group = models.ForeignKey(
+        Group, on_delete=models.CASCADE, related_name="chat_messages"
+    )
+    sender = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="groupbuy_chat_messages",
+    )
+    is_system = models.BooleanField(default=False)
+    content = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+
+    def __str__(self):
+        who = self.sender.email if self.sender else "MyFund"
+        return f"[{self.group_id}] {who}: {self.content[:50]}"
+
+
 class GroupOwnership(models.Model):
     group = models.ForeignKey(Group, on_delete=models.CASCADE)
     user = models.ForeignKey(User, on_delete=models.CASCADE)

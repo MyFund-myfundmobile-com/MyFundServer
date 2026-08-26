@@ -344,6 +344,16 @@ urlpatterns = [
         name="get_groupbuy_contributions",
     ),
     path("groupbuy/leave/<str:group_id>/", views.leave_groupbuy, name="leave_group"),
+    path(
+        "groupbuy/<str:group_id>/chat/",
+        views.get_groupbuy_chat_messages,
+        name="get_groupbuy_chat_messages",
+    ),
+    path(
+        "groupbuy/<str:group_id>/chat/send/",
+        views.send_groupbuy_chat_message,
+        name="send_groupbuy_chat_message",
+    ),
     path("user/groupbuy/", views.get_user_groupbuys, name="get_user_groupbuys"),
     path(
         "user/groupbuy/invited/",

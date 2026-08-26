@@ -867,6 +867,13 @@ def _build_admin_user_queryset(params):
         )
         filters_applied["non_zero_balance"] = True
 
+    zero_balance = _parse_bool_param(params.get('zero_balance'))
+    if zero_balance:
+        queryset = queryset.filter(
+            Q(savings__lte=0) & Q(investment__lte=0) & Q(wallet__lte=0)
+        )
+        filters_applied["zero_balance"] = True
+
     # New-signup segments (1/3/6 months) - matches the "New Users" chips
     # on the mobile Email tab's segment picker.
     new_users_months = params.get('new_users_months')
@@ -2905,6 +2912,44 @@ def cancel_email_campaign(request, campaign_id):
             )
 
         campaign.status = 'cancelled'
+        campaign.save(update_fields=['status'])
+        return Response(EmailCampaignSerializer(campaign).data)
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
+
+
+@api_view(['POST'])
+@permission_classes([IsAdminUser])
+def resume_email_campaign(request, campaign_id):
+    """
+    POST /api/admin/email-campaigns/<campaign_id>/resume/
+    Undoes cancel_email_campaign - flips a cancelled campaign back to
+    in_progress so send_next_email_campaign_batch/send_extra_email_campaign_batch
+    work on it again. Both of those already resume from
+    sent_count + failed_count (see send_next_email_campaign_batch), so
+    nothing else needs to change - this just clears the status gate that
+    was rejecting them. Whatever's left in recipient_emails picks up
+    exactly where cancellation left off; nothing already sent is resent.
+    """
+    try:
+        try:
+            campaign = EmailCampaign.objects.get(pk=campaign_id)
+        except EmailCampaign.DoesNotExist:
+            return Response({"error": "Campaign not found."}, status=404)
+
+        if campaign.status != 'cancelled':
+            return Response(
+                {"error": f"Only a cancelled campaign can be resumed (this one is {campaign.status})."},
+                status=400,
+            )
+
+        if campaign.sent_count + campaign.failed_count >= campaign.total_recipients:
+            campaign.status = 'completed'
+            campaign.save(update_fields=['status'])
+            return Response(EmailCampaignSerializer(campaign).data)
+
+        campaign.status = 'in_progress'
         campaign.save(update_fields=['status'])
         return Response(EmailCampaignSerializer(campaign).data)
 

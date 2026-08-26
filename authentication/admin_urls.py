@@ -207,4 +207,9 @@ urlpatterns = [
         admin_views.cancel_email_campaign,
         name="admin_cancel_email_campaign",
     ),
+    path(
+        "email-campaigns/<int:campaign_id>/resume/",
+        admin_views.resume_email_campaign,
+        name="admin_resume_email_campaign",
+    ),
 ]

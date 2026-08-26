@@ -926,6 +926,40 @@ class GroupSerializer(serializers.ModelSerializer):
         ]
 
 
+from .models import GroupChatMessage
+
+
+class GroupChatMessageSerializer(serializers.ModelSerializer):
+    sender_email = serializers.SerializerMethodField()
+    sender_first_name = serializers.SerializerMethodField()
+    sender_profile_picture = serializers.SerializerMethodField()
+
+    class Meta:
+        model = GroupChatMessage
+        fields = [
+            "id",
+            "content",
+            "is_system",
+            "created_at",
+            "sender_email",
+            "sender_first_name",
+            "sender_profile_picture",
+        ]
+
+    def get_sender_email(self, obj):
+        return obj.sender.email if obj.sender else None
+
+    def get_sender_first_name(self, obj):
+        return obj.sender.first_name if obj.sender else "MyFund"
+
+    def get_sender_profile_picture(self, obj):
+        return (
+            _resolve_profile_picture_url(obj.sender.profile_picture)
+            if obj.sender
+            else None
+        )
+
+
 # from rest_framework import serializers
 from .models import Contribution
 
