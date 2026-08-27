@@ -3042,6 +3042,19 @@ class GroupOwnership(models.Model):
     ownership_percentage = models.DecimalField(
         max_digits=5, decimal_places=2, default=0
     )
+    # Has this specific ownership stake already been counted toward the
+    # user's properties total? Guards utils.credit_groupbuy_ownership_
+    # properties against ever double-crediting the same stake - it's called
+    # from more than one place (contribute_to_groupbuy on natural
+    # completion, GroupAdmin.save_model on a manually-flipped status, and a
+    # one-time backfill for groups completed before this counting existed),
+    # any of which could otherwise fire for the same group twice.
+    properties_credited = models.BooleanField(default=False)
+    # Resale marketplace (post-completion only): the owner has put this
+    # stake up for another user to buy - see utils.get_resale_value_for_
+    # ownership for pricing and views.buy_groupbuy_share for the transfer.
+    listed_for_sale = models.BooleanField(default=False)
+    listed_at = models.DateTimeField(null=True, blank=True)
 
 
 class GroupDeparture(models.Model):

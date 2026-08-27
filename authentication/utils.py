@@ -2505,6 +2505,39 @@ def expire_overdue_groupbuys(dry_run=False):
     }
 
 
+def credit_groupbuy_ownership_properties(group):
+    """
+    Awards +1 to user.properties for every GroupOwnership stake on `group`
+    that hasn't been credited yet (same idea as a direct Property purchase
+    already does via num_units - see the purchase view). Idempotent: a
+    stake is only ever counted once, tracked via
+    GroupOwnership.properties_credited, so this is safe to call from
+    multiple places without double-crediting the same completion:
+      - contribute_to_groupbuy, the moment a group naturally tips over
+        into "completed"
+      - GroupAdmin.save_model, if a group's status is instead flipped to
+        "completed" manually in Django admin (which never goes through
+        contribute_to_groupbuy)
+      - a one-time backfill for groups that completed before this counting
+        existed at all
+
+    Returns how many users were credited.
+    """
+    from django.db.models import F
+    from .models import GroupOwnership, CustomUser
+
+    to_credit = GroupOwnership.objects.filter(
+        group=group, properties_credited=False, ownership_percentage__gt=0
+    )
+    user_ids = list(to_credit.values_list("user_id", flat=True))
+    if not user_ids:
+        return 0
+
+    CustomUser.objects.filter(id__in=user_ids).update(properties=F("properties") + 1)
+    to_credit.update(properties_credited=True)
+    return len(user_ids)
+
+
 RENT_ESCALATION_RATE = Decimal("0.05")  # 5% compounding per completed year
 
 
@@ -2529,6 +2562,31 @@ def get_monthly_rent_for_group(group, as_of=None):
         (1 + RENT_ESCALATION_RATE) ** years_elapsed
     )
     return (annual_rent / 12).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def get_resale_value_for_ownership(ownership, as_of=None):
+    """What a GroupOwnership stake is worth today if sold (back to MyFund,
+    or to another user on the resale marketplace).
+
+    ownership.total_contributed is treated as the year-1 value, escalated
+    on the same schedule as the property's rent (RENT_ESCALATION_RATE
+    compounding per full year since group.completed_at) - so a stake's
+    resale value and the rent it earns grow together instead of drifting
+    apart. Unescalated (equal to total_contributed) for a group that
+    hasn't completed yet, though selling isn't offered before completion.
+    """
+    from django.utils import timezone
+
+    group = ownership.group
+    if not group.completed_at:
+        return ownership.total_contributed
+
+    as_of = as_of or timezone.now()
+    years_elapsed = (as_of.date() - group.completed_at.date()).days // 365
+    value = ownership.total_contributed * (
+        (1 + RENT_ESCALATION_RATE) ** years_elapsed
+    )
+    return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
 # Monthly GroupBuy income distribution, automated. For every completed Group,

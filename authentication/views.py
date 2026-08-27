@@ -9763,7 +9763,7 @@ def create_groupbuy(request):
                 logger.warning(f"GroupBuy-live push failed: {e}")
 
         # Step 9: Return the serialized group
-        serializer = GroupSerializer(group)
+        serializer = GroupSerializer(group, context={"request": request})
         response_data = serializer.data
         response_data = dict(serializer.data)
         if warning_message:
@@ -9778,7 +9778,7 @@ def get_groupbuy_by_property(request, property_id):
     try:
         group = Group.objects.filter(property_id=property_id)
         if group.exists():
-            serializer = GroupSerializer(group, many=True)
+            serializer = GroupSerializer(group, many=True, context={"request": request})
             return Response(serializer.data)
         return Response(
             {"message": "No group found for this property."},
@@ -9811,7 +9811,7 @@ def get_groupbuy_by_id(request, group_id):
             {"message": "Group not found."}, status=status.HTTP_404_NOT_FOUND
         )
 
-    return Response(GroupSerializer(group).data)
+    return Response(GroupSerializer(group, context={"request": request}).data)
 
 
 # GET /groupbuys/ - Retrieve group buy details for a specific property
@@ -9828,7 +9828,7 @@ def get_active_public_groupbuys(request):
             group_type="public",
         )
         if groups.exists():
-            serializer = GroupSerializer(groups, many=True)
+            serializer = GroupSerializer(groups, many=True, context={"request": request})
             return Response(serializer.data)
         return Response(
             {"message": "No active public GroupBuy available"},
@@ -10470,6 +10470,378 @@ def leave_groupbuy(request, group_id):
         )
 
 
+# ── Resale marketplace ───────────────────────────────────────────────────
+# Once a GroupBuy is completed, a member's stake becomes a real, resellable
+# asset instead of a refundable contribution (see leave_groupbuy above,
+# which is only for pre-completion exits). Two ways to exit:
+#   - sell_groupbuy_to_myfund: instant, MyFund absorbs the stake.
+#   - list_groupbuy_share_for_sale / buy_groupbuy_share: another member (or
+#     any user) buys the stake directly, MyFund holding the payment only
+#     for the instant of the atomic swap - no manual/offline step for
+#     either side.
+# Both price the stake the same way: get_resale_value_for_ownership, the
+# same 5%/year escalation already used for rent (RENT_ESCALATION_RATE),
+# applied to what the seller originally put in.
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def sell_groupbuy_to_myfund(request, group_id):
+    from .utils import get_resale_value_for_ownership
+
+    try:
+        group = Group.objects.get(id=group_id)
+    except (Group.DoesNotExist, ValueError, ValidationError):
+        return Response(
+            {"message": "GroupBuy not found."}, status=status.HTTP_404_NOT_FOUND
+        )
+
+    if group.status != "completed":
+        return Response(
+            {"message": "This property isn't fully owned yet - nothing to sell."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    user = request.user
+    destination = (request.data.get("destination") or "Wallet").capitalize()
+    if destination not in ["Savings", "Investment", "Wallet"]:
+        return Response(
+            {"message": "Invalid destination. Accepted values are: Savings, Investment, Wallet."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    with transaction.atomic():
+        ownership = (
+            GroupOwnership.objects.select_for_update()
+            .filter(group=group, user=user)
+            .first()
+        )
+        if not ownership or ownership.ownership_percentage <= 0:
+            return Response(
+                {"message": "You don't own a share of this property."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        payout = get_resale_value_for_ownership(ownership)
+        percentage_sold = ownership.ownership_percentage
+
+        create_transaction(
+            user=user,
+            amount=payout,
+            transaction_type="credit",
+            credited_to=destination.upper(),
+            status="confirmed",
+            description=(
+                f"Sold your {percentage_sold:.2f}% share of "
+                f"{group.property.name} back to MyFund"
+            ),
+        )
+
+        was_credited = ownership.properties_credited
+        ownership.delete()
+        group.contributors.remove(user)
+
+        if was_credited:
+            CustomUser.objects.filter(id=user.id, properties__gt=0).update(
+                properties=F("properties") - 1
+            )
+
+        from .models import GroupChatMessage
+
+        GroupChatMessage.objects.create(
+            group=group,
+            sender=None,
+            is_system=True,
+            content=(
+                f"{user.first_name or 'A member'} sold their "
+                f"{percentage_sold:.2f}% share back to MyFund."
+            ),
+        )
+
+    try:
+        send_push_notification(
+            user=user,
+            title="🏠 Property Sold to MyFund",
+            message=(
+                f"You sold your {percentage_sold:.2f}% share of "
+                f"{group.property.name} for ₦{payout:,.2f}, credited to your "
+                f"{destination.lower()}."
+            ),
+            notif_type="GROUP",
+            data={"group_id": str(group.id), "type": "GROUPBUY_SOLD_TO_MYFUND"},
+        )
+        send_generic_email(
+            subject="Property Sold to MyFund",
+            message=(
+                f"You sold your {percentage_sold:.2f}% share of "
+                f"{group.property.name} back to MyFund for ₦{payout:,.2f}, "
+                f"credited to your {destination.lower()} account."
+            ),
+            recipient_list=[user.email],
+        )
+    except Exception as e:
+        logger.warning(f"Sell-to-MyFund notification failed: {e}")
+
+    return Response(
+        {
+            "message": "Sold successfully.",
+            "payout": float(payout),
+            "destination": destination,
+        },
+        status=status.HTTP_200_OK,
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def list_groupbuy_share_for_sale(request, group_id):
+    try:
+        group = Group.objects.get(id=group_id)
+    except (Group.DoesNotExist, ValueError, ValidationError):
+        return Response(
+            {"message": "GroupBuy not found."}, status=status.HTTP_404_NOT_FOUND
+        )
+
+    if group.status != "completed":
+        return Response(
+            {"message": "This property isn't fully owned yet - nothing to list."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    ownership = GroupOwnership.objects.filter(group=group, user=request.user).first()
+    if not ownership or ownership.ownership_percentage <= 0:
+        return Response(
+            {"message": "You don't own a share of this property."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    ownership.listed_for_sale = True
+    ownership.listed_at = timezone.now()
+    ownership.save(update_fields=["listed_for_sale", "listed_at"])
+
+    return Response({"message": "Your share is now listed for sale."})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def unlist_groupbuy_share(request, group_id):
+    try:
+        group = Group.objects.get(id=group_id)
+    except (Group.DoesNotExist, ValueError, ValidationError):
+        return Response(
+            {"message": "GroupBuy not found."}, status=status.HTTP_404_NOT_FOUND
+        )
+
+    ownership = GroupOwnership.objects.filter(group=group, user=request.user).first()
+    if not ownership:
+        return Response(
+            {"message": "You don't own a share of this property."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    ownership.listed_for_sale = False
+    ownership.listed_at = None
+    ownership.save(update_fields=["listed_for_sale", "listed_at"])
+
+    return Response({"message": "Listing removed."})
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def get_groupbuy_resale_listings(request, group_id):
+    from .serializers import GroupOwnershipListingSerializer
+
+    try:
+        group = Group.objects.get(id=group_id)
+    except (Group.DoesNotExist, ValueError, ValidationError):
+        return Response(
+            {"message": "GroupBuy not found."}, status=status.HTTP_404_NOT_FOUND
+        )
+
+    listings = (
+        GroupOwnership.objects.filter(
+            group=group, listed_for_sale=True, ownership_percentage__gt=0
+        )
+        .exclude(user=request.user)
+        .select_related("user")
+        .order_by("-listed_at")
+    )
+    return Response(GroupOwnershipListingSerializer(listings, many=True).data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def buy_groupbuy_share(request, group_id):
+    from .utils import get_resale_value_for_ownership
+
+    try:
+        group = Group.objects.get(id=group_id)
+    except (Group.DoesNotExist, ValueError, ValidationError):
+        return Response(
+            {"message": "GroupBuy not found."}, status=status.HTTP_404_NOT_FOUND
+        )
+
+    if group.status != "completed":
+        return Response(
+            {"message": "This property isn't fully owned yet."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    buyer = request.user
+    seller_email = request.data.get("seller_email")
+    if not seller_email:
+        return Response(
+            {"message": "seller_email is required."}, status=status.HTTP_400_BAD_REQUEST
+        )
+
+    source = (request.data.get("source") or "").capitalize()
+    if source not in ["Savings", "Investment", "Wallet"]:
+        return Response(
+            {"message": "Invalid source. Accepted values are: Savings, Investment, Wallet."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if seller_email.strip().lower() == buyer.email.strip().lower():
+        return Response(
+            {"message": "You can't buy your own listing."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    with transaction.atomic():
+        seller_ownership = (
+            GroupOwnership.objects.select_for_update()
+            .filter(group=group, user__email__iexact=seller_email, listed_for_sale=True)
+            .select_related("user")
+            .first()
+        )
+        if not seller_ownership or seller_ownership.ownership_percentage <= 0:
+            return Response(
+                {"message": "This share is no longer available."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        price = get_resale_value_for_ownership(seller_ownership)
+        buyer_balance = get_user_balance(buyer, source)
+        if buyer_balance < price:
+            return Response(
+                {"message": f"Insufficient {source.lower()} balance."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        seller = seller_ownership.user
+        percentage_sold = seller_ownership.ownership_percentage
+
+        # Debit buyer, credit seller - seller always receives into their
+        # wallet (buyer may pay from Savings/Investment/Wallet, but the
+        # seller has no say in the buyer's source, so their payout account
+        # needs to be unambiguous).
+        create_transaction(
+            user=buyer,
+            amount=price,
+            transaction_type="debit",
+            source=source.upper(),
+            status="confirmed",
+            description=(
+                f"Bought {percentage_sold:.2f}% share of "
+                f"{group.property.name} from {seller.first_name or seller.email}"
+            ),
+        )
+        create_transaction(
+            user=seller,
+            amount=price,
+            transaction_type="credit",
+            credited_to="WALLET",
+            status="confirmed",
+            description=(
+                f"Sold your {percentage_sold:.2f}% share of "
+                f"{group.property.name} to {buyer.first_name or buyer.email}"
+            ),
+        )
+
+        buyer_ownership, buyer_is_new = GroupOwnership.objects.select_for_update().get_or_create(
+            group=group, user=buyer
+        )
+        buyer_ownership.total_contributed += seller_ownership.total_contributed
+        buyer_ownership.ownership_percentage += percentage_sold
+        buyer_was_credited = buyer_ownership.properties_credited
+        buyer_ownership.properties_credited = True
+        buyer_ownership.save()
+
+        group.contributors.add(buyer)
+
+        was_seller_credited = seller_ownership.properties_credited
+        seller_ownership.delete()
+        group.contributors.remove(seller)
+
+        if not buyer_was_credited:
+            CustomUser.objects.filter(id=buyer.id).update(properties=F("properties") + 1)
+        if was_seller_credited:
+            CustomUser.objects.filter(id=seller.id, properties__gt=0).update(
+                properties=F("properties") - 1
+            )
+
+        from .models import GroupChatMessage
+
+        GroupChatMessage.objects.create(
+            group=group,
+            sender=None,
+            is_system=True,
+            content=(
+                f"{buyer.first_name or 'A new member'} bought "
+                f"{seller.first_name or 'a member'}'s {percentage_sold:.2f}% "
+                f"share. Welcome to the {group.property.name} GroupBuy chat! 👋"
+            ),
+        )
+
+    try:
+        send_push_notification(
+            user=seller,
+            title="💰 Your Share Was Sold",
+            message=(
+                f"{buyer.first_name or 'A buyer'} bought your "
+                f"{percentage_sold:.2f}% share of {group.property.name} for "
+                f"₦{price:,.2f}, credited to your wallet."
+            ),
+            notif_type="GROUP",
+            data={"group_id": str(group.id), "type": "GROUPBUY_SHARE_SOLD"},
+        )
+        send_generic_email(
+            subject="Your Property Share Was Sold",
+            message=(
+                f"{buyer.first_name or 'A buyer'} bought your "
+                f"{percentage_sold:.2f}% share of {group.property.name} for "
+                f"₦{price:,.2f}, credited to your wallet."
+            ),
+            recipient_list=[seller.email],
+        )
+        send_push_notification(
+            user=buyer,
+            title="🏠 Property Share Purchased",
+            message=(
+                f"You now own {percentage_sold:.2f}% of {group.property.name}, "
+                f"bought from {seller.first_name or seller.email}."
+            ),
+            notif_type="GROUP",
+            data={"group_id": str(group.id), "type": "GROUPBUY_SHARE_BOUGHT"},
+        )
+        send_generic_email(
+            subject="Property Share Purchased",
+            message=(
+                f"You now own {percentage_sold:.2f}% of {group.property.name}, "
+                f"bought from {seller.first_name or seller.email} for "
+                f"₦{price:,.2f}."
+            ),
+            recipient_list=[buyer.email],
+        )
+    except Exception as e:
+        logger.warning(f"Buy-share notification failed: {e}")
+
+    return Response(
+        {"message": "Purchase successful.", "price": float(price)},
+        status=status.HTTP_200_OK,
+    )
+
+
 # GET /users/:userId/groups - Retrieve all groups a user has joined
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
@@ -10490,7 +10862,7 @@ def get_user_groupbuys(request):
         groups_list = list(groups)
 
         # Serialize the group data
-        serializer = GroupSerializer(groups_list, many=True)
+        serializer = GroupSerializer(groups_list, many=True, context={"request": request})
 
         # Return the serialized data with a 200 OK status
         return Response(serializer.data, status=status.HTTP_200_OK)
@@ -10808,11 +11180,9 @@ def contribute_to_groupbuy(request, group_id):
             # Withdraw, etc), so this is what makes those screens reflect
             # it without each needing GroupBuy-specific logic of their own.
             if just_completed:
-                for ownership in GroupOwnership.objects.filter(group=group):
-                    if ownership.ownership_percentage > 0:
-                        CustomUser.objects.filter(id=ownership.user_id).update(
-                            properties=F("properties") + 1
-                        )
+                from .utils import credit_groupbuy_ownership_properties
+
+                credit_groupbuy_ownership_properties(group)
 
         # The property is now fully owned by its contributors - let everyone
         # who put money in know, and record their final ownership % (already

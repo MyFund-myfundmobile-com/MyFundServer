@@ -2765,6 +2765,30 @@ def list_email_campaigns(request):
         return Response({"error": str(e)}, status=500)
 
 
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def get_email_campaign_detail(request, campaign_id):
+    """
+    GET /api/admin/email-campaigns/<campaign_id>/
+    The one place body_html is returned for a campaign - deliberately left
+    out of EmailCampaignSerializer/list_email_campaigns (that list can be
+    50 campaigns deep and doesn't need the raw HTML payload for every row).
+    Only fetched on demand, when an admin taps "Edit & Resend" on a
+    specific campaign card.
+    """
+    try:
+        campaign = EmailCampaign.objects.get(pk=campaign_id)
+    except EmailCampaign.DoesNotExist:
+        return Response({"error": "Campaign not found."}, status=404)
+
+    return Response({
+        "id": campaign.id,
+        "subject": campaign.subject,
+        "body_html": campaign.body_html,
+        "filters_applied": campaign.filters_applied,
+    })
+
+
 @api_view(['POST'])
 @permission_classes([IsAdminUser])
 def send_next_email_campaign_batch(request, campaign_id):

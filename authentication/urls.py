@@ -345,6 +345,31 @@ urlpatterns = [
     ),
     path("groupbuy/leave/<str:group_id>/", views.leave_groupbuy, name="leave_group"),
     path(
+        "groupbuy/<str:group_id>/sell-to-myfund/",
+        views.sell_groupbuy_to_myfund,
+        name="sell_groupbuy_to_myfund",
+    ),
+    path(
+        "groupbuy/<str:group_id>/list-for-sale/",
+        views.list_groupbuy_share_for_sale,
+        name="list_groupbuy_share_for_sale",
+    ),
+    path(
+        "groupbuy/<str:group_id>/unlist/",
+        views.unlist_groupbuy_share,
+        name="unlist_groupbuy_share",
+    ),
+    path(
+        "groupbuy/<str:group_id>/resale-listings/",
+        views.get_groupbuy_resale_listings,
+        name="get_groupbuy_resale_listings",
+    ),
+    path(
+        "groupbuy/<str:group_id>/buy-share/",
+        views.buy_groupbuy_share,
+        name="buy_groupbuy_share",
+    ),
+    path(
         "groupbuy/<str:group_id>/chat/",
         views.get_groupbuy_chat_messages,
         name="get_groupbuy_chat_messages",

@@ -703,7 +703,7 @@ def release_quarterly_roi(test_mode=True):
 
 
 @shared_task
-def distribute_groupbuy_income_notifications(event_id):
+def distribute_groupbuy_income_notifications(event_id, send_email=False):
     """
     Sends a push notification for a GroupBuy income distribution that has
     already been credited to members' wallets. Dispatched after the
@@ -711,14 +711,19 @@ def distribute_groupbuy_income_notifications(event_id):
     and utils.auto_distribute_groupbuy_income) so a slow/failed notification
     can never block or roll back a payout.
 
-    Push-only, deliberately: this fires for every member on every monthly
+    Push-only by default: this fires for every member on every monthly
     payout once auto-distribution is live, so it's a routine, expected,
     non-urgent event. Members can always see the full breakdown via
     GET /user/groupbuy/income-history/ - an email per member per month here
     would just be recurring cost/latency for something push already covers.
+
+    send_email=True is the one exception - used only by GroupAdmin's
+    "Trigger test rent payment" action (admin.py), where the whole point is
+    a visible, hard-to-miss confirmation (e.g. for a live demo), and it's a
+    one-off admin action rather than a recurring monthly cost.
     """
     from .models import GroupIncomeDistribution
-    from .utils import send_push_notification
+    from .utils import send_push_notification, send_generic_email
 
     distributions = GroupIncomeDistribution.objects.filter(
         income_event_id=event_id
@@ -746,6 +751,24 @@ def distribute_groupbuy_income_notifications(event_id):
                     "group_id": str(event.group_id),
                 },
             )
+
+            if send_email:
+                send_generic_email(
+                    subject=f"💰 Rent Payment Received - {property_name}",
+                    message=(
+                        f"Hi {user.first_name or 'there'},<br><br>"
+                        f"₦{dist.amount:,.2f} has just been credited to your MyFund "
+                        f"wallet as your share of rental income from "
+                        f"<strong>{property_name}</strong> "
+                        f"({dist.ownership_percentage}% ownership).<br><br>"
+                        f"Period: {event.period_start} – {event.period_end}<br><br>"
+                        f"Keep growing your funds 🥂<br><br>"
+                        f"— The MyFund Team"
+                    ),
+                    from_email="MyFund <info@mg.myfundmobile.com>",
+                    recipient_list=[user.email],
+                )
+
             processed += 1
         except Exception as e:
             errors += 1

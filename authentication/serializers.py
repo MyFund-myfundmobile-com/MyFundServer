@@ -926,6 +926,33 @@ class GroupSerializer(serializers.ModelSerializer):
         period_start = last_event.period_end if last_event else obj.completed_at.date()
         return (period_start + relativedelta(months=1)).isoformat()
 
+    # The requesting user's own stake in this group, straight from
+    # GroupOwnership (the same record contribute_to_groupbuy/buy_groupbuy_
+    # share/sell_groupbuy_to_myfund all write to) - not recomputed from
+    # Contribution history client-side, so it stays correct after a resale
+    # transfer changes who owns what without a matching Contribution row.
+    # None when there's no request in context (e.g. an unauthenticated or
+    # context-less serialization) or the user has no stake in this group.
+    my_ownership = serializers.SerializerMethodField()
+
+    def get_my_ownership(self, obj):
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if not user or not user.is_authenticated:
+            return None
+        from .models import GroupOwnership
+        from .utils import get_resale_value_for_ownership
+
+        ownership = GroupOwnership.objects.filter(group=obj, user=user).first()
+        if not ownership or ownership.ownership_percentage <= 0:
+            return None
+        return {
+            "ownership_percentage": ownership.ownership_percentage,
+            "total_contributed": ownership.total_contributed,
+            "listed_for_sale": ownership.listed_for_sale,
+            "resale_value": get_resale_value_for_ownership(ownership),
+        }
+
     class Meta:
         model = Group
         fields = [
@@ -944,7 +971,31 @@ class GroupSerializer(serializers.ModelSerializer):
             "created_at",
             "completed_at",
             "next_payout_date",
+            "my_ownership",
         ]
+
+
+class GroupOwnershipListingSerializer(serializers.Serializer):
+    """A single resale-marketplace listing - one member's stake in a
+    completed GroupBuy that they've put up for another user to buy (see
+    views.get_groupbuy_resale_listings / buy_groupbuy_share)."""
+
+    id = serializers.IntegerField()
+    seller_email = serializers.EmailField(source="user.email")
+    seller_first_name = serializers.CharField(source="user.first_name")
+    seller_profile_picture = serializers.SerializerMethodField()
+    ownership_percentage = serializers.DecimalField(max_digits=5, decimal_places=2)
+    total_contributed = serializers.DecimalField(max_digits=12, decimal_places=2)
+    resale_value = serializers.SerializerMethodField()
+    listed_at = serializers.DateTimeField()
+
+    def get_seller_profile_picture(self, obj):
+        return _resolve_profile_picture_url(obj.user.profile_picture)
+
+    def get_resale_value(self, obj):
+        from .utils import get_resale_value_for_ownership
+
+        return get_resale_value_for_ownership(obj)
 
 
 from .models import GroupChatMessage

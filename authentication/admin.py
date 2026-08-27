@@ -3797,6 +3797,38 @@ class GroupAdmin(admin.ModelAdmin):
     search_fields = ["id", "property__name", "created_by__email"]
     actions = ["trigger_test_rent_payment"]
 
+    def save_model(self, request, obj, form, change):
+        # list_editable's inline status column (and the detail-page edit
+        # form) let staff flip a group straight to "completed" without ever
+        # going through contribute_to_groupbuy - which is the only other
+        # place completed_at gets set and user.properties gets credited.
+        # Do both here too, the moment that transition is spotted, so a
+        # manually-completed group behaves identically to a naturally
+        # completed one (rent payout dates, the properties counter, etc).
+        was_completed = (
+            change and obj.pk
+            and Group.objects.filter(pk=obj.pk, status="completed").exists()
+        )
+
+        if obj.status == "completed" and not was_completed and not obj.completed_at:
+            from django.utils import timezone
+
+            obj.completed_at = timezone.now()
+
+        super().save_model(request, obj, form, change)
+
+        if obj.status == "completed" and not was_completed:
+            from .utils import credit_groupbuy_ownership_properties
+
+            credited = credit_groupbuy_ownership_properties(obj)
+            if credited:
+                self.message_user(
+                    request,
+                    f"Credited {credited} member(s) +1 property for this "
+                    f"newly-completed GroupBuy.",
+                    level=messages.SUCCESS,
+                )
+
     @admin.action(description="💰 Trigger test rent payment (distribute this period's income now)")
     def trigger_test_rent_payment(self, request, queryset):
         """
@@ -3837,7 +3869,13 @@ class GroupAdmin(admin.ModelAdmin):
             try:
                 from .tasks import distribute_groupbuy_income_notifications
 
-                distribute_groupbuy_income_notifications.delay(event["event_id"])
+                # send_email=True (unlike the routine monthly sweep) - this
+                # is a one-off demo/test trigger, so a visible, hard-to-miss
+                # confirmation matters more than the recurring-cost concern
+                # that keeps the automatic monthly payout push-only.
+                distribute_groupbuy_income_notifications.delay(
+                    event["event_id"], send_email=True
+                )
             except Exception:
                 pass
 
