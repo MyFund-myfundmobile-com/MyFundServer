@@ -420,7 +420,7 @@ BREVO_SENDER_NAME = "MyFund"
 
 EMAIL_BACKEND = "django.core.mail.backends.dummy.EmailBackend"
 
-DEFAULT_FROM_EMAIL = "MyFund <noreply@mg.myfundmobile.com>"
+DEFAULT_FROM_EMAIL = "MyFund <noreply@myfundmobile.com>"
 
 
 AUTHENTICATION_BACKENDS = [

@@ -680,7 +680,7 @@ def release_quarterly_roi(test_mode=True):
                 subject=f"Quarterly ROI Paid! ({QUARTER_LABEL})",
                 message=email_body,
                 recipient_list=[user.email],
-                from_email="MyFund <noreply@mg.myfundmobile.com>",
+                from_email="MyFund <noreply@myfundmobile.com>",
                 use_celery_threshold=0,  # force direct send
             )
 
@@ -765,7 +765,7 @@ def distribute_groupbuy_income_notifications(event_id, send_email=False):
                         f"Keep growing your funds 🥂<br><br>"
                         f"— The MyFund Team"
                     ),
-                    from_email="MyFund <info@mg.myfundmobile.com>",
+                    from_email="MyFund <info@myfundmobile.com>",
                     recipient_list=[user.email],
                 )
 
@@ -859,7 +859,7 @@ def reward_top_savers_of_month():
                 send_generic_email(
                     subject=f"🏆 Congrats! You are the #{rank} Top Saver for {prev_month_name}!",
                     message=email_message,
-                    from_email="MyFund <info@mg.myfundmobile.com>",
+                    from_email="MyFund <info@myfundmobile.com>",
                     recipient_list=[user.email],
                 )
                 logger.info(
@@ -888,7 +888,7 @@ def reward_top_savers_of_month():
                 send_generic_email(
                     subject=f"You're the #{rank} Top Saver for {prev_month_name}! 🚀",
                     message=email_message,
-                    from_email="MyFund <info@mg.myfundmobile.com>",
+                    from_email="MyFund <info@myfundmobile.com>",
                     recipient_list=[user.email],
                 )
                 logger.info(
@@ -932,7 +932,7 @@ def send_birthday_greetings():
             — The MyFund Team
             """
             send_generic_email(
-                subject, message, "MyFund <info@mg.myfundmobile.com>", [user.email]
+                subject, message, "MyFund <info@myfundmobile.com>", [user.email]
             )
 
             # 🎊 Push notification
@@ -1104,7 +1104,7 @@ def alert_admins_of_failed_scheduled_withdrawals(failed_withdrawals):
         send_generic_email(
             subject="[ACTION REQUIRED] Scheduled Withdrawal Failed",
             message=message,
-            from_email="MyFund <info@mg.myfundmobile.com>",
+            from_email="MyFund <info@myfundmobile.com>",
             recipient_list=ADMIN_ALERT_EMAILS,
         )
     except Exception:
@@ -1768,7 +1768,7 @@ def send_ambassador_report_notifications_task(self, report_id, user_id):
                 "It is now under review. We’ll notify you once it has been approved.<br><br>"
                 "Thank you for using MyFund.<br><br>"
             ),
-            from_email="MyFund <info@mg.myfundmobile.com>",
+            from_email="MyFund <info@myfundmobile.com>",
             recipient_list=[user.email],
         )
 
@@ -1793,8 +1793,8 @@ def send_ambassador_report_notifications_task(self, report_id, user_id):
                 f"{user.first_name} {user.last_name} ({user.email}) submitted an ambassador report for {report.month}. "
                 "Please review it in Django admin.<br><br>"
             ),
-            from_email="MyFund <info@mg.myfundmobile.com>",
-            recipient_list=["info@mg.myfundmobile.com", "company@myfundmobile.com"],
+            from_email="MyFund <info@myfundmobile.com>",
+            recipient_list=["info@myfundmobile.com", "company@myfundmobile.com"],
         )
 
         # ADMIN PUSH
@@ -2051,7 +2051,7 @@ def send_shortlisted_ambassador_emails(test_mode=True, only_email=None):
     from_email = getattr(
         settings,
         "DEFAULT_FROM_EMAIL",
-        "MyFund <info@mg.myfundmobile.com>",
+        "MyFund <info@myfundmobile.com>",
     )
 
     if only_email:
@@ -2138,7 +2138,7 @@ def send_second_batch_ambassador_emails(test_mode=True, only_email=None):
     from_email = getattr(
         settings,
         "DEFAULT_FROM_EMAIL",
-        "MyFund <info@mg.myfundmobile.com>",
+        "MyFund <info@myfundmobile.com>",
     )
 
     if only_email:

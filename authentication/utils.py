@@ -1194,7 +1194,7 @@ def process_scheduled_withdrawal(withdrawal, triggered_by="celery"):
                 "You can now use or withdraw the funds anytime.<br><br>"
                 "Thank you for using MyFund."
             ),
-            from_email="MyFund <info@mg.myfundmobile.com>",
+            from_email="MyFund <info@myfundmobile.com>",
             recipient_list=[user.email],
         )
     except Exception:
@@ -1211,7 +1211,7 @@ def process_scheduled_withdrawal(withdrawal, triggered_by="celery"):
                 f"Credit Transaction ID: {credit_transaction_id}<br>"
                 f"Triggered by: {triggered_by}<br>"
             ),
-            from_email="MyFund <info@mg.myfundmobile.com>",
+            from_email="MyFund <info@myfundmobile.com>",
             recipient_list=ADMIN_ALERT_EMAILS,
         )
     except Exception:
@@ -1917,7 +1917,7 @@ def approve_quicksave_credit(
             f"Your QuickSave deposit of ₦{amount:,.2f} "
             f"has been confirmed and added to your Savings account."
         ),
-        from_email="MyFund <info@mg.myfundmobile.com>",
+        from_email="MyFund <info@myfundmobile.com>",
         recipient_list=[locked_user.email],
     )
 
@@ -2014,7 +2014,7 @@ def approve_quickinvest_credit(
             f"Your QuickInvest deposit of ₦{amount:,.2f} "
             f"has been confirmed and added to your Investment account."
         ),
-        from_email="MyFund <info@mg.myfundmobile.com>",
+        from_email="MyFund <info@myfundmobile.com>",
         recipient_list=[locked_user.email],
     )
 
@@ -2123,7 +2123,7 @@ def send_ambassador_status_notification(user, became_ambassador=True):
             send_generic_email(
                 subject=email_subject,
                 message=email_message,
-                from_email="MyFund <info@mg.myfundmobile.com>",
+                from_email="MyFund <info@myfundmobile.com>",
                 recipient_list=[user.email],
             )
         except Exception as email_error:

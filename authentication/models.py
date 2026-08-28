@@ -689,7 +689,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                 subject=subject,
                 message=message_html,
                 recipient_list=[self.email],
-                from_email="MyFund <info@mg.myfundmobile.com>",
+                from_email="MyFund <info@myfundmobile.com>",
                 template="email/email.html",  # <-- add this
             )
             logger.info(f"✅ Welcome email sent to {self.email}")
@@ -757,7 +757,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                     subject=subject,
                     message=message,
                     recipient_list=[self.referral.email],
-                    from_email="MyFund <info@mg.myfundmobile.com>",
+                    from_email="MyFund <info@myfundmobile.com>",
                     template="email/email.html",
                 )
             except Exception as e:
@@ -779,7 +779,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                 subject=subject,
                 message=message,
                 recipient_list=[self.email],
-                from_email="MyFund <info@mg.myfundmobile.com>",
+                from_email="MyFund <info@myfundmobile.com>",
                 template="email/email.html",
             )
         except Exception as e:
@@ -991,7 +991,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                 subject=subject,
                 message=message,
                 recipient_list=[user.email],
-                from_email="MyFund <info@mg.myfundmobile.com>",
+                from_email="MyFund <info@myfundmobile.com>",
                 template="email/email.html",  # <-- ensures your header/footer template is used
             )
             logger.info(f"✅ Confirmation email sent to {user.email}")
