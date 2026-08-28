@@ -653,7 +653,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         msg.send()
 
     def send_welcome_email(self):
-        from authentication.utils import send_generic_email
+        from authentication.utils import send_generic_email, send_transactional_email
 
         """
         Sends the Welcome email to this user.
@@ -685,7 +685,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         """
 
         try:
-            send_generic_email(
+            send_transactional_email(
                 subject=subject,
                 message=message_html,
                 recipient_list=[self.email],
@@ -701,7 +701,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         Creates pending referral reward transactions for new signup,
         sends referral emails and pushes.
         """
-        from .utils import send_push_notification, send_generic_email
+        from .utils import send_push_notification, send_generic_email, send_transactional_email
 
         # Prevent duplicates
         if Transaction.objects.filter(
@@ -753,7 +753,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
             Keep growing your funds.🥂<br><br>
             """
             try:
-                send_generic_email(
+                send_transactional_email(
                     subject=subject,
                     message=message,
                     recipient_list=[self.referral.email],
@@ -775,7 +775,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         Keep growing your funds.🥂<br><br>
         """
         try:
-            send_generic_email(
+            send_transactional_email(
                 subject=subject,
                 message=message,
                 recipient_list=[self.email],
@@ -984,10 +984,10 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                 f"\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
             )
 
-        from authentication.utils import send_generic_email
+        from authentication.utils import send_generic_email, send_transactional_email
 
         try:
-            send_generic_email(
+            send_transactional_email(
                 subject=subject,
                 message=message,
                 recipient_list=[user.email],
@@ -1679,7 +1679,7 @@ class TargetSavings(models.Model):
         3. Use update_fields on saves to minimize accidental overwrites.
         """
         from django.db import transaction
-        from .utils import send_generic_email, send_push_notification
+        from .utils import send_generic_email, send_transactional_email, send_push_notification
 
         try:
             with transaction.atomic():
@@ -1807,7 +1807,7 @@ class TargetSavings(models.Model):
                             f"You're now {progress}% closer to your goal! 🚀\n\n"
                             f"Next autosave: {target.next_deduction.strftime('%Y-%m-%d %H:%M') if target.next_deduction else 'scheduled soon'}"
                         )
-                        send_generic_email(
+                        send_transactional_email(
                             subject=subject,
                             message=message,
                             recipient_list=[user.email],
@@ -1889,7 +1889,7 @@ class TargetSavings(models.Model):
         with `self` (the target) and `user` already select_for_update()'d.
         """
         from django.db import transaction
-        from .utils import send_generic_email, send_push_notification
+        from .utils import send_generic_email, send_transactional_email, send_push_notification
 
         target = self
         target.deduction_attempts += 1
@@ -2144,7 +2144,7 @@ class TargetSavings(models.Model):
 
     def send_failed_deduction_email(self, max_attempts=False, reason="insufficient_funds"):
         """Send formatted email notification about failed deduction using generic email helper"""
-        from .utils import send_generic_email
+        from .utils import send_generic_email, send_transactional_email
         from django.conf import settings
 
         try:
@@ -2186,7 +2186,7 @@ class TargetSavings(models.Model):
                     "<em>MyFund Team</em>"
                 )
 
-            send_generic_email(
+            send_transactional_email(
                 subject=subject,
                 message=message,
                 recipient_list=[self.user.email],
@@ -2203,7 +2203,7 @@ class TargetSavings(models.Model):
 
     def send_completion_email(self):
         """Send formatted email notification about target completion using generic email helper"""
-        from .utils import send_generic_email
+        from .utils import send_generic_email, send_transactional_email
         from .models import TargetSavingsCompletion
 
         try:
@@ -2229,7 +2229,7 @@ class TargetSavings(models.Model):
                 "<em>MyFund Team</em>"
             )
 
-            send_generic_email(
+            send_transactional_email(
                 subject=subject,
                 message=message,
                 recipient_list=[self.user.email],

@@ -4,7 +4,7 @@ from django.utils import timezone
 from .models import TargetSavings
 import logging
 from django.db import models
-from .utils import send_generic_email, send_push_notification, create_transaction
+from .utils import send_generic_email, send_transactional_email, send_push_notification, create_transaction
 from datetime import timedelta
 from django.conf import settings
 from .utils import create_transaction
@@ -288,7 +288,7 @@ def retry_failed_deductions():
                 f"New balance: ₦{target.current_amount:,.2f}.\n\n "
                 "Keep going! You're doing great. 🚀"
             )
-            send_generic_email(
+            send_transactional_email(
                 subject=subject,
                 message=message,
                 recipient_list=[user.email],
@@ -676,7 +676,7 @@ def release_quarterly_roi(test_mode=True):
                 f"The MyFund Team"
             )
 
-            send_generic_email(
+            send_transactional_email(
                 subject=f"Quarterly ROI Paid! ({QUARTER_LABEL})",
                 message=email_body,
                 recipient_list=[user.email],
@@ -723,7 +723,7 @@ def distribute_groupbuy_income_notifications(event_id, send_email=False):
     one-off admin action rather than a recurring monthly cost.
     """
     from .models import GroupIncomeDistribution
-    from .utils import send_push_notification, send_generic_email
+    from .utils import send_push_notification, send_generic_email, send_transactional_email
 
     distributions = GroupIncomeDistribution.objects.filter(
         income_event_id=event_id
@@ -753,7 +753,7 @@ def distribute_groupbuy_income_notifications(event_id, send_email=False):
             )
 
             if send_email:
-                send_generic_email(
+                send_transactional_email(
                     subject=f"💰 Rent Payment Received - {property_name}",
                     message=(
                         f"Hi {user.first_name or 'there'},<br><br>"
@@ -785,7 +785,7 @@ def distribute_groupbuy_income_notifications(event_id, send_email=False):
 from celery import shared_task
 from django.utils import timezone
 from .models import CustomUser, TopSaverHistory
-from .utils import send_push_notification, send_generic_email
+from .utils import send_push_notification, send_generic_email, send_transactional_email
 import datetime
 import logging
 
@@ -856,7 +856,7 @@ def reward_top_savers_of_month():
                     — The MyFund Team
                     """
 
-                send_generic_email(
+                send_transactional_email(
                     subject=f"🏆 Congrats! You are the #{rank} Top Saver for {prev_month_name}!",
                     message=email_message,
                     from_email="MyFund <info@myfundmobile.com>",
@@ -885,7 +885,7 @@ def reward_top_savers_of_month():
                 — The MyFund Team
                 """
 
-                send_generic_email(
+                send_transactional_email(
                     subject=f"You're the #{rank} Top Saver for {prev_month_name}! 🚀",
                     message=email_message,
                     from_email="MyFund <info@myfundmobile.com>",
@@ -907,7 +907,7 @@ def send_birthday_greetings():
     from django.utils import timezone
     from datetime import date
     from .models import CustomUser
-    from .utils import send_generic_email, send_push_notification
+    from .utils import send_generic_email, send_transactional_email, send_push_notification
 
     today = date.today()
     users = CustomUser.objects.filter(
@@ -931,7 +931,7 @@ def send_birthday_greetings():
             🥳 Keep saving and keep shining!<br><br>
             — The MyFund Team
             """
-            send_generic_email(
+            send_transactional_email(
                 subject, message, "MyFund <info@myfundmobile.com>", [user.email]
             )
 
@@ -1064,6 +1064,7 @@ from authentication.models import WithdrawalsRequestToAdmin, CustomUser
 from .utils import (
     process_scheduled_withdrawal,
     send_generic_email,
+    send_transactional_email,
     send_push_notification,
 )
 
@@ -1101,7 +1102,7 @@ def alert_admins_of_failed_scheduled_withdrawals(failed_withdrawals):
     )
 
     try:
-        send_generic_email(
+        send_transactional_email(
             subject="[ACTION REQUIRED] Scheduled Withdrawal Failed",
             message=message,
             from_email="MyFund <info@myfundmobile.com>",
@@ -1742,7 +1743,7 @@ def apply_withholding_tax_q1_2026(test_mode=True):
 
 from celery import shared_task
 from .models import AmbassadorMonthlyReport, CustomUser
-from .utils import send_push_notification, send_generic_email
+from .utils import send_push_notification, send_generic_email, send_transactional_email
 from datetime import datetime
 
 
@@ -1760,7 +1761,7 @@ def send_ambassador_report_notifications_task(self, report_id, user_id):
         except Exception:
             pass
         # USER EMAIL
-        send_generic_email(
+        send_transactional_email(
             subject="Ambassador Report Received... 🕒",
             message=(
                 f"Hi {user.first_name},<br><br>"
@@ -1786,7 +1787,7 @@ def send_ambassador_report_notifications_task(self, report_id, user_id):
         )
 
         # ADMIN EMAIL
-        send_generic_email(
+        send_transactional_email(
             subject=f"Ambassador Report - {user.first_name} {user.last_name}",
             message=(
                 f"Hello Admin,<br><br>"
@@ -1833,7 +1834,7 @@ import re
 from django.conf import settings
 
 from authentication.models import CustomUser
-from authentication.utils import send_generic_email
+from authentication.utils import send_generic_email, send_transactional_email
 
 logger = logging.getLogger(__name__)
 

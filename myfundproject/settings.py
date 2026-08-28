@@ -410,9 +410,16 @@ PAYLESS_SMS_SENDER_ID = config("PAYLESS_SMS_SENDER_ID")
 # regardless of this class of config-precedence surprise.
 
 # ===== EMAIL CONFIGURATION =====
-# All transactional email (OTPs, notifications, etc.) goes through Brevo -
-# see authentication/utils.py's send_generic_email() and
-# authentication/services/brevo_service.py. Resend is no longer used.
+# Split by traffic type: transactional (OTPs, password reset, security
+# alerts - single user, auth-critical) goes through Resend - see
+# authentication/utils.py's send_transactional_email() and
+# authentication/services/resend_service.py. Bulk/campaign email (admin
+# broadcasts, segments) stays on Brevo - see send_generic_email() and
+# authentication/services/brevo_service.py. send_transactional_email falls
+# back to Brevo if Resend errors (e.g. before myfundmobile.com is verified
+# on Resend's side), so nothing breaks mid-migration.
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
+
 BREVO_API_KEY = os.environ.get("BREVO_API_KEY")
 
 BREVO_SENDER_EMAIL = "hello@myfundmobile.com"

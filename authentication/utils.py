@@ -552,6 +552,108 @@ def send_generic_email(
         return {"status": "error", "reason": str(e), "total": total_valid}
 
 
+def send_transactional_email(
+    subject,
+    message,
+    recipient_list,
+    from_email=None,
+    use_celery_threshold=None,
+    template="email/email.html",
+    extra_context=None,
+):
+    """
+    Sends single-user, auth/account-critical transactional email (signup
+    and password-reset OTP, security alerts, KYC/withdrawal/transaction
+    updates, top-saver notifications, etc.) via Resend, falling back to
+    Brevo if Resend errors - e.g. before myfundmobile.com is verified on
+    Resend's side (see resend_service.py). Once that verification is done,
+    Resend sends stop raising and the fallback goes quiet on its own with
+    no further deploy needed.
+
+    Deliberately separate from send_generic_email/Brevo, which stays the
+    sender for bulk/campaign email (admin broadcasts, segments) - see
+    settings.py's EMAIL CONFIGURATION note. Same call signature as
+    send_generic_email (recipient_list, use_celery_threshold accepted for
+    drop-in compatibility at call sites migrated from it) since a
+    transactional send is always inline/single-recipient in practice -
+    use_celery_threshold is accepted but ignored, there's no batching case
+    here.
+    """
+    if isinstance(recipient_list, str):
+        recipient_list = [recipient_list]
+
+    if not recipient_list:
+        logger.warning("No recipients provided for transactional email")
+        return {"status": "skipped", "reason": "No recipients"}
+
+    from_email = from_email or settings.DEFAULT_FROM_EMAIL
+    extra_context = extra_context or {}
+
+    from .services.resend_service import send_email_via_resend
+    from .services.brevo_service import send_email_via_brevo
+
+    sent_count = 0
+    failed_emails = []
+    failure_reasons = []
+
+    for raw_email in recipient_list:
+        recipient_email = str(raw_email).strip().lower()
+
+        if not validate_email(recipient_email):
+            logger.warning(f"Invalid email skipped: {recipient_email}")
+            failed_emails.append(recipient_email)
+            failure_reasons.append(f"{recipient_email}: invalid email")
+            continue
+
+        payload = personalize_email_payload(
+            recipient_email, subject, message, extra_context, template
+        )
+
+        try:
+            send_email_via_resend(
+                to_email=payload["to"],
+                subject=payload["subject"],
+                html_content=payload["html_message"],
+                from_email=from_email,
+            )
+            logger.info(f"✅ Transactional email sent via Resend to {recipient_email}")
+            sent_count += 1
+            continue
+
+        except Exception as resend_exc:
+            logger.warning(
+                f"⚠️ Resend failed for {recipient_email}, falling back to Brevo: {resend_exc}"
+            )
+
+        try:
+            send_email_via_brevo(
+                to_email=payload["to"],
+                subject=payload["subject"],
+                html_content=payload["html_message"],
+                from_email=from_email,
+            )
+            logger.info(
+                f"✅ Transactional email sent via Brevo fallback to {recipient_email}"
+            )
+            sent_count += 1
+
+        except Exception as brevo_exc:
+            logger.error(
+                f"❌ Transactional email failed on both Resend and Brevo for {recipient_email}: {brevo_exc}"
+            )
+            failed_emails.append(recipient_email)
+            failure_reasons.append(f"{recipient_email}: {brevo_exc}")
+
+    return {
+        "status": "completed" if sent_count else "error",
+        "sent": sent_count,
+        "failed": len(failed_emails),
+        "failed_emails": failed_emails,
+        "failure_reasons": failure_reasons,
+        "total": len(recipient_list),
+    }
+
+
 def get_user_balance(user, source):
     if source == "Savings":
         return user.savings

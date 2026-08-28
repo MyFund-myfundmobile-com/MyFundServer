@@ -53,6 +53,7 @@ from authentication.tasks import (
 from .utils import (
     send_push_notification,
     send_generic_email,
+    send_transactional_email,
     clear_local_dva_fields,
     sync_user_dva_from_paystack,
     deactivate_user_dva,
@@ -1196,7 +1197,7 @@ class CustomUserAdmin(UserAdmin):
 
             # EMAIL (NON-BLOCKING)
             try:
-                send_generic_email(
+                send_transactional_email(
                     subject="🎉 Your KYC Has Been Approved",
                     message=f"""Hi {user.first_name},
 
@@ -1241,7 +1242,7 @@ class CustomUserAdmin(UserAdmin):
 
             # EMAIL (NON-BLOCKING)
             try:
-                send_generic_email(
+                send_transactional_email(
                     subject="KYC Verification Update – Action Required",
                     message=f"""Hi {user.first_name},
 
@@ -1646,6 +1647,7 @@ from .utils import (
     process_scheduled_withdrawal,
     send_push_notification,
     send_generic_email,
+    send_transactional_email,
 )
 
 
@@ -1892,7 +1894,7 @@ class PendingWithdrawalsAdmin(admin.ModelAdmin):
 
                     # Email
                     try:
-                        send_generic_email(
+                        send_transactional_email(
                             subject="Withdrawal Successful ✔",
                             message=(
                                 f"Hi {user.first_name},<br><br>"
@@ -2040,7 +2042,7 @@ from .models import Transaction
 from django.contrib import admin
 from django.utils import timezone
 from .models import Transaction
-from .utils import send_generic_email, send_push_notification
+from .utils import send_generic_email, send_transactional_email, send_push_notification
 
 
 class TransactionAdmin(admin.ModelAdmin):
@@ -2181,7 +2183,7 @@ class TransactionAdmin(admin.ModelAdmin):
             print(f"Referral confirmation failed: {e}")
 
         try:
-            send_generic_email(
+            send_transactional_email(
                 subject=f"{folder_name} Updated! ✅",
                 message=(
                     f"Hi {user.first_name},<br><br>"
@@ -2788,7 +2790,7 @@ from django.db import transaction as db_transaction
 from django.utils import timezone
 from datetime import datetime
 from .models import AmbassadorPointConfig, AmbassadorMonthlyReport, Transaction
-from .utils import send_push_notification, send_generic_email
+from .utils import send_push_notification, send_generic_email, send_transactional_email
 
 
 @admin.register(AmbassadorPointConfig)
@@ -3024,7 +3026,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
         # CASE 1: ZERO PERFORMANCE
         # -----------------------------
         if stipend_amount <= 0:
-            send_generic_email(
+            send_transactional_email(
                 subject="Ambassador Report Reviewed",
                 message=(
                     f"Hi {user.first_name},<br><br>"
@@ -3072,7 +3074,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
                 report.stipend_paid = True
                 report.save(update_fields=["stipend_paid"])
 
-            send_generic_email(
+            send_transactional_email(
                 subject="Ambassador Stipend Credited",
                 message=(
                     f"Hi {user.first_name},<br><br>"
@@ -3124,7 +3126,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
             report.stipend_paid = True
             report.save(update_fields=["stipend_paid"])
 
-        send_generic_email(
+        send_transactional_email(
             subject=f"{formatted_month} Stipend Credited ✅",
             message=(
                 f"Hi {user.first_name},<br><br>"
@@ -3154,7 +3156,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
     def notify_user_rejected(self, report):
         user = report.user
 
-        send_generic_email(
+        send_transactional_email(
             subject="Ambassador Report Update",
             message=(
                 f"Hi {user.first_name},<br><br>"
@@ -3344,6 +3346,7 @@ from django.contrib.auth import get_user_model
 from authentication.utils import (
     send_push_notification,
     send_generic_email,
+    send_transactional_email,
 )
 
 User = get_user_model()
@@ -3637,7 +3640,7 @@ class EmployeeAdmin(admin.ModelAdmin):
             # SEND EMAIL
             # ==============================
 
-            send_generic_email(
+            send_transactional_email(
                 subject=email_subject,
                 message=email_message,
                 recipient_list=[user.email],

@@ -60,7 +60,7 @@ from .utils import (
     update_top_savers,
     _update_top_savers_worker,
 )
-from .utils import send_generic_email
+from .utils import send_generic_email, send_transactional_email
 from django.db import transaction
 from .utils import (
     send_sms_via_payless,
@@ -586,7 +586,9 @@ def generate_otp():
 
 def send_otp_email(user, otp):
     """
-    Sends signup OTP email via send_generic_email (Brevo).
+    Sends signup OTP email via send_transactional_email (Resend, falls
+    back to Brevo - see authentication/utils.py). Transactional, not bulk -
+    kept off send_generic_email/Brevo on purpose.
     """
 
     subject = f"[OTP-{otp}] Did You Just Signup?"
@@ -612,22 +614,22 @@ def send_otp_email(user, otp):
     """
 
     try:
-        result = send_generic_email(
+        result = send_transactional_email(
             subject=subject,
             message=inner_html,
             recipient_list=[user.email],
             from_email="MyFund <noreply@myfundmobile.com>",
-            use_celery_threshold=0,
             template="email/email.html",
         )
 
-        # send_generic_email catches per-recipient send failures internally
-        # and returns a result dict instead of raising, so a failed Brevo
-        # send here was silently falling through as if it succeeded - the
-        # OTP got marked "sent" in OTPDeliveryLog even though it never
-        # actually reached Brevo. Real signups were affected by this.
+        # send_transactional_email catches per-provider send failures
+        # internally and returns a result dict instead of raising, so a
+        # failed send here was silently falling through as if it
+        # succeeded - the OTP got marked "sent" in OTPDeliveryLog even
+        # though it never actually reached either provider. Real signups
+        # were affected by this.
         if not result or result.get("sent", 0) < 1:
-            raise Exception(f"send_generic_email reported no successful send: {result}")
+            raise Exception(f"send_transactional_email reported no successful send: {result}")
 
         logger.info(f"✅ Signup OTP email sent to {user.email}")
 
@@ -855,7 +857,7 @@ def send_welcome_email(user):
         """
 
         # Just call the generic helper
-        send_generic_email(
+        send_transactional_email(
             subject=subject,
             message=message_html,
             recipient_list=[user.email],
@@ -901,7 +903,7 @@ def send_otp_reset_email(user, otp):
     from_email = "MyFund <info@myfundmobile.com>"
     recipient_list = [user.email]
 
-    send_generic_email(
+    send_transactional_email(
         subject=subject,
         message=message,
         from_email=from_email,
@@ -1311,7 +1313,7 @@ def _send_otp(user, otp, purpose="signup"):
 
         # Send email
         try:
-            result = send_generic_email(
+            result = send_transactional_email(
                 subject=subject,
                 message=inner_html,  # pass HTML content directly
                 recipient_list=[user.email],
@@ -1357,7 +1359,7 @@ def send_password_change_confirmation(user):
         """
 
         try:
-            send_generic_email(
+            send_transactional_email(
                 subject=subject,
                 message=inner_html,  # fixed from context dict to plain HTML
                 recipient_list=[user.email],
@@ -2523,7 +2525,7 @@ def add_bank_account(request):
             notif_type="SYSTEM",
         )
 
-        send_generic_email(
+        send_transactional_email(
             subject="Your MyFund deposit account is ready ✅",
             message=(
                 f"Hi {user.first_name},<br><br>"
@@ -3173,7 +3175,7 @@ def quicksave(request):
                     f"Transaction ID: {reference}<br><br>"
                     f"Keep growing your funds.🥂"
                 )
-                send_generic_email(
+                send_transactional_email(
                     subject=subject,
                     message=message,
                     from_email="MyFund <info@myfundmobile.com>",
@@ -3476,7 +3478,7 @@ def autosave(request):
     from_email = "MyFund <info@myfundmobile.com>"
     recipient_list = [user.email]
 
-    send_generic_email(
+    send_transactional_email(
         subject=subject,
         message=message,
         from_email=from_email,
@@ -3594,7 +3596,7 @@ def deactivate_autosave(request):
         from_email = "MyFund <info@myfundmobile.com>"
         recipient_list = [user.email]
 
-        send_generic_email(
+        send_transactional_email(
             subject=subject,
             message=message,
             from_email=from_email,
@@ -3807,7 +3809,7 @@ def quickinvest(request):
                     f"Transaction ID: {reference}<br><br>"
                     f"Keep growing your funds.🥂"
                 )
-                send_generic_email(
+                send_transactional_email(
                     subject=subject,
                     message=message,
                     from_email="MyFund <info@myfundmobile.com>",
@@ -4102,7 +4104,7 @@ def autoinvest(request):
     from_email = "MyFund <info@myfundmobile.com>"
     recipient_list = [user.email]
 
-    send_generic_email(
+    send_transactional_email(
         subject=subject,
         message=message,
         from_email=from_email,
@@ -4218,7 +4220,7 @@ def deactivate_autoinvest(request):
         from_email = "MyFund <info@myfundmobile.com>"
         recipient_list = [user.email]
 
-        send_generic_email(
+        send_transactional_email(
             subject=subject,
             message=message,
             from_email=from_email,
@@ -4782,7 +4784,7 @@ def withdraw_to_local_bank(request):
                 )
 
                 _bg(
-                    send_generic_email,
+                    send_transactional_email,
                     subject=f"Withdrawal Successful: ₦{amount:,.2f}",
                     message=(
                         f"Hi {user.first_name},<br><br>"
@@ -4892,7 +4894,7 @@ def withdraw_to_local_bank(request):
             )
 
             _bg(
-                send_generic_email,
+                send_transactional_email,
                 subject=f"Withdrawal of ₦{amount:,.2f} Processing...",
                 message=(
                     f"Hi {user.first_name},<br><br>"
@@ -4909,7 +4911,7 @@ def withdraw_to_local_bank(request):
             )
 
             _bg(
-                send_generic_email,
+                send_transactional_email,
                 subject=f"[CHECK] {user.first_name} Wants to Withdraw ₦{amount:,.2f}",
                 message=(
                     f"User: {user.first_name} {user.last_name}<br>"
@@ -5253,7 +5255,7 @@ def process_withdrawal_to_local_bank(request):
             user_message_body = f"Your withdrawal request of ₦{amount:,.2f} has been received successfully."
 
         _bg(
-            send_generic_email,
+            send_transactional_email,
             subject="Withdrawal Request Received",
             message=(
                 f"Hi {user_locked.first_name},<br><br>"
@@ -5363,7 +5365,7 @@ def process_withdrawal_to_local_bank(request):
             """
 
         _bg(
-            send_generic_email,
+            send_transactional_email,
             subject=f"[CHECK] {user_locked.first_name} Wants to Withdraw ₦{amount:,.2f} ({withdrawal_type.capitalize()})",
             message=admin_message,
             from_email="MyFund <info@myfundmobile.com>",
@@ -5564,7 +5566,7 @@ def cancel_scheduled_withdrawal(request):
                 f"Thank you for using MyFund."
             )
 
-            send_generic_email(
+            send_transactional_email(
                 subject=subject,
                 message=user_message,
                 from_email="MyFund <info@myfundmobile.com>",
@@ -5701,7 +5703,7 @@ def make_withdrawal_through_admin(user, amount, transaction_id):
             "cto@myfundmobile.com",
         ]
 
-        send_generic_email(
+        send_transactional_email(
             subject=subject,
             message=message,
             from_email=from_email,
@@ -5713,7 +5715,7 @@ def make_withdrawal_through_admin(user, amount, transaction_id):
         user_message = f"Hi {user.first_name},<br><br>Your withdrawal of ₦{amount} is pending approval. We will notify you once it's processed. <br><br>Thank you for using MyFund."
         user_email = [user.email]
 
-        send_generic_email(
+        send_transactional_email(
             subject=user_subject,
             message=user_message,
             from_email=from_email,
@@ -5842,7 +5844,7 @@ def wallet_transfer_view(request):
         pass
 
     # Emails
-    send_generic_email(
+    send_transactional_email(
         subject=f"You Sent ₦{amount:,.2f} to {target_user.first_name or target_user.email}",
         message=(
             f"Hi {sender.first_name or 'there'},<br><br>"
@@ -5853,7 +5855,7 @@ def wallet_transfer_view(request):
         recipient_list=[sender.email],
     )
 
-    send_generic_email(
+    send_transactional_email(
         subject=f"You Received ₦{amount:,.2f} from {sender.first_name or 'a MyFund user'}",
         message=(
             f"Hi {target_user.first_name or 'there'},<br><br>"
@@ -5910,7 +5912,7 @@ def schedule_rent_reward(user_id, rent_reward, transaction_id, property_name):
     # from_email = "MyFund <info@myfundmobile.com>"
     # recipient_list = [user.email]
 
-    # send_generic_email(subject=subject, message=message, from_email=from_email, recipient_list=recipient_list)
+    # send_transactional_email(subject=subject, message=message, from_email=from_email, recipient_list=recipient_list)
 
 
 class BuyPropertyView(generics.CreateAPIView):
@@ -5993,7 +5995,7 @@ class BuyPropertyView(generics.CreateAPIView):
             from_email = "MyFund <info@myfundmobile.com>"
             recipient_list = [user.email]
 
-            send_generic_email(
+            send_transactional_email(
                 subject=subject,
                 message=message,
                 from_email=from_email,
@@ -6079,7 +6081,7 @@ class BuyPropertyView(generics.CreateAPIView):
                     from_email = "MyFund <info@myfundmobile.com>"
                     recipient_list = [user.email]
 
-                    send_generic_email(
+                    send_transactional_email(
                         subject=subject,
                         message=message,
                         from_email=from_email,
@@ -6238,7 +6240,7 @@ def send_top_saver_notification(user, old_rank, new_rank):
 
     # Only email if user is currently in Top 10
     if in_top_3_now:
-        send_generic_email(
+        send_transactional_email(
             subject=subject,
             message=email_message,
             from_email="MyFund <info@myfundmobile.com>",
@@ -6451,7 +6453,7 @@ class KYCUpdateView(generics.UpdateAPIView):
             from_email = "MyFund <info@myfundmobile.com>"
             recipient_list = [user.email]
 
-            send_generic_email(
+            send_transactional_email(
                 subject=user_subject,
                 message=user_message,
                 from_email=from_email,
@@ -6476,7 +6478,7 @@ class KYCUpdateView(generics.UpdateAPIView):
             "Please review it in the admin panel:<br>"
             "https://myfundapi-myfund-07ce351a.koyeb.app/admin/login/?next=/admin/.<br><br>"
         )
-        send_generic_email(
+        send_transactional_email(
             subject=admin_subject,
             message=admin_message,
             from_email="MyFund <info@myfundmobile.com>",
@@ -6767,7 +6769,7 @@ def initiate_bank_transfer(request):
                     f"Thank you for using MyFund.<br><br>"
                 )
 
-                send_generic_email(
+                send_transactional_email(
                     subject=user_subject,
                     message=user_message,
                     from_email="info@myfundmobile.com",
@@ -6787,7 +6789,7 @@ def initiate_bank_transfer(request):
                     f"MyFund Team"
                 )
 
-                send_generic_email(
+                send_transactional_email(
                     subject=admin_subject,
                     message=admin_message,
                     from_email="info@myfundmobile.com",
@@ -6939,9 +6941,13 @@ def initiate_invest_transfer(request):
             "Thank you for using MyFund."
         )
         threading.Thread(
-            target=send_generic_email,
-            args=(user_subject, user_message, "info@myfundmobile.com", [user.email]),
-            kwargs={"use_celery_threshold": 30, "template": "email/email.html"},
+            target=send_transactional_email,
+            args=(user_subject, user_message, [user.email]),
+            kwargs={
+                "from_email": "MyFund <info@myfundmobile.com>",
+                "use_celery_threshold": 30,
+                "template": "email/email.html",
+            },
             daemon=True,
         ).start()
 
@@ -6955,14 +6961,17 @@ def initiate_invest_transfer(request):
             "MyFund Team"
         )
         threading.Thread(
-            target=send_generic_email,
+            target=send_transactional_email,
             args=(
                 admin_subject,
                 admin_message,
-                "info@myfundmobile.com",
                 ["company@myfundmobile.com", "info@myfundmobile.com"],
             ),
-            kwargs={"use_celery_threshold": 30, "template": "email/email.html"},
+            kwargs={
+                "from_email": "MyFund <info@myfundmobile.com>",
+                "use_celery_threshold": 30,
+                "template": "email/email.html",
+            },
             daemon=True,
         ).start()
 
@@ -7298,7 +7307,7 @@ def initiate_dva_quickinvest(request):
                     notif_type="PENDING",
                 )
 
-                send_generic_email(
+                send_transactional_email(
                     "QuickInvest Transfer Created",
                     (
                         f"Hi {user.first_name},<br><br>"
@@ -7443,7 +7452,7 @@ def message_admin(request):
         subject = f"Message from {first_name} {last_name}"
         message = f"From: {first_name} {last_name} ({email})<br><br>{message}"
 
-        send_generic_email(
+        send_transactional_email(
             subject=subject,
             message=message,
             from_email=from_email,
@@ -7547,7 +7556,7 @@ def send_pin_reset_otp(request):
         Best regards,<br>
         MyFund Team
         """
-        send_generic_email(
+        send_transactional_email(
             subject=subject,
             message=message,
             from_email="MyFund <info@myfundmobile.com>",
@@ -7600,7 +7609,7 @@ def verify_otp_and_reset_pin(request):
         Best regards,<br>
         MyFund Team
         """
-        send_generic_email(
+        send_transactional_email(
             subject=subject,
             message=message,
             from_email="MyFund <info@myfundmobile.com>",
@@ -7666,7 +7675,7 @@ def paystack_submit_otp(request):
                 from_email = "MyFund <info@myfundmobile.com>"
                 recipient_list = [user.email]
 
-                send_generic_email(
+                send_transactional_email(
                     subject=subject,
                     message=message,
                     from_email=from_email,
@@ -7682,7 +7691,7 @@ def paystack_submit_otp(request):
                 from_email = "MyFund <info@myfundmobile.com>"
                 recipient_list = [user.email]
 
-                send_generic_email(
+                send_transactional_email(
                     subject=subject,
                     message=message,
                     from_email=from_email,
@@ -7821,7 +7830,7 @@ def paystack_webhook(request):
     except Exception as e:
         print(f"\nPaystack Webhook(Internal Server Error): {e}\n")
 
-        send_generic_email(
+        send_transactional_email(
             subject="Paystack Webhook Error!",
             message=f"Paystack Webhook Internal Server Error: {e}",
             from_email="MyFund <info@myfundmobile.com>",
@@ -8015,7 +8024,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
         from_email = "MyFund <info@myfundmobile.com>"
         recipient_list = ["webhook@myfundmobile.com", "sammy@myfundmobile.com"]
 
-        send_generic_email(
+        send_transactional_email(
             subject=subject,
             message=message,
             from_email=from_email,
@@ -8064,7 +8073,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         "sammy@myfundmobile.com",
                     ]
 
-                    send_generic_email(
+                    send_transactional_email(
                         subject=subject,
                         message=message,
                         from_email=from_email,
@@ -8102,7 +8111,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                                 f"Failed to save/update card for user {email}: {str(e)}<br><br>"
                                 f"Authorization payload: {authorization}"
                             )
-                            send_generic_email(
+                            send_transactional_email(
                                 subject=subject,
                                 message=message,
                                 from_email="MyFund <info@myfundmobile.com>",
@@ -8151,7 +8160,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             "sammy@myfundmobile.com",
                         ]
 
-                        send_generic_email(
+                        send_transactional_email(
                             subject=subject,
                             message=message,
                             from_email=from_email,
@@ -8226,7 +8235,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         from_email = "MyFund <info@myfundmobile.com>"
                         recipient_list = [user.email]
 
-                        send_generic_email(
+                        send_transactional_email(
                             subject=subject,
                             message=message,
                             from_email=from_email,
@@ -8322,7 +8331,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         from_email = "MyFund <info@myfundmobile.com>"
                         recipient_list = [user.email]
 
-                        send_generic_email(
+                        send_transactional_email(
                             subject=subject,
                             message=message,
                             from_email=from_email,
@@ -8386,7 +8395,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     from_email = "MyFund <info@myfundmobile.com>"
                     recipient_list = [user.email]
 
-                    send_generic_email(
+                    send_transactional_email(
                         subject=subject,
                         message=message,
                         from_email=from_email,
@@ -8426,7 +8435,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     from_email = "MyFund <info@myfundmobile.com>"
                     recipient_list = [user.email]
 
-                    send_generic_email(
+                    send_transactional_email(
                         subject=subject,
                         message=message,
                         from_email=from_email,
@@ -8600,7 +8609,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             from_email = "MyFund <info@myfundmobile.com>"
                             recipient_list = [user.email]
 
-                            send_generic_email(
+                            send_transactional_email(
                                 subject=subject,
                                 message=message,
                                 from_email=from_email,
@@ -8620,7 +8629,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             from_email = "MyFund <info@myfundmobile.com>"
                             recipient_list = [user.email]
 
-                            send_generic_email(
+                            send_transactional_email(
                                 subject=subject,
                                 message=message,
                                 from_email=from_email,
@@ -8645,7 +8654,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                 from_email = "MyFund <info@myfundmobile.com>"
                 recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
 
-                send_generic_email(
+                send_transactional_email(
                     subject=subject,
                     message=message,
                     from_email=from_email,
@@ -8687,7 +8696,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     "sammy@myfundmobile.com",
                 ]
 
-                send_generic_email(
+                send_transactional_email(
                     subject=subject,
                     message=message,
                     from_email=from_email,
@@ -8753,7 +8762,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             notif_type="SYSTEM",
                         )
 
-                        send_generic_email(
+                        send_transactional_email(
                             subject="Your MyFund deposit account is ready ✅",
                             message=(
                                 f"Hi {user.first_name},<br><br>"
@@ -8768,7 +8777,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         )
 
                     else:
-                        send_generic_email(
+                        send_transactional_email(
                             subject="[Paystack DVA Creation Failed After KYC]",
                             message=(
                                 f"User: {user.email}<br>"
@@ -8800,7 +8809,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         notif_type="SYSTEM",
                     )
 
-                    send_generic_email(
+                    send_transactional_email(
                         subject="Your MyFund deposit account is ready ✅",
                         message=(
                             f"Hi {user.first_name},<br><br>"
@@ -8891,7 +8900,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     notif_type="SYSTEM",
                 )
 
-                send_generic_email(
+                send_transactional_email(
                     subject=email_subject,
                     message=email_message,
                     from_email="MyFund <info@myfundmobile.com>",
@@ -8952,7 +8961,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         notif_type="SYSTEM",
                     )
 
-                    send_generic_email(
+                    send_transactional_email(
                         subject="Your MyFund deposit account is ready ✅",
                         message=(
                             f"Hi {user.first_name},<br><br>"
@@ -8995,7 +9004,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         notif_type="SYSTEM",
                     )
 
-                    send_generic_email(
+                    send_transactional_email(
                         subject="Deposit account setup failed",
                         message=(
                             f"Hi {user.first_name},<br><br>"
@@ -9007,7 +9016,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         recipient_list=[user.email],
                     )
 
-                    send_generic_email(
+                    send_transactional_email(
                         subject="[Paystack DVA Failed]",
                         message=f"User: {user.email}<br>Reason: {reason}",
                         from_email="MyFund <info@myfundmobile.com>",
@@ -9031,7 +9040,7 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
         from_email = "MyFund <info@myfundmobile.com>"
         recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
 
-        send_generic_email(
+        send_transactional_email(
             subject=subject,
             message=message,
             from_email=from_email,
@@ -9698,7 +9707,7 @@ def create_groupbuy(request):
                         # can be re-notified later via the share GroupBuy
                         # flow.
                         try:
-                            send_generic_email(
+                            send_transactional_email(
                                 subject=subject,
                                 message=message,
                                 from_email=from_email,
@@ -10041,7 +10050,7 @@ def invite_to_groupbuy(request, group_id):
 
             recipient_list = [invited_user.email for invited_user in invited_users]
             try:
-                send_generic_email(
+                send_transactional_email(
                     subject=subject,
                     message=message,
                     from_email=from_email,
@@ -10222,7 +10231,7 @@ def share_groupbuy(request, group_id):
             invited_external_emails.append(email)
 
         try:
-            send_generic_email(
+            send_transactional_email(
                 subject=subject,
                 message=message,
                 from_email="MyFund <info@myfundmobile.com>",
@@ -10570,7 +10579,7 @@ def sell_groupbuy_to_myfund(request, group_id):
             notif_type="GROUP",
             data={"group_id": str(group.id), "type": "GROUPBUY_SOLD_TO_MYFUND"},
         )
-        send_generic_email(
+        send_transactional_email(
             subject="Property Sold to MyFund",
             message=(
                 f"You sold your {percentage_sold:.2f}% share of "
@@ -10805,7 +10814,7 @@ def buy_groupbuy_share(request, group_id):
             notif_type="GROUP",
             data={"group_id": str(group.id), "type": "GROUPBUY_SHARE_SOLD"},
         )
-        send_generic_email(
+        send_transactional_email(
             subject="Your Property Share Was Sold",
             message=(
                 f"{buyer.first_name or 'A buyer'} bought your "
@@ -10824,7 +10833,7 @@ def buy_groupbuy_share(request, group_id):
             notif_type="GROUP",
             data={"group_id": str(group.id), "type": "GROUPBUY_SHARE_BOUGHT"},
         )
-        send_generic_email(
+        send_transactional_email(
             subject="Property Share Purchased",
             message=(
                 f"You now own {percentage_sold:.2f}% of {group.property.name}, "
@@ -11568,7 +11577,7 @@ def add_funds(request, id):
             )
 
         # 📧 Email
-        send_generic_email(
+        send_transactional_email(
             subject=f"Deposit to Target Savings ({goal.name}) Successful!",
             message=(
                 f"Hi {user.first_name},<br><br>"
@@ -11733,7 +11742,7 @@ def withdraw_savings(request, id):
                 tx.description = f"Target Savings Withdrawal ({goal.name})"
                 tx.save(update_fields=["status", "description"])
 
-                send_generic_email(
+                send_transactional_email(
                     subject="Withdrawal Successful!",
                     message=(
                         f"Hi {user.first_name},<br><br>"
@@ -11972,7 +11981,7 @@ class TargetSavingsListCreate(ListCreateAPIView):
                 f"Consistency is key — you’re on the right path 💪"
             )
 
-            send_generic_email(
+            send_transactional_email(
                 subject=subject,
                 message=message,
                 from_email=settings.DEFAULT_FROM_EMAIL,
@@ -12468,7 +12477,7 @@ class TopReferralsAPIView(APIView):
                 "Thank you for using MyFund.<br><br>"
                 "MyFund"
             )
-            send_generic_email(
+            send_transactional_email(
                 subject=subject,
                 message=message,
                 from_email="MyFund <info@myfundmobile.com>",
@@ -12484,7 +12493,7 @@ class TopReferralsAPIView(APIView):
                 "Thank you for using MyFund.<br><br>"
                 "MyFund"
             )
-            send_generic_email(
+            send_transactional_email(
                 subject=subject,
                 message=message,
                 from_email="MyFund <info@myfundmobile.com>",
