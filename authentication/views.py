@@ -2110,6 +2110,50 @@ from rest_framework import viewsets, permissions
 from rest_framework.decorators import action
 from .serializers import BankAccountSerializer
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Same catalog MyFundMobileApp/screens/components/BankOptions.js ships (minus
+# the handful of entries with no known Paystack bank_code) - kept in sync
+# manually since there's no shared source of truth between the two repos.
+# Used by BankAccountViewSet.predict below to figure out which bank an
+# account number belongs to without asking the user to pick one first -
+# NUBAN account numbers only resolve successfully against their real bank's
+# code, so trying every code and keeping whichever succeed identifies the
+# bank(s) for us.
+NIGERIAN_BANK_CODES = [
+    ("044", "Access Bank"),
+    ("023", "Citibank"),
+    ("050", "Ecobank"),
+    ("070", "Fidelity Bank"),
+    ("011", "First Bank of Nigeria"),
+    ("214", "First City Monument Bank"),
+    ("058", "Guaranty Trust Bank"),
+    ("082", "Keystone Bank"),
+    ("104", "Parallex Bank"),
+    ("076", "Polaris Bank"),
+    ("105", "Premium Trust Bank"),
+    ("101", "Providus Bank"),
+    ("221", "Stanbic IBTC Bank"),
+    ("068", "Standard Chartered Bank"),
+    ("232", "Sterling Bank"),
+    ("100", "Suntrust Bank"),
+    ("102", "Titan Trust Bank"),
+    ("032", "Union Bank"),
+    ("033", "United Bank for Africa"),
+    ("215", "Unity Bank"),
+    ("035", "Wema Bank"),
+    ("057", "Zenith Bank"),
+    ("120001", "9 Payment Service Bank"),
+    ("301", "Jaiz Bank"),
+    ("50211", "Kuda Microfinance Bank"),
+    ("50515", "Moniepoint"),
+    ("999992", "OPay"),
+    ("999991", "PalmPay"),
+    ("100002", "Paga"),
+    ("125", "Rubies Microfinance Bank"),
+    ("00803", "SmartCash PSB"),
+    ("566", "VFD Microfinance Bank"),
+]
 
 
 class BankAccountViewSet(viewsets.ModelViewSet):
@@ -2180,6 +2224,53 @@ class BankAccountViewSet(viewsets.ModelViewSet):
             {"error": "Could not resolve account."},
             status=status.HTTP_400_BAD_REQUEST,
         )
+
+    @action(detail=False, methods=["get"])
+    def predict(self, request):
+        """
+        Faster alternative to `resolve` above: given only an account_number
+        (no bank_code), tries resolving it against every known Nigerian bank
+        concurrently and returns whichever ones actually resolve - almost
+        always exactly one, since NUBAN account numbers only validate
+        against their real bank's code. Lets AddBankModal.js skip making the
+        user pick a bank first; they just tap the correct match from the
+        (usually one-item) list this returns.
+        """
+        account_number = (request.query_params.get("account_number") or "").strip()
+        if not account_number or not account_number.isdigit() or len(account_number) != 10:
+            return Response(
+                {"error": "A valid 10-digit account_number is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        def try_bank(bank_code, bank_name):
+            account_name = self.resolve_account(account_number, bank_code)
+            if account_name:
+                return {
+                    "bank_code": bank_code,
+                    "bank_name": bank_name,
+                    "account_name": account_name,
+                }
+            return None
+
+        matches = []
+        with ThreadPoolExecutor(max_workers=16) as executor:
+            futures = [
+                executor.submit(try_bank, code, name)
+                for code, name in NIGERIAN_BANK_CODES
+            ]
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    matches.append(result)
+
+        if not matches:
+            return Response(
+                {"error": "Could not find a matching bank for this account number."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response({"matches": matches}, status=status.HTTP_200_OK)
 
     def perform_create(self, serializer):
         """
