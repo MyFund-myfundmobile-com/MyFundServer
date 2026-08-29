@@ -9633,6 +9633,12 @@ from dateutil.relativedelta import relativedelta
 
 # Group Related APIs
 
+# Flat platform-wide floor for how little anyone can contribute to join a
+# GroupBuy, regardless of property price - see create_groupbuy below and
+# AddFundsModal.js/JoinGroupBuyModal.js on the mobile side, which mirror
+# this same ₦500,000 figure for their own preset "Min" buttons.
+GROUPBUY_MINIMUM_CONTRIBUTION = Decimal("500000")
+
 
 # POST /groups/create - Create a new group buy for a property
 @api_view(["POST"])
@@ -9668,28 +9674,18 @@ def create_groupbuy(request):
         except Property.DoesNotExist:
             return JsonResponse({"error": "Invalid Property ID"}, status=400)
 
-        # Step 4: Validate minimum_contribution against property price
-        try:
-            minimum_contribution = float(data["minimum_contribution"])
-        except (ValueError, TypeError):
-            return JsonResponse(
-                {"error": "Invalid minimum_contribution. Must be a valid number."},
-                status=400,
-            )
-
-        if minimum_contribution > property_obj.price:
-            return JsonResponse(
-                {
-                    "error": f"Minimum contribution (₦{minimum_contribution:,.2f}) cannot exceed the property price (₦{property_obj.price:,.2f})."
-                },
-                status=400,
-            )
-
-        if minimum_contribution <= 0:
-            return JsonResponse(
-                {"error": "Minimum contribution must be greater than zero."},
-                status=400,
-            )
+        # Step 4: minimum_contribution is a fixed platform-wide floor - NOT
+        # whatever the client sends. StartGroupBuyModal.js was (bug) sending
+        # the creator's own chosen initial contribution as this field, so a
+        # creator who opened with e.g. ₦2,500,000 on an ₦8.5M property
+        # locked every future joiner into a ₦2,500,000 minimum instead of
+        # the intended flat ₦500,000 anyone should be able to join with.
+        # The field is still accepted in the request for backward
+        # compatibility with older clients, but its value is ignored here -
+        # this is the single source of truth now.
+        minimum_contribution = min(
+            GROUPBUY_MINIMUM_CONTRIBUTION, property_obj.price
+        )
 
         # Step 5: Check property availability
         if property_obj.units_available < 1:
@@ -9735,7 +9731,7 @@ def create_groupbuy(request):
             property_id=data["property_id"],
             created_by=request.user,
             goal_amount=property_obj.price,
-            minimum_contribution=data["minimum_contribution"],
+            minimum_contribution=minimum_contribution,
             total_raised=0,
             status="active",
             group_type=group_type,
