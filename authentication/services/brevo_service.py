@@ -29,6 +29,55 @@ def get_brevo_client():
     return sib_api_v3_sdk.ApiClient(configuration)
 
 
+def get_brevo_usage_today():
+    """
+    Live count + subject breakdown of transactional emails actually sent
+    TODAY across the *whole* Brevo account - not just campaigns, everything
+    sharing the same daily quota (OTPs, notifications, webapp sends, a
+    previous day's large batch that Brevo's own queue is still trickling
+    out, etc.) - queried directly from Brevo's own event log so this can
+    never drift out of sync with what Brevo is actually enforcing.
+
+    Shared by admin_views.brevo_daily_usage (the admin panel's usage badge)
+    and by every campaign-batch-sending view, which use it to cap a batch
+    to whatever headroom is *actually* left instead of always assuming the
+    full 280/20 allowance is free - that wrong assumption is exactly what
+    let a same-day batch overshoot Brevo's real 300/day cap on 2026-08-29,
+    when 124 of that day's quota turned out to already be consumed by
+    Brevo's own delayed dispatch of the previous day's batch before anyone
+    had clicked anything that day.
+    """
+    from collections import Counter
+
+    today_str = timezone.now().strftime("%Y-%m-%d")
+    api = sib_api_v3_sdk.TransactionalEmailsApi(get_brevo_client())
+    report = api.get_email_event_report(
+        start_date=today_str,
+        end_date=today_str,
+        event="requests",
+        limit=500,
+    )
+    events = report.events or []
+    used_today = len(events)
+
+    subject_counts = Counter(
+        getattr(e, "subject", None) or "(no subject)" for e in events
+    )
+    breakdown = [
+        {"subject": subject, "count": count}
+        for subject, count in subject_counts.most_common(20)
+    ]
+
+    return {
+        "date": today_str,
+        "used_today": used_today,
+        "daily_limit": DAILY_EMAIL_LIMIT,
+        "remaining_today": max(DAILY_EMAIL_LIMIT - used_today, 0),
+        "near_limit": used_today >= DAILY_EMAIL_LIMIT * 0.9,
+        "breakdown": breakdown,
+    }
+
+
 # ==========================================
 # TRANSACTIONAL EMAIL SENDING
 # ==========================================

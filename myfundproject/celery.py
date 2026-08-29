@@ -90,9 +90,24 @@ app.autodiscover_tasks()
 # this change, just under the old WAT-evaluated schedule.
 app.conf.beat_schedule = {
     # Target savings
-    "process-target-savings-daily": {
+    #
+    # Hourly, not once/day: next_deduction is anchored to whatever
+    # time-of-day the user funded the target (schedule_anchor), so for any
+    # DAILY plan whose anchor time-of-day falls after this sweep's run
+    # time, next_deduction recomputes to "later today" every cycle - which
+    # a once-daily sweep can then only ever pick up the FOLLOWING day's
+    # run, ~12-24h after the app already told the user it was due (e.g. a
+    # target anchored at 18:03 shows "next deduction 6:03pm today" but
+    # can't actually be swept until 06:00 WAT the next morning). Worse for
+    # HOURLY-frequency plans: since the sweep itself was the bottleneck,
+    # they only ever got ~1 of their ~24 expected daily deductions
+    # processed, no matter how their own schedule looked. Safe to run this
+    # often - process_deduction() locks the row and advances
+    # next_deduction into the future before returning, same idempotency
+    # already relied on for process-scheduled-withdrawals-hourly below.
+    "process-target-savings-hourly": {
         "task": "authentication.tasks.process_target_savings_deductions",
-        "schedule": crontab(hour=5, minute=0),
+        "schedule": crontab(minute=0),
     },
     "retry-failed-deductions-daily": {
         "task": "authentication.tasks.retry_failed_deductions",

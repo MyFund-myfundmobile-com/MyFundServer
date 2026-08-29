@@ -1,5 +1,7 @@
 # admin_views.py - Optimized Admin Dashboard Endpoints with Growth Metrics
 
+import logging
+
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAdminUser
 from rest_framework.response import Response
@@ -28,6 +30,8 @@ from .serializers import (
     EmailCampaignSerializer,
 )
 from .utils import grant_user_ambassador_status, revoke_user_ambassador_status
+
+logger = logging.getLogger(__name__)
 from django.db.models.functions import ExtractMonth, ExtractYear, Coalesce, Cast
  
 
@@ -2662,6 +2666,23 @@ CAMPAIGN_BASE_BATCH_LIMIT = 280
 CAMPAIGN_EXTRA_DAILY_LIMIT = 20
 
 
+def _safe_brevo_usage():
+    """
+    get_brevo_usage_today(), or None if the Brevo API call itself fails
+    (network blip, Brevo outage, etc.) - callers that cap a batch by this
+    treat None as "couldn't check, don't block the send", since refusing
+    to send campaign email because a *reporting* API call failed would be
+    a worse outcome than occasionally not catching an overshoot.
+    """
+    from .services.brevo_service import get_brevo_usage_today
+
+    try:
+        return get_brevo_usage_today()
+    except Exception as e:
+        logger.warning(f"Brevo usage lookup failed, sending without a quota cap: {e}")
+        return None
+
+
 def _dedupe_preserve_order(emails):
     seen = set()
     result = []
@@ -2734,17 +2755,43 @@ def create_email_campaign(request):
             total_recipients=len(emails),
         )
 
-        first_batch = emails[:CAMPAIGN_BASE_BATCH_LIMIT]
-        campaign.last_batch_sent_at = timezone.now()
-        campaign.is_sending = True
-        campaign.save()
-
-        from .tasks import send_email_campaign_batch_task
-        send_email_campaign_batch_task.delay(
-            campaign.id, first_batch, is_first_batch=True, is_extra_batch=False,
+        desired_batch = emails[:CAMPAIGN_BASE_BATCH_LIMIT]
+        usage = _safe_brevo_usage()
+        allowed = (
+            len(desired_batch)
+            if usage is None
+            else min(len(desired_batch), usage["remaining_today"])
         )
+        first_batch = desired_batch[:allowed]
 
-        return Response(EmailCampaignSerializer(campaign).data, status=201)
+        # Only mark last_batch_sent_at/is_sending if a batch actually went
+        # out today - if quota is already exhausted (allowed == 0), leave
+        # the campaign untouched at sent_count 0 so can_send_next_batch
+        # stays True and an admin can just tap "Send next batch" once the
+        # quota frees up, rather than it wrongly looking like today's
+        # attempt already happened.
+        if first_batch:
+            campaign.last_batch_sent_at = timezone.now()
+            campaign.is_sending = True
+            campaign.save()
+
+            from .tasks import send_email_campaign_batch_task
+            send_email_campaign_batch_task.delay(
+                campaign.id, first_batch, is_first_batch=True, is_extra_batch=False,
+            )
+
+        data = EmailCampaignSerializer(campaign).data
+        data["brevo_usage"] = usage
+        if allowed < len(desired_batch):
+            data["quota_capped"] = True
+            data["quota_capped_reason"] = (
+                f"Only {usage['remaining_today']} of Brevo's daily "
+                f"{usage['daily_limit']} was left today, so this batch was "
+                f"capped to {allowed} instead of {len(desired_batch)}."
+                if usage
+                else "Batch was capped due to a Brevo quota check issue."
+            )
+        return Response(data, status=201)
 
     except Exception as e:
         return Response({"error": str(e)}, status=500)
@@ -2826,14 +2873,42 @@ def send_next_email_campaign_batch(request, campaign_id):
             )
 
         already_attempted = campaign.sent_count + campaign.failed_count
-        next_batch = campaign.recipient_emails[
+        desired_batch = campaign.recipient_emails[
             already_attempted:already_attempted + CAMPAIGN_BASE_BATCH_LIMIT
         ]
 
-        if not next_batch:
+        if not desired_batch:
             campaign.status = 'completed'
             campaign.save()
             return Response(EmailCampaignSerializer(campaign).data)
+
+        # Cap to whatever's actually left on Brevo's live daily count today
+        # - CAMPAIGN_BASE_BATCH_LIMIT (280) assumes nothing else is
+        # competing for the quota, which isn't always true (other
+        # transactional mail sent the same day, or Brevo's own queue still
+        # trickling out part of a previous day's batch - see
+        # get_brevo_usage_today's docstring for the incident this fixed).
+        usage = _safe_brevo_usage()
+        allowed = (
+            len(desired_batch)
+            if usage is None
+            else min(len(desired_batch), usage["remaining_today"])
+        )
+
+        if allowed <= 0:
+            return Response(
+                {
+                    "error": (
+                        f"Brevo's daily limit is already used up today "
+                        f"({usage['used_today']}/{usage['daily_limit']}). "
+                        "Try again after it resets."
+                    ),
+                    "brevo_usage": usage,
+                },
+                status=400,
+            )
+
+        next_batch = desired_batch[:allowed]
 
         campaign.last_batch_sent_at = timezone.now()
         campaign.extra_sent_today = 0  # new day - the extra allowance refreshes
@@ -2845,7 +2920,17 @@ def send_next_email_campaign_batch(request, campaign_id):
             campaign.id, next_batch, is_first_batch=False, is_extra_batch=False,
         )
 
-        return Response(EmailCampaignSerializer(campaign).data)
+        data = EmailCampaignSerializer(campaign).data
+        data["brevo_usage"] = usage
+        if allowed < len(desired_batch):
+            data["quota_capped"] = True
+            data["quota_capped_reason"] = (
+                f"Only {usage['remaining_today']} of Brevo's daily "
+                f"{usage['daily_limit']} was left today, so this batch was "
+                f"capped to {allowed} instead of {len(desired_batch)}. "
+                "The rest will be picked up by a future batch."
+            )
+        return Response(data)
 
     except Exception as e:
         return Response({"error": str(e)}, status=500)
@@ -2894,14 +2979,36 @@ def send_extra_email_campaign_batch(request, campaign_id):
             )
 
         already_attempted = campaign.sent_count + campaign.failed_count
-        next_batch = campaign.recipient_emails[
+        desired_batch = campaign.recipient_emails[
             already_attempted:already_attempted + remaining_allowance
         ]
 
-        if not next_batch:
+        if not desired_batch:
             campaign.status = 'completed'
             campaign.save()
             return Response(EmailCampaignSerializer(campaign).data)
+
+        usage = _safe_brevo_usage()
+        allowed = (
+            len(desired_batch)
+            if usage is None
+            else min(len(desired_batch), usage["remaining_today"])
+        )
+
+        if allowed <= 0:
+            return Response(
+                {
+                    "error": (
+                        f"Brevo's daily limit is already used up today "
+                        f"({usage['used_today']}/{usage['daily_limit']}). "
+                        "Try again after it resets."
+                    ),
+                    "brevo_usage": usage,
+                },
+                status=400,
+            )
+
+        next_batch = desired_batch[:allowed]
 
         campaign.is_sending = True
         campaign.save()
@@ -2911,7 +3018,16 @@ def send_extra_email_campaign_batch(request, campaign_id):
             campaign.id, next_batch, is_first_batch=False, is_extra_batch=True,
         )
 
-        return Response(EmailCampaignSerializer(campaign).data)
+        data = EmailCampaignSerializer(campaign).data
+        data["brevo_usage"] = usage
+        if allowed < len(desired_batch):
+            data["quota_capped"] = True
+            data["quota_capped_reason"] = (
+                f"Only {usage['remaining_today']} of Brevo's daily "
+                f"{usage['daily_limit']} was left today, so this extra "
+                f"batch was capped to {allowed} instead of {len(desired_batch)}."
+            )
+        return Response(data)
 
     except Exception as e:
         return Response({"error": str(e)}, status=500)
@@ -3025,37 +3141,21 @@ def upload_campaign_image(request):
 def brevo_daily_usage(request):
     """
     GET /api/admin/brevo-daily-usage/
-    Live count of transactional emails actually sent TODAY across the
-    *whole* Brevo account - not just this app's campaigns, everything
-    sharing the same daily quota (OTPs, notifications, webapp sends,
-    etc.) - queried directly from Brevo's own event log (the "requests"
-    event = an actual send attempt, which is what counts against the
-    quota) so this can never drift out of sync with what Brevo is
-    actually enforcing. Brevo's free-tier cap is 300/day (see
-    services/brevo_service.py: DAILY_EMAIL_LIMIT). limit=500 comfortably
-    covers a full free-tier day; if this account ever moves to a paid
-    tier sending well past that, this would need real pagination.
+    Live count + subject breakdown of transactional emails actually sent
+    TODAY across the *whole* Brevo account - not just this app's
+    campaigns, everything sharing the same daily quota (OTPs,
+    notifications, webapp sends, etc.). See
+    services/brevo_service.py:get_brevo_usage_today for the actual query -
+    this view and every campaign-batch-sending view share that one
+    implementation so the badge here and the quota cap those views enforce
+    can never disagree about what "used today" means. The "breakdown" list
+    (subject -> count for today) is what the admin panel's usage-detail
+    modal renders, so an admin can see *what* is eating the quota instead
+    of just a bare number.
     """
     try:
-        import sib_api_v3_sdk
-        from .services.brevo_service import get_brevo_client, DAILY_EMAIL_LIMIT
+        from .services.brevo_service import get_brevo_usage_today
 
-        today_str = timezone.now().strftime('%Y-%m-%d')
-        api = sib_api_v3_sdk.TransactionalEmailsApi(get_brevo_client())
-        report = api.get_email_event_report(
-            start_date=today_str,
-            end_date=today_str,
-            event='requests',
-            limit=500,
-        )
-        used_today = len(report.events or [])
-
-        return Response({
-            "date": today_str,
-            "used_today": used_today,
-            "daily_limit": DAILY_EMAIL_LIMIT,
-            "remaining_today": max(DAILY_EMAIL_LIMIT - used_today, 0),
-            "near_limit": used_today >= DAILY_EMAIL_LIMIT * 0.9,
-        })
+        return Response(get_brevo_usage_today())
     except Exception as e:
         return Response({"error": str(e)}, status=500)
