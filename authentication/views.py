@@ -10582,21 +10582,22 @@ def leave_groupbuy(request, group_id):
 # ── Resale marketplace ───────────────────────────────────────────────────
 # Once a GroupBuy is completed, a member's stake becomes a real, resellable
 # asset instead of a refundable contribution (see leave_groupbuy above,
-# which is only for pre-completion exits). Two ways to exit:
-#   - sell_groupbuy_to_myfund: instant, MyFund absorbs the stake.
+# which is only for pre-completion exits). Two ways to exit, priced
+# differently on purpose (see utils.py docstrings):
+#   - sell_groupbuy_to_myfund: instant, MyFund absorbs the stake at a flat
+#     price (get_myfund_buyback_value_for_ownership) - no appreciation,
+#     since instant/guaranteed liquidity is the value being traded.
 #   - list_groupbuy_share_for_sale / buy_groupbuy_share: another member (or
-#     any user) buys the stake directly, MyFund holding the payment only
-#     for the instant of the atomic swap - no manual/offline step for
-#     either side.
-# Both price the stake the same way: get_resale_value_for_ownership, the
-# same 5%/year escalation already used for rent (RENT_ESCALATION_RATE),
-# applied to what the seller originally put in.
+#     any user) buys the stake directly at the higher, appreciating peer
+#     price (get_peer_resale_value_for_ownership, 7%/year), MyFund holding
+#     the payment only for the instant of the atomic swap - no manual/
+#     offline step for either side.
 
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def sell_groupbuy_to_myfund(request, group_id):
-    from .utils import get_resale_value_for_ownership
+    from .utils import get_myfund_buyback_value_for_ownership
 
     try:
         group = Group.objects.get(id=group_id)
@@ -10631,7 +10632,7 @@ def sell_groupbuy_to_myfund(request, group_id):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        payout = get_resale_value_for_ownership(ownership)
+        payout = get_myfund_buyback_value_for_ownership(ownership)
         percentage_sold = ownership.ownership_percentage
 
         create_transaction(
@@ -10728,6 +10729,16 @@ def list_groupbuy_share_for_sale(request, group_id):
     ownership.listed_at = timezone.now()
     ownership.save(update_fields=["listed_for_sale", "listed_at"])
 
+    from .utils import get_peer_resale_value_for_ownership
+    from .tasks import notify_all_users_share_listed_for_resale
+
+    notify_all_users_share_listed_for_resale.delay(
+        group_id=str(group.id),
+        ownership_percentage=float(ownership.ownership_percentage),
+        price=float(get_peer_resale_value_for_ownership(ownership)),
+        exclude_user_id=request.user.id,
+    )
+
     return Response({"message": "Your share is now listed for sale."})
 
 
@@ -10781,7 +10792,7 @@ def get_groupbuy_resale_listings(request, group_id):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def buy_groupbuy_share(request, group_id):
-    from .utils import get_resale_value_for_ownership
+    from .utils import get_peer_resale_value_for_ownership
 
     try:
         group = Group.objects.get(id=group_id)
@@ -10829,7 +10840,7 @@ def buy_groupbuy_share(request, group_id):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        price = get_resale_value_for_ownership(seller_ownership)
+        price = get_peer_resale_value_for_ownership(seller_ownership)
         buyer_balance = get_user_balance(buyer, source)
         if buyer_balance < price:
             return Response(

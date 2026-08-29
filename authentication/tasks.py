@@ -160,6 +160,62 @@ def send_groupbuy_deadline_reminders_task():
 
 
 @shared_task(queue="default")
+def notify_all_users_share_listed_for_resale(
+    group_id, ownership_percentage, price, exclude_user_id=None
+):
+    """
+    Broadcasts a push notification to every active user when a GroupBuy
+    stake is newly listed on the peer resale marketplace (see
+    views.list_groupbuy_share_for_sale) - so a completed property's open
+    share is discoverable beyond whoever happens to open that exact
+    property's detail page. Runs in the background (dispatched via
+    .delay()) rather than inline in that request, since looping over every
+    active user to send a push is too slow for a request/response cycle -
+    queue="default" set explicitly for the same reason documented on
+    process_target_savings_deductions above (CELERY_TASK_ROUTES routing
+    confusion silently stranding a task in a queue nobody consumes).
+    """
+    from .models import CustomUser, Group
+
+    try:
+        group = Group.objects.select_related("property").get(id=group_id)
+    except Group.DoesNotExist:
+        logger.warning(
+            f"notify_all_users_share_listed_for_resale: group {group_id} not found"
+        )
+        return 0
+
+    users = CustomUser.objects.filter(is_active=True, is_banned=False)
+    if exclude_user_id:
+        users = users.exclude(id=exclude_user_id)
+
+    sent_count = 0
+    for user in users:
+        try:
+            send_push_notification(
+                user=user,
+                title="🏠 New GroupBuy Share Available",
+                message=(
+                    f"A {ownership_percentage:.2f}% share of {group.property.name} "
+                    f"just became available for ₦{price:,.2f}. Buy it to join the "
+                    f"other owners and start earning rent right away."
+                ),
+                notif_type="GROUP",
+                data={"group_id": str(group.id), "type": "GROUPBUY_SHARE_LISTED"},
+            )
+            sent_count += 1
+        except Exception as e:
+            logger.warning(
+                f"GroupBuy share-listed push failed for user {user.id}: {e}"
+            )
+
+    logger.info(
+        f"✅ Notified {sent_count} user(s) about new resale listing for group {group_id}"
+    )
+    return sent_count
+
+
+@shared_task(queue="default")
 def process_target_savings_deductions():
     """Celery task to process all due target savings deductions
 

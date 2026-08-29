@@ -2666,16 +2666,33 @@ def get_monthly_rent_for_group(group, as_of=None):
     return (annual_rent / 12).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
-def get_resale_value_for_ownership(ownership, as_of=None):
-    """What a GroupOwnership stake is worth today if sold (back to MyFund,
-    or to another user on the resale marketplace).
+PEER_RESALE_APPRECIATION_RATE = Decimal("0.07")  # 7% compounding per completed year
+
+
+def get_myfund_buyback_value_for_ownership(ownership):
+    """What MyFund pays to instantly absorb a GroupOwnership stake
+    (sell_groupbuy_to_myfund) - flat, exactly what the seller originally
+    put in, no appreciation. The trade-off for the seller is speed
+    (instant, guaranteed credit with no buyer to find) rather than the
+    higher, appreciating price a peer resale can fetch - see
+    get_peer_resale_value_for_ownership.
+    """
+    return ownership.total_contributed
+
+
+def get_peer_resale_value_for_ownership(ownership, as_of=None):
+    """What a GroupOwnership stake is listed/sold for on the peer resale
+    marketplace (list_groupbuy_share_for_sale / buy_groupbuy_share) -
+    priced higher than MyFund's flat instant buyback (see
+    get_myfund_buyback_value_for_ownership) since a peer sale isn't
+    instant/guaranteed and needs to be worth waiting for.
 
     ownership.total_contributed is treated as the year-1 value, escalated
-    on the same schedule as the property's rent (RENT_ESCALATION_RATE
-    compounding per full year since group.completed_at) - so a stake's
-    resale value and the rent it earns grow together instead of drifting
-    apart. Unescalated (equal to total_contributed) for a group that
-    hasn't completed yet, though selling isn't offered before completion.
+    at PEER_RESALE_APPRECIATION_RATE (7%/year) compounding per full year
+    since group.completed_at - deliberately a different, higher rate than
+    RENT_ESCALATION_RATE (5%/year), which only governs the rent itself.
+    Unescalated (equal to total_contributed) for a group that hasn't
+    completed yet, though selling isn't offered before completion.
     """
     from django.utils import timezone
 
@@ -2686,7 +2703,7 @@ def get_resale_value_for_ownership(ownership, as_of=None):
     as_of = as_of or timezone.now()
     years_elapsed = (as_of.date() - group.completed_at.date()).days // 365
     value = ownership.total_contributed * (
-        (1 + RENT_ESCALATION_RATE) ** years_elapsed
+        (1 + PEER_RESALE_APPRECIATION_RATE) ** years_elapsed
     )
     return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 

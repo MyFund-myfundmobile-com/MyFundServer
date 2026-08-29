@@ -941,7 +941,10 @@ class GroupSerializer(serializers.ModelSerializer):
         if not user or not user.is_authenticated:
             return None
         from .models import GroupOwnership
-        from .utils import get_resale_value_for_ownership
+        from .utils import (
+            get_myfund_buyback_value_for_ownership,
+            get_peer_resale_value_for_ownership,
+        )
 
         ownership = GroupOwnership.objects.filter(group=obj, user=user).first()
         if not ownership or ownership.ownership_percentage <= 0:
@@ -950,8 +953,26 @@ class GroupSerializer(serializers.ModelSerializer):
             "ownership_percentage": ownership.ownership_percentage,
             "total_contributed": ownership.total_contributed,
             "listed_for_sale": ownership.listed_for_sale,
-            "resale_value": get_resale_value_for_ownership(ownership),
+            # Two distinct exit prices - see the two utils functions'
+            # docstrings for why they differ (instant flat vs. appreciating
+            # peer-market price).
+            "myfund_buyback_value": get_myfund_buyback_value_for_ownership(ownership),
+            "resale_value": get_peer_resale_value_for_ownership(ownership),
         }
+
+    # How many other members currently have a share of this group listed
+    # for peer resale - powers the "Shares Available" badge on the
+    # Properties browse list (get_active_public_groupbuys uses this same
+    # serializer), so a buyer doesn't have to open every completed
+    # property's detail page just to discover one has an open listing.
+    resale_listings_count = serializers.SerializerMethodField()
+
+    def get_resale_listings_count(self, obj):
+        from .models import GroupOwnership
+
+        return GroupOwnership.objects.filter(
+            group=obj, listed_for_sale=True, ownership_percentage__gt=0
+        ).count()
 
     class Meta:
         model = Group
@@ -972,6 +993,7 @@ class GroupSerializer(serializers.ModelSerializer):
             "completed_at",
             "next_payout_date",
             "my_ownership",
+            "resale_listings_count",
         ]
 
 
@@ -993,9 +1015,9 @@ class GroupOwnershipListingSerializer(serializers.Serializer):
         return _resolve_profile_picture_url(obj.user.profile_picture)
 
     def get_resale_value(self, obj):
-        from .utils import get_resale_value_for_ownership
+        from .utils import get_peer_resale_value_for_ownership
 
-        return get_resale_value_for_ownership(obj)
+        return get_peer_resale_value_for_ownership(obj)
 
 
 from .models import GroupChatMessage
