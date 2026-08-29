@@ -9827,45 +9827,15 @@ def create_groupbuy(request):
                 if invalid_emails:
                     warning_message = f"Some emails were invalid and skipped: {', '.join(invalid_emails)}"
 
-        # Step 8b: Notify admin users that a new public GroupBuy just went
-        # live. Scoped to the central admin notification list (see
-        # utils.get_admin_notify_users) until the public launch on
-        # 2026-08-29 - switch to "all users with push tokens" once that's
-        # live. Push-only (no email) since this is a routine, non-urgent
-        # broadcast.
-        if group_type == "public":
-            from .utils import get_admin_notify_users
-
-            try:
-                percentage_complete = (
-                    (group.total_raised / group.goal_amount * 100)
-                    if group.goal_amount
-                    else 0
-                )
-                notify_users = get_admin_notify_users(category="groupbuy")
-                for notify_user in notify_users:
-                    send_push_notification(
-                        user=notify_user,
-                        title="New GroupBuy is Live! 🏠",
-                        message=(
-                            f"A new GroupBuy just opened for {property_obj.name} - "
-                            f"₦{property_obj.price:,.2f} property value, "
-                            f"₦{property_obj.rent_reward:,.2f}/year potential returns. "
-                            f"{percentage_complete:.1f}% funded so far. Join now to "
-                            f"start owning a share of this property."
-                        ),
-                        data={
-                            "type": "groupbuy_live",
-                            "group_id": str(group.id),
-                            "property_id": str(property_obj.id),
-                            "percentage_complete": float(percentage_complete),
-                            "property_value": float(property_obj.price),
-                            "expected_annual_return": float(property_obj.rent_reward),
-                        },
-                        notif_type="GROUP",
-                    )
-            except Exception as e:
-                logger.warning(f"GroupBuy-live push failed: {e}")
+        # Step 8b: The "New GroupBuy is Live!" broadcast used to fire right
+        # here, but group.total_raised is unconditionally 0 at this point -
+        # the creator's own initial contribution is a separate follow-up
+        # request (StartGroupBuyModal.js calls createGroupBuy, then
+        # joinOrContributeToGroupBuy) that hasn't happened yet when this
+        # request returns. That made the notification always claim "0.0%
+        # funded" no matter what the creator was about to put in. Moved to
+        # contribute_to_groupbuy, gated on is_founding_contribution, where
+        # total_raised reflects the real amount - see that view.
 
         # Step 9: Return the serialized group
         serializer = GroupSerializer(group, context={"request": request})
@@ -11247,6 +11217,20 @@ def contribute_to_groupbuy(request, group_id):
                 source=source,
             )
 
+            # True exactly once per group - the very first contribution
+            # ever recorded for it (normally the creator's own initial
+            # contribution, made in a separate follow-up request right
+            # after create_groupbuy - see StartGroupBuyModal.js). Used
+            # below to fire the "New GroupBuy is Live!" broadcast here
+            # instead of inside create_groupbuy itself, where
+            # group.total_raised is unconditionally still 0 (that request
+            # returns before this one is even sent) - which was making the
+            # notification always claim "0.0% funded" regardless of what
+            # the creator actually put in.
+            is_founding_contribution = (
+                Contribution.objects.filter(group=group).count() == 1
+            )
+
             # 11. Update group total raised, and flip it to completed the
             # moment it's fully funded - otherwise it stays "active" forever
             # even though step 7 already blocks further contributions once
@@ -11299,6 +11283,46 @@ def contribute_to_groupbuy(request, group_id):
                 from .utils import credit_groupbuy_ownership_properties
 
                 credit_groupbuy_ownership_properties(group)
+
+        # A brand-new public GroupBuy just got its founding contribution -
+        # announce it now, when group.total_raised actually reflects that
+        # money (see is_founding_contribution's comment above for why this
+        # used to live in create_groupbuy instead, always showing 0.0%).
+        # Scoped to the central admin notification list for now (see
+        # utils.get_admin_notify_users) - same audience create_groupbuy's
+        # version used.
+        if is_founding_contribution and group.group_type == "public":
+            from .utils import get_admin_notify_users
+
+            percentage_complete = (
+                (group.total_raised / group.goal_amount * 100)
+                if group.goal_amount
+                else 0
+            )
+            try:
+                for notify_user in get_admin_notify_users(category="groupbuy"):
+                    send_push_notification(
+                        user=notify_user,
+                        title="New GroupBuy is Live! 🏠",
+                        message=(
+                            f"A new GroupBuy just opened for {group.property.name} - "
+                            f"₦{group.property.price:,.2f} property value, "
+                            f"₦{group.property.rent_reward:,.2f}/year potential returns. "
+                            f"{percentage_complete:.1f}% funded so far. Join now to "
+                            f"start owning a share of this property."
+                        ),
+                        data={
+                            "type": "groupbuy_live",
+                            "group_id": str(group.id),
+                            "property_id": str(group.property.id),
+                            "percentage_complete": float(percentage_complete),
+                            "property_value": float(group.property.price),
+                            "expected_annual_return": float(group.property.rent_reward),
+                        },
+                        notif_type="GROUP",
+                    )
+            except Exception as e:
+                logger.warning(f"GroupBuy-live push failed: {e}")
 
         # The property is now fully owned by its contributors - let everyone
         # who put money in know, and record their final ownership % (already
