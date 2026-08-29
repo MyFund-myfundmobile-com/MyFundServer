@@ -1034,6 +1034,82 @@ def admin_user_emails_for_segment(request):
         return Response({"error": str(e)}, status=500)
 
 
+def _csv_safe_filename(label):
+    """
+    Turn a free-text segment label ("KYC Approved", "Ambassadors" etc.)
+    into a safe filename fragment - alnum/dash/underscore only, spaces
+    collapsed to underscores, falls back to "users" if that leaves
+    nothing usable.
+    """
+    cleaned = "".join(
+        c if c.isalnum() or c in ("-", "_") else "_" for c in label.replace(" ", "_")
+    ).strip("_")
+    return cleaned or "users"
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def admin_user_export_csv(request):
+    """
+    GET /api/admin/users/export/?is_ambassador=true&segment_label=Ambassadors
+    Same filters as all_users_list/admin_user_emails_for_segment (via
+    _build_admin_user_queryset) - whatever category/segment is currently
+    selected on the mobile admin Users screen - but returns the matching
+    users as a downloadable CSV (phone number, email, and basic contact
+    info) instead of a paginated JSON list, for use in an external email
+    campaign tool or a phone-call bot. Capped at
+    MAX_SEGMENT_EMAIL_RECIPIENTS (10,000), same reasoning and same limit
+    as admin_user_emails_for_segment - protects against an accidental
+    "no filters" export being built from an unbounded queryset.
+    segment_label is purely cosmetic (used for the downloaded filename)
+    and doesn't affect which users match.
+    """
+    import csv
+    from django.http import HttpResponse
+
+    try:
+        queryset, filters_applied = _build_admin_user_queryset(request.GET)
+        users = queryset[:MAX_SEGMENT_EMAIL_RECIPIENTS]
+
+        segment_label = _csv_safe_filename(request.GET.get('segment_label') or 'users')
+        today_str = timezone.now().strftime('%Y-%m-%d')
+
+        response = HttpResponse(content_type="text/csv")
+        response["Content-Disposition"] = (
+            f'attachment; filename="{segment_label}_{today_str}.csv"'
+        )
+
+        writer = csv.writer(response)
+        writer.writerow([
+            "First Name",
+            "Last Name",
+            "Email",
+            "Phone Number",
+            "Gender",
+            "State",
+            "Country",
+            "KYC Status",
+            "Date Joined",
+        ])
+        for user in users:
+            writer.writerow([
+                user.first_name or "",
+                user.last_name or "",
+                user.email or "",
+                user.phone_number or "",
+                user.gender or "",
+                user.state or "",
+                user.country or "",
+                user.kyc_status or "",
+                user.date_joined.strftime('%Y-%m-%d') if user.date_joined else "",
+            ])
+
+        return response
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
+
+
 @api_view(['GET'])
 @permission_classes([IsAdminUser])
 def admin_user_detail(request, user_id):

@@ -116,6 +116,11 @@ urlpatterns = [
         name="admin_user_emails_for_segment",
     ),
     path(
+        "users/export/",
+        admin_views.admin_user_export_csv,
+        name="admin_user_export_csv",
+    ),
+    path(
         "users/<int:user_id>/",
         admin_views.admin_user_detail,
         name="admin_user_detail",
