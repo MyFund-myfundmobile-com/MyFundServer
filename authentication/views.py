@@ -154,12 +154,23 @@ def signup(request):
         # -----------------------
         # PAYSTACK CUSTOMER
         # -----------------------
-        customer_code = create_paystack_customer(user)
+        # create_paystack_customer returns (success, customer_code_or_error) -
+        # this was previously stored as-is (the whole tuple, stringified) into
+        # paystack_customer_code, e.g. "(True, 'CUS_xxx')" instead of just
+        # "CUS_xxx". A truthy tuple also meant the `if not customer_code`
+        # failure check below never actually fired. That corrupted value then
+        # broke anything downstream needing a real Paystack customer code
+        # (e.g. bank account/recipient creation for withdrawals), surfacing to
+        # affected users as withdrawals silently failing with a bank/account
+        # error despite correct details.
+        customer_created, customer_result = create_paystack_customer(user)
 
-        if not customer_code:
-            logger.warning(f"Paystack customer creation failed for user {user.email}")
+        if not customer_created:
+            logger.warning(
+                f"Paystack customer creation failed for user {user.email}: {customer_result}"
+            )
         else:
-            user.paystack_customer_code = customer_code
+            user.paystack_customer_code = customer_result
             user.save(update_fields=["paystack_customer_code"])
 
             try:
