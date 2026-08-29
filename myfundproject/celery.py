@@ -45,6 +45,9 @@ app.conf.task_routes = {
     "authentication.tasks.expire_groupbuys_task": {"queue": "default"},
     "authentication.tasks.auto_distribute_groupbuy_income_task": {"queue": "default"},
     "authentication.tasks.send_groupbuy_deadline_reminders_task": {"queue": "default"},
+    "authentication.tasks.notify_all_users_share_listed_for_resale": {
+        "queue": "default"
+    },
     "authentication.tasks.process_due_scheduled_withdrawals": {"queue": "default"},
     "authentication.tasks.send_birthday_greetings": {"queue": "default"},
     "authentication.tasks.reward_top_savers_of_month": {"queue": "default"},
