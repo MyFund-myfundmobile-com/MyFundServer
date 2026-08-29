@@ -5176,50 +5176,150 @@ def process_withdrawal_to_local_bank(request):
                 f"✅ Charge Rate: {rate * 100}%, Charge Amount: ₦{charge_amount}, Net Amount: ₦{net_amount}"
             )
 
-            withdrawal = WithdrawalsRequestToAdmin.objects.create(
-                user=user_locked,
-                amount=net_amount,
-                charge_percentage=rate * 100,
-                charge_amount=charge_amount,
-                total_amount=amount,
-                transaction_id=transaction_id,
-                source_account=source_account,
-                target_bank=(
-                    target_bank_account.bank_name if target_bank_account else ""
-                ),
-                target_account_number=(
-                    target_bank_account.account_number if target_bank_account else ""
-                ),
-                withdrawal_type=withdrawal_type,
-                scheduled_processing_date=(
-                    processing_date.date() if processing_date else None
-                ),
-                is_approved=False,
+            # Immediate withdrawals should try Paystack first, same as
+            # withdraw_to_local_bank (the Withdrawal tab's endpoint) -
+            # only fall to an admin request if Paystack fails or has no
+            # balance. Previously this endpoint (the Schedule Withdrawal
+            # screen's "immediate" option) skipped Paystack entirely and
+            # went straight to WithdrawalsRequestToAdmin every time, even
+            # with live Paystack balance available - real admin-processed
+            # withdrawals that should have gone out automatically.
+            # Scheduled withdrawals are deliberately deferred (credited to
+            # the wallet on a future date), so they still skip Paystack
+            # and go straight to the admin queue.
+            paystack_response = None
+            if withdrawal_type == "immediate":
+                paystack_response = make_withdrawal_through_paystack(
+                    user_locked,
+                    target_bank_account,
+                    net_amount,
+                    transaction_id,
+                )
+                print("Paystack API Response:", paystack_response)
+
+            paystack_succeeded = bool(
+                paystack_response and paystack_response.get("status")
             )
 
-            print("✅ STEP 6: Withdrawal record created.")
+            if paystack_succeeded:
+                withdrawal = None
 
-            Transaction.objects.create(
-                user=user_locked,
-                transaction_id=transaction_id,
-                transaction_type="debit",
-                status="pending",
-                amount=amount,
-                service_charge=charge_amount,
-                total_amount=amount,
-                source=source_choice,
-                balance_before=previous_balance,
-                balance_after=new_balance,
-                description=(
-                    f"{source_account.capitalize()} > Wallet . . ."
-                    if withdrawal_type == "scheduled"
-                    else f"{source_account.capitalize()} > Bank . . ."
-                ),
-                scheduled_date=processing_date.date() if processing_date else None,
-            )
-            print("✅ STEP 7: Transaction record created.")
+                Transaction.objects.create(
+                    user=user_locked,
+                    transaction_id=transaction_id,
+                    transaction_type="debit",
+                    status="confirmed",
+                    amount=amount,
+                    service_charge=charge_amount,
+                    total_amount=amount,
+                    source=source_choice,
+                    balance_before=previous_balance,
+                    balance_after=new_balance,
+                    description=f"{source_account.capitalize()} > Bank . . .",
+                )
+                print("✅ STEP 6/7: Paystack transfer succeeded, transaction confirmed.")
+
+            else:
+                withdrawal = WithdrawalsRequestToAdmin.objects.create(
+                    user=user_locked,
+                    amount=net_amount,
+                    charge_percentage=rate * 100,
+                    charge_amount=charge_amount,
+                    total_amount=amount,
+                    transaction_id=transaction_id,
+                    source_account=source_account,
+                    target_bank=(
+                        target_bank_account.bank_name if target_bank_account else ""
+                    ),
+                    target_account_number=(
+                        target_bank_account.account_number
+                        if target_bank_account
+                        else ""
+                    ),
+                    withdrawal_type=withdrawal_type,
+                    scheduled_processing_date=(
+                        processing_date.date() if processing_date else None
+                    ),
+                    is_approved=False,
+                )
+
+                print("✅ STEP 6: Withdrawal record created.")
+
+                Transaction.objects.create(
+                    user=user_locked,
+                    transaction_id=transaction_id,
+                    transaction_type="debit",
+                    status="pending",
+                    amount=amount,
+                    service_charge=charge_amount,
+                    total_amount=amount,
+                    source=source_choice,
+                    balance_before=previous_balance,
+                    balance_after=new_balance,
+                    description=(
+                        f"{source_account.capitalize()} > Wallet . . ."
+                        if withdrawal_type == "scheduled"
+                        else f"{source_account.capitalize()} > Bank . . ."
+                    ),
+                    scheduled_date=processing_date.date() if processing_date else None,
+                )
+                print("✅ STEP 7: Transaction record created.")
 
         charge_percentage_display = f"{rate * 100}%" if rate > 0 else "0%"
+
+        if paystack_succeeded:
+            _bg(
+                send_transactional_email,
+                subject=f"Withdrawal Successful: ₦{amount:,.2f}",
+                message=(
+                    f"Hi {user_locked.first_name},<br><br>"
+                    f"Your withdrawal request of <strong>₦{amount:,.2f}</strong> from your "
+                    f"{source_account.capitalize()} account has been processed successfully.<br><br>"
+                    f"<strong>Amount credited to your bank account:</strong> ₦{net_amount:,.2f}<br>"
+                    f"<strong>Charge deducted:</strong> ₦{charge_amount:,.2f}<br>"
+                    f"<strong>Bank:</strong> {target_bank_account.bank_name}<br>"
+                    f"<strong>Account:</strong> {target_bank_account.account_name} - {target_bank_account.account_number}<br><br>"
+                    "Thank you for using MyFund! 🥂<br><br>"
+                ),
+                from_email="MyFund <info@myfundmobile.com>",
+                recipient_list=[user_locked.email],
+            )
+
+            _bg(
+                send_push_notification,
+                user=user_locked,
+                title="Withdrawal Successful ✅",
+                message=(
+                    f"Your withdrawal request of ₦{amount:,.2f} has been processed. "
+                    f"₦{net_amount:,.2f} was credited to your bank account after "
+                    f"₦{charge_amount:,.2f} charge."
+                ),
+                data={
+                    "amount": str(amount),
+                    "net_amount": str(net_amount),
+                    "charge_amount": str(charge_amount),
+                    "transaction_id": transaction_id,
+                    "source_account": source_account,
+                    "type": "Withdrawal",
+                    "status": "confirmed",
+                },
+                notif_type="SUCCESS",
+            )
+
+            return Response(
+                {
+                    "success": True,
+                    "message": paystack_response.get("message"),
+                    "transaction_id": transaction_id,
+                    "charge_details": {
+                        "charge_percentage": f"{rate * 100}%",
+                        "charge_amount": float(charge_amount),
+                        "net_amount": float(net_amount),
+                        "total_amount": float(amount),
+                    },
+                },
+                status=status.HTTP_200_OK,
+            )
 
         if withdrawal_type == "scheduled" and processing_date:
             user_message_body = (
