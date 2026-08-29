@@ -126,7 +126,12 @@ urlpatterns = [
         name="admin-reply-to-message",
     ),
     # Bank-related APIs
-    path("api/", include(router.urls)),
+    # NOT "api/" here - myfundproject/urls.py already includes this whole
+    # module under "api/" (`path("api/", include("authentication.urls"))`),
+    # so an extra "api/" prefix here doubled it to /api/api/bank-accounts/...
+    # for every router-based endpoint (bank-accounts/resolve/ included) -
+    # a genuine 404 for any client correctly calling /api/bank-accounts/...
+    path("", include(router.urls)),
     path("add-bank-account/", views.add_bank_account, name="add-bank-account"),
     path(
         "delete-bank-account/<str:account_number>/",
