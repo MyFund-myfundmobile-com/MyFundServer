@@ -43,14 +43,9 @@ urlpatterns = [
     # GROWTH MULTIPLIERS
     # ========================================================================
     path(
-        "multipliers/top-referrals",
-        admin_views.top_referrals,
-        name="admin_top_referrals",
-    ),
-    path(
-        "multipliers/top-influencers",
-        admin_views.top_influencers,
-        name="admin_top_influencers",
+        "multipliers/top-performers",
+        admin_views.admin_top_performers,
+        name="admin_top_performers",
     ),
     path(
         "multipliers/groupbuys",

@@ -1,10 +1,12 @@
 """
-Tests for the Admin Transactions Management endpoint
-(authentication/admin_views.py: all_transactions_list).
+Tests for the Admin Transactions Management endpoints
+(authentication/admin_views.py: all_transactions_list, admin_transactions_summary).
 """
 
 from django.test import TestCase
 from django.urls import reverse
+from django.utils import timezone
+from dateutil.relativedelta import relativedelta
 from rest_framework import status
 from rest_framework.test import APIClient
 
@@ -131,3 +133,89 @@ class AdminTransactionsListTest(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["page"], 1)
         self.assertEqual(response.data["limit"], 200)
+
+
+def _set_transaction_date(transaction, when):
+    # date is auto_now_add=True, so it can't be set via .create() /
+    # .save() - bypass it with a direct queryset update, same trick used
+    # elsewhere in this codebase for backdating test fixtures.
+    Transaction.objects.filter(pk=transaction.pk).update(date=when)
+    transaction.refresh_from_db()
+
+
+class AdminTransactionsSummaryTest(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.staff = _make_user("txnsummarystaff@example.com", "95000000005", is_staff=True)
+        self.client.force_authenticate(user=self.staff)
+        self.user = _make_user("txnsummaryuser@example.com", "95000000006")
+
+        now = timezone.now()
+
+        # Confirmed, today - should count in every range.
+        self.credit_today = _make_transaction(
+            self.user, transaction_type="credit", status="confirmed", amount=5000,
+        )
+        self.debit_today = _make_transaction(
+            self.user, transaction_type="debit", status="confirmed", amount=2000,
+        )
+
+        # Confirmed, but 2 months back - excluded from "today"/"month",
+        # included from "3months" onward.
+        self.credit_2mo = _make_transaction(
+            self.user, transaction_type="credit", status="confirmed", amount=1000,
+        )
+        _set_transaction_date(self.credit_2mo, now - relativedelta(months=2))
+
+        # Confirmed, but over a year back - only "all" should include it.
+        self.credit_2yr = _make_transaction(
+            self.user, transaction_type="credit", status="confirmed", amount=7000,
+        )
+        _set_transaction_date(self.credit_2yr, now - relativedelta(years=2))
+
+        # Pending today - must never count, regardless of range.
+        self.pending_today = _make_transaction(
+            self.user, transaction_type="credit", status="pending", amount=999999,
+        )
+
+    def test_non_staff_rejected(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(reverse("admin_transactions_summary"))
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_today_range_excludes_older_and_pending(self):
+        response = self.client.get(
+            reverse("admin_transactions_summary"), {"range": "today"}
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["total_credits"], 5000)
+        self.assertEqual(response.data["total_debits"], 2000)
+        self.assertEqual(response.data["net"], 3000)
+        self.assertEqual(response.data["credit_count"], 1)
+        self.assertEqual(response.data["debit_count"], 1)
+
+    def test_3months_range_includes_2mo_old_excludes_2yr_old(self):
+        response = self.client.get(
+            reverse("admin_transactions_summary"), {"range": "3months"}
+        )
+        self.assertEqual(response.data["total_credits"], 6000)  # 5000 + 1000
+        self.assertEqual(response.data["total_debits"], 2000)
+
+    def test_all_range_includes_everything_confirmed(self):
+        response = self.client.get(
+            reverse("admin_transactions_summary"), {"range": "all"}
+        )
+        self.assertEqual(response.data["total_credits"], 13000)  # 5000+1000+7000
+        self.assertEqual(response.data["total_debits"], 2000)
+        self.assertEqual(response.data["net"], 11000)
+
+    def test_default_range_is_today(self):
+        response = self.client.get(reverse("admin_transactions_summary"))
+        self.assertEqual(response.data["range"], "today")
+        self.assertEqual(response.data["total_credits"], 5000)
+
+    def test_invalid_range_returns_400(self):
+        response = self.client.get(
+            reverse("admin_transactions_summary"), {"range": "yesterday"}
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)

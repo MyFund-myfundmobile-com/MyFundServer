@@ -136,7 +136,7 @@ class UserSerializer(serializers.ModelSerializer):
             "properties",
             "wallet",
             "total_savings_and_investments_this_month",
-            "is_hired_referrer",
+            "is_influencer",
             "is_ambassador",
             "autosave_enabled",
             "autoinvest_enabled",

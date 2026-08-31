@@ -172,7 +172,7 @@ class CustomUserAdmin(UserAdmin):
         "total_savings_and_investments_this_month",
         "user_percentage_to_top_saver",
         "how_did_you_hear",
-        "is_hired_referrer",
+        "is_influencer",
         "is_ambassador",
         "kyc_status",
         "is_staff",
@@ -193,7 +193,7 @@ class CustomUserAdmin(UserAdmin):
         "kyc_status",
         "how_did_you_hear",
         "date_joined",
-        "is_hired_referrer",
+        "is_influencer",
         "is_ambassador",
         "paystack_identified",
         "paystack_identification_status",
@@ -217,7 +217,7 @@ class CustomUserAdmin(UserAdmin):
         "view_kyc_details",
         "approve_kyc",
         "reject_kyc",
-        "make_hired_referrer",
+        "make_influencer",
         "make_ambassador",
         "revoke_ambassador",
         "delete_selected",
@@ -250,7 +250,7 @@ class CustomUserAdmin(UserAdmin):
                     "is_active",
                     "is_superuser",
                     "is_ambassador",
-                    "is_hired_referrer",
+                    "is_influencer",
                     "groups",
                     "user_permissions",
                 )
@@ -635,6 +635,15 @@ class CustomUserAdmin(UserAdmin):
             level=messages.SUCCESS,
         )
 
+    @admin.action(description="📣 Mark selected users as influencers")
+    def make_influencer(self, request, queryset):
+        updated_count = queryset.update(is_influencer=True)
+        self.message_user(
+            request,
+            f"{updated_count} user(s) marked as influencer.",
+            level=messages.SUCCESS,
+        )
+
     @admin.action(description="🚫 Ban selected users (cannot reactivate)")
     def ban_user(self, request, queryset):
         queryset.update(is_banned=True, is_active=False)
@@ -696,7 +705,7 @@ class CustomUserAdmin(UserAdmin):
                 # Referral Source
                 "How Did You Hear",  # ADDED - Shows user acquisition source
                 # Account Information
-                "Is Hired Referrer",
+                "Is Influencer",
                 "Is Ambassador",
                 # Account Balances
                 "Savings",
@@ -810,7 +819,7 @@ class CustomUserAdmin(UserAdmin):
                     # Referral Source - ADDED
                     how_did_you_hear_display,  # Shows the full readable value
                     # Account Information
-                    "Yes" if user.is_hired_referrer else "No",
+                    "Yes" if user.is_influencer else "No",
                     "Yes" if user.is_ambassador else "No",
                     # Account Balances
                     str(user.savings),

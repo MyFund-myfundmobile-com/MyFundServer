@@ -825,7 +825,7 @@ USER_LIST_BOOLEAN_FILTERS = (
     'is_staff',
     'is_banned',
     'is_active',
-    'is_hired_referrer',
+    'is_influencer',
 )
 
 
@@ -940,10 +940,10 @@ def all_users_list(request):
     """
     GET /api/admin/users/list?page=1&limit=50&search=john
         &is_ambassador=true&is_staff=false&is_banned=false&is_active=true
-        &is_hired_referrer=true&kyc_status=approved
+        &is_influencer=true&kyc_status=approved
     Paginated, searchable, filterable user list. Filters mirror Django's
     own CustomUserAdmin.list_filter (is_staff/is_active/is_banned/
-    is_ambassador/is_hired_referrer/kyc_status) so the mobile admin Users
+    is_ambassador/is_influencer/kyc_status) so the mobile admin Users
     screen can offer the same filtering Django admin does.
     """
     try:
@@ -1134,7 +1134,7 @@ def admin_user_detail(request, user_id):
 # exposes as bulk actions (make/revoke ambassador, ban/unban, staff
 # toggle) - kept as an explicit whitelist rather than allowing arbitrary
 # field mass-assignment.
-USER_STATUS_TOGGLEABLE_FIELDS = {'is_ambassador', 'is_banned', 'is_staff', 'is_active'}
+USER_STATUS_TOGGLEABLE_FIELDS = {'is_ambassador', 'is_influencer', 'is_banned', 'is_staff', 'is_active'}
 
 
 @api_view(['POST'])
@@ -1598,143 +1598,123 @@ def transaction_success_rate(request):
 # GROWTH MULTIPLIERS ENDPOINTS
 # ============================================================================
 
-@api_view(['GET'])
-@permission_classes([IsAdminUser])
-def top_referrals(request):
-    """
-    GET /api/admin/multipliers/top-referrals?limit=20
-    Returns top referrers with badges (Active, Ambassador, Advocate)
-    Formula: (Signups with referrals / Total signups)
-    """
-    limit = int(request.GET.get('limit', 20))
-    
-    cache_key = f"multipliers:referrals:{limit}"
-    cached_data = cache.get(cache_key)
-    
-    if cached_data:
-        return Response(cached_data)
-    
-    try:
-        # Assuming CustomUser has a 'referred_by' field
-        # Get users who have referred others
-        referral_stats = CustomUser.objects.filter(
-            is_deleted=False
-        ).exclude(
-            referred_by__isnull=True
-        ).values('referred_by').annotate(
-            referral_count=Count('id')
-        ).order_by('-referral_count')[:limit]
-        
-        # Get total signups with and without referrals
-        total_signups = CustomUser.objects.filter(is_deleted=False).count()
-        signups_with_referrals = CustomUser.objects.filter(
-            is_deleted=False
-        ).exclude(referred_by__isnull=True).count()
-        signups_without_referrals = total_signups - signups_with_referrals
-        
-        referral_rate = (signups_with_referrals / total_signups * 100) if total_signups > 0 else 0
-        
-        # Build leaderboard with badges
-        leaderboard = []
-        for stat in referral_stats:
-            user = CustomUser.objects.get(id=stat['referred_by'])
-            count = stat['referral_count']
-            
-            # Assign badge based on referral count
-            if count >= 50:
-                badge = "Advocate"
-            elif count >= 20:
-                badge = "Ambassador"
-            else:
-                badge = "Active"
-            
-            leaderboard.append({
-                "user_id": user.id,
-                "first_name": user.first_name,
-                "last_name": user.last_name,
-                "referral_count": count,
-                "badge": badge,
-                "profile_picture": user.profile_picture or ""
-            })
-        
-        response_data = {
-            "total_signups": total_signups,
-            "signups_with_referrals": signups_with_referrals,
-            "signups_without_referrals": signups_without_referrals,
-            "referral_rate": round(referral_rate, 2),
-            "leaderboard": leaderboard
-        }
-        
-        cache.set(cache_key, response_data, 900)
-        return Response(response_data)
-        
-    except Exception as e:
-        return Response({"error": str(e)}, status=500)
+# Growth leaderboard - one endpoint backing all three "Top ..." cards on
+# the mobile admin dashboard (referrals/ambassadors/influencers are all
+# the same underlying computation: referred-signup counts, just scoped to
+# a different subset of referrers). Replaces two previously broken
+# endpoints here (top_referrals queried a `referred_by` field that never
+# existed on CustomUser - the real field is `referral`; top_influencers
+# queried an `influencer_code` field that never existed either - "hired
+# referrer" users, now renamed `is_influencer`, are what this app actually
+# calls influencers). Neither old endpoint was ever called by the mobile
+# app or the web admin dashboard (both of those use the real, working
+# /api/top-referrals/ instead), so nothing depended on the old shape.
+GROWTH_LEADER_CATEGORIES = ("referrals", "ambassadors", "influencers")
+GROWTH_LEADER_RANGES = ("month", "3months", "6months", "1year", "all")
 
 
 @api_view(['GET'])
 @permission_classes([IsAdminUser])
-def top_influencers(request):
+def admin_top_performers(request):
     """
-    GET /api/admin/multipliers/top-influencers?limit=20
-    Returns top influencers with badges (Bronze, Silver, Gold)
-    Formula: (Signups via influencers / Total signups)
+    GET /api/admin/multipliers/top-performers?category=referrals|ambassadors|influencers
+        &range=month|3months|6months|1year|all&limit=20
+    Leaderboard of referrers ranked by how many people they referred (and
+    how many of those referrals were confirmed) within the selected
+    range - same computation TopReferralsAPIView already does for a
+    single user's own gamified ranking (see authentication/views.py),
+    just admin-facing across everyone and period-configurable instead of
+    locked to "this month".
+    - category=referrals: every referrer.
+    - category=ambassadors: referrers with is_ambassador=True only.
+    - category=influencers: referrers with is_influencer=True only.
     """
-    limit = int(request.GET.get('limit', 20))
-    
-    cache_key = f"multipliers:influencers:{limit}"
+    category = request.GET.get('category', 'referrals').strip().lower()
+    if category not in GROWTH_LEADER_CATEGORIES:
+        return Response(
+            {"error": f"Invalid category '{category}'. Must be one of {GROWTH_LEADER_CATEGORIES}."},
+            status=400,
+        )
+
+    range_key = request.GET.get('range', 'month').strip().lower()
+    if range_key not in GROWTH_LEADER_RANGES:
+        return Response(
+            {"error": f"Invalid range '{range_key}'. Must be one of {GROWTH_LEADER_RANGES}."},
+            status=400,
+        )
+
+    try:
+        limit = int(request.GET.get('limit', 20))
+    except (TypeError, ValueError):
+        limit = 20
+    limit = min(max(limit, 1), 100)
+
+    cache_key = f"multipliers:top-performers:{category}:{range_key}:{limit}"
     cached_data = cache.get(cache_key)
-    
     if cached_data:
         return Response(cached_data)
-    
+
+    now = timezone.now()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    range_starts = {
+        "month": today_start.replace(day=1),
+        "3months": today_start - relativedelta(months=3),
+        "6months": today_start - relativedelta(months=6),
+        "1year": today_start - relativedelta(years=1),
+        "all": None,
+    }
+    start = range_starts[range_key]
+
     try:
-        # Assuming CustomUser has an 'influencer_code' field
-        # Get influencer stats
-        influencer_stats = CustomUser.objects.filter(
-            is_deleted=False
-        ).exclude(
-            influencer_code__isnull=True
-        ).values('influencer_code').annotate(
-            signup_count=Count('id')
-        ).order_by('-signup_count')[:limit]
-        
-        # Get total signups
-        total_signups = CustomUser.objects.filter(is_deleted=False).count()
-        signups_via_influencers = CustomUser.objects.filter(
-            is_deleted=False
-        ).exclude(influencer_code__isnull=True).count()
-        signups_without_influencers = total_signups - signups_via_influencers
-        
-        influencer_rate = (signups_via_influencers / total_signups * 100) if total_signups > 0 else 0
-        
-        # Build leaderboard with badges
+        referred_qs = CustomUser.objects.filter(is_deleted=False, referral__isnull=False)
+        if start is not None:
+            referred_qs = referred_qs.filter(date_joined__gte=start)
+
+        if category == "ambassadors":
+            referred_qs = referred_qs.filter(referral__is_ambassador=True)
+        elif category == "influencers":
+            referred_qs = referred_qs.filter(referral__is_influencer=True)
+
+        confirmed_filter = Q(referral_reward_granted=True)
+        if start is not None:
+            confirmed_filter &= Q(referral_reward_confirmed_at__gte=start)
+
+        stats = (
+            referred_qs
+            .values('referral')
+            .annotate(
+                signups=Count('id'),
+                confirmed=Count('id', filter=confirmed_filter),
+            )
+            .order_by('-confirmed', '-signups')[:limit]
+        )
+
+        referrer_ids = [s['referral'] for s in stats]
+        referrers = CustomUser.objects.in_bulk(referrer_ids)
+
         leaderboard = []
-        for stat in influencer_stats:
-            count = stat['signup_count']
-            
-            # Assign badge based on signup count
-            if count >= 100:
-                badge = "Gold"
-            elif count >= 50:
-                badge = "Silver"
-            else:
-                badge = "Bronze"
-            
+        for stat in stats:
+            referrer = referrers.get(stat['referral'])
+            if not referrer:
+                continue
             leaderboard.append({
-                "influencer_code": stat['influencer_code'],
-                "signup_count": count,
-                "badge": badge
+                "user_id": referrer.id,
+                "first_name": referrer.first_name,
+                "last_name": referrer.last_name,
+                "email": referrer.email,
+                "profile_picture": referrer.profile_picture or "",
+                "is_ambassador": referrer.is_ambassador,
+                "is_influencer": referrer.is_influencer,
+                "signups": stat['signups'],
+                "confirmed": stat['confirmed'],
             })
-        
+
         response_data = {
-            "total_signups": total_signups,
-            "signups_via_influencers": signups_via_influencers,
-            "signups_without_influencers": signups_without_influencers,
-            "influencer_rate": round(influencer_rate, 2),
-            "leaderboard": leaderboard
+            "category": category,
+            "range": range_key,
+            "leaderboard": leaderboard,
         }
-        
+
         cache.set(cache_key, response_data, 900)
         return Response(response_data)
 

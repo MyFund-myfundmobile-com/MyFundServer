@@ -168,7 +168,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     is_staff = models.BooleanField(default=False)
     is_superuser = models.BooleanField(default=False)
 
-    is_hired_referrer = models.BooleanField(default=False)
+    is_influencer = models.BooleanField(default=False)
     is_ambassador = models.BooleanField(default=False)
 
     objects = CustomUserManager()
@@ -728,7 +728,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         self.save(update_fields=["pending_referral_reward"])
 
         # Referrer reward (pending)
-        if not self.referral.is_hired_referrer:
+        if not self.referral.is_influencer:
             transaction_id = str(uuid.uuid4())[:10]
             Transaction.objects.create(
                 user=self.referral,

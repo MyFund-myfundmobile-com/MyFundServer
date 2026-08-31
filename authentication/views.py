@@ -2110,7 +2110,12 @@ from rest_framework import viewsets, permissions
 from rest_framework.decorators import action
 from .serializers import BankAccountSerializer
 import requests
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time as _time
+from concurrent.futures import (
+    ThreadPoolExecutor,
+    as_completed,
+    TimeoutError as FuturesTimeoutError,
+)
 
 # Same catalog MyFundMobileApp/screens/components/BankOptions.js ships (minus
 # the handful of entries with no known Paystack bank_code) - kept in sync
@@ -2225,6 +2230,18 @@ class BankAccountViewSet(viewsets.ModelViewSet):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+    # How long to keep waiting for stragglers after the FIRST match comes
+    # back, and the absolute ceiling regardless of how many are still
+    # outstanding - same two-number scheme (and same reasoning) as
+    # ValuePlus's DetectBankAccountView: NUBAN resolves against the right
+    # bank code are typically fast, so once one hit lands, any other real
+    # matches (e.g. a phone-number-style virtual account shared across
+    # fintechs) are usually only a few hundred ms behind - no need to wait
+    # for all ~31 threads (many of which are slow, guaranteed-empty misses)
+    # before responding.
+    PREDICT_GRACE_SECONDS = 1.2
+    PREDICT_HARD_TIMEOUT_SECONDS = 6
+
     @action(detail=False, methods=["get"])
     def predict(self, request):
         """
@@ -2235,6 +2252,13 @@ class BankAccountViewSet(viewsets.ModelViewSet):
         against their real bank's code. Lets AddBankModal.js skip making the
         user pick a bank first; they just tap the correct match from the
         (usually one-item) list this returns.
+
+        Returns as soon as PREDICT_GRACE_SECONDS has passed since the first
+        match, instead of waiting on every one of the ~31 threads via a
+        plain as_completed(futures) loop - most of those are slow, certain
+        misses (wrong bank), so waiting for all of them made this endpoint
+        noticeably slower than it needs to be for what's usually a 1-result
+        answer.
         """
         account_number = (request.query_params.get("account_number") or "").strip()
         if not account_number or not account_number.isdigit() or len(account_number) != 10:
@@ -2254,15 +2278,35 @@ class BankAccountViewSet(viewsets.ModelViewSet):
             return None
 
         matches = []
-        with ThreadPoolExecutor(max_workers=16) as executor:
+        pool = ThreadPoolExecutor(max_workers=len(NIGERIAN_BANK_CODES))
+        try:
             futures = [
-                executor.submit(try_bank, code, name)
+                pool.submit(try_bank, code, name)
                 for code, name in NIGERIAN_BANK_CODES
             ]
-            for future in as_completed(futures):
-                result = future.result()
-                if result:
-                    matches.append(result)
+            grace_deadline = None
+            try:
+                for future in as_completed(
+                    futures, timeout=self.PREDICT_HARD_TIMEOUT_SECONDS
+                ):
+                    result = future.result()
+                    if result:
+                        matches.append(result)
+                        if grace_deadline is None:
+                            grace_deadline = (
+                                _time.monotonic() + self.PREDICT_GRACE_SECONDS
+                            )
+                    if (
+                        grace_deadline is not None
+                        and _time.monotonic() >= grace_deadline
+                    ):
+                        break
+            except FuturesTimeoutError:
+                pass
+        finally:
+            # Don't block the response on stragglers - they're daemon-owned
+            # threads that'll finish and get garbage collected on their own.
+            pool.shutdown(wait=False)
 
         if not matches:
             return Response(
@@ -12784,7 +12828,7 @@ class TopReferralsAPIView(APIView):
                     "monthly_attendance": self.get_user_monthly_attendance_count(
                         ref_user, start_of_month
                     ),
-                    "is_hired_referrer": ref_user.is_hired_referrer,
+                    "is_influencer": ref_user.is_influencer,
                     "is_ambassador": getattr(ref_user, "is_ambassador", False),
                 }
             )
