@@ -135,6 +135,11 @@ urlpatterns = [
         admin_views.all_transactions_list,
         name="admin_all_transactions_list",
     ),
+    path(
+        "transactions/summary",
+        admin_views.admin_transactions_summary,
+        name="admin_transactions_summary",
+    ),
     # ========================================================================
     # ADMIN METRICS DASHBOARD (mobile app - 7-category overview)
     # ========================================================================
@@ -221,5 +226,10 @@ urlpatterns = [
         "email-campaigns/<int:campaign_id>/resume/",
         admin_views.resume_email_campaign,
         name="admin_resume_email_campaign",
+    ),
+    path(
+        "email-campaigns/<int:campaign_id>/end/",
+        admin_views.end_email_campaign,
+        name="admin_end_email_campaign",
     ),
 ]

@@ -2731,6 +2731,97 @@ def all_transactions_list(request):
         return Response({"error": str(e)}, status=500)
 
 
+# Range keys the mobile admin Transactions tab's summary selector offers -
+# maps directly to how far back `date__gte` filters, `None` meaning
+# unbounded ("all time").
+TRANSACTION_SUMMARY_RANGES = (
+    "today",
+    "month",
+    "3months",
+    "6months",
+    "1year",
+    "all",
+)
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def admin_transactions_summary(request):
+    """
+    GET /api/admin/transactions/summary?range=today|month|3months|6months|1year|all
+        &transaction_type=credit&status=confirmed&credited_to=SAVINGS
+    Total credits, total debits, and net for the selected period, scoped by
+    whichever of the Transactions tab's filter chips (type/status/
+    credited-to - same TRANSACTION_LIST_EXACT_FILTERS param names
+    all_transactions_list uses) are currently active, so the strip actually
+    matches what's filtered below it instead of always being the
+    all-time-confirmed total. Defaults to confirmed-only when no status
+    filter is given - same convention dashboard_summary above uses for
+    every other money aggregate in this file (pending/failed rows haven't
+    actually moved money yet); picking "Pending" explicitly overrides that.
+    """
+    range_key = request.GET.get('range', 'today').strip().lower()
+    if range_key not in TRANSACTION_SUMMARY_RANGES:
+        return Response(
+            {"error": f"Invalid range '{range_key}'. Must be one of {TRANSACTION_SUMMARY_RANGES}."},
+            status=400,
+        )
+
+    now = timezone.now()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    range_starts = {
+        "today": today_start,
+        "month": today_start.replace(day=1),
+        "3months": today_start - relativedelta(months=3),
+        "6months": today_start - relativedelta(months=6),
+        "1year": today_start - relativedelta(years=1),
+        "all": None,
+    }
+
+    try:
+        queryset = Transaction.objects.all()
+        start = range_starts[range_key]
+        if start is not None:
+            queryset = queryset.filter(date__gte=start)
+
+        status_filter = request.GET.get('status', '').strip()
+        queryset = queryset.filter(status=status_filter if status_filter else 'confirmed')
+
+        for field in ('transaction_type', 'credited_to'):
+            value = request.GET.get(field, '').strip()
+            if value:
+                queryset = queryset.filter(**{field: value})
+
+        agg = queryset.aggregate(
+            total_credits=Coalesce(
+                Sum('amount', filter=Q(transaction_type='credit')),
+                Value(0), output_field=DecimalField(),
+            ),
+            total_debits=Coalesce(
+                Sum('amount', filter=Q(transaction_type='debit')),
+                Value(0), output_field=DecimalField(),
+            ),
+            credit_count=Count('id', filter=Q(transaction_type='credit')),
+            debit_count=Count('id', filter=Q(transaction_type='debit')),
+        )
+
+        total_credits = float(agg['total_credits'])
+        total_debits = float(agg['total_debits'])
+
+        return Response({
+            "range": range_key,
+            "total_credits": total_credits,
+            "total_debits": total_debits,
+            "net": total_credits - total_debits,
+            "credit_count": agg['credit_count'],
+            "debit_count": agg['debit_count'],
+        })
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
+
+
 # Brevo's real daily sending cap is 300 (see
 # authentication/services/brevo_service.py: DAILY_EMAIL_LIMIT). The
 # automatic base batch only uses 280 of that, leaving a 20-email buffer
@@ -3166,6 +3257,38 @@ def resume_email_campaign(request, campaign_id):
             return Response(EmailCampaignSerializer(campaign).data)
 
         campaign.status = 'in_progress'
+        campaign.save(update_fields=['status'])
+        return Response(EmailCampaignSerializer(campaign).data)
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
+
+
+@api_view(['POST'])
+@permission_classes([IsAdminUser])
+def end_email_campaign(request, campaign_id):
+    """
+    POST /api/admin/email-campaigns/<campaign_id>/end/
+    For a cancelled (paused) campaign that will never be resumed - e.g. the
+    launch it was announcing already happened, so there's no point sending
+    the remaining batches. Marks it permanently completed as-is (whatever's
+    in sent_count/failed_count stays final) rather than leaving it stuck
+    showing a "Resume" action forever. Unlike resume_email_campaign, this
+    never re-enters in_progress - completed is terminal.
+    """
+    try:
+        try:
+            campaign = EmailCampaign.objects.get(pk=campaign_id)
+        except EmailCampaign.DoesNotExist:
+            return Response({"error": "Campaign not found."}, status=404)
+
+        if campaign.status != 'cancelled':
+            return Response(
+                {"error": f"Only a cancelled campaign can be ended (this one is {campaign.status})."},
+                status=400,
+            )
+
+        campaign.status = 'completed'
         campaign.save(update_fields=['status'])
         return Response(EmailCampaignSerializer(campaign).data)
 
