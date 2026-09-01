@@ -177,6 +177,11 @@ urlpatterns = [
         name="admin_cashflow_summary",
     ),
     path(
+        "financial/cashflow-summary/range",
+        admin_views.cashflow_range_summary,
+        name="admin_cashflow_range_summary",
+    ),
+    path(
         "metrics/target-savings",
         admin_views.target_savings_breakdown,
         name="admin_target_savings_breakdown",

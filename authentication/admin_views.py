@@ -1616,7 +1616,7 @@ def transaction_success_rate(request):
 # app or the web admin dashboard (both of those use the real, working
 # /api/top-referrals/ instead), so nothing depended on the old shape.
 GROWTH_LEADER_CATEGORIES = ("referrals", "ambassadors", "influencers")
-GROWTH_LEADER_RANGES = ("month", "3months", "6months", "1year", "all")
+GROWTH_LEADER_RANGES = ("month", "last_month", "3months", "6months", "1year", "all")
 
 
 @api_view(['GET'])
@@ -1662,19 +1662,30 @@ def admin_top_performers(request):
 
     now = timezone.now()
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    range_starts = {
-        "month": today_start.replace(day=1),
-        "3months": today_start - relativedelta(months=3),
-        "6months": today_start - relativedelta(months=6),
-        "1year": today_start - relativedelta(years=1),
-        "all": None,
-    }
-    start = range_starts[range_key]
+    this_month_start = today_start.replace(day=1)
+
+    # last_month is the one bounded window here (a fixed calendar month) -
+    # same treatment as signup_summary's last_month above.
+    if range_key == "last_month":
+        start = this_month_start - relativedelta(months=1)
+        end = this_month_start
+    else:
+        range_starts = {
+            "month": this_month_start,
+            "3months": today_start - relativedelta(months=3),
+            "6months": today_start - relativedelta(months=6),
+            "1year": today_start - relativedelta(years=1),
+            "all": None,
+        }
+        start = range_starts[range_key]
+        end = None
 
     try:
         referred_qs = CustomUser.objects.filter(is_deleted=False, referral__isnull=False)
         if start is not None:
             referred_qs = referred_qs.filter(date_joined__gte=start)
+        if end is not None:
+            referred_qs = referred_qs.filter(date_joined__lt=end)
 
         if category == "ambassadors":
             referred_qs = referred_qs.filter(referral__is_ambassador=True)
@@ -1684,6 +1695,8 @@ def admin_top_performers(request):
         confirmed_filter = Q(referral_reward_granted=True)
         if start is not None:
             confirmed_filter &= Q(referral_reward_confirmed_at__gte=start)
+        if end is not None:
+            confirmed_filter &= Q(referral_reward_confirmed_at__lt=end)
 
         stats = (
             referred_qs
@@ -2492,6 +2505,96 @@ def cashflow_summary(request):
         return Response({"error": str(e)}, status=500)
 
 
+CASHFLOW_RANGE_SUMMARY_RANGES = ("today", "month", "last_month", "3months", "6months", "1year", "all")
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def cashflow_range_summary(request):
+    """
+    GET /api/admin/financial/cashflow-summary/range?range=today|month|last_month|3months|6months|1year|all
+    Range-picker version of cashflow_summary above (This Month/Last
+    Month/3 Months/6 Months/1 Year/All Time), for the dashboard's global
+    range control (see AdminDashboard.js - the same picker also drives
+    Signups/Growth/Transactions). cashflow_summary itself stays
+    month-only/untouched, since AdminCashflowDetailScreen.js's own
+    weekly/trend breakdown still needs that fixed this-month-vs-last-month
+    shape.
+    """
+    range_key = request.GET.get('range', 'month').strip().lower()
+    if range_key not in CASHFLOW_RANGE_SUMMARY_RANGES:
+        return Response(
+            {"error": f"Invalid range '{range_key}'. Must be one of {CASHFLOW_RANGE_SUMMARY_RANGES}."},
+            status=400,
+        )
+
+    now = timezone.now()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    this_month_start = today_start.replace(day=1)
+
+    try:
+        if range_key == "last_month":
+            start = this_month_start - relativedelta(months=1)
+            end = this_month_start
+        else:
+            range_starts = {
+                "today": today_start,
+                "month": this_month_start,
+                "3months": today_start - relativedelta(months=3),
+                "6months": today_start - relativedelta(months=6),
+                "1year": today_start - relativedelta(years=1),
+                "all": None,
+            }
+            start = range_starts[range_key]
+            end = None
+
+        def sum_for(win_start, win_end, transaction_type, source__in=None, credited_to=None):
+            qs = Transaction.objects.filter(transaction_type=transaction_type, status='confirmed')
+            if win_start is not None:
+                qs = qs.filter(date__gte=win_start)
+            if win_end is not None:
+                qs = qs.filter(date__lt=win_end)
+            if source__in:
+                qs = qs.filter(source__in=source__in)
+            if credited_to:
+                qs = qs.filter(credited_to=credited_to)
+            return float(qs.aggregate(total=Sum('amount'))['total'] or 0)
+
+        def rate_str(current, previous):
+            if previous > 0:
+                rate = ((current - previous) / previous) * 100
+            else:
+                rate = 100.0 if current > 0 else 0.0
+            return f"{'+' if rate >= 0 else ''}{round(rate, 1)}%"
+
+        prev_start = prev_end = None
+        if start is not None:
+            period_length = (end or now) - start
+            prev_start = start - period_length
+            prev_end = start
+
+        def build_metric(transaction_type, **filters):
+            current = sum_for(start, end, transaction_type, **filters)
+            if start is None:
+                return {"amount": current, "growth_rate": None}
+            previous = sum_for(prev_start, prev_end, transaction_type, **filters)
+            return {"amount": current, "growth_rate": rate_str(current, previous)}
+
+        total_saved = build_metric('credit', credited_to='SAVINGS')
+        total_invested = build_metric('credit', credited_to='INVESTMENT')
+        total_withdrawals = build_metric('debit', source__in=['SAVINGS', 'INVESTMENT'])
+
+        return Response({
+            "range": range_key,
+            "total_saved": total_saved,
+            "total_invested": total_invested,
+            "total_withdrawals": total_withdrawals,
+        })
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
+
+
 @api_view(['GET'])
 @permission_classes([IsAdminUser])
 def target_savings_breakdown(request):
@@ -2629,6 +2732,12 @@ def user_activity_segments(request):
 def transaction_type_breakdown(request):
     """
     GET /api/admin/metrics/transaction-types?period=current_month
+        (also accepts the dashboard's global range keys - today/month/
+        last_month/3months/6months/1year/all - since this is the
+        Transactions category card's data source and the dashboard now
+        has one range picker driving Signups/Growth/Cashflow/Transactions
+        together; the original 30days/7days/current_month values still
+        work too, kept for backward compatibility.)
     Returns confirmed transaction counts/amounts split by credit vs debit
     for the given period, plus how many carried a service charge.
     """
@@ -2642,15 +2751,36 @@ def transaction_type_breakdown(request):
 
     try:
         now = timezone.now()
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        this_month_start = today_start.replace(day=1)
+        end_date = None
+
         if period == '30days':
             start_date = now - timedelta(days=30)
         elif period == '7days':
             start_date = now - timedelta(days=7)
+        elif period == 'today':
+            start_date = today_start
+        elif period == 'last_month':
+            start_date = this_month_start - relativedelta(months=1)
+            end_date = this_month_start
+        elif period == '3months':
+            start_date = today_start - relativedelta(months=3)
+        elif period == '6months':
+            start_date = today_start - relativedelta(months=6)
+        elif period == '1year':
+            start_date = today_start - relativedelta(years=1)
+        elif period == 'all':
+            start_date = None
         else:
             period = 'current_month'
-            start_date = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            start_date = this_month_start
 
-        base_qs = Transaction.objects.filter(status='confirmed', date__gte=start_date)
+        base_qs = Transaction.objects.filter(status='confirmed')
+        if start_date is not None:
+            base_qs = base_qs.filter(date__gte=start_date)
+        if end_date is not None:
+            base_qs = base_qs.filter(date__lt=end_date)
 
         credit_agg = base_qs.filter(transaction_type='credit').aggregate(
             count=Count('id'), total_amount=Sum('amount')
