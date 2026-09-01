@@ -3,7 +3,7 @@
 import logging
 
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAdminUser
+from rest_framework.permissions import IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from django.db.models import Sum, Count, Q, F, Case, When, IntegerField, FloatField,ExpressionWrapper, DecimalField, IntegerField, Prefetch, Case, When, Value
 from django.utils import timezone
@@ -22,14 +22,20 @@ from .models import (
     Property,
     EmailCampaign,
     Employee,
+    CxWeeklyReport,
 )
 from .serializers import (
     UserSerializer,
     AdminUserListSerializer,
     AdminTransactionListSerializer,
     EmailCampaignSerializer,
+    CxWeeklyReportSerializer,
 )
-from .utils import grant_user_ambassador_status, revoke_user_ambassador_status
+from .utils import (
+    grant_user_ambassador_status,
+    revoke_user_ambassador_status,
+    send_admin_push_notification,
+)
 
 logger = logging.getLogger(__name__)
 from django.db.models.functions import ExtractMonth, ExtractYear, Coalesce, Cast
@@ -2220,6 +2226,98 @@ def signup_metrics(request):
         return Response({"error": str(e)}, status=500)
 
 
+SIGNUP_SUMMARY_RANGES = ("today", "month", "last_month", "3months", "6months", "1year", "all")
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def signup_summary(request):
+    """
+    GET /api/admin/metrics/signups/summary?range=today|month|last_month|3months|6months|1year|all
+    Total new signups and how many of them have "started saving" (a
+    confirmed SAVINGS/INVESTMENT credit) for the selected window, plus a
+    growth_rate vs the immediately preceding window of the same length -
+    same range-picker convention as admin_transactions_summary, just for
+    the Signups card's own range control (This Month/Last Month/3
+    Months/6 Months/1 Year/All Time) - the existing signup_metrics above
+    only ever compares one calendar month against the prior one.
+    """
+    range_key = request.GET.get('range', 'month').strip().lower()
+    if range_key not in SIGNUP_SUMMARY_RANGES:
+        return Response(
+            {"error": f"Invalid range '{range_key}'. Must be one of {SIGNUP_SUMMARY_RANGES}."},
+            status=400,
+        )
+
+    now = timezone.now()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    this_month_start = today_start.replace(day=1)
+
+    try:
+        # last_month is the one bounded window here (a fixed [start, end)
+        # calendar month) - every other range is open-ended through now,
+        # so it needs its own end rather than reusing the generic
+        # range_starts dict below.
+        if range_key == "last_month":
+            start = this_month_start - relativedelta(months=1)
+            end = this_month_start
+        else:
+            range_starts = {
+                "today": today_start,
+                "month": this_month_start,
+                "3months": today_start - relativedelta(months=3),
+                "6months": today_start - relativedelta(months=6),
+                "1year": today_start - relativedelta(years=1),
+                "all": None,
+            }
+            start = range_starts[range_key]
+            end = None
+
+        base_qs = CustomUser.objects.filter(is_deleted=False)
+        current_qs = base_qs
+        if start is not None:
+            current_qs = current_qs.filter(date_joined__gte=start)
+        if end is not None:
+            current_qs = current_qs.filter(date_joined__lt=end)
+        total_signups = current_qs.count()
+
+        # credited_to (destination bucket), not source (funding channel) -
+        # same fix signup_metrics's activated_count above already applies.
+        started_saving_count = Transaction.objects.filter(
+            user__in=current_qs,
+            credited_to__in=['SAVINGS', 'INVESTMENT'],
+            transaction_type='credit',
+            status='confirmed',
+        ).values('user').distinct().count()
+
+        growth_rate = None
+        if start is not None:
+            period_length = (end or now) - start
+            prev_start = start - period_length
+            prev_total = base_qs.filter(
+                date_joined__gte=prev_start, date_joined__lt=start,
+            ).count()
+            if prev_total > 0:
+                growth_rate = ((total_signups - prev_total) / prev_total) * 100
+            else:
+                growth_rate = 100.0 if total_signups > 0 else 0.0
+
+        return Response({
+            "range": range_key,
+            "total_signups": total_signups,
+            "started_saving_count": started_saving_count,
+            "not_yet_saved_count": max(total_signups - started_saving_count, 0),
+            "growth_rate": (
+                f"{'+' if growth_rate >= 0 else ''}{round(growth_rate, 1)}%"
+                if growth_rate is not None
+                else None
+            ),
+        })
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
+
+
 SIGNUP_USER_LIST_CAP = 500
 
 
@@ -3338,3 +3436,145 @@ def brevo_daily_usage(request):
         return Response(get_brevo_usage_today())
     except Exception as e:
         return Response({"error": str(e)}, status=500)
+
+
+# ============================================================================
+# OPERATING EXPENSES (Finance tab, founders-only)
+# ============================================================================
+
+from .models import OperatingExpense
+from .serializers import OperatingExpenseSerializer
+from .views import FINANCE_METRICS_ALLOWED_EMAILS
+
+
+def _is_finance_allowed(user):
+    return bool(user.is_staff) and (user.email or "").strip().lower() in FINANCE_METRICS_ALLOWED_EMAILS
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def operating_expenses_list(request):
+    """
+    GET /api/admin/operating-expenses/list?date_from=YYYY-MM-DD&date_to=YYYY-MM-DD
+    Founders-only, same boundary as AdminFinanceMetricsView - this ledger
+    directly feeds calculate_finance_metrics's operating_expenses line.
+    Unfiltered, returns the most recent 200 entries.
+    """
+    if not _is_finance_allowed(request.user):
+        return Response({"detail": "Permission denied"}, status=403)
+
+    queryset = OperatingExpense.objects.all()
+
+    date_from = request.GET.get('date_from', '').strip()
+    if date_from:
+        queryset = queryset.filter(date_incurred__gte=date_from)
+
+    date_to = request.GET.get('date_to', '').strip()
+    if date_to:
+        queryset = queryset.filter(date_incurred__lte=date_to)
+
+    if not date_from and not date_to:
+        queryset = queryset[:200]
+
+    serializer = OperatingExpenseSerializer(queryset, many=True)
+    return Response({"data": serializer.data})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def operating_expenses_create(request):
+    """
+    POST /api/admin/operating-expenses/create
+    Body: {"description": "...", "category": "software", "amount": 15000,
+           "date_incurred": "2026-09-01", "notes": "..."}
+    """
+    if not _is_finance_allowed(request.user):
+        return Response({"detail": "Permission denied"}, status=403)
+
+    serializer = OperatingExpenseSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=400)
+
+    serializer.save(added_by=request.user)
+    return Response(serializer.data, status=201)
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def operating_expenses_delete(request, expense_id):
+    """DELETE /api/admin/operating-expenses/<expense_id>/delete"""
+    if not _is_finance_allowed(request.user):
+        return Response({"detail": "Permission denied"}, status=403)
+
+    try:
+        expense = OperatingExpense.objects.get(pk=expense_id)
+    except OperatingExpense.DoesNotExist:
+        return Response({"error": "Expense not found."}, status=404)
+
+    expense.delete()
+    return Response({"success": True})
+
+
+@api_view(['POST'])
+@permission_classes([IsAdminUser])
+def submit_cx_weekly_report(request):
+    """
+    POST /api/admin/cx/weekly-reports/create/
+    Body: {"report": "...", "recommendation": "..."}
+    Any is_staff admin can submit - the mobile app only surfaces this
+    form on the CX-restricted dashboard, but there's no reason to block a
+    founder/other admin from using the same channel. Notifies founders
+    (get_admin_notify_users(category="system") via
+    send_admin_push_notification - see AdminNotifyRecipient) with a
+    summary so nothing submitted here goes unseen.
+    """
+    report_text = (request.data.get('report') or '').strip()
+    recommendation_text = (request.data.get('recommendation') or '').strip()
+
+    if not report_text:
+        return Response({"error": "Report text is required."}, status=400)
+
+    try:
+        cx_report = CxWeeklyReport.objects.create(
+            submitted_by=request.user,
+            report=report_text,
+            recommendation=recommendation_text,
+        )
+
+        submitter_name = (
+            f"{request.user.first_name} {request.user.last_name}".strip()
+            or request.user.email
+        )
+        summary = report_text if len(report_text) <= 140 else f"{report_text[:137]}..."
+
+        try:
+            send_admin_push_notification(
+                title=f"📋 Weekly report from {submitter_name}",
+                message=summary,
+                data={"type": "cx_weekly_report", "report_id": cx_report.id},
+                notif_type="ADMIN",
+                category="system",
+            )
+        except Exception as e:
+            logger.warning(f"CX weekly report push failed: {e}")
+
+        return Response(CxWeeklyReportSerializer(cx_report).data, status=201)
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def list_cx_weekly_reports(request):
+    """
+    GET /api/admin/cx/weekly-reports/
+    Founders only (_is_finance_allowed) - CX submits but doesn't get a
+    read view back, this is a one-way "send it up" channel by design (see
+    CxWeeklyReport's docstring in models.py).
+    """
+    if not _is_finance_allowed(request.user):
+        return Response({"detail": "Permission denied"}, status=403)
+
+    reports = CxWeeklyReport.objects.select_related('submitted_by').all()[:200]
+    return Response(CxWeeklyReportSerializer(reports, many=True).data)

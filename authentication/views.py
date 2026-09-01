@@ -13112,11 +13112,27 @@ from .models import FinanceMetricSnapshot
 from .finance_metrics import calculate_finance_metrics
 
 
+# Founders-only, on top of the regular is_staff admin check below - real
+# revenue/profit numbers are more sensitive than the rest of the admin
+# dashboard's operational metrics. Deliberately a SEPARATE list from
+# ADMIN_ALERT_EMAILS (utils.py) even though the values match today - that
+# one is notification routing, this one is a permission boundary, and
+# adminAccess.js on the mobile side carries an explicit warning about a
+# past incident from conflating the two. Keep this list in sync with the
+# mobile app's own FINANCE_ALLOWED_EMAILS (screens/menu/adminAccess.js).
+FINANCE_METRICS_ALLOWED_EMAILS = {
+    "tolulopeahmed@gmail.com",
+    "janet.adegbenro@gmail.com",
+}
+
+
 class AdminFinanceMetricsView(generics.RetrieveAPIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, *args, **kwargs):
         if not request.user.is_staff:
+            return Response({"detail": "Permission denied"}, status=403)
+        if (request.user.email or "").strip().lower() not in FINANCE_METRICS_ALLOWED_EMAILS:
             return Response({"detail": "Permission denied"}, status=403)
 
         period_type = request.query_params.get("period_type", "monthly")
@@ -13139,6 +13155,9 @@ class AdminFinanceMetricsView(generics.RetrieveAPIView):
                 "float_net_profit": snapshot.float_net_profit,
                 "property_sales_revenue": snapshot.property_sales_revenue,
                 "rent_commission_revenue": snapshot.rent_commission_revenue,
+                "payroll_expense": snapshot.payroll_expense,
+                "ambassador_stipend_expense": snapshot.ambassador_stipend_expense,
+                "operating_expenses": snapshot.operating_expenses,
                 "total_revenue": snapshot.total_revenue,
                 "total_expenses": snapshot.total_expenses,
                 "net_profit": snapshot.net_profit,

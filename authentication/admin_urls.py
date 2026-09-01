@@ -136,6 +136,24 @@ urlpatterns = [
         name="admin_transactions_summary",
     ),
     # ========================================================================
+    # OPERATING EXPENSES (Finance tab, founders-only)
+    # ========================================================================
+    path(
+        "operating-expenses/list",
+        admin_views.operating_expenses_list,
+        name="admin_operating_expenses_list",
+    ),
+    path(
+        "operating-expenses/create",
+        admin_views.operating_expenses_create,
+        name="admin_operating_expenses_create",
+    ),
+    path(
+        "operating-expenses/<int:expense_id>/delete",
+        admin_views.operating_expenses_delete,
+        name="admin_operating_expenses_delete",
+    ),
+    # ========================================================================
     # ADMIN METRICS DASHBOARD (mobile app - 7-category overview)
     # ========================================================================
     path(
@@ -147,6 +165,11 @@ urlpatterns = [
         "metrics/signups/users",
         admin_views.signup_segment_users,
         name="admin_signup_segment_users",
+    ),
+    path(
+        "metrics/signups/summary",
+        admin_views.signup_summary,
+        name="admin_signup_summary",
     ),
     path(
         "financial/cashflow-summary",
@@ -226,5 +249,19 @@ urlpatterns = [
         "email-campaigns/<int:campaign_id>/end/",
         admin_views.end_email_campaign,
         name="admin_end_email_campaign",
+    ),
+    # ========================================================================
+    # CX WEEKLY REPORTS (mobile app - CX-restricted dashboard submission
+    # form; founders-only read list)
+    # ========================================================================
+    path(
+        "cx/weekly-reports/create/",
+        admin_views.submit_cx_weekly_report,
+        name="admin_submit_cx_weekly_report",
+    ),
+    path(
+        "cx/weekly-reports/",
+        admin_views.list_cx_weekly_reports,
+        name="admin_list_cx_weekly_reports",
     ),
 ]

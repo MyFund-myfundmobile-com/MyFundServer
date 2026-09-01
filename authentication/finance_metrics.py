@@ -5,7 +5,13 @@ from django.db.models import Sum, Q
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 
-from .models import CustomUser, Transaction, FinanceMetricSnapshot
+from .models import (
+    CustomUser,
+    Transaction,
+    FinanceMetricSnapshot,
+    PayrollEntry,
+    OperatingExpense,
+)
 
 
 def money(value):
@@ -105,7 +111,9 @@ def calculate_finance_metrics(period_type="monthly", target_date=None, save=True
 
     days = (period_end - period_start).days + 1
 
-    myfund_daily_rate = Decimal("0.22") / Decimal("365")
+    # 18%/yr - the real assumed yield on pooled AUM (was incorrectly 22%,
+    # overstating float revenue and profit every period).
+    myfund_daily_rate = Decimal("0.18") / Decimal("365")
     savings_user_daily_rate = Decimal("0.13") / Decimal("365")
     investment_user_daily_rate = Decimal("0.20") / Decimal("365")
 
@@ -130,14 +138,48 @@ def calculate_finance_metrics(period_type="monthly", target_date=None, save=True
         + rent_commission_revenue
     )
 
-    total_expenses = money(roi_payable_to_users)
-
-    net_profit = money(
-        total_service_charge_revenue
-        + float_net_profit
-        + property_sales_revenue
-        + rent_commission_revenue
+    # Real payroll actually disbursed in the period - PayrollEntry.created_at
+    # is a DateTimeField, so filter via __date to compare against the
+    # (naive) period_start/period_end dates without a tz mismatch.
+    payroll_expense = money(
+        PayrollEntry.objects.filter(
+            status="credited",
+            created_at__date__gte=period_start,
+            created_at__date__lte=period_end,
+        ).aggregate(total=Coalesce(Sum("amount"), Decimal("0.00")))["total"]
     )
+
+    # Ambassador stipends actually paid out in the period - always a
+    # confirmed credit Transaction whose description ends in "Stipend"
+    # (CustomUserAdmin.credit_stipend_and_notify in admin.py; the one-off
+    # december_ambassador_stipends.py script uses the same pattern).
+    ambassador_stipend_expense = money(
+        Transaction.objects.filter(
+            status="confirmed",
+            transaction_type="credit",
+            description__icontains="Stipend",
+            date__gte=period_start,
+            date__lte=period_end,
+        ).aggregate(total=Coalesce(Sum("amount"), Decimal("0.00")))["total"]
+    )
+
+    # Software/hosting/marketing/etc. logged month-to-month via the
+    # OperatingExpense ledger (admin app) rather than a hardcoded average.
+    operating_expenses = money(
+        OperatingExpense.objects.filter(
+            date_incurred__gte=period_start,
+            date_incurred__lte=period_end,
+        ).aggregate(total=Coalesce(Sum("amount"), Decimal("0.00")))["total"]
+    )
+
+    total_expenses = money(
+        roi_payable_to_users
+        + payroll_expense
+        + ambassador_stipend_expense
+        + operating_expenses
+    )
+
+    net_profit = money(total_revenue - total_expenses)
 
     profit_margin = Decimal("0.00")
     if total_revenue > 0:
@@ -148,7 +190,11 @@ def calculate_finance_metrics(period_type="monthly", target_date=None, save=True
         f"Abrupt withdrawals ₦{abrupt_withdrawal_revenue:,.2f}; "
         f"Target savings cancellations ₦{target_savings_cancellation_revenue:,.2f}; "
         f"Scheduled withdrawal cancellations ₦{scheduled_withdrawal_cancellation_revenue:,.2f}; "
-        f"Other service charges ₦{other_service_charge_revenue:,.2f}."
+        f"Other service charges ₦{other_service_charge_revenue:,.2f}. "
+        f"Expenses: payroll ₦{payroll_expense:,.2f}; "
+        f"ambassador stipends ₦{ambassador_stipend_expense:,.2f}; "
+        f"operating expenses ₦{operating_expenses:,.2f}; "
+        f"ROI payable to users ₦{roi_payable_to_users:,.2f}."
     )
 
     data = {
@@ -163,6 +209,9 @@ def calculate_finance_metrics(period_type="monthly", target_date=None, save=True
         "float_net_profit": float_net_profit,
         "property_sales_revenue": property_sales_revenue,
         "rent_commission_revenue": rent_commission_revenue,
+        "payroll_expense": payroll_expense,
+        "ambassador_stipend_expense": ambassador_stipend_expense,
+        "operating_expenses": operating_expenses,
         "total_revenue": total_revenue,
         "total_expenses": total_expenses,
         "net_profit": net_profit,

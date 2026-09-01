@@ -354,6 +354,32 @@ class EmailCampaignSerializer(serializers.ModelSerializer):
 from authentication.models import CustomUser
 
 
+from .models import CxWeeklyReport
+
+
+class CxWeeklyReportSerializer(serializers.ModelSerializer):
+    submitted_by_name = serializers.SerializerMethodField()
+    submitted_by_email = serializers.EmailField(
+        source="submitted_by.email", read_only=True, default=""
+    )
+
+    class Meta:
+        model = CxWeeklyReport
+        fields = [
+            "id",
+            "report",
+            "recommendation",
+            "created_at",
+            "submitted_by_name",
+            "submitted_by_email",
+        ]
+
+    def get_submitted_by_name(self, obj):
+        if not obj.submitted_by:
+            return "Unknown"
+        return f"{obj.submitted_by.first_name} {obj.submitted_by.last_name}".strip()
+
+
 class KYCUpdateSerializer(serializers.ModelSerializer):
     id_upload = serializers.ImageField(
         max_length=None, use_url=True
@@ -1342,3 +1368,29 @@ class AmbassadorAttendanceSubmissionSerializer(serializers.Serializer):
 
     def create(self, validated_data):
         return AmbassadorAttendanceSubmission.objects.create(**validated_data)
+
+
+from .models import OperatingExpense
+
+
+class OperatingExpenseSerializer(serializers.ModelSerializer):
+    added_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = OperatingExpense
+        fields = [
+            "id",
+            "description",
+            "category",
+            "amount",
+            "date_incurred",
+            "notes",
+            "added_by_name",
+            "created_at",
+        ]
+        read_only_fields = ["id", "added_by_name", "created_at"]
+
+    def get_added_by_name(self, obj):
+        if not obj.added_by:
+            return None
+        return f"{obj.added_by.first_name} {obj.added_by.last_name}".strip()

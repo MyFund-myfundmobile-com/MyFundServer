@@ -3210,6 +3210,43 @@ class AdminNotifyRecipient(models.Model):
         return f"{self.label or self.email} ({self.email})"
 
 
+class CxWeeklyReport(models.Model):
+    """
+    A CX team member's weekly report + improvement recommendation,
+    submitted from their restricted admin dashboard (see the mobile app's
+    isCxOnly gating - CX gets Signups/User Activity + this submission
+    form, not Transactions/Financial). Deliberately a one-way "send it up"
+    channel: CX submits but has no read view back - only founders (see
+    FINANCE_METRICS_ALLOWED_EMAILS/_is_finance_allowed, same email set
+    reused here since this is the same "founders only" boundary) can list
+    these, and get a push notification the moment one comes in (see
+    submit_cx_weekly_report / send_admin_push_notification with
+    category="system").
+    """
+
+    submitted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="cx_weekly_reports",
+    )
+    report = models.TextField(help_text="What happened this week")
+    recommendation = models.TextField(
+        blank=True,
+        default="",
+        help_text="Suggested improvement to the report/UX/process",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        who = self.submitted_by.email if self.submitted_by else "unknown"
+        return f"CX report from {who} ({self.created_at:%Y-%m-%d})"
+
+
 class AppVersionConfig(models.Model):
     """
     Drives the mobile app's force-update / soft-update prompt (App.js's
@@ -3647,6 +3684,22 @@ class FinanceMetricSnapshot(models.Model):
         max_digits=14, decimal_places=2, default=0
     )
 
+    # Real operating expenses, added 2026-09 - previously total_expenses
+    # was only roi_payable_to_users. payroll_expense sums actual credited
+    # PayrollEntry amounts in the period; ambassador_stipend_expense sums
+    # confirmed "... Stipend" credit Transactions (see
+    # CustomUserAdmin.credit_stipend_and_notify in admin.py) paid out to
+    # ambassadors in the period; operating_expenses sums OperatingExpense
+    # ledger entries (software/hosting/marketing/etc.) logged for the
+    # period.
+    payroll_expense = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    ambassador_stipend_expense = models.DecimalField(
+        max_digits=14, decimal_places=2, default=0
+    )
+    operating_expenses = models.DecimalField(
+        max_digits=14, decimal_places=2, default=0
+    )
+
     total_revenue = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     total_expenses = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     net_profit = models.DecimalField(max_digits=14, decimal_places=2, default=0)
@@ -3670,6 +3723,47 @@ class FinanceMetricSnapshot(models.Model):
 
     def __str__(self):
         return f"{self.period_type.title()} Finance Snapshot: {self.period_start} - {self.period_end}"
+
+
+# Recurring/one-off operating costs (software subscriptions, hosting,
+# marketing, legal, etc.) - logged month-to-month by a founder rather than
+# hardcoded as a single average, since costs like annual subscription
+# renewals spike in specific months and a flat average would smear that
+# out. Summed by date_incurred within calculate_finance_metrics's period
+# range (finance_metrics.py) into the P&L's operating_expenses line.
+class OperatingExpense(models.Model):
+    CATEGORY_CHOICES = [
+        ("software", "Software & Tools"),
+        ("infrastructure", "Infrastructure & Hosting"),
+        ("marketing", "Marketing"),
+        ("legal", "Legal & Compliance"),
+        ("office", "Office & Admin"),
+        ("other", "Other"),
+    ]
+
+    description = models.CharField(max_length=200)
+    category = models.CharField(
+        max_length=30, choices=CATEGORY_CHOICES, default="other"
+    )
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    date_incurred = models.DateField(
+        help_text="Which day/month this expense counts toward in the P&L.",
+    )
+    notes = models.TextField(blank=True, null=True)
+    added_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="added_operating_expenses",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-date_incurred", "-created_at"]
+
+    def __str__(self):
+        return f"{self.description} - ₦{self.amount} ({self.date_incurred})"
 
 
 class Employee(models.Model):
