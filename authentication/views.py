@@ -2631,9 +2631,20 @@ def add_bank_account(request):
                 ]
             )
 
+            # combined_message (Paystack's own raw reason, e.g. "BVN does
+            # not match the account number provided") was already being
+            # computed above and saved to
+            # user.paystack_identification_reason, but never actually
+            # returned in this response - the mobile app's error handler
+            # reads .message first, falling back to .error only when
+            # .message is absent, so without this it always showed the
+            # generic "Customer identification failed." with no way to
+            # tell what to actually fix.
             return Response(
                 {
                     "error": "Customer identification failed.",
+                    "message": combined_message
+                    or "We couldn't verify your BVN against this bank account. Please double-check your BVN and try again.",
                     "details": result,
                 },
                 status=status.HTTP_400_BAD_REQUEST,
