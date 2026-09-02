@@ -79,6 +79,14 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     is_confirmed = models.BooleanField(default=False)
     referral_reward_confirmed_at = models.DateTimeField(null=True, blank=True)
     is_subscribed = models.BooleanField(default=True)
+    # Set the first time a campaign's Brevo delivery report (see
+    # get_email_campaign_report) shows a hard bounce for this address -
+    # not a soft bounce, which can be transient (mailbox full, etc.).
+    # Excluded from every future admin campaign/segment send by default
+    # (_build_admin_user_queryset), same as is_subscribed=False, so a
+    # dead address doesn't keep eating a daily send slot once it's known
+    # to be undeliverable.
+    email_undeliverable = models.BooleanField(default=False, db_index=True)
     date_joined = models.DateTimeField(auto_now_add=True, db_index=True)
     is_deleted = models.BooleanField(default=False)
     last_otp_sent_at = models.DateTimeField(null=True, blank=True)
@@ -2858,6 +2866,15 @@ class EmailCampaign(models.Model):
         blank=True,
         related_name="email_campaigns",
     )
+    # Optional display-name override, e.g. "Ibukunoluwa" -> sent as
+    # "Ibukunoluwa from MyFund <noreply@myfundmobile.com>" (see
+    # send_email_campaign_batch_task) - the address itself never changes,
+    # only the name, so MyFund branding always stays visible. Persisted
+    # here (not just passed at creation) so every later batch of a
+    # multi-day campaign (send_next_email_campaign_batch/
+    # send_extra_email_campaign_batch) keeps using the same sender
+    # instead of silently reverting to the default on day 2.
+    sender_name = models.CharField(max_length=100, blank=True, default="")
     filters_applied = models.JSONField(default=dict, blank=True)
     recipient_emails = models.JSONField(default=list)
     total_recipients = models.IntegerField(default=0)

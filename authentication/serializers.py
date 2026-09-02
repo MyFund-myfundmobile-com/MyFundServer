@@ -319,6 +319,7 @@ class EmailCampaignSerializer(serializers.ModelSerializer):
             "created_at",
             "last_batch_sent_at",
             "is_sending",
+            "sender_name",
         ]
 
     def get_remaining_count(self, obj):

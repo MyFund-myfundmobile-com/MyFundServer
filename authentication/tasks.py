@@ -1509,6 +1509,7 @@ def send_email_campaign_batch_task(
     Brevo - "already_attempted" (used to compute the next batch's slice)
     can never drift ahead of reality again.
     """
+    from email.utils import parseaddr
     from django.db.models import F
     from .models import EmailCampaign
     from .services.brevo_service import send_email_via_brevo
@@ -1520,9 +1521,24 @@ def send_email_campaign_batch_task(
         logger.error(f"send_email_campaign_batch_task: campaign {campaign_id} not found")
         return
 
-    from_email = from_email or settings.DEFAULT_FROM_EMAIL
+    # campaign.sender_name (if set at creation) wins over the from_email
+    # param and settings default - read from the campaign row itself
+    # (not just whatever this particular call was passed) so every batch
+    # of a multi-day campaign keeps using the same sender, not just the
+    # first one. Only the display name changes - the address is always
+    # whatever DEFAULT_FROM_EMAIL's address portion already is, so MyFund
+    # branding/deliverability reputation stays on the one verified sender.
+    if campaign.sender_name:
+        _, default_address = parseaddr(settings.DEFAULT_FROM_EMAIL)
+        from_email = f"{campaign.sender_name} from MyFund <{default_address}>"
+    else:
+        from_email = from_email or settings.DEFAULT_FROM_EMAIL
     subject = campaign.subject
     body = campaign.body_html
+    # Tags every send so get_email_campaign_report can pull this
+    # campaign's delivered/opened/bounced/blocked counts straight from
+    # Brevo's own event log later, filtered by tag - no webhook needed.
+    campaign_tags = [f"campaign-{campaign_id}"]
 
     sent_this_call = 0
     failed_this_call = 0
@@ -1536,6 +1552,7 @@ def send_email_campaign_batch_task(
                 subject=payload["subject"],
                 html_content=payload["html_message"],
                 from_email=from_email,
+                tags=campaign_tags,
             )
             sent_this_call += 1
             EmailCampaign.objects.filter(pk=campaign_id).update(sent_count=F("sent_count") + 1)

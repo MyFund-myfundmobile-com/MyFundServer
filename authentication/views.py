@@ -9405,7 +9405,21 @@ def send_email(request):
     logger.info(f"📧 API send_email called by user: {request.user.email}")
 
     try:
-        sender = settings.DEFAULT_FROM_EMAIL
+        # Optional display-name override ("Ibukunoluwa" -> sent as
+        # "Ibukunoluwa from MyFund <...>") - same convention as
+        # admin_views.create_email_campaign's sender_name, for the
+        # Individuals-mode send path (this view never creates an
+        # EmailCampaign row, so there's nowhere to persist it - it's
+        # only ever used for this one send).
+        import re
+        sender_name = (request.data.get("sender_name") or "").strip()
+        sender_name = re.sub(r"[\r\n<>]", "", sender_name)[:100]
+        if sender_name:
+            from email.utils import parseaddr
+            _, default_address = parseaddr(settings.DEFAULT_FROM_EMAIL)
+            sender = f"{sender_name} from MyFund <{default_address}>"
+        else:
+            sender = settings.DEFAULT_FROM_EMAIL
         subject = request.data.get("subject", "").strip()
         body = request.data.get("body", "").strip()  # This is the HTML content
         recipients = request.data.get("recipients", [])

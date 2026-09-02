@@ -83,11 +83,18 @@ def get_brevo_usage_today():
 # ==========================================
 
 
-def send_email_via_brevo(to_email, subject, html_content, from_email=None, cc=None):
+def send_email_via_brevo(to_email, subject, html_content, from_email=None, cc=None, tags=None):
     """
     Send a single transactional email through Brevo's Transactional Emails
     API. Raises on failure - callers decide how to log/track that. Optional
     `cc` (list of email strings), same rare case as send_email_via_resend.
+
+    `tags` (list of strings, optional) - Brevo stamps these on the send
+    and returns them on every event (delivered/opened/bounced/etc.) in
+    get_email_event_report, filterable by tag. See
+    admin_views.get_email_campaign_report, which tags every campaign send
+    "campaign-<id>" so a campaign's delivery stats can be pulled back out
+    later without needing a separate webhook receiver.
     """
     from_email = from_email or settings.DEFAULT_FROM_EMAIL
 
@@ -107,6 +114,7 @@ def send_email_via_brevo(to_email, subject, html_content, from_email=None, cc=No
         sender={"name": sender_name, "email": sender_email},
         subject=subject,
         html_content=html_content,
+        tags=tags or None,
     )
 
     return api_instance.send_transac_email(send_smtp_email)

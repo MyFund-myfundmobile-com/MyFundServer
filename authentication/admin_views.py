@@ -835,19 +835,49 @@ USER_LIST_BOOLEAN_FILTERS = (
 )
 
 
-def _build_admin_user_queryset(params):
+def _annotate_activity(queryset, as_of):
+    """
+    Shared by _build_admin_user_queryset's `activity` filter and
+    user_activity_segments's counts, so the two definitions of
+    active/dormant/inactive can't drift apart. See
+    user_activity_segments's docstring for what each annotation means.
+    """
+    recent_threshold = as_of - timedelta(days=30)
+    recent_tx = Transaction.objects.filter(
+        user=OuterRef('pk'), status='confirmed',
+        date__gte=recent_threshold, date__lte=as_of,
+    )
+    any_tx = Transaction.objects.filter(
+        user=OuterRef('pk'), status='confirmed', date__lte=as_of,
+    )
+    return queryset.annotate(
+        has_recent_tx=Exists(recent_tx),
+        has_any_tx=Exists(any_tx),
+    )
+
+
+def _build_admin_user_queryset(params, exclude_unmailable=False):
     """
     Shared search/filter logic behind all_users_list,
-    admin_user_emails_for_segment, and create_email_campaign, so none of
-    them can drift out of sync on what "matches this segment" means.
-    `params` is anything dict-like with .get() - request.GET (query
-    string, values always strings) for the GET endpoints, or request.data
-    (JSON body, values may be native bools) for the POST campaign-create
-    endpoint. Returns (queryset, filters_applied), ordered by
-    -date_joined; callers paginate/slice/cap as needed.
+    admin_user_emails_for_segment, admin_user_export_csv, and
+    create_email_campaign, so none of them can drift out of sync on what
+    "matches this segment" means. `params` is anything dict-like with
+    .get() - request.GET (query string, values always strings) for the
+    GET endpoints, or request.data (JSON body, values may be native
+    bools) for the POST campaign-create endpoint. Returns (queryset,
+    filters_applied), ordered by -date_joined; callers paginate/slice/cap
+    as needed.
+
+    exclude_unmailable=True drops is_subscribed=False and
+    email_undeliverable=True users - pass this from every endpoint that
+    actually SENDS mail (not all_users_list, which is a general browse/
+    search list an admin still needs to find an opted-out or bounced user
+    on, e.g. to follow up some other way).
     """
     search = (params.get('search') or '').strip()
     queryset = CustomUser.objects.filter(is_deleted=False)
+    if exclude_unmailable:
+        queryset = queryset.filter(is_subscribed=True, email_undeliverable=False)
 
     if search:
         queryset = queryset.filter(
@@ -937,6 +967,39 @@ def _build_admin_user_queryset(params):
             queryset = queryset.none()
         filters_applied["is_employee"] = True
 
+    # Transaction-activity segment - same definitions as
+    # user_activity_segments (via the shared _annotate_activity helper):
+    # active = confirmed transaction in the last 30 days; dormant = quiet
+    # right now but has a balance or prior transaction history; inactive
+    # = never transacted and has a zero balance. ever_transacted is a 4th,
+    # independent cut across that same split - has_any_tx=True regardless
+    # of recency or current balance - for "everyone who's ever put money
+    # in," which active+dormant only approximates (it also catches a
+    # handful of dormant users with a non-zero balance but no transaction
+    # on record - an admin credit/adjustment, not an actual transaction).
+    # Backs the mobile app's User Activity detail drill-down
+    # (AdminUsersScreen.js's "Active (Txns)"/"Dormant"/"Never Transacted"/
+    # "Ever Transacted" filter chips) - CSV export, recipient count, and
+    # campaign send all get this for free since they already go through
+    # this shared queryset builder.
+    activity = (params.get('activity') or '').strip().lower()
+    if activity in ('active', 'dormant', 'inactive', 'ever_transacted'):
+        queryset = _annotate_activity(queryset, timezone.now())
+        has_balance_q = Q(savings__gt=0) | Q(investment__gt=0) | Q(wallet__gt=0)
+        if activity == 'active':
+            queryset = queryset.filter(has_recent_tx=True)
+        elif activity == 'dormant':
+            queryset = queryset.filter(
+                Q(has_recent_tx=False) & (has_balance_q | Q(has_any_tx=True))
+            )
+        elif activity == 'ever_transacted':
+            queryset = queryset.filter(has_any_tx=True)
+        else:  # inactive
+            queryset = queryset.filter(
+                has_recent_tx=False, has_any_tx=False,
+            ).filter(Q(savings__lte=0) & Q(investment__lte=0) & Q(wallet__lte=0))
+        filters_applied["activity"] = activity
+
     return queryset.order_by('-date_joined'), filters_applied
 
 
@@ -1009,8 +1072,12 @@ def admin_user_emails_for_segment(request):
     admin actually commits to sending.
     """
     try:
-        queryset, filters_applied = _build_admin_user_queryset(request.GET)
-        # Only ever email users who can actually receive mail.
+        queryset, filters_applied = _build_admin_user_queryset(
+            request.GET, exclude_unmailable=True,
+        )
+        # Only ever email users who can actually receive mail - opted-out
+        # and known-bounced addresses are already dropped by
+        # exclude_unmailable above; this just also drops blank emails.
         queryset = queryset.exclude(email__isnull=True).exclude(email__exact='')
 
         count_only = _parse_bool_param(request.GET.get('count_only')) or False
@@ -2656,6 +2723,13 @@ def user_activity_segments(request):
     Deliberately NOT using CustomUser.updated_at as an activity proxy (see
     user_metrics_chart) - that field changes on almost any save and doesn't
     reflect real transaction activity.
+
+    Counts only - the mobile app's User Activity drill-down (tap Active/
+    Dormant/Inactive) gets the actual per-user list via all_users_list /
+    admin_user_export_csv / admin_user_emails_for_segment, all filterable
+    by the same segmentation through _build_admin_user_queryset's
+    `activity` param (shares _annotate_activity with this view so the two
+    can't drift apart).
     """
     cache_key = "metrics:user-activity-segments"
     cached_data = cache.get(cache_key)
@@ -2665,19 +2739,8 @@ def user_activity_segments(request):
 
     try:
         def segment_counts(as_of):
-            recent_threshold = as_of - timedelta(days=30)
-
-            recent_tx = Transaction.objects.filter(
-                user=OuterRef('pk'), status='confirmed',
-                date__gte=recent_threshold, date__lte=as_of,
-            )
-            any_tx = Transaction.objects.filter(
-                user=OuterRef('pk'), status='confirmed', date__lte=as_of,
-            )
-
-            users = CustomUser.objects.filter(is_deleted=False).annotate(
-                has_recent_tx=Exists(recent_tx),
-                has_any_tx=Exists(any_tx),
+            users = _annotate_activity(
+                CustomUser.objects.filter(is_deleted=False), as_of,
             )
 
             total = users.count()
@@ -3099,12 +3162,24 @@ def create_email_campaign(request):
         if not subject or not body:
             return Response({"error": "Subject and body are required."}, status=400)
 
+        # Optional display-name override ("Ibukunoluwa" -> sent as
+        # "Ibukunoluwa from MyFund <...>", see send_email_campaign_batch_task)
+        # - stripped of newlines/angle brackets (defensive; the SDK sends
+        # this as a separate JSON field, not a raw header, but there's no
+        # reason to accept characters that have no business in a name) and
+        # capped well under the model's max_length.
+        import re
+        sender_name = (request.data.get('sender_name') or '').strip()
+        sender_name = re.sub(r'[\r\n<>]', '', sender_name)[:100]
+
         extra_emails_raw = request.data.get('extra_emails') or []
         if not isinstance(extra_emails_raw, list):
             return Response({"error": "extra_emails must be a list."}, status=400)
         extra_emails = _dedupe_preserve_order(extra_emails_raw)
 
-        queryset, filters_applied = _build_admin_user_queryset(request.data)
+        queryset, filters_applied = _build_admin_user_queryset(
+            request.data, exclude_unmailable=True,
+        )
         queryset = queryset.exclude(email__isnull=True).exclude(email__exact='')
 
         segment_emails = list(
@@ -3128,6 +3203,7 @@ def create_email_campaign(request):
             filters_applied=filters_applied,
             recipient_emails=emails,
             total_recipients=len(emails),
+            sender_name=sender_name,
         )
 
         desired_batch = emails[:CAMPAIGN_BASE_BATCH_LIMIT]
@@ -3208,7 +3284,85 @@ def get_email_campaign_detail(request, campaign_id):
         "subject": campaign.subject,
         "body_html": campaign.body_html,
         "filters_applied": campaign.filters_applied,
+        "sender_name": campaign.sender_name,
     })
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def get_email_campaign_report(request, campaign_id):
+    """
+    GET /api/admin/email-campaigns/<campaign_id>/report/
+    Pulls this campaign's delivered/opened/clicked/bounced/blocked/
+    invalid counts straight from Brevo's own event log
+    (get_aggregated_smtp_report, filtered by the "campaign-<id>" tag
+    every send is stamped with - see send_email_campaign_batch_task) - no
+    webhook receiver needed. "sent"/"failed" on the campaign record
+    itself only ever meant "did Brevo's API accept the request"; this is
+    what actually happened afterward.
+
+    Side effect: separately pulls just the hardBounces events (same tag)
+    and flags each of those addresses email_undeliverable=True on
+    CustomUser, so future campaign segments
+    (_build_admin_user_queryset's exclude_unmailable) stop selecting
+    them. Soft bounces are left alone - those can be transient (mailbox
+    full, etc.), not necessarily a dead address.
+    """
+    import json
+    import sib_api_v3_sdk
+    from .services.brevo_service import get_brevo_client
+
+    try:
+        campaign = EmailCampaign.objects.get(pk=campaign_id)
+    except EmailCampaign.DoesNotExist:
+        return Response({"error": "Campaign not found."}, status=404)
+
+    try:
+        api = sib_api_v3_sdk.TransactionalEmailsApi(get_brevo_client())
+        tag = f"campaign-{campaign_id}"
+        start_date = campaign.created_at.date().isoformat()
+        end_date = timezone.now().date().isoformat()
+
+        aggregated = api.get_aggregated_smtp_report(
+            start_date=start_date, end_date=end_date, tag=tag,
+        )
+
+        # Hard bounces only, to find + flag the actual dead addresses -
+        # capped at 500, comfortably above what even a multi-week
+        # campaign (280/day batches) would produce.
+        bounce_report = api.get_email_event_report(
+            start_date=start_date, end_date=end_date,
+            tags=json.dumps([tag]), event='hardBounces', limit=500,
+        )
+        bounced_emails = sorted({
+            e.email for e in (bounce_report.events or []) if e.email
+        })
+        newly_flagged = 0
+        if bounced_emails:
+            newly_flagged = CustomUser.objects.filter(
+                email__in=bounced_emails, email_undeliverable=False,
+            ).update(email_undeliverable=True)
+
+        return Response({
+            "campaign_id": campaign.id,
+            "requests": aggregated.requests,
+            "delivered": aggregated.delivered,
+            "opens": aggregated.opens,
+            "unique_opens": aggregated.unique_opens,
+            "clicks": aggregated.clicks,
+            "unique_clicks": aggregated.unique_clicks,
+            "hard_bounces": aggregated.hard_bounces,
+            "soft_bounces": aggregated.soft_bounces,
+            "blocked": aggregated.blocked,
+            "invalid": aggregated.invalid,
+            "spam_reports": aggregated.spam_reports,
+            "unsubscribed": aggregated.unsubscribed,
+            "bounced_emails": bounced_emails,
+            "newly_flagged_undeliverable": newly_flagged,
+        })
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
 
 
 @api_view(['POST'])
