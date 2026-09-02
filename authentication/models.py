@@ -3215,13 +3215,16 @@ class CxWeeklyReport(models.Model):
     A CX team member's weekly report + improvement recommendation,
     submitted from their restricted admin dashboard (see the mobile app's
     isCxOnly gating - CX gets Signups/User Activity + this submission
-    form, not Transactions/Financial). Deliberately a one-way "send it up"
-    channel: CX submits but has no read view back - only founders (see
-    FINANCE_METRICS_ALLOWED_EMAILS/_is_finance_allowed, same email set
-    reused here since this is the same "founders only" boundary) can list
-    these, and get a push notification the moment one comes in (see
-    submit_cx_weekly_report / send_admin_push_notification with
-    category="system").
+    form, not Transactions/Financial). Founders (see
+    FINANCE_METRICS_ALLOWED_EMAILS/_is_finance_allowed) can list every
+    submission via list_cx_weekly_reports and get a push notification the
+    moment one comes in (see submit_cx_weekly_report /
+    send_admin_push_notification with category="system"). CX can also
+    read back only their own past submissions (my_cx_weekly_reports,
+    always self-filtered regardless of caller) - not a one-way channel
+    any more now that week_start lets them submit for any recent week,
+    since they'd otherwise have no way to check what they've already
+    covered.
     """
 
     submitted_by = models.ForeignKey(
@@ -3237,6 +3240,12 @@ class CxWeeklyReport(models.Model):
         default="",
         help_text="Suggested improvement to the report/UX/process",
     )
+    # The Monday of the week this report actually covers - not necessarily
+    # the same as created_at's date, since CX can pick any week in the
+    # current or previous month when submitting (catch-up/backdated
+    # reports, or several reports for different weeks in one sitting).
+    # Nullable only for rows created before this field existed.
+    week_start = models.DateField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

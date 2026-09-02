@@ -3650,25 +3650,46 @@ def operating_expenses_delete(request, expense_id):
 def submit_cx_weekly_report(request):
     """
     POST /api/admin/cx/weekly-reports/create/
-    Body: {"report": "...", "recommendation": "..."}
+    Body: {"report": "...", "recommendation": "...", "week_start": "YYYY-MM-DD"}
     Any is_staff admin can submit - the mobile app only surfaces this
     form on the CX-restricted dashboard, but there's no reason to block a
     founder/other admin from using the same channel. Notifies founders
     (get_admin_notify_users(category="system") via
     send_admin_push_notification - see AdminNotifyRecipient) with a
     summary so nothing submitted here goes unseen.
+
+    week_start is the Monday of whichever week this report is actually
+    for - the mobile app lets CX pick any week in the current or
+    previous month (not just "this week"), so a catch-up report or
+    several reports for different weeks can all be submitted in one
+    sitting. No uniqueness constraint on (submitted_by, week_start) -
+    resubmitting/adding another report for a week already covered is
+    allowed. Defaults to the Monday of the current week if omitted.
     """
+    from datetime import date
+
     report_text = (request.data.get('report') or '').strip()
     recommendation_text = (request.data.get('recommendation') or '').strip()
+    week_start_str = (request.data.get('week_start') or '').strip()
 
     if not report_text:
         return Response({"error": "Report text is required."}, status=400)
+
+    if week_start_str:
+        try:
+            week_start = date.fromisoformat(week_start_str)
+        except ValueError:
+            return Response({"error": "week_start must be YYYY-MM-DD."}, status=400)
+    else:
+        today = date.today()
+        week_start = today - timedelta(days=today.weekday())
 
     try:
         cx_report = CxWeeklyReport.objects.create(
             submitted_by=request.user,
             report=report_text,
             recommendation=recommendation_text,
+            week_start=week_start,
         )
 
         submitter_name = (
@@ -3689,7 +3710,7 @@ def submit_cx_weekly_report(request):
 
         try:
             send_admin_push_notification(
-                title=f"📋 Weekly report from {submitter_name}",
+                title=f"📋 Weekly report from {submitter_name} (week of {week_start.strftime('%b %d')})",
                 message=message,
                 data={"type": "cx_weekly_report", "report_id": cx_report.id},
                 notif_type="ADMIN",
@@ -3709,12 +3730,28 @@ def submit_cx_weekly_report(request):
 def list_cx_weekly_reports(request):
     """
     GET /api/admin/cx/weekly-reports/
-    Founders only (_is_finance_allowed) - CX submits but doesn't get a
-    read view back, this is a one-way "send it up" channel by design (see
-    CxWeeklyReport's docstring in models.py).
+    Founders only (_is_finance_allowed) - the full feed across all of CX,
+    not just the calling user's own submissions (see my_cx_weekly_reports
+    below for that).
     """
     if not _is_finance_allowed(request.user):
         return Response({"detail": "Permission denied"}, status=403)
 
     reports = CxWeeklyReport.objects.select_related('submitted_by').all()[:200]
+    return Response(CxWeeklyReportSerializer(reports, many=True).data)
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def my_cx_weekly_reports(request):
+    """
+    GET /api/admin/cx/weekly-reports/mine/
+    Self-service read-back, always filtered to request.user regardless of
+    who's asking - safe to expose to CX-only accounts (unlike
+    list_cx_weekly_reports, which is founders-only and returns
+    everyone's). Lets CX check what they've already submitted before
+    picking a week to report on, now that week_start means they aren't
+    limited to "this week only".
+    """
+    reports = CxWeeklyReport.objects.filter(submitted_by=request.user)[:200]
     return Response(CxWeeklyReportSerializer(reports, many=True).data)

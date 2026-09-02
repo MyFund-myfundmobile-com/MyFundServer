@@ -265,6 +265,11 @@ urlpatterns = [
         name="admin_submit_cx_weekly_report",
     ),
     path(
+        "cx/weekly-reports/mine/",
+        admin_views.my_cx_weekly_reports,
+        name="admin_my_cx_weekly_reports",
+    ),
+    path(
         "cx/weekly-reports/",
         admin_views.list_cx_weekly_reports,
         name="admin_list_cx_weekly_reports",

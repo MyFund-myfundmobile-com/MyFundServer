@@ -369,6 +369,7 @@ class CxWeeklyReportSerializer(serializers.ModelSerializer):
             "id",
             "report",
             "recommendation",
+            "week_start",
             "created_at",
             "submitted_by_name",
             "submitted_by_email",
