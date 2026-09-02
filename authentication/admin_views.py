@@ -1000,6 +1000,15 @@ def _build_admin_user_queryset(params, exclude_unmailable=False):
             ).filter(Q(savings__lte=0) & Q(investment__lte=0) & Q(wallet__lte=0))
         filters_applied["activity"] = activity
 
+    # No referrer at all - the "Engagement Team" segment on the Growth
+    # card (see admin_top_performers' engagement_team category). Reused
+    # here so the same segment can be exported/emailed like every other
+    # one, not just counted.
+    no_referral = _parse_bool_param(params.get('no_referral'))
+    if no_referral:
+        queryset = queryset.filter(referral__isnull=True)
+        filters_applied["no_referral"] = True
+
     return queryset.order_by('-date_joined'), filters_applied
 
 
@@ -1682,7 +1691,7 @@ def transaction_success_rate(request):
 # calls influencers). Neither old endpoint was ever called by the mobile
 # app or the web admin dashboard (both of those use the real, working
 # /api/top-referrals/ instead), so nothing depended on the old shape.
-GROWTH_LEADER_CATEGORIES = ("referrals", "ambassadors", "influencers")
+GROWTH_LEADER_CATEGORIES = ("referrals", "ambassadors", "influencers", "engagement_team")
 GROWTH_LEADER_RANGES = ("month", "last_month", "3months", "6months", "1year", "all")
 
 
@@ -1690,7 +1699,7 @@ GROWTH_LEADER_RANGES = ("month", "last_month", "3months", "6months", "1year", "a
 @permission_classes([IsAdminUser])
 def admin_top_performers(request):
     """
-    GET /api/admin/multipliers/top-performers?category=referrals|ambassadors|influencers
+    GET /api/admin/multipliers/top-performers?category=referrals|ambassadors|influencers|engagement_team
         &range=month|3months|6months|1year|all&limit=20
     Leaderboard of referrers ranked by how many people they referred (and
     how many of those referrals were confirmed) within the selected
@@ -1701,6 +1710,19 @@ def admin_top_performers(request):
     - category=referrals: every referrer.
     - category=ambassadors: referrers with is_ambassador=True only.
     - category=influencers: referrers with is_influencer=True only.
+    - category=engagement_team: NOT a leaderboard (there's no referrer to
+      rank - that's the point) - a plain count of signups with no
+      referral/ambassador/influencer attribution at all (referral IS
+      NULL) in the range, plus how many of those went on to start
+      saving. This is a label of convenience for "nobody referred them,
+      so we're crediting this to the company's own outreach" - it's
+      really just every unattributed signup, which could in principle
+      also include e.g. organic app-store discovery with no tracked
+      source; there's no field that distinguishes those from genuine
+      engagement-team-driven signups (how_did_you_hear is self-reported
+      and free-text-ish, not a reliable attribution signal). Returns
+      {"category", "range", "signups", "confirmed"} - no "leaderboard"
+      key, since there's nothing to rank.
     """
     category = request.GET.get('category', 'referrals').strip().lower()
     if category not in GROWTH_LEADER_CATEGORIES:
@@ -1748,6 +1770,31 @@ def admin_top_performers(request):
         end = None
 
     try:
+        if category == "engagement_team":
+            qs = CustomUser.objects.filter(is_deleted=False, referral__isnull=True)
+            if start is not None:
+                qs = qs.filter(date_joined__gte=start)
+            if end is not None:
+                qs = qs.filter(date_joined__lt=end)
+
+            signups = qs.count()
+            # Same "started saving" definition as signup_summary/
+            # not_yet_saved_this_month - a confirmed credit into savings
+            # or investment, not just any transaction.
+            activated_ids = Transaction.objects.filter(
+                user__in=qs, credited_to__in=['SAVINGS', 'INVESTMENT'],
+                transaction_type='credit', status='confirmed',
+            ).values_list('user', flat=True).distinct()
+
+            response_data = {
+                "category": category,
+                "range": range_key,
+                "signups": signups,
+                "confirmed": activated_ids.count(),
+            }
+            cache.set(cache_key, response_data, 900)
+            return Response(response_data)
+
         referred_qs = CustomUser.objects.filter(is_deleted=False, referral__isnull=False)
         if start is not None:
             referred_qs = referred_qs.filter(date_joined__gte=start)
@@ -2730,6 +2777,20 @@ def user_activity_segments(request):
     by the same segmentation through _build_admin_user_queryset's
     `activity` param (shares _annotate_activity with this view so the two
     can't drift apart).
+
+    Also returns "engaged" - a coarser, second cut across the same user
+    base answering "is this a real, live account at all" rather than
+    "how recently did they transact": non-zero balance OR ever
+    transacted OR active (logged in, or the app re-registered its push
+    token - see CustomUser.last_active_at) in the last 6 months. The
+    complement is a genuinely dead account - never funded, never
+    transacted, never seen the app in 6+ months. Reported as a
+    percentage of total_users, with a percentage-point (not relative %)
+    month-over-month delta - "+2.1pts" reads unambiguously, "+2.1%"
+    could be misread as the count growing 2.1%. Same last-month caveat
+    as dormant/inactive above for the balance/last_active_at halves
+    (current values only, no historical snapshot) - only the
+    ever-transacted half is a true historical reconstruction.
     """
     cache_key = "metrics:user-activity-segments"
     cached_data = cache.get(cache_key)
@@ -2753,11 +2814,27 @@ def user_activity_segments(request):
 
             return active, dormant, inactive, total
 
+        def engaged_counts(as_of):
+            users = _annotate_activity(
+                CustomUser.objects.filter(is_deleted=False), as_of,
+            )
+            has_balance_q = Q(savings__gt=0) | Q(investment__gt=0) | Q(wallet__gt=0)
+            six_months_ago = as_of - relativedelta(months=6)
+            recently_active_q = Q(last_active_at__gte=six_months_ago)
+
+            total = users.count()
+            engaged = users.filter(
+                Q(has_any_tx=True) | has_balance_q | recently_active_q
+            ).count()
+            return engaged, total
+
         now = timezone.now()
         this_active, this_dormant, this_inactive, total_users = segment_counts(now)
+        this_engaged, _ = engaged_counts(now)
 
         last_month_point = now.replace(day=1) - timedelta(days=1)
         last_active, last_dormant, last_inactive, _ = segment_counts(last_month_point)
+        last_engaged, _ = engaged_counts(last_month_point)
 
         def rate_str(current, previous):
             if previous > 0:
@@ -2765,6 +2842,11 @@ def user_activity_segments(request):
             else:
                 rate = 100.0 if current > 0 else 0.0
             return f"{'+' if rate >= 0 else ''}{round(rate, 1)}%"
+
+        this_engaged_pct = round((this_engaged / total_users) * 100, 1) if total_users else 0.0
+        last_engaged_pct = round((last_engaged / total_users) * 100, 1) if total_users else 0.0
+        pct_point_delta = round(this_engaged_pct - last_engaged_pct, 1)
+        engaged_trend = f"{'+' if pct_point_delta >= 0 else ''}{pct_point_delta}pts"
 
         response_data = {
             "as_of": now.date().isoformat(),
@@ -2779,6 +2861,12 @@ def user_activity_segments(request):
             "inactive": {
                 "this_month": this_inactive, "last_month": last_inactive,
                 "growth_rate": rate_str(this_inactive, last_inactive),
+            },
+            "engaged": {
+                "this_month": this_engaged, "last_month": last_engaged,
+                "percentage": this_engaged_pct,
+                "percentage_last_month": last_engaged_pct,
+                "trend": engaged_trend,
             },
             "total_users": total_users,
         }

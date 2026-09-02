@@ -1176,6 +1176,13 @@ class CustomObtainAuthToken(ObtainAuthToken):
                 )
 
             # ✅ SUCCESS
+            # Explicit login is the clearest "this person was just here"
+            # signal available - covers anyone who denied push
+            # notification permission and so never hits
+            # save_expo_push_token's own last_active_at update.
+            user.last_active_at = timezone.now()
+            user.save(update_fields=["last_active_at"])
+
             tokens = self.get_tokens_for_user(user)
 
             return Response(tokens)
@@ -12676,6 +12683,11 @@ def save_expo_push_token(request):
         new_token["app_version"] = app_version
 
     user.expo_push_tokens.append(new_token)
+    # This fires on every app cold start for a logged-in user (see
+    # App.js's initializeApp), not just first install - the closest
+    # thing to an "opened the app" heartbeat this app has. Feeds
+    # user_activity_segments' "engaged" split.
+    user.last_active_at = timezone.now()
     user.save()
     return Response({"message": "Token saved"})
 

@@ -87,6 +87,18 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     # dead address doesn't keep eating a daily send slot once it's known
     # to be undeliverable.
     email_undeliverable = models.BooleanField(default=False, db_index=True)
+    # Best-effort "was this person actually here" signal - set whenever a
+    # user either logs in (CustomObtainAuthToken) or the app re-registers
+    # its push token on a cold start (save_expo_push_token, which fires
+    # on every app open for a logged-in user, not just first install -
+    # see App.js's initializeApp). Null for anyone who hasn't done either
+    # since this field shipped, which reads as "not recently active" even
+    # if they're actually a quiet-but-real user who just hasn't reopened
+    # the app yet - that's expected to self-correct within days/weeks as
+    # real users open the app again, not a backfill problem. Feeds
+    # user_activity_segments' "engaged" split (non-zero balance OR ever
+    # transacted OR active in the last 6 months, by this field).
+    last_active_at = models.DateTimeField(null=True, blank=True, db_index=True)
     date_joined = models.DateTimeField(auto_now_add=True, db_index=True)
     is_deleted = models.BooleanField(default=False)
     last_otp_sent_at = models.DateTimeField(null=True, blank=True)
