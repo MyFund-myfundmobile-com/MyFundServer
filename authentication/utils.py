@@ -560,6 +560,7 @@ def send_transactional_email(
     use_celery_threshold=None,
     template="email/email.html",
     extra_context=None,
+    cc=None,
 ):
     """
     Sends single-user, auth/account-critical transactional email (signup
@@ -578,6 +579,10 @@ def send_transactional_email(
     transactional send is always inline/single-recipient in practice -
     use_celery_threshold is accepted but ignored, there's no batching case
     here.
+
+    Optional `cc` (list of email strings) - applied to every recipient in
+    recipient_list, for the rare case a reply needs to stay visible to more
+    than just the primary recipient.
     """
     if isinstance(recipient_list, str):
         recipient_list = [recipient_list]
@@ -615,6 +620,7 @@ def send_transactional_email(
                 subject=payload["subject"],
                 html_content=payload["html_message"],
                 from_email=from_email,
+                cc=cc,
             )
             logger.info(f"✅ Transactional email sent via Resend to {recipient_email}")
             sent_count += 1
@@ -631,6 +637,7 @@ def send_transactional_email(
                 subject=payload["subject"],
                 html_content=payload["html_message"],
                 from_email=from_email,
+                cc=cc,
             )
             logger.info(
                 f"✅ Transactional email sent via Brevo fallback to {recipient_email}"

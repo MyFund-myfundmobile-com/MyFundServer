@@ -83,10 +83,11 @@ def get_brevo_usage_today():
 # ==========================================
 
 
-def send_email_via_brevo(to_email, subject, html_content, from_email=None):
+def send_email_via_brevo(to_email, subject, html_content, from_email=None, cc=None):
     """
     Send a single transactional email through Brevo's Transactional Emails
-    API. Raises on failure - callers decide how to log/track that.
+    API. Raises on failure - callers decide how to log/track that. Optional
+    `cc` (list of email strings), same rare case as send_email_via_resend.
     """
     from_email = from_email or settings.DEFAULT_FROM_EMAIL
 
@@ -102,6 +103,7 @@ def send_email_via_brevo(to_email, subject, html_content, from_email=None):
 
     send_smtp_email = sib_api_v3_sdk.SendSmtpEmail(
         to=[{"email": to_email}],
+        cc=[{"email": e} for e in cc] if cc else None,
         sender={"name": sender_name, "email": sender_email},
         subject=subject,
         html_content=html_content,

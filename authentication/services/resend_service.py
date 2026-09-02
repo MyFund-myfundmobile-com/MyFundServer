@@ -32,10 +32,13 @@ logger = logging.getLogger(__name__)
 RESEND_VERIFIED_DOMAIN = "mg.myfundmobile.com"
 
 
-def send_email_via_resend(to_email, subject, html_content, from_email=None):
+def send_email_via_resend(to_email, subject, html_content, from_email=None, cc=None):
     """
     Send a single transactional email through Resend. Raises on failure -
-    callers decide how to log/track/fall back.
+    callers decide how to log/track/fall back. Optional `cc` (list of email
+    strings) for the rare case a reply needs to stay visible to more than
+    just the primary recipient (e.g. staff-onboarding email cc'd to the
+    founders who need to see replies).
     """
     from_email = from_email or settings.DEFAULT_FROM_EMAIL
 
@@ -53,11 +56,13 @@ def send_email_via_resend(to_email, subject, html_content, from_email=None):
 
     resend.api_key = settings.RESEND_API_KEY
 
-    return resend.Emails.send(
-        {
-            "from": sender,
-            "to": [to_email],
-            "subject": subject,
-            "html": html_content,
-        }
-    )
+    payload = {
+        "from": sender,
+        "to": [to_email],
+        "subject": subject,
+        "html": html_content,
+    }
+    if cc:
+        payload["cc"] = list(cc)
+
+    return resend.Emails.send(payload)

@@ -3675,12 +3675,22 @@ def submit_cx_weekly_report(request):
             f"{request.user.first_name} {request.user.last_name}".strip()
             or request.user.email
         )
-        summary = report_text if len(report_text) <= 140 else f"{report_text[:137]}..."
+
+        def _truncate(text, limit):
+            return text if len(text) <= limit else f"{text[:limit - 3]}..."
+
+        # Both summaries share the notification body, so each gets a
+        # smaller budget than the old report-only version did (140) -
+        # keeps the combined message a reasonable push-notification
+        # length instead of just growing it unbounded.
+        message = _truncate(report_text, 100)
+        if recommendation_text:
+            message += f"\n\nRecommendation: {_truncate(recommendation_text, 80)}"
 
         try:
             send_admin_push_notification(
                 title=f"📋 Weekly report from {submitter_name}",
-                message=summary,
+                message=message,
                 data={"type": "cx_weekly_report", "report_id": cx_report.id},
                 notif_type="ADMIN",
                 category="system",
