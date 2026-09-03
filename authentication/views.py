@@ -2769,10 +2769,13 @@ def delete_bank_account(request, account_number):
                 account_number,
             )
 
-        return Response(
-            {"message": "Bank account deleted successfully."},
-            status=status.HTTP_204_NO_CONTENT,
-        )
+        # 204 must not carry a body (HTTP spec) - returning one alongside
+        # this status is exactly the kind of mismatch that can make a
+        # client choke on an otherwise-successful delete (the account is
+        # actually gone by this point, but the response itself is
+        # malformed), which is what the mobile app's "Delete in
+        # Progress..." fallback message was masking.
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     except Exception as e:
         logger.error("Error deleting bank account %s: %s", account_number, str(e))

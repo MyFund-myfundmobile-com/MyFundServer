@@ -226,6 +226,11 @@ urlpatterns = [
         name="admin_list_email_campaigns",
     ),
     path(
+        "email-campaigns/overview/",
+        admin_views.get_email_campaigns_overview,
+        name="admin_get_email_campaigns_overview",
+    ),
+    path(
         "email-campaigns/<int:campaign_id>/",
         admin_views.get_email_campaign_detail,
         name="admin_get_email_campaign_detail",

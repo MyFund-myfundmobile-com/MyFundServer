@@ -3353,6 +3353,133 @@ def list_email_campaigns(request):
 
 @api_view(['GET'])
 @permission_classes([IsAdminUser])
+def get_email_campaigns_overview(request):
+    """
+    GET /api/admin/email-campaigns/overview/
+    Aggregate delivery/engagement metrics across every campaign that's
+    actually sent something (sent_count>0, most recent 50 - matches
+    list_email_campaigns' own cap), for the summary board at the top of
+    the mobile Email admin screen. Sums each campaign's own Brevo
+    aggregated_smtp_report (same per-campaign tag lookup as
+    get_email_campaign_report) rather than querying Brevo without a tag
+    filter, since an untagged range would also pull in unrelated
+    transactional email (OTPs, notifications) that shares the same Brevo
+    account. Fetched concurrently (ThreadPoolExecutor, same pattern as
+    BankAccountViewSet.predict in views.py) since this is otherwise up to
+    50 sequential Brevo API round-trips.
+
+    Rate thresholds in `recommendations` below are general email-industry
+    benchmarks (Brevo/Mailchimp-published ranges), not MyFund-specific
+    targets - a rough sanity check, not a precise goal.
+    """
+    import sib_api_v3_sdk
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from .services.brevo_service import get_brevo_client
+
+    campaigns = list(
+        EmailCampaign.objects.filter(sent_count__gt=0).order_by("-created_at")[:50]
+    )
+    if not campaigns:
+        return Response({"campaign_count": 0, "reported_campaign_count": 0})
+
+    api = sib_api_v3_sdk.TransactionalEmailsApi(get_brevo_client())
+    today = timezone.now().date().isoformat()
+
+    def fetch_one(campaign):
+        try:
+            return api.get_aggregated_smtp_report(
+                start_date=campaign.created_at.date().isoformat(),
+                end_date=today,
+                tag=f"campaign-{campaign.id}",
+            )
+        except Exception as e:
+            logger.warning(
+                "Skipping campaign %s in overview - Brevo report failed: %s",
+                campaign.id, e,
+            )
+            return None
+
+    totals = {
+        "requests": 0, "delivered": 0, "opens": 0, "unique_opens": 0,
+        "clicks": 0, "unique_clicks": 0, "hard_bounces": 0, "soft_bounces": 0,
+        "blocked": 0, "invalid": 0, "spam_reports": 0, "unsubscribed": 0,
+    }
+    reported_campaign_count = 0
+    with ThreadPoolExecutor(max_workers=min(len(campaigns), 20)) as pool:
+        for agg in pool.map(fetch_one, campaigns):
+            if agg is None:
+                continue
+            reported_campaign_count += 1
+            for key in totals:
+                totals[key] += getattr(agg, key, 0) or 0
+
+    def pct(numerator, denominator):
+        return round((numerator / denominator) * 100, 1) if denominator else None
+
+    delivery_rate = pct(totals["delivered"], totals["requests"])
+    open_rate = pct(totals["unique_opens"], totals["delivered"])
+    click_rate = pct(totals["unique_clicks"], totals["delivered"])
+    click_to_open_rate = pct(totals["unique_clicks"], totals["unique_opens"])
+    bounce_rate = pct(
+        totals["hard_bounces"] + totals["soft_bounces"], totals["requests"]
+    )
+    spam_rate = pct(totals["spam_reports"], totals["delivered"])
+    unsubscribe_rate = pct(totals["unsubscribed"], totals["delivered"])
+
+    recommendations = []
+    if bounce_rate is not None and bounce_rate > 2:
+        recommendations.append(
+            f"Bounce rate is {bounce_rate}%, above the ~2% healthy ceiling - "
+            "clean stale addresses from your list before the next send."
+        )
+    if spam_rate is not None and spam_rate > 0.1:
+        recommendations.append(
+            f"Spam complaint rate is {spam_rate}%, above the 0.1% threshold "
+            "Gmail/Yahoo use for bulk-sender standing - watch this closely, "
+            "sustained complaints above ~0.3% risk inbox placement for all "
+            "your mail, not just campaigns."
+        )
+    if unsubscribe_rate is not None and unsubscribe_rate > 0.5:
+        recommendations.append(
+            f"Unsubscribe rate is {unsubscribe_rate}%, above the ~0.5% "
+            "healthy range - consider segmenting more narrowly or sending "
+            "less frequently to less-engaged users."
+        )
+    if open_rate is not None and open_rate < 15:
+        recommendations.append(
+            f"Open rate is {open_rate}%, below the ~15-25% range typical "
+            "for this kind of email - sharper subject lines or a different "
+            "send time may help."
+        )
+    if click_to_open_rate is not None and click_to_open_rate < 10:
+        recommendations.append(
+            f"Click-to-open rate is {click_to_open_rate}% (of people who "
+            "opened, how many clicked) - below the ~10-15% range, suggesting "
+            "the content/CTA isn't landing even when the email gets opened."
+        )
+    if not recommendations:
+        recommendations.append(
+            "All metrics are within healthy industry ranges - keep up "
+            "current sending practices."
+        )
+
+    return Response({
+        "campaign_count": len(campaigns),
+        "reported_campaign_count": reported_campaign_count,
+        **totals,
+        "delivery_rate": delivery_rate,
+        "open_rate": open_rate,
+        "click_rate": click_rate,
+        "click_to_open_rate": click_to_open_rate,
+        "bounce_rate": bounce_rate,
+        "spam_rate": spam_rate,
+        "unsubscribe_rate": unsubscribe_rate,
+        "recommendations": recommendations,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
 def get_email_campaign_detail(request, campaign_id):
     """
     GET /api/admin/email-campaigns/<campaign_id>/
