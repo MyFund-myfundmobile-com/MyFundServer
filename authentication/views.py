@@ -1598,6 +1598,7 @@ def get_user_profile(request):
             "is_confirmed": user.is_confirmed,
             "is_subscribed": user.is_subscribed,
             "is_ambassador": user.is_ambassador,
+            "is_influencer": user.is_influencer,
             "savings": user.savings,
             "investment": user.investment,
             "properties": user.properties,
