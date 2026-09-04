@@ -1511,7 +1511,7 @@ def send_email_campaign_batch_task(
     """
     from email.utils import parseaddr
     from django.db.models import F
-    from .models import EmailCampaign
+    from .models import EmailCampaign, CustomUser
     from .services.brevo_service import send_email_via_brevo
     from .utils import personalize_email_payload
 
@@ -1535,6 +1535,13 @@ def send_email_campaign_batch_task(
         from_email = from_email or settings.DEFAULT_FROM_EMAIL
     subject = campaign.subject
     body = campaign.body_html
+    # "Personal style" toggle (see EmailCampaign.template_mode /
+    # admin_views.create_email_campaign) - the only place that decides
+    # which of email.html (branded)/email_plain.html (plain) actually
+    # wraps this campaign's body, for every batch of a multi-day send.
+    email_template = (
+        "email/email_plain.html" if campaign.template_mode == "plain" else "email/email.html"
+    )
     # Tags every send so get_email_campaign_report can pull this
     # campaign's delivered/opened/bounced/blocked counts straight from
     # Brevo's own event log later, filtered by tag - no webhook needed.
@@ -1546,7 +1553,7 @@ def send_email_campaign_batch_task(
 
     for email in recipient_emails:
         try:
-            payload = personalize_email_payload(email, subject, body)
+            payload = personalize_email_payload(email, subject, body, template=email_template)
             send_email_via_brevo(
                 to_email=payload["to"],
                 subject=payload["subject"],
@@ -1556,6 +1563,14 @@ def send_email_campaign_batch_task(
             )
             sent_this_call += 1
             EmailCampaign.objects.filter(pk=campaign_id).update(sent_count=F("sent_count") + 1)
+            # Drives the cooling-off suppression in segments.py's
+            # classify_recruitment_segments - a single "last sent"
+            # timestamp per user rather than a full per-campaign log,
+            # since cooling-off only ever needs to know how recently, not
+            # a full history.
+            CustomUser.objects.filter(email__iexact=email).update(
+                last_campaign_email_sent_at=timezone.now()
+            )
             logger.info(f"✅ Campaign {campaign_id}: sent to {email}")
         except Exception as e:
             failed_this_call += 1

@@ -3313,6 +3313,15 @@ def create_email_campaign(request):
         sender_name = (request.data.get('sender_name') or '').strip()
         sender_name = re.sub(r'[\r\n<>]', '', sender_name)[:100]
 
+        # "Personal style" toggle on the compose screen - drops the
+        # branded header entirely and shrinks the footer to just an
+        # unsubscribe link (see email_plain.html / EmailCampaign.
+        # template_mode). Defaults to branded (current behaviour) so
+        # every existing/other caller is unaffected.
+        template_mode = (request.data.get('template_mode') or 'branded').strip().lower()
+        if template_mode not in ('branded', 'plain'):
+            template_mode = 'branded'
+
         extra_emails_raw = request.data.get('extra_emails') or []
         if not isinstance(extra_emails_raw, list):
             return Response({"error": "extra_emails must be a list."}, status=400)
@@ -3345,6 +3354,7 @@ def create_email_campaign(request):
             recipient_emails=emails,
             total_recipients=len(emails),
             sender_name=sender_name,
+            template_mode=template_mode,
         )
 
         desired_batch = emails[:CAMPAIGN_BASE_BATCH_LIMIT]
@@ -3553,6 +3563,7 @@ def get_email_campaign_detail(request, campaign_id):
         "body_html": campaign.body_html,
         "filters_applied": campaign.filters_applied,
         "sender_name": campaign.sender_name,
+        "template_mode": campaign.template_mode,
     })
 
 

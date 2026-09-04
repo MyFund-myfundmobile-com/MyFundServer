@@ -99,6 +99,13 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     # user_activity_segments' "engaged" split (non-zero balance OR ever
     # transacted OR active in the last 6 months, by this field).
     last_active_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    # Stamped on every successful admin campaign send to this address (see
+    # tasks.send_email_campaign_batch_task) - a single "most recent send"
+    # timestamp rather than a full per-campaign log, since the only thing
+    # that reads this is segments.classify_recruitment_segments' cooling-
+    # off suppression (skip anyone emailed within the last N days), which
+    # only ever needs recency, not history.
+    last_campaign_email_sent_at = models.DateTimeField(null=True, blank=True, db_index=True)
     date_joined = models.DateTimeField(auto_now_add=True, db_index=True)
     is_deleted = models.BooleanField(default=False)
     last_otp_sent_at = models.DateTimeField(null=True, blank=True)
@@ -2907,6 +2914,33 @@ class EmailCampaign(models.Model):
     # which would race on "how many have been attempted so far" and could
     # double-email whoever falls in the overlap.
     is_sending = models.BooleanField(default=False)
+    # Purely descriptive logging of how this campaign's audience was
+    # picked - never read back to determine who gets emailed (that's
+    # always filters_applied/recipient_emails, already frozen at create
+    # time). audience is e.g. "recruitment"; segment_key is one
+    # RECRUITMENT_SEGMENTS-style key for a Personalised send, or a
+    # "+"-joined list of keys for a Broadcast send with multiple chips.
+    audience = models.CharField(max_length=40, blank=True, default="")
+    segment_key = models.CharField(max_length=255, blank=True, default="")
+    send_mode = models.CharField(
+        max_length=20,
+        choices=(("broadcast", "Broadcast"), ("personalised", "Personalised")),
+        blank=True,
+        default="",
+    )
+    # "branded" (default, unchanged behaviour) wraps body_html in the full
+    # email/email.html layout - purple header/logo, full footer with
+    # tagline/social icons/address/trademark. "plain" wraps it in
+    # email/email_plain.html instead - no header at all, a minimal
+    # unsubscribe-only footer - for one-to-one-style outreach that should
+    # read like a person wrote it, not a broadcast. See
+    # tasks.send_email_campaign_batch_task, which is the only place this
+    # actually changes which template personalize_email_payload renders.
+    template_mode = models.CharField(
+        max_length=20,
+        choices=(("branded", "Branded"), ("plain", "Plain")),
+        default="branded",
+    )
 
     class Meta:
         ordering = ["-created_at"]

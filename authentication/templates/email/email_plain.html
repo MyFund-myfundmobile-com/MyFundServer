@@ -1,0 +1,68 @@
+<!-- Plain mode - no header/logo, minimal footer. Selected per-campaign via
+     EmailCampaign.template_mode (see tasks.send_email_campaign_batch_task,
+     the only place that decides which of email.html/email_plain.html
+     personalize_email_payload renders). Meant to read like an email a
+     person actually typed, not a branded broadcast - left-aligned, system
+     font, no colour blocks, no centred "card" - see the 2026-09-04 Plain
+     mode brief this was built from. -->
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <title></title>
+    <meta content="text/html; charset=utf-8" http-equiv="Content-Type" />
+    <meta content="width=device-width, initial-scale=1.0" name="viewport" />
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+        background-color: #ffffff;
+      }
+      a {
+        color: #1a1a1a;
+      }
+    </style>
+  </head>
+  <body style="margin: 0; padding: 0; background-color: #ffffff">
+    <div
+      style="
+        max-width: 600px;
+        margin: 0;
+        padding: 24px 20px;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+          sans-serif;
+        font-size: 16px;
+        line-height: 1.5;
+        color: #1a1a1a;
+        text-align: left;
+      "
+    >
+      {{ message|safe }}
+    </div>
+
+    <!-- Minimal footer - unsubscribe only, never optional. Everything
+         else the branded footer carries (tagline, social icons, website
+         URL, address, trademark/copyright, "you're receiving this
+         because...") is deliberately dropped here, not just visually
+         hidden - a plain-style email shouldn't look like it's wearing a
+         broadcast's footer underneath. -->
+    <div
+      style="
+        max-width: 600px;
+        margin: 0;
+        padding: 12px 20px 20px 20px;
+        border-top: 1px solid #e5e5e5;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+          sans-serif;
+        font-size: 12px;
+        color: #888888;
+        text-align: left;
+      "
+    >
+      <a
+        href="https://www.myfundmobile.com/unsubscribe"
+        style="color: #888888; text-decoration: underline"
+        >Unsubscribe</a
+      >
+    </div>
+  </body>
+</html>

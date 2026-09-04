@@ -9491,6 +9491,13 @@ def send_email(request):
         subject = request.data.get("subject", "").strip()
         body = request.data.get("body", "").strip()  # This is the HTML content
         recipients = request.data.get("recipients", [])
+        # "Personal style" toggle - same template_mode convention as
+        # admin_views.create_email_campaign, for this Individuals-mode
+        # send path (no EmailCampaign row here to persist it on).
+        template_mode = (request.data.get("template_mode") or "branded").strip().lower()
+        email_template = (
+            "email/email_plain.html" if template_mode == "plain" else "email/email.html"
+        )
         # Set by the mobile admin Email tab (never by the webapp's own
         # Unlayer "send" flow, which would otherwise duplicate its own
         # already-saved template on every send) - see
@@ -9547,6 +9554,7 @@ def send_email(request):
             message=body,  # CHANGED FROM 'message' TO ''
             recipient_list=cleaned_recipients,
             from_email=sender,
+            template=email_template,
         )
 
         logger.info(f"📧 send_generic_email result: {result}")
