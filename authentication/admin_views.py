@@ -914,18 +914,28 @@ def _build_admin_user_queryset(params, exclude_unmailable=False):
         )
         filters_applied["zero_balance"] = True
 
-    # New-signup segments (1/3/6 months) - matches the "New Users" chips
-    # on the mobile Email tab's segment picker.
-    new_users_months = params.get('new_users_months')
-    if new_users_months not in (None, ''):
-        try:
-            months = int(new_users_months)
-        except (TypeError, ValueError):
-            months = None
-        if months in (1, 3, 6):
-            cutoff = timezone.now() - relativedelta(months=months)
-            queryset = queryset.filter(date_joined__gte=cutoff)
-            filters_applied["new_users_months"] = months
+    # New-signup age bracket - half-open ranges on date_joined, so the 4
+    # brackets never overlap (a user matches exactly one). Replaces the
+    # old new_users_months param (2026-09), which used date_joined__gte
+    # with no upper bound - meaning "1 Mo" was actually a subset of "3
+    # Mo" which was a subset of "6 Mo", not 3 independent groups. Matches
+    # the mobile Users/Email chip picker's single "New Users" chip with
+    # its own 0-1/1-3/3-6/6+ sub-picker.
+    signup_age_bracket = (params.get('signup_age_bracket') or '').strip()
+    if signup_age_bracket in ('0_1', '1_3', '3_6', '6_plus'):
+        now = timezone.now()
+        bracket_bounds = {
+            '0_1': (now - relativedelta(months=1), None),
+            '1_3': (now - relativedelta(months=3), now - relativedelta(months=1)),
+            '3_6': (now - relativedelta(months=6), now - relativedelta(months=3)),
+            '6_plus': (None, now - relativedelta(months=6)),
+        }
+        lower, upper = bracket_bounds[signup_age_bracket]
+        if lower is not None:
+            queryset = queryset.filter(date_joined__gte=lower)
+        if upper is not None:
+            queryset = queryset.filter(date_joined__lt=upper)
+        filters_applied["signup_age_bracket"] = signup_age_bracket
 
     # Signed up this calendar month but hasn't made a single confirmed
     # savings/investment deposit yet - same "not yet saved" definition as
@@ -1043,8 +1053,11 @@ def _build_admin_user_queryset(params, exclude_unmailable=False):
 
     # Referred at least one person within the last 1/3/6 months - a
     # recency-scoped refinement of has_referred, e.g. to reward/re-engage
-    # recently-active referrers specifically. Same window choices as
-    # new_users_months above and admin_top_performers' leaderboard ranges.
+    # recently-active referrers specifically. Deliberately cumulative
+    # (3mo is a superset of 1mo), unlike signup_age_bracket above - this
+    # is a recency window, not a signup cohort, so overlap here is
+    # correct. Same window choices as admin_top_performers' leaderboard
+    # ranges.
     referred_within_months = params.get('referred_within_months')
     if referred_within_months not in (None, ''):
         try:

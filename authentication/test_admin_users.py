@@ -299,7 +299,7 @@ class AdminUserEmailsForSegmentTest(TestCase):
 
 class SegmentFilterExtensionsTest(TestCase):
     """
-    non_zero_balance and new_users_months filters on
+    non_zero_balance and signup_age_bracket filters on
     _build_admin_user_queryset, exercised via admin_user_emails_for_segment.
     """
 
@@ -331,32 +331,34 @@ class SegmentFilterExtensionsTest(TestCase):
         self.assertIn("funded@example.com", response.data["emails"])
         self.assertNotIn("empty@example.com", response.data["emails"])
 
-    def test_new_users_1_month(self):
+    def test_signup_age_bracket_0_1(self):
         response = self.client.get(
-            reverse("admin_user_emails_for_segment"), {"new_users_months": "1"}
+            reverse("admin_user_emails_for_segment"), {"signup_age_bracket": "0_1"}
         )
         emails = response.data["emails"]
         self.assertIn("recent@example.com", emails)
         self.assertNotIn("mid@example.com", emails)
         self.assertNotIn("old@example.com", emails)
 
-    def test_new_users_3_months(self):
+    def test_signup_age_bracket_1_3(self):
         response = self.client.get(
-            reverse("admin_user_emails_for_segment"), {"new_users_months": "3"}
+            reverse("admin_user_emails_for_segment"), {"signup_age_bracket": "1_3"}
         )
         emails = response.data["emails"]
-        self.assertIn("recent@example.com", emails)
+        # Half-open bracket - the 0-1mo user must NOT also match 1-3mo
+        # (this is exactly the overlap the old new_users_months param had).
+        self.assertNotIn("recent@example.com", emails)
         self.assertIn("mid@example.com", emails)
         self.assertNotIn("old@example.com", emails)
 
-    def test_new_users_6_months(self):
+    def test_signup_age_bracket_6_plus(self):
         response = self.client.get(
-            reverse("admin_user_emails_for_segment"), {"new_users_months": "6"}
+            reverse("admin_user_emails_for_segment"), {"signup_age_bracket": "6_plus"}
         )
         emails = response.data["emails"]
-        self.assertIn("recent@example.com", emails)
-        self.assertIn("mid@example.com", emails)
-        self.assertNotIn("old@example.com", emails)
+        self.assertNotIn("recent@example.com", emails)
+        self.assertNotIn("mid@example.com", emails)
+        self.assertIn("old@example.com", emails)
 
     def test_not_yet_saved_this_month_filter(self):
         now = timezone.now()
@@ -413,12 +415,12 @@ class SegmentFilterExtensionsTest(TestCase):
         self.assertNotIn("inactivestaffer@example.com", emails)
         self.assertNotIn("notemployee@example.com", emails)
 
-    def test_invalid_new_users_months_ignored(self):
-        # Not one of the supported values (1/3/6) - should just be
-        # ignored rather than 500ing or silently matching everyone/no one
+    def test_invalid_signup_age_bracket_ignored(self):
+        # Not one of the 4 supported brackets - should just be ignored
+        # rather than 500ing or silently matching everyone/no one
         # unexpectedly.
         response = self.client.get(
-            reverse("admin_user_emails_for_segment"), {"new_users_months": "99"}
+            reverse("admin_user_emails_for_segment"), {"signup_age_bracket": "99"}
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertNotIn("new_users_months", response.data["filters_applied"])
+        self.assertNotIn("signup_age_bracket", response.data["filters_applied"])
