@@ -1009,6 +1009,59 @@ def _build_admin_user_queryset(params, exclude_unmailable=False):
         queryset = queryset.filter(referral__isnull=True)
         filters_applied["no_referral"] = True
 
+    # Has THIS user ever referred anyone else - opposite direction from
+    # `no_referral` above (that asks "was this user referred BY someone";
+    # this asks "has this user referred someone else"). Same `referral`
+    # FK, same Exists pattern admin_top_performers' referrer leaderboard
+    # uses to count a person's referrals - just a boolean cut rather than
+    # a count, and with no date window (any time, ever), independent of
+    # whether the referrer themselves has ever saved/transacted.
+    has_referred = _parse_bool_param(params.get('has_referred'))
+    if has_referred is not None:
+        referred_exists = CustomUser.objects.filter(
+            is_deleted=False, referral=OuterRef('pk'),
+        )
+        queryset = queryset.annotate(has_referred_anyone=Exists(referred_exists))
+        queryset = queryset.filter(has_referred_anyone=has_referred)
+        filters_applied["has_referred"] = has_referred
+
+    # Never referred anyone, but already engaged (saved/transacted) -
+    # the natural "hasn't discovered the referral program yet, but is
+    # clearly bought into the product" segment for an invite-a-friend
+    # campaign. Reuses _annotate_activity's has_any_tx so "transacted
+    # before" can't drift from what activity=ever_transacted already
+    # means elsewhere.
+    never_referred_active = _parse_bool_param(params.get('never_referred_active'))
+    if never_referred_active:
+        referred_exists = CustomUser.objects.filter(
+            is_deleted=False, referral=OuterRef('pk'),
+        )
+        queryset = _annotate_activity(queryset, timezone.now())
+        queryset = queryset.annotate(has_referred_anyone=Exists(referred_exists))
+        queryset = queryset.filter(has_referred_anyone=False, has_any_tx=True)
+        filters_applied["never_referred_active"] = True
+
+    # Referred at least one person within the last 1/3/6 months - a
+    # recency-scoped refinement of has_referred, e.g. to reward/re-engage
+    # recently-active referrers specifically. Same window choices as
+    # new_users_months above and admin_top_performers' leaderboard ranges.
+    referred_within_months = params.get('referred_within_months')
+    if referred_within_months not in (None, ''):
+        try:
+            months = int(referred_within_months)
+        except (TypeError, ValueError):
+            months = None
+        if months in (1, 3, 6):
+            cutoff = timezone.now() - relativedelta(months=months)
+            recent_referred_exists = CustomUser.objects.filter(
+                is_deleted=False, referral=OuterRef('pk'), date_joined__gte=cutoff,
+            )
+            queryset = queryset.annotate(
+                has_recent_referral=Exists(recent_referred_exists)
+            )
+            queryset = queryset.filter(has_recent_referral=True)
+            filters_applied["referred_within_months"] = months
+
     return queryset.order_by('-date_joined'), filters_applied
 
 
