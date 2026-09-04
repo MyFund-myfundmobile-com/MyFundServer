@@ -2132,39 +2132,47 @@ from concurrent.futures import (
 # NUBAN account numbers only resolve successfully against their real bank's
 # code, so trying every code and keeping whichever succeed identifies the
 # bank(s) for us.
+# Ordered by real-world popularity among MyFund's users, not alphabetically.
+# predict() below is supposed to try all of these concurrently, but in
+# production (Koyeb) that concurrency isn't reliable - see
+# PREDICT_HARD_TIMEOUT_SECONDS's comment - so whichever entries are
+# *first* get their result back soonest under load. Putting the banks
+# most people actually use at the front means the common case still
+# resolves well within the timeout even when the rest of the list is
+# effectively running closer to sequential than parallel.
 NIGERIAN_BANK_CODES = [
-    ("044", "Access Bank"),
-    ("023", "Citibank"),
-    ("050", "Ecobank"),
-    ("070", "Fidelity Bank"),
-    ("011", "First Bank of Nigeria"),
-    ("214", "First City Monument Bank"),
-    ("058", "Guaranty Trust Bank"),
-    ("082", "Keystone Bank"),
-    ("104", "Parallex Bank"),
-    ("076", "Polaris Bank"),
-    ("105", "Premium Trust Bank"),
-    ("101", "Providus Bank"),
-    ("221", "Stanbic IBTC Bank"),
-    ("068", "Standard Chartered Bank"),
-    ("232", "Sterling Bank"),
-    ("100", "Suntrust Bank"),
-    ("102", "Titan Trust Bank"),
-    ("032", "Union Bank"),
-    ("033", "United Bank for Africa"),
-    ("215", "Unity Bank"),
-    ("035", "Wema Bank"),
-    ("057", "Zenith Bank"),
-    ("120001", "9 Payment Service Bank"),
-    ("301", "Jaiz Bank"),
-    ("50211", "Kuda Microfinance Bank"),
-    ("50515", "Moniepoint"),
     ("999992", "OPay"),
+    ("50515", "Moniepoint"),
     ("999991", "PalmPay"),
+    ("058", "Guaranty Trust Bank"),
+    ("044", "Access Bank"),
+    ("057", "Zenith Bank"),
+    ("033", "United Bank for Africa"),
+    ("011", "First Bank of Nigeria"),
+    ("50211", "Kuda Microfinance Bank"),
+    ("070", "Fidelity Bank"),
+    ("032", "Union Bank"),
+    ("221", "Stanbic IBTC Bank"),
+    ("214", "First City Monument Bank"),
+    ("232", "Sterling Bank"),
+    ("035", "Wema Bank"),
+    ("101", "Providus Bank"),
+    ("076", "Polaris Bank"),
+    ("120001", "9 Payment Service Bank"),
+    ("215", "Unity Bank"),
+    ("301", "Jaiz Bank"),
     ("100002", "Paga"),
+    ("082", "Keystone Bank"),
+    ("102", "Titan Trust Bank"),
+    ("100", "Suntrust Bank"),
+    ("105", "Premium Trust Bank"),
+    ("104", "Parallex Bank"),
     ("125", "Rubies Microfinance Bank"),
     ("00803", "SmartCash PSB"),
     ("566", "VFD Microfinance Bank"),
+    ("068", "Standard Chartered Bank"),
+    ("023", "Citibank"),
+    ("050", "Ecobank"),
 ]
 
 
@@ -2265,7 +2273,16 @@ class BankAccountViewSet(viewsets.ModelViewSet):
     # timeout (3s connect + 5s read = 8s) - otherwise this cuts every
     # thread off before any of them can even time out on their own,
     # which is worse than not having a hard timeout here at all.
-    PREDICT_HARD_TIMEOUT_SECONDS = 9
+    #
+    # 9s wasn't actually enough in production: measured directly against
+    # Koyeb, 31 "concurrent" calls came back closer to one-at-a-time
+    # (~1-1.5s apart) than truly in parallel - a bank sitting around
+    # position 19 of 31 (as UBA did before the NIGERIAN_BANK_CODES
+    # reorder above) simply hadn't been reached yet at 9s, let alone 6s.
+    # 15s + trying popular banks first gives real accounts on common
+    # banks enough room to actually get a turn, without leaving a
+    # genuinely-unmatched number hanging indefinitely.
+    PREDICT_HARD_TIMEOUT_SECONDS = 15
 
     @action(detail=False, methods=["get"])
     def predict(self, request):
