@@ -2320,7 +2320,19 @@ class BankAccountViewSet(viewsets.ModelViewSet):
             return None
 
         matches = []
-        pool = ThreadPoolExecutor(max_workers=len(NIGERIAN_BANK_CODES))
+        # NOT max_workers=len(NIGERIAN_BANK_CODES) (31) anymore - measured
+        # directly against Koyeb, firing all 31 at once doesn't actually
+        # run them in parallel there the way it does locally; wall-clock
+        # time for a curl against predict() varied wildly run to run
+        # (17s/19.6s success, 22.7s/27s false "no match") even after
+        # reordering NIGERIAN_BANK_CODES by popularity and raising
+        # PREDICT_HARD_TIMEOUT_SECONDS - a strong sign the 31-way burst
+        # itself (31 simultaneous TLS handshakes) was overwhelming
+        # whatever CPU/network concurrency the instance actually has,
+        # not just losing a race against the deadline. Capping workers
+        # means the popular banks at the front of the list get serviced
+        # with real concurrency instead of competing against all 31.
+        pool = ThreadPoolExecutor(max_workers=6)
         try:
             futures = [
                 pool.submit(try_bank, code, name)
