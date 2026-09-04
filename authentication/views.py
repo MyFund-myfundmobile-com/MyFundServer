@@ -2198,7 +2198,19 @@ class BankAccountViewSet(viewsets.ModelViewSet):
         headers = {"Authorization": f"Bearer {secret_key}"}
 
         try:
-            response = requests.get(url, headers=headers)
+            # An explicit timeout matters a lot more here than it would for
+            # a single one-off call: predict() below fires this from up to
+            # 31 threads at once (one per Nigerian bank code), and without
+            # a cap, a single slow/hanging connection could tie up a worker
+            # indefinitely. On a resource-constrained host (e.g. Koyeb's
+            # smaller instances have far less spare CPU/network headroom
+            # than a laptop running the dev server), that kind of stall is
+            # much more likely, and it was silently starving the pool -
+            # letting the *correct* bank's request get scheduled late
+            # enough to miss PREDICT_HARD_TIMEOUT_SECONDS below, even
+            # though a single resolve() call for that same account/bank
+            # pair succeeds instantly. (connect timeout, read timeout).
+            response = requests.get(url, headers=headers, timeout=(3, 5))
             response.raise_for_status()
 
             response_data = response.json()
@@ -2207,7 +2219,9 @@ class BankAccountViewSet(viewsets.ModelViewSet):
                 logger.info("Account resolved successfully: %s", account_name)
             return account_name
         except requests.exceptions.RequestException as e:
-            logger.error("Failed to resolve account: %s", str(e))
+            logger.error(
+                "Failed to resolve account (bank_code=%s): %s", bank_code, str(e)
+            )
             return None
 
     @action(detail=False, methods=["get"])
@@ -2247,7 +2261,11 @@ class BankAccountViewSet(viewsets.ModelViewSet):
     # for all ~31 threads (many of which are slow, guaranteed-empty misses)
     # before responding.
     PREDICT_GRACE_SECONDS = 1.2
-    PREDICT_HARD_TIMEOUT_SECONDS = 6
+    # Must comfortably exceed resolve_account's own worst-case per-request
+    # timeout (3s connect + 5s read = 8s) - otherwise this cuts every
+    # thread off before any of them can even time out on their own,
+    # which is worse than not having a hard timeout here at all.
+    PREDICT_HARD_TIMEOUT_SECONDS = 9
 
     @action(detail=False, methods=["get"])
     def predict(self, request):
