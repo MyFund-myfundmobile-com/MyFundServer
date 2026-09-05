@@ -61,5 +61,9 @@ def verify_google_id_token(token):
         "email": email,
         "first_name": (claims.get("given_name") or "").strip(),
         "last_name": (claims.get("family_name") or "").strip(),
+        # Google's hosted avatar URL, present whenever the account has a
+        # profile photo set (absent for accounts that never set one -
+        # callers must treat it as optional, never assume a value).
+        "picture": (claims.get("picture") or "").strip(),
         "sub": claims.get("sub"),
     }

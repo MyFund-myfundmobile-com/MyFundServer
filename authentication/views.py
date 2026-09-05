@@ -453,6 +453,11 @@ def google_complete_signup(request):
                 email=email,
                 phone_number=validated_phone,
                 how_did_you_hear=how_did_you_hear,
+                # Google's avatar URL when the account has one, otherwise
+                # left blank so the app falls back to its initial-letter
+                # placeholder (extractSecondUrl passes a plain https URL
+                # straight through, so no ImageKit round trip is needed).
+                profile_picture=google_user.get("picture") or "",
                 is_active=False,
             )
             # Google is the only credential on this account - no password
