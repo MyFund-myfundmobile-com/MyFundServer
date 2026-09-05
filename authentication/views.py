@@ -504,9 +504,26 @@ def google_complete_signup(request):
         otp_log = OTPDeliveryLog.objects.create(user=user, otp=otp)
 
         def send_otp_async():
-            # Email already Google-verified - only the SMS OTP is needed
-            # here, to prove phone ownership (the one thing Google never
-            # touches).
+            # Email OTP too, not SMS-only, despite the email itself
+            # already being Google-verified - matches plain signup()'s
+            # own send_otp_async exactly (2026-09-06: SMS-only wasn't
+            # landing reliably on the first attempt via Payless, and the
+            # apparent "fix" of hitting Resend was actually just falling
+            # back to resend_otp's own email-first behavior - the SMS was
+            # never actually being retried). Sending both from the start
+            # here removes that reliability gap; it doesn't weaken
+            # anything the plain flow didn't already accept, since email
+            # was always a valid OTP channel there too - phone ownership
+            # was never strictly proven by this step for ANY signup path.
+            try:
+                send_otp_email(user, otp)
+                otp_log.email_status = "sent"
+                otp_log.save(update_fields=["email_status"])
+            except Exception as exc:
+                logger.warning(f"OTP email failed for {user.email}: {exc}")
+                otp_log.email_status = "failed"
+                otp_log.save(update_fields=["email_status"])
+
             try:
                 if user.phone_number:
                     sms_count_key = f"signup_sms_otp_count:{user.phone_number}"
