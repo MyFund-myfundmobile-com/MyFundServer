@@ -72,6 +72,12 @@ urlpatterns = [
     path("signup/", views.signup, name="signup"),
     path("confirm-otp/", views.confirm_otp, name="confirm-otp"),
     path("resend-otp/", views.resend_otp, name="resend-otp"),
+    path("auth/google/", views.google_auth_signin, name="google-auth-signin"),
+    path(
+        "auth/google/complete-signup/",
+        views.google_complete_signup,
+        name="google-complete-signup",
+    ),
     path("login/", views.CustomObtainAuthToken.as_view(), name="login"),
     path("admin/login/", views.CustomObtainAuthToken.as_view(), name="admin-login"),
     path(

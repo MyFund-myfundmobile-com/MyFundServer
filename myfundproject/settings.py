@@ -429,6 +429,14 @@ EMAIL_BACKEND = "django.core.mail.backends.dummy.EmailBackend"
 
 DEFAULT_FROM_EMAIL = "MyFund <noreply@myfundmobile.com>"
 
+# Google Sign-In - the WEB client ID only (every platform's Google Sign-In
+# native module is configured to mint ID tokens with this as the audience,
+# same "one client the backend verifies against" pattern as ValuePlus -
+# see authentication/google_auth.py). The iOS/Android OAuth clients in
+# the Cloud Console are never referenced here; Google matches those by
+# bundle ID/package name + SHA-1 fingerprint instead.
+GOOGLE_OAUTH_CLIENT_ID = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "")
+
 
 AUTHENTICATION_BACKENDS = [
     "authentication.auth_backends.CustomUserAdminAuthBackend",  # Custom admin authentication

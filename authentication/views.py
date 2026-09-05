@@ -283,6 +283,262 @@ def signup(request):
         )
 
 
+from .google_auth import verify_google_id_token, GoogleTokenError
+
+
+@api_view(["POST"])
+@csrf_exempt
+@permission_classes([AllowAny])
+def google_auth_signin(request):
+    """
+    POST /api/auth/google/
+    Body: {"id_token": "..."}
+
+    Step 1 of Google Sign-In - verifies the ID token server-side (see
+    google_auth.verify_google_id_token: signature, issuer, expiry, aud,
+    AND email_verified) and matches on that verified email, never on
+    anything the client claims. Deliberately does NOT create an account
+    for an unrecognized email - plenty of people have multiple Google
+    accounts, and tapping the wrong one should never silently spawn a
+    duplicate MyFund account. Returns account_exists: false instead; the
+    app then routes to google_complete_signup (below) if the user
+    confirms they want to create one.
+
+    Unlike ValuePlus's two-step confirm_create flow, there's no
+    intermediate "confirm_create: true" call here that creates a bare
+    account - CustomUser.phone_number is required and unique, and Google
+    never provides a phone number, so account creation is deferred
+    entirely to google_complete_signup, which collects it (plus
+    referral/how_did_you_hear) and creates the user in one step.
+    """
+    id_token_str = request.data.get("id_token")
+    if not id_token_str:
+        return Response({"error": "id_token is required."}, status=400)
+
+    try:
+        google_user = verify_google_id_token(id_token_str)
+    except GoogleTokenError as e:
+        return Response({"error": str(e)}, status=400)
+
+    email = google_user["email"]
+    user = CustomUser.objects.filter(email__iexact=email, is_deleted=False).first()
+
+    if not user:
+        return Response({
+            "account_exists": False,
+            "email": email,
+            "first_name": google_user["first_name"],
+            "last_name": google_user["last_name"],
+        })
+
+    if getattr(user, "is_banned", False):
+        return Response(
+            {
+                "status": "banned",
+                "message": "Your account has been disabled. Contact support.",
+            },
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    if not user.is_active:
+        # Same shape as CustomObtainAuthToken's inactive branch - lets
+        # the app route to the exact same OTP-confirmation screen
+        # regardless of which login method got them here. Google having
+        # verified the email doesn't skip phone verification - that's a
+        # separate ownership proof, not redundant with email.
+        return Response(
+            {
+                "status": "inactive",
+                "message": "Account not verified.",
+                "next_step": "enter_otp",
+                "email": user.email,
+            },
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    user.last_active_at = timezone.now()
+    user.save(update_fields=["last_active_at"])
+
+    tokens = CustomObtainAuthToken.get_tokens_for_user(user)
+    return Response({"account_exists": True, "status": "existing", **tokens})
+
+
+@api_view(["POST"])
+@csrf_exempt
+@permission_classes([AllowAny])
+def google_complete_signup(request):
+    """
+    POST /api/auth/google/complete-signup/
+    Body: {"id_token": "...", "phone_number": "...",
+           "referral": "<email, optional>", "how_did_you_hear": "<code>"}
+
+    Actually creates the account for a Google sign-in with no existing
+    MyFund account (google_auth_signin returned account_exists: false and
+    the user chose "Continue and create account"). Re-verifies id_token
+    itself rather than trusting any client-supplied email/name in this
+    request - the whole point is that identity always comes from a
+    freshly-verified Google token, never from request-body fields that
+    could be stale or tampered with between the two calls (the "mismatch
+    email" edge case). Mirrors the plain signup() view's pipeline
+    (phone validation, Paystack customer + DVA, SMS OTP, is_active=False
+    until confirm_otp) so every downstream system behaves identically
+    regardless of signup method - the only things genuinely skipped are
+    password (set unusable - Google is the only credential) and the
+    email OTP (Google already proved email ownership; the SMS OTP alone
+    still proves phone ownership, which Google never touches).
+    """
+    id_token_str = request.data.get("id_token")
+    if not id_token_str:
+        return Response({"error": "id_token is required."}, status=400)
+
+    try:
+        google_user = verify_google_id_token(id_token_str)
+    except GoogleTokenError as e:
+        return Response({"error": str(e)}, status=400)
+
+    email = google_user["email"]
+
+    if CustomUser.objects.filter(email__iexact=email, is_deleted=False).exists():
+        return Response(
+            {"error": "An account with this email already exists. Please log in instead."},
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    phone_number = request.data.get("phone_number")
+    if not phone_number:
+        return Response(
+            {"error": "Phone number is required"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    phone_check = validate_phone_number(phone_number)
+    if not phone_check.get("valid"):
+        return Response(
+            {"error": phone_check.get("error")},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    validated_phone = phone_check.get("formatted")
+
+    # Same rate-limiting as plain signup() - this endpoint creates
+    # accounts too, same spam-signup surface.
+    phone_key = f"signup_phone:{validated_phone}"
+    ip_key = f"signup_ip_attempts:{request.META.get('REMOTE_ADDR')}"
+
+    if cache.get(phone_key):
+        return Response(
+            {"error": "Please wait a moment before trying again."}, status=429,
+        )
+    ip_attempts = cache.get(ip_key, 0)
+    if ip_attempts >= 10:
+        return Response(
+            {"error": "Too many signup attempts. Try again shortly."}, status=429,
+        )
+    cache.set(ip_key, ip_attempts + 1, timeout=60)
+    cache.set(phone_key, True, timeout=60)
+
+    how_did_you_hear_choices = {
+        "SM", "IMs", "FF", "GS", "REC", "CFG", "OTHER",
+    }
+    how_did_you_hear = request.data.get("how_did_you_hear") or "OTHER"
+    if how_did_you_hear not in how_did_you_hear_choices:
+        how_did_you_hear = "OTHER"
+
+    referral_code = (request.data.get("referral") or "").strip()
+
+    try:
+        with transaction.atomic():
+            user = CustomUser.objects.create(
+                first_name=google_user["first_name"] or "MyFund",
+                last_name=google_user["last_name"] or "User",
+                email=email,
+                phone_number=validated_phone,
+                how_did_you_hear=how_did_you_hear,
+                is_active=False,
+            )
+            # Google is the only credential on this account - no password
+            # to check, ever, unless the user later sets one explicitly.
+            user.set_unusable_password()
+            user.save()
+
+        if referral_code:
+            referrer = CustomUser.objects.filter(
+                Q(email__iexact=referral_code) | Q(phone_number__iexact=referral_code)
+            ).first()
+            if referrer:
+                user.referral = referrer
+                user.save(update_fields=["referral"])
+                logger.info("Referral applied successfully (Google signup)")
+            else:
+                logger.warning(f"Invalid referral code (Google signup): {referral_code}")
+
+        customer_created, customer_result = create_paystack_customer(user)
+        if not customer_created:
+            logger.warning(
+                f"Paystack customer creation failed for Google signup {user.email}: {customer_result}"
+            )
+        else:
+            user.paystack_customer_code = customer_result
+            user.save(update_fields=["paystack_customer_code"])
+            try:
+                create_dedicated_account(user)
+            except Exception as e:
+                logger.exception(f"DVA creation failed for Google signup {user.email}: {e}")
+
+        otp = generate_otp()
+        user.otp = otp
+        user.otp_created_at = timezone.now()
+        if hasattr(user, "last_otp_sent_at"):
+            user.last_otp_sent_at = timezone.now()
+        user.save(
+            update_fields=[
+                "otp", "otp_created_at",
+                *(["last_otp_sent_at"] if hasattr(user, "last_otp_sent_at") else []),
+            ]
+        )
+
+        otp_log = OTPDeliveryLog.objects.create(user=user, otp=otp)
+
+        def send_otp_async():
+            # Email already Google-verified - only the SMS OTP is needed
+            # here, to prove phone ownership (the one thing Google never
+            # touches).
+            try:
+                if user.phone_number:
+                    sms_count_key = f"signup_sms_otp_count:{user.phone_number}"
+                    sms_count = cache.get(sms_count_key, 0)
+                    if sms_count < 2:
+                        sms_success = send_otp_sms(user, otp)
+                        if sms_success:
+                            cache.set(sms_count_key, sms_count + 1, timeout=60 * 60 * 24)
+                            otp_log.sms_sent = True
+                            otp_log.save(update_fields=["sms_sent"])
+                        else:
+                            logger.warning(f"SMS OTP failed for {user.phone_number}")
+                    else:
+                        logger.info(f"Daily SMS OTP limit reached for {user.phone_number}")
+            except Exception as sms_exc:
+                logger.warning(f"SMS OTP sending error for {user.phone_number}: {sms_exc}")
+
+        transaction.on_commit(send_otp_async)
+
+        return Response(
+            {
+                "email": user.email,
+                "phone_number": user.phone_number,
+                "referral_email": user.referral.email if user.referral else None,
+                "message": "OTP sent successfully",
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+    except Exception as e:
+        logger.exception(f"Unexpected error during Google signup completion: {e}")
+        return Response(
+            {"error": "Signup failed. Try again later."},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
 import threading
 from .push_deep_links import dl
 
@@ -585,10 +841,32 @@ def confirm_otp(request):
         daemon=True,
     ).start()
 
-    return Response(
-        {"message": "Account confirmed successfully."},
-        status=status.HTTP_200_OK,
-    )
+    response_data = {"message": "Account confirmed successfully."}
+
+    # Google-created accounts have an unusable password (set_unusable_
+    # password in google_complete_signup) - Confirmation.js's normal
+    # post-OTP `/api/login/` call would always fail "wrong_password" for
+    # them, since there's genuinely no password to check. Optional
+    # id_token here lets that same screen skip straight to real tokens
+    # instead - re-verified fresh (never trusting a client-echoed email)
+    # and required to match the account just activated, same "never
+    # trust anything but a freshly-verified Google token" rule as
+    # google_auth_signin/google_complete_signup.
+    id_token_str = request.data.get("id_token")
+    if id_token_str:
+        try:
+            google_user = verify_google_id_token(id_token_str)
+            if google_user["email"] == user.email.lower():
+                tokens = CustomObtainAuthToken.get_tokens_for_user(user)
+                response_data.update(tokens)
+            else:
+                logger.warning(
+                    f"confirm_otp id_token email mismatch for {user.email}"
+                )
+        except GoogleTokenError as e:
+            logger.warning(f"confirm_otp id_token verification failed: {e}")
+
+    return Response(response_data, status=status.HTTP_200_OK)
 
 
 def generate_otp():

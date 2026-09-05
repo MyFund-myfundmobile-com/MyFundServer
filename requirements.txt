@@ -24,6 +24,7 @@ django-graphql-jwt==0.4.0
 django-timezone-field==7.1
 djangorestframework==3.15.2
 djangorestframework-simplejwt==5.5.1
+google-auth==2.57.1
 graphene==3.4.3
 graphene-django==3.2.2
 graphql-core==3.2.5
