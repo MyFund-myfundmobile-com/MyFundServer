@@ -1288,8 +1288,17 @@ class AmbassadorMonthlyReportSerializer(serializers.ModelSerializer):
         user = request.user
         month = attrs.get("month")
 
-        if not getattr(user, "is_ambassador", False):
-            raise serializers.ValidationError("Only ambassadors can submit reports.")
+        # Influencers submit through this exact same pipeline (form,
+        # model, admin approval, stipend payout) as ambassadors - see
+        # 2026-09-05 decision to reuse it rather than build a parallel
+        # one, since is_ambassador/is_influencer are already mutually
+        # exclusive (enforced elsewhere - see TopReferrals.js).
+        if not getattr(user, "is_ambassador", False) and not getattr(
+            user, "is_influencer", False
+        ):
+            raise serializers.ValidationError(
+                "Only ambassadors or influencers can submit reports."
+            )
 
         already_exists = AmbassadorMonthlyReport.objects.filter(
             user=user,
