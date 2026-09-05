@@ -913,9 +913,18 @@ def send_otp_email(user, otp):
     This code is valid for 20 minutes.
     </p>
 
-    <h1 style="text-align:center; font-size:36px;">
-        {otp}
-    </h1>
+    <div style="text-align:center; margin: 20px 0;">
+        <span style="
+            display: inline-block;
+            font-size: 36px;
+            font-weight: 700;
+            letter-spacing: 6px;
+            color: #351265;
+            background-color: #f4f0fa;
+            border-radius: 10px;
+            padding: 14px 28px;
+        ">{otp}</span>
+    </div>
 
     <p>
     If you did not request this, kindly ignore this email.
@@ -930,7 +939,15 @@ def send_otp_email(user, otp):
             message=inner_html,
             recipient_list=[user.email],
             from_email="MyFund <noreply@myfundmobile.com>",
-            template="email/email.html",
+            # Light-branded template (see email_otp.html) - a middle
+            # ground between the full marketing template (whose
+            # header/colour blocks/social-icon footer read as a broadcast
+            # to Gmail's classifier, landing OTP codes in Promotions -
+            # 2026-09-05) and the fully unbranded plain template (which
+            # dropped MyFund branding entirely). Keeps a small wordmark
+            # and a boxed, centred OTP so it still reads as a MyFund
+            # email while staying inbox-safe.
+            template="email/email_otp.html",
         )
 
         # send_transactional_email catches per-provider send failures
