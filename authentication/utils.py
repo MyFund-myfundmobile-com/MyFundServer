@@ -418,12 +418,22 @@ def send_generic_email(
     use_celery_threshold=30,
     template="email/email.html",
     extra_context=None,
+    tags=None,
 ):
     """
     Smart, universal email sender - sends via Brevo (see
     authentication/services/brevo_service.py). Single/small sends go out
     inline; sends larger than Brevo's daily cap are queued via Celery and
     spread across multiple days.
+
+    tags: optional list of strings, passed straight through to
+    send_email_via_brevo on the inline path - see its own docstring.
+    Lets a caller (e.g. send_email below, tagging "template-<id>") pull a
+    delivery report back out later the same way campaign sends do.
+    Celery-batched sends don't carry this through yet - individual/
+    template sends are the only caller today, and those are always small
+    enough to go inline; wire it into send_bulk_email_task's payload if a
+    tagged send ever needs to be large enough to queue.
     """
 
     logger.info(
@@ -497,6 +507,7 @@ def send_generic_email(
                     subject=p["subject"],
                     html_content=p["html_message"],
                     from_email=from_email,
+                    tags=tags,
                 )
 
                 sent_count += 1
@@ -2242,6 +2253,115 @@ def send_ambassador_status_notification(user, became_ambassador=True):
 
     except Exception as e:
         logger.error(f"Ambassador notification error for {user.email}: {e}")
+
+
+def send_influencer_status_notification(user, became_influencer=True):
+    """
+    Send push notification + email when influencer status changes - same
+    treatment as send_ambassador_status_notification above, just worded
+    for the influencer track.
+    """
+    try:
+        if became_influencer:
+            push_title = "🎉 You are now a MyFund Influencer!"
+            push_message = (
+                f"Hi {user.first_name}, congratulations! "
+                "Your account has been updated to Influencer status. Enjoy!"
+            )
+
+            email_subject = "You are now a MyFund Influencer 🎉"
+            email_message = (
+                f"Hi {user.first_name},<br><br>"
+                "Congratulations! Your MyFund account has been updated to "
+                "<b>Influencer status</b>.<br><br>"
+                "You can now enjoy influencer-related benefits and opportunities on MyFund.<br><br>"
+                "Keep winning with MyFund. 🚀"
+            )
+
+            data = {
+                "type": "INFLUENCER_GRANTED",
+                "is_influencer": True,
+            }
+        else:
+            push_title = "Influencer Status Updated"
+            push_message = (
+                f"Hi {user.first_name}, your MyFund Influencer status has been removed."
+            )
+
+            email_subject = "Your MyFund Influencer Status Was Updated"
+            email_message = (
+                f"Hi {user.first_name},<br><br>"
+                "Your MyFund Influencer status has been removed from your account.<br><br>"
+                "If you believe this was done in error, please contact support.<br><br>"
+                "MyFund Team"
+            )
+
+            data = {
+                "type": "INFLUENCER_REVOKED",
+                "is_influencer": False,
+            }
+
+        # Push
+        try:
+            send_push_notification(
+                user=user,
+                title=push_title,
+                message=push_message,
+                data=data,
+                notif_type="SYSTEM",
+            )
+        except Exception as push_error:
+            logger.error(
+                f"Failed to send influencer push to {user.email}: {push_error}"
+            )
+
+        # Email
+        try:
+            send_generic_email(
+                subject=email_subject,
+                message=email_message,
+                from_email="MyFund <info@myfundmobile.com>",
+                recipient_list=[user.email],
+            )
+        except Exception as email_error:
+            logger.error(
+                f"Failed to send influencer email to {user.email}: {email_error}"
+            )
+
+    except Exception as e:
+        logger.error(f"Influencer notification error for {user.email}: {e}")
+
+
+def grant_user_influencer_status(user):
+    """
+    Grant influencer status and notify the user.
+    Returns True if the status changed.
+    """
+    if user.is_influencer:
+        return False
+
+    user.is_influencer = True
+    user.save(update_fields=["is_influencer"])
+
+    send_influencer_status_notification(user=user, became_influencer=True)
+
+    return True
+
+
+def revoke_user_influencer_status(user):
+    """
+    Revoke influencer status and notify the user.
+    Returns True if the status changed.
+    """
+    if not user.is_influencer:
+        return False
+
+    user.is_influencer = False
+    user.save(update_fields=["is_influencer"])
+
+    send_influencer_status_notification(user=user, became_influencer=False)
+
+    return True
 
 
 def grant_user_ambassador_status(user):

@@ -21,6 +21,7 @@ from .models import (
     WithdrawalsRequestToAdmin,
     Property,
     EmailCampaign,
+    EmailTemplate,
     Employee,
     CxWeeklyReport,
 )
@@ -34,6 +35,8 @@ from .serializers import (
 from .utils import (
     grant_user_ambassador_status,
     revoke_user_ambassador_status,
+    grant_user_influencer_status,
+    revoke_user_influencer_status,
     send_admin_push_notification,
 )
 
@@ -1293,12 +1296,12 @@ def update_user_status(request, user_id):
     Body: {"field": "is_ambassador", "value": true}
     Toggles one whitelisted boolean status field on a user - the same
     actions Django's own /admin/ panel exposes as bulk actions on
-    CustomUserAdmin. is_ambassador goes through
-    grant_user_ambassador_status/revoke_user_ambassador_status (utils.py)
-    so the same push/email notification fires as when this is done via
-    Django admin; is_banned also flips is_active off (matching
-    CustomUserAdmin.ban_user's exact behavior); the rest are a plain
-    attribute set.
+    CustomUserAdmin. is_ambassador/is_influencer go through
+    grant/revoke_user_ambassador_status and grant/revoke_user_influencer_
+    status (utils.py) so the same push/email notification fires as when
+    either is done via Django admin; is_banned also flips is_active off
+    (matching CustomUserAdmin.ban_user's exact behavior); the rest are a
+    plain attribute set.
     """
     field = request.data.get('field')
     value = request.data.get('value')
@@ -1324,6 +1327,11 @@ def update_user_status(request, user_id):
                 grant_user_ambassador_status(user)
             else:
                 revoke_user_ambassador_status(user)
+        elif field == 'is_influencer':
+            if value:
+                grant_user_influencer_status(user)
+            else:
+                revoke_user_influencer_status(user)
         elif field == 'is_banned':
             user.is_banned = value
             update_fields = ['is_banned']
@@ -3651,6 +3659,66 @@ def get_email_campaign_report(request, campaign_id):
             "unsubscribed": aggregated.unsubscribed,
             "bounced_emails": bounced_emails,
             "newly_flagged_undeliverable": newly_flagged,
+        })
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def get_email_template_report(request, template_id):
+    """
+    GET /api/admin/email-templates/<template_id>/report/
+    Same idea as get_email_campaign_report above, for an individual/
+    personal send instead of a campaign - EmailTemplate rows created via
+    a "sent" email (was_sent=True) get tagged "template-<id>" at send
+    time (see views.create_pending_email_template/
+    email_template_brevo_tag/send_email), so the same Brevo aggregated-
+    report call works here too, just filtered by that tag instead of
+    "campaign-<id>". A template that was never actually sent (was_sent=
+    False - a draft, or one saved by the webapp's own flow rather than a
+    send) has no tag and nothing to report.
+    """
+    import sib_api_v3_sdk
+    from .services.brevo_service import get_brevo_client
+    from .views import email_template_brevo_tag
+
+    try:
+        template = EmailTemplate.objects.get(pk=template_id)
+    except EmailTemplate.DoesNotExist:
+        return Response({"error": "Template not found."}, status=404)
+
+    if not template.was_sent:
+        return Response(
+            {"error": "This template hasn't been sent yet - nothing to report."},
+            status=400,
+        )
+
+    try:
+        api = sib_api_v3_sdk.TransactionalEmailsApi(get_brevo_client())
+        tag = email_template_brevo_tag(template.id)
+        start_date = template.last_update.date().isoformat()
+        end_date = timezone.now().date().isoformat()
+
+        aggregated = api.get_aggregated_smtp_report(
+            start_date=start_date, end_date=end_date, tag=tag,
+        )
+
+        return Response({
+            "template_id": template.id,
+            "requests": aggregated.requests,
+            "delivered": aggregated.delivered,
+            "opens": aggregated.opens,
+            "unique_opens": aggregated.unique_opens,
+            "clicks": aggregated.clicks,
+            "unique_clicks": aggregated.unique_clicks,
+            "hard_bounces": aggregated.hard_bounces,
+            "soft_bounces": aggregated.soft_bounces,
+            "blocked": aggregated.blocked,
+            "invalid": aggregated.invalid,
+            "spam_reports": aggregated.spam_reports,
+            "unsubscribed": aggregated.unsubscribed,
         })
 
     except Exception as e:

@@ -429,28 +429,34 @@ class EmailCampaignBatchTaskTest(TestCase):
         self.assertFalse(self.campaign.is_sending)
 
     @patch("authentication.tasks.time.sleep")
-    @patch("authentication.views.auto_save_email_as_template")
+    @patch("authentication.views.finalize_email_template")
+    @patch("authentication.views.create_pending_email_template")
     @patch("authentication.services.brevo_service.send_email_via_brevo")
     def test_auto_saves_template_only_on_first_batch_with_sends(
-        self, mock_brevo, mock_autosave, mock_sleep
+        self, mock_brevo, mock_create, mock_finalize, mock_sleep
     ):
         from .tasks import send_email_campaign_batch_task
 
         send_email_campaign_batch_task(
             self.campaign.id, ["a@example.com"], is_first_batch=True,
         )
-        mock_autosave.assert_called_once()
+        mock_create.assert_called_once()
+        mock_finalize.assert_called_once()
 
     @patch("authentication.tasks.time.sleep")
-    @patch("authentication.views.auto_save_email_as_template")
+    @patch("authentication.views.finalize_email_template")
+    @patch("authentication.views.create_pending_email_template")
     @patch("authentication.services.brevo_service.send_email_via_brevo")
-    def test_does_not_auto_save_on_later_batches(self, mock_brevo, mock_autosave, mock_sleep):
+    def test_does_not_auto_save_on_later_batches(
+        self, mock_brevo, mock_create, mock_finalize, mock_sleep
+    ):
         from .tasks import send_email_campaign_batch_task
 
         send_email_campaign_batch_task(
             self.campaign.id, ["a@example.com"], is_first_batch=False,
         )
-        mock_autosave.assert_not_called()
+        mock_create.assert_not_called()
+        mock_finalize.assert_not_called()
 
     @patch("authentication.tasks.time.sleep")
     @patch("authentication.services.brevo_service.send_email_via_brevo")

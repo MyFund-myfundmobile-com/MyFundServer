@@ -64,6 +64,9 @@ from .utils import (
     send_ambassador_status_notification,
     grant_user_ambassador_status,
     revoke_user_ambassador_status,
+    send_influencer_status_notification,
+    grant_user_influencer_status,
+    revoke_user_influencer_status,
     create_transaction,
 )
 from decimal import Decimal
@@ -218,6 +221,7 @@ class CustomUserAdmin(UserAdmin):
         "approve_kyc",
         "reject_kyc",
         "make_influencer",
+        "revoke_influencer",
         "make_ambassador",
         "revoke_ambassador",
         "delete_selected",
@@ -590,13 +594,16 @@ class CustomUserAdmin(UserAdmin):
 
     def save_model(self, request, obj, form, change):
         previous_is_ambassador = None
+        previous_is_influencer = None
 
         if change and obj.pk:
-            previous_is_ambassador = (
+            previous_values = (
                 CustomUser.objects.filter(pk=obj.pk)
-                .values_list("is_ambassador", flat=True)
+                .values_list("is_ambassador", "is_influencer")
                 .first()
             )
+            if previous_values is not None:
+                previous_is_ambassador, previous_is_influencer = previous_values
 
         super().save_model(request, obj, form, change)
 
@@ -605,6 +612,13 @@ class CustomUserAdmin(UserAdmin):
                 send_ambassador_status_notification(
                     user=obj,
                     became_ambassador=obj.is_ambassador,
+                )
+
+        if change and previous_is_influencer is not None:
+            if previous_is_influencer != obj.is_influencer:
+                send_influencer_status_notification(
+                    user=obj,
+                    became_influencer=obj.is_influencer,
                 )
 
     @admin.action(description="🌟 Make selected users ambassadors")
@@ -637,10 +651,29 @@ class CustomUserAdmin(UserAdmin):
 
     @admin.action(description="📣 Mark selected users as influencers")
     def make_influencer(self, request, queryset):
-        updated_count = queryset.update(is_influencer=True)
+        updated_count = 0
+
+        for user in queryset:
+            if grant_user_influencer_status(user):
+                updated_count += 1
+
         self.message_user(
             request,
-            f"{updated_count} user(s) marked as influencer.",
+            f"{updated_count} user(s) marked as influencer and notified.",
+            level=messages.SUCCESS,
+        )
+
+    @admin.action(description="❌ Revoke influencer status")
+    def revoke_influencer(self, request, queryset):
+        updated_count = 0
+
+        for user in queryset:
+            if revoke_user_influencer_status(user):
+                updated_count += 1
+
+        self.message_user(
+            request,
+            f"{updated_count} user(s) influencer status revoked and notified.",
             level=messages.SUCCESS,
         )
 

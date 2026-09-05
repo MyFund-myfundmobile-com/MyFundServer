@@ -9503,7 +9503,7 @@ def send_email(request):
         # Unlayer "send" flow, which would otherwise duplicate its own
         # already-saved template on every send) - see
         # authentication.admin_views.create_email_campaign for the other
-        # caller of auto_save_email_as_template.
+        # caller of create_pending_email_template/finalize_email_template.
         save_as_template = bool(request.data.get("save_as_template", False))
 
         logger.info(
@@ -9542,6 +9542,20 @@ def send_email(request):
 
         logger.info(f"📧 Cleaned recipients: {cleaned_recipients}")
 
+        # Created BEFORE the send (not after, like the old
+        # auto_save_email_as_template) so its id exists in time to tag
+        # the Brevo send itself - see email_template_brevo_tag. was_sent
+        # stays False until finalize_email_template confirms the send
+        # actually went out below; a total failure deletes this row
+        # instead, matching the old "never save a template for a send
+        # that delivered to nobody" behavior.
+        pending_template = (
+            create_pending_email_template(subject, body) if save_as_template else None
+        )
+        send_tags = (
+            [email_template_brevo_tag(pending_template.id)] if pending_template else None
+        )
+
         # Use the smart email sender. use_celery_threshold is left at its
         # default (30) rather than forced to 0 - forcing inline-always
         # meant a large campaign would try to send synchronously within
@@ -9556,6 +9570,7 @@ def send_email(request):
             recipient_list=cleaned_recipients,
             from_email=sender,
             template=email_template,
+            tags=send_tags,
         )
 
         logger.info(f"📧 send_generic_email result: {result}")
@@ -9575,6 +9590,8 @@ def send_email(request):
             if sent == 0:
                 reason = (result.get("failure_reasons") or ["Unknown error"])[0]
                 logger.error(f"❌ Brevo delivered to none of {failed} recipient(s): {reason}")
+                if pending_template:
+                    pending_template.delete()
                 return Response(
                     {
                         "status": "error",
@@ -9591,8 +9608,7 @@ def send_email(request):
 
             if failed > 0:
                 logger.warning(f"⚠️ Partial email send: {sent} sent, {failed} failed")
-                if save_as_template:
-                    auto_save_email_as_template(subject, body, len(cleaned_recipients))
+                finalize_email_template(pending_template, len(cleaned_recipients))
                 return Response(
                     {
                         "status": "partial",
@@ -9608,8 +9624,7 @@ def send_email(request):
                 )
 
             logger.info(f"✅ Email confirmed delivered via Brevo: {sent} sent")
-            if save_as_template:
-                auto_save_email_as_template(subject, body, len(cleaned_recipients))
+            finalize_email_template(pending_template, len(cleaned_recipients))
             return Response(
                 {
                     "status": "success",
@@ -9623,8 +9638,11 @@ def send_email(request):
 
         elif result["status"] == "queued":
             logger.info(f"📦 Email queued to Celery: {result['total']} recipients")
-            if save_as_template:
-                auto_save_email_as_template(subject, body, result["total"])
+            # The celery-batched path doesn't carry the tag through (see
+            # send_generic_email's docstring), so this template's Report
+            # tap will come back with no delivery data - handled
+            # gracefully client-side same as any untagged/too-early send.
+            finalize_email_template(pending_template, result["total"])
             return Response(
                 {
                     "status": "queued",
@@ -9677,21 +9695,39 @@ from django.views.decorators.http import require_http_methods
 import logging
 
 
-def auto_save_email_as_template(subject, html, recipient_count=None):
+def email_template_brevo_tag(template_id):
     """
-    Every email actually sent from the admin Email tab (compose or
-    segment/individuals sends) gets saved here as a reusable template, so
-    it can be revisited, edited, and resent to a different audience later
-    - see create_email_campaign (admin_views.py) and send_email below.
+    Deterministic from the id alone (no separate column needed) - same
+    "campaign-<id>" convention admin_views.get_email_campaign_report uses
+    for EmailCampaign, just "template-<id>" for EmailTemplate. Computed
+    the same way at send time (create_pending_email_template's caller
+    tags the Brevo send with it) and at report time
+    (get_email_template_report), so the two always agree.
+    """
+    return f"template-{template_id}"
+
+
+def create_pending_email_template(subject, html):
+    """
+    Creates the EmailTemplate row BEFORE the actual Brevo send, not
+    after (contrast the old auto_save_email_as_template) - so its id
+    exists in time to tag the send itself (see email_template_brevo_tag),
+    which is what makes get_email_template_report possible for
+    individual/personal sends the same way it already works for
+    campaigns. was_sent stays False until finalize_email_template
+    confirms the send actually went out; a totally-failed send (see
+    send_email's sent==0 branch) deletes this row instead of finalizing
+    it, matching the old behavior of never saving a template for a send
+    that delivered to nobody.
+
     Never raises: a template-save hiccup must never block or fail the
-    actual send, which is the primary action. title is EmailTemplate's
-    only unique field, so a timestamp is always appended (rather than
-    only on collision) - simpler, and makes clear at a glance which
-    templates were auto-saved from a send vs. deliberately named.
-    recipient_count is the size of the audience that send targeted (not
-    a live delivered-so-far tally, which would go stale as e.g. a
-    segment campaign's later daily batches go out) - shown on the
-    template list's "Sent" badge.
+    actual send, which is the primary action. Returns None on failure
+    (caller treats that as "no tagging, no template row" and the send
+    proceeds untagged - degrades to the old untracked behavior rather
+    than blocking the send). title is EmailTemplate's only unique field,
+    so a timestamp is always appended (rather than only on collision) -
+    simpler, and makes clear at a glance which templates were auto-saved
+    from a send vs. deliberately named.
     """
     try:
         base_title = (subject or "Untitled").strip() or "Untitled"
@@ -9706,16 +9742,34 @@ def auto_save_email_as_template(subject, html, recipient_count=None):
             candidate = f"{title} ({suffix})"[:255]
             suffix += 1
 
-        EmailTemplate.objects.create(
+        return EmailTemplate.objects.create(
             title=candidate,
             design_body=json.dumps({}),
             design_html=html,
             last_update=timezone.now(),
-            was_sent=True,
-            recipient_count=recipient_count,
+            was_sent=False,
+            recipient_count=None,
         )
     except Exception as e:
-        logger.error(f"Auto-save-as-template failed for subject '{subject}': {e}")
+        logger.error(f"create_pending_email_template failed for subject '{subject}': {e}")
+        return None
+
+
+def finalize_email_template(template_obj, recipient_count):
+    """
+    recipient_count is the size of the audience that send targeted (not
+    a live delivered-so-far tally, which would go stale as e.g. a
+    segment campaign's later daily batches go out) - shown on the
+    template list's "Sent" badge.
+    """
+    if not template_obj:
+        return
+    try:
+        template_obj.was_sent = True
+        template_obj.recipient_count = recipient_count
+        template_obj.save(update_fields=["was_sent", "recipient_count"])
+    except Exception as e:
+        logger.error(f"finalize_email_template failed for template {template_obj.id}: {e}")
 
 
 @api_view(["POST"])

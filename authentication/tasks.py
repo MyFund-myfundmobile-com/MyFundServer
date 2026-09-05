@@ -1598,8 +1598,13 @@ def send_email_campaign_batch_task(
     campaign.save()
 
     if is_first_batch and campaign.sent_count > 0:
-        from .views import auto_save_email_as_template
-        auto_save_email_as_template(subject, body, campaign.total_recipients)
+        # Just a reusable copy for "resend as new" from the templates
+        # list - this campaign already has its own "campaign-<id>" tag/
+        # report (get_email_campaign_report), so no pending/finalize
+        # split or tagging needed for this auto-saved copy.
+        from .views import create_pending_email_template, finalize_email_template
+        template_obj = create_pending_email_template(subject, body)
+        finalize_email_template(template_obj, campaign.total_recipients)
 
     logger.info(
         f"📊 Campaign {campaign_id} batch done: {sent_this_call} sent, "
