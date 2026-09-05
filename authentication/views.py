@@ -1627,12 +1627,31 @@ def _send_otp(user, otp, purpose="signup"):
     """
     try:
         # Compose template message
+        # Shared boxed-OTP markup (see email_otp.html / send_otp_email) -
+        # keeps this in the same inbox-safe, light-branded shape as the
+        # signup OTP, instead of the full marketing template this used to
+        # render into.
+        otp_box = f"""
+            <div style="text-align:center; margin: 20px 0;">
+                <span style="
+                    display: inline-block;
+                    font-size: 36px;
+                    font-weight: 700;
+                    letter-spacing: 6px;
+                    color: #351265;
+                    background-color: #f4f0fa;
+                    border-radius: 10px;
+                    padding: 14px 28px;
+                ">{otp}</span>
+            </div>
+        """
+
         if purpose == "signup":
             subject = f"[OTP-{otp}] Complete Your MyFund Signup"
             inner_html = f"""
                 <p>Hi {user.first_name},</p>
                 <p>Use the One-Time-Password (OTP) below to complete your MyFund signup. Valid for 20 minutes.</p>
-                <h1 style="text-align:center; font-size:36px;">{otp}</h1>
+                {otp_box}
                 <p>If you did not request this, ignore this email.</p>
                 <p>Cheers! 🥂</p>
             """
@@ -1641,7 +1660,7 @@ def _send_otp(user, otp, purpose="signup"):
             inner_html = f"""
                 <p>Hi {user.first_name},</p>
                 <p>You requested to reset your password. Use the OTP below to continue. Valid for 20 minutes.</p>
-                <h1 style="text-align:center; font-size:36px;">{otp}</h1>
+                {otp_box}
                 <p>If you did not request this, ignore this email.</p>
                 <p>Thanks, <br> MyFund Team</p>
             """
@@ -1654,7 +1673,12 @@ def _send_otp(user, otp, purpose="signup"):
                 recipient_list=[user.email],
                 from_email="MyFund <info@myfundmobile.com>",
                 use_celery_threshold=30,
-                template="email/email.html",
+                # Light-branded template (see email_otp.html) - same
+                # Promotions-tab fix as signup's OTP (2026-09-05): the
+                # full marketing template reads as a broadcast to Gmail's
+                # classifier, and a time-limited reset code needs to land
+                # in the inbox.
+                template="email/email_otp.html",
             )
             # send_generic_email catches per-recipient send failures
             # internally and returns a result dict rather than raising, so
@@ -1700,7 +1724,10 @@ def send_password_change_confirmation(user):
                 recipient_list=[user.email],
                 from_email="MyFund Security <info@myfundmobile.com>",
                 use_celery_threshold=30,
-                template="email/email.html",
+                # Same Promotions-tab fix as the OTP emails - a "did you
+                # just change your password" notice needs Primary-inbox
+                # delivery even more than most transactional mail.
+                template="email/email_otp.html",
             )
             logger.info(f"Password change confirmation sent to {user.email}")
             return True
