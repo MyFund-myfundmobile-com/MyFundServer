@@ -1316,6 +1316,7 @@ def process_scheduled_withdrawal(withdrawal, triggered_by="celery"):
             ),
             from_email="MyFund <info@myfundmobile.com>",
             recipient_list=[user.email],
+            template="email/email_light.html",
         )
     except Exception:
         logger.exception("User email failed for scheduled withdrawal %s", withdrawal.pk)

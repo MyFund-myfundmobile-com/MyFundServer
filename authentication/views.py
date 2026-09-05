@@ -939,7 +939,7 @@ def send_otp_email(user, otp):
             message=inner_html,
             recipient_list=[user.email],
             from_email="MyFund <noreply@myfundmobile.com>",
-            # Light-branded template (see email_otp.html) - a middle
+            # Light-branded template (see email_light.html) - a middle
             # ground between the full marketing template (whose
             # header/colour blocks/social-icon footer read as a broadcast
             # to Gmail's classifier, landing OTP codes in Promotions -
@@ -947,7 +947,7 @@ def send_otp_email(user, otp):
             # dropped MyFund branding entirely). Keeps a small wordmark
             # and a boxed, centred OTP so it still reads as a MyFund
             # email while staying inbox-safe.
-            template="email/email_otp.html",
+            template="email/email_light.html",
         )
 
         # send_transactional_email catches per-provider send failures
@@ -1627,7 +1627,7 @@ def _send_otp(user, otp, purpose="signup"):
     """
     try:
         # Compose template message
-        # Shared boxed-OTP markup (see email_otp.html / send_otp_email) -
+        # Shared boxed-OTP markup (see email_light.html / send_otp_email) -
         # keeps this in the same inbox-safe, light-branded shape as the
         # signup OTP, instead of the full marketing template this used to
         # render into.
@@ -1673,12 +1673,12 @@ def _send_otp(user, otp, purpose="signup"):
                 recipient_list=[user.email],
                 from_email="MyFund <info@myfundmobile.com>",
                 use_celery_threshold=30,
-                # Light-branded template (see email_otp.html) - same
+                # Light-branded template (see email_light.html) - same
                 # Promotions-tab fix as signup's OTP (2026-09-05): the
                 # full marketing template reads as a broadcast to Gmail's
                 # classifier, and a time-limited reset code needs to land
                 # in the inbox.
-                template="email/email_otp.html",
+                template="email/email_light.html",
             )
             # send_generic_email catches per-recipient send failures
             # internally and returns a result dict rather than raising, so
@@ -1727,7 +1727,7 @@ def send_password_change_confirmation(user):
                 # Same Promotions-tab fix as the OTP emails - a "did you
                 # just change your password" notice needs Primary-inbox
                 # delivery even more than most transactional mail.
-                template="email/email_otp.html",
+                template="email/email_light.html",
             )
             logger.info(f"Password change confirmation sent to {user.email}")
             return True

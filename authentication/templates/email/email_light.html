@@ -1,12 +1,18 @@
-<!-- OTP mode - a light-touch step between email.html (full marketing
-     broadcast) and email_plain.html (no branding at all). Security codes
-     need Primary-inbox delivery, which the fully branded template lost
-     (see the 2026-09-05 "Promotions tab" fix) - but the user still wants
-     it recognizably MyFund, not a bare-bones plain email. So: a small
-     text wordmark instead of a hero image/colour block, plain white
-     body, and the actual OTP code is the only "designed" element - see
-     send_otp_email in views.py, which renders it big/central/boxed
-     inline before handing it to {{ message|safe }} below. -->
+<!-- Light-branded mode - a middle ground between email.html (full
+     marketing broadcast: header image, colour blocks, social-icon
+     footer) and email_plain.html (no branding at all). Time-sensitive
+     or security-adjacent transactional mail needs Primary-inbox
+     delivery, which the fully branded template was losing to Gmail's
+     Promotions classifier (see the 2026-09-05 "Promotions tab" fix) -
+     but the user still wants it recognizably MyFund, not a bare-bones
+     plain email. So: a small text wordmark instead of a hero image/
+     colour block, plain white body, minimal one-line footer. Used by
+     OTP emails (send_otp_email / _send_otp in views.py, which render
+     the code big/central/boxed inline before handing it to
+     {{ message|safe }} below), password-change confirmation, referral
+     reward emails, AutoSave failure notices, and scheduled-withdrawal
+     completion emails - anything time-sensitive/actionable enough that
+     it must not get buried in Promotions. -->
 <!DOCTYPE html>
 <html lang="en">
   <head>

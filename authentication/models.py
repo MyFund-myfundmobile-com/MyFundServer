@@ -785,7 +785,12 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                     message=message,
                     recipient_list=[self.referral.email],
                     from_email="MyFund <info@myfundmobile.com>",
-                    template="email/email.html",
+                    # Light-branded template (see email_light.html) - a
+                    # pending reward is actionable enough (nudges the
+                    # referrer to check their wallet / the referred
+                    # friend to make their first savings) that it
+                    # shouldn't get buried in Promotions.
+                    template="email/email_light.html",
                 )
             except Exception as e:
                 logger.warning(
@@ -807,7 +812,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                 message=message,
                 recipient_list=[self.email],
                 from_email="MyFund <info@myfundmobile.com>",
-                template="email/email.html",
+                template="email/email_light.html",
             )
         except Exception as e:
             logger.warning(
@@ -1019,7 +1024,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                 message=message,
                 recipient_list=[user.email],
                 from_email="MyFund <info@myfundmobile.com>",
-                template="email/email.html",  # <-- ensures your header/footer template is used
+                template="email/email_light.html",
             )
             logger.info(f"✅ Confirmation email sent to {user.email}")
         except Exception as e:
@@ -1839,6 +1844,7 @@ class TargetSavings(models.Model):
                             message=message,
                             recipient_list=[user.email],
                             from_email=settings.DEFAULT_FROM_EMAIL,
+                            template="email/email_light.html",
                         )
                     except Exception as e:
                         logger.exception(
@@ -2218,6 +2224,7 @@ class TargetSavings(models.Model):
                 message=message,
                 recipient_list=[self.user.email],
                 from_email=settings.DEFAULT_FROM_EMAIL,
+                template="email/email_light.html",
             )
 
         except Exception as e:
