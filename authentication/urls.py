@@ -78,6 +78,12 @@ urlpatterns = [
         views.google_complete_signup,
         name="google-complete-signup",
     ),
+    path("auth/apple/", views.apple_auth_signin, name="apple-auth-signin"),
+    path(
+        "auth/apple/complete-signup/",
+        views.apple_complete_signup,
+        name="apple-complete-signup",
+    ),
     path("login/", views.CustomObtainAuthToken.as_view(), name="login"),
     path("admin/login/", views.CustomObtainAuthToken.as_view(), name="admin-login"),
     path(

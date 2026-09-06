@@ -437,6 +437,15 @@ DEFAULT_FROM_EMAIL = "MyFund <noreply@myfundmobile.com>"
 # bundle ID/package name + SHA-1 fingerprint instead.
 GOOGLE_OAUTH_CLIENT_ID = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "")
 
+# Sign in with Apple - the audience every native identity token is
+# minted against is the app's own bundle ID (unlike Google, there's no
+# separate "web client" concept for the native flow). Defaulted to the
+# real bundle ID rather than "" so this can't silently repeat Google's
+# "not configured on this server" bug (that one only had an empty
+# default because the value was newly generated per-environment; this
+# one is public, fixed, and already known everywhere).
+APPLE_BUNDLE_ID = os.getenv("APPLE_BUNDLE_ID", "com.tolulopeahmed.MyFundMobile")
+
 
 AUTHENTICATION_BACKENDS = [
     "authentication.auth_backends.CustomUserAdminAuthBackend",  # Custom admin authentication
