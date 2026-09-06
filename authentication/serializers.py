@@ -837,6 +837,7 @@ class EmailTemplateSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "title",
+            "subject",  # clean subject, distinct from title - see model docstring
             "design",  # JSON (for Unlayer)
             "design_html",  # HTML (for preview/send)
             "last_update",

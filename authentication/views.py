@@ -10332,7 +10332,10 @@ def create_pending_email_template(subject, html):
     than blocking the send). title is EmailTemplate's only unique field,
     so a timestamp is always appended (rather than only on collision) -
     simpler, and makes clear at a glance which templates were auto-saved
-    from a send vs. deliberately named.
+    from a send vs. deliberately named. The real, unmangled subject is
+    kept separately in `subject` - clients should read that (falling back
+    to stripping the timestamp off `title` for rows saved before this
+    field existed) rather than ever showing `title` as the subject.
     """
     try:
         base_title = (subject or "Untitled").strip() or "Untitled"
@@ -10349,6 +10352,7 @@ def create_pending_email_template(subject, html):
 
         return EmailTemplate.objects.create(
             title=candidate,
+            subject=base_title,
             design_body=json.dumps({}),
             design_html=html,
             last_update=timezone.now(),
@@ -10399,6 +10403,11 @@ def save_template(request):
 
         template = EmailTemplate.objects.create(
             title=title,
+            # A deliberately-named template (webapp Unlayer / mobile's own
+            # "Save as Template") has no timestamp mangling to strip, so
+            # subject and title start out identical - unlike
+            # create_pending_email_template's auto-saved rows.
+            subject=title,
             design_body=design_body,
             design_html=design_html,
             last_update=last_update,
@@ -10467,7 +10476,15 @@ def update_template(request, template_id):
     try:
         template = EmailTemplate.objects.get(id=template_id)
 
-        template.title = request.data.get("title", template.title)
+        # Keep subject mirroring title for a deliberately-named template
+        # (subject == title, no timestamp mangling) so renaming it here
+        # doesn't leave a stale subject behind. An auto-saved row's
+        # subject deliberately differs from its (timestamp-suffixed)
+        # title - leave that alone.
+        new_title = request.data.get("title", template.title)
+        if new_title != template.title and template.subject == template.title:
+            template.subject = new_title
+        template.title = new_title
 
         design_body = request.data.get("designBody", template.design_body)
         if not isinstance(design_body, str):

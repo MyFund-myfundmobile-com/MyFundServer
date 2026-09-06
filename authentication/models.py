@@ -2847,6 +2847,14 @@ class WithdrawalsRequestToAdmin(models.Model):
 
 class EmailTemplate(models.Model):
     title = models.CharField(max_length=255, unique=True)  # Ensure title is unique
+    # The actual email subject line, kept separate from `title` so `title`
+    # can stay a short, unique, human-authored template name (webapp
+    # library, mobile "Save as Template") without being polluted by
+    # create_pending_email_template's timestamp-uniqueness hack. Null for
+    # rows created before this field existed - callers should fall back to
+    # stripping that timestamp suffix off `title` for those (see mobile's
+    # utils/emailTemplate.deriveTemplateSubject).
+    subject = models.CharField(max_length=255, null=True, blank=True)
     design_body = models.TextField()
     design_html = models.TextField()
     last_update = models.DateTimeField()

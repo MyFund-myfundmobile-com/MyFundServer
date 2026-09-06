@@ -184,6 +184,7 @@ class AutoSaveAsTemplateTest(TestCase):
 
         created = EmailTemplate.objects.latest("id")
         self.assertTrue(created.title.startswith("Quarterly Update - "))
+        self.assertEqual(created.subject, "Quarterly Update")
         self.assertEqual(created.design_html, "<p>Hello {first_name}</p>")
 
     @patch("authentication.views.send_generic_email")
