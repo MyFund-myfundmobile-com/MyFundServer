@@ -5590,12 +5590,100 @@ def withdraw_to_local_bank(request):
     with transaction.atomic():
         user = User.objects.select_for_update().get(pk=request.user.pk)
 
-        if source_account == "savings" and user.savings < amount:
-            return Response({"error": "Insufficient savings balance."}, status=400)
-        if source_account == "investment" and user.investment < amount:
-            return Response({"error": "Insufficient investment balance."}, status=400)
-        if source_account == "wallet" and user.wallet < amount:
-            return Response({"error": "Insufficient wallet balance."}, status=400)
+        source_choice = {
+            "savings": "SAVINGS",
+            "investment": "INVESTMENT",
+            "wallet": "WALLET",
+        }[source_account]
+
+        if getattr(user, source_account) < amount:
+            return Response(
+                {"error": f"Insufficient {source_account} balance."}, status=400
+            )
+
+        # Duplicate-submission guard: if a withdrawal for this exact
+        # user/source/amount is already sitting "pending" from the last
+        # 30 minutes, don't deduct the balance and call Paystack again -
+        # check what actually happened to it first. This is what silently
+        # produced two real payouts for the same withdrawal in the
+        # 2026-09-07 incident: a slow Paystack response got treated as a
+        # failure, and the retry (plus the manual admin payout it queued)
+        # paid the same withdrawal a second time.
+        recent_cutoff = timezone.now() - timedelta(minutes=30)
+        existing_pending = (
+            Transaction.objects.select_for_update()
+            .filter(
+                user=user,
+                status="pending",
+                source=source_choice,
+                total_amount=amount,
+                transaction_type="debit",
+                date__gte=recent_cutoff,
+            )
+            .order_by("-date")
+            .first()
+        )
+
+        if existing_pending:
+            verify = verify_paystack_transfer(existing_pending.transaction_id)
+
+            if verify["status"] == "success":
+                if existing_pending.balance_before is None:
+                    prev = getattr(user, source_account)
+                    new = prev - amount
+                    setattr(user, source_account, new)
+                    user.save(update_fields=[source_account])
+                    existing_pending.balance_before = prev
+                    existing_pending.balance_after = new
+
+                existing_pending.status = "confirmed"
+                existing_pending.save(
+                    update_fields=["status", "balance_before", "balance_after"]
+                )
+
+                return Response(
+                    {
+                        "success": True,
+                        "message": "Withdrawal already completed by Paystack.",
+                        "transaction_id": existing_pending.transaction_id,
+                        "updated_balance": {
+                            "savings": user.savings,
+                            "investment": user.investment,
+                            "wallet": user.wallet,
+                        },
+                    },
+                    status=200,
+                )
+
+            if verify["found"] is None or verify["status"] in (
+                None,
+                "pending",
+                "otp",
+                "processing",
+                "queued",
+            ):
+                return Response(
+                    {
+                        "error": "A previous withdrawal request for this amount is still being processed. Please wait a few minutes before trying again.",
+                        "transaction_id": existing_pending.transaction_id,
+                    },
+                    status=409,
+                )
+
+            # Genuinely failed/reversed on Paystack (or never reached it) -
+            # refund it if its balance was already deducted, then fall
+            # through and let this request proceed as a fresh attempt.
+            if existing_pending.balance_before is not None:
+                setattr(
+                    user, source_account, getattr(user, source_account) + amount
+                )
+                user.save(update_fields=[source_account])
+
+            existing_pending.status = "failed"
+            existing_pending.save(update_fields=["status"])
+
+        previous_balance = getattr(user, source_account)
+        new_balance = previous_balance - amount
 
         try:
             target_bank_account = BankAccount.objects.get(
@@ -5615,19 +5703,6 @@ def withdraw_to_local_bank(request):
         transaction_id = f"withdrawal-{reference_code}"
 
         try:
-            if source_account == "savings":
-                previous_balance = user.savings
-                new_balance = user.savings - amount
-                source_choice = "SAVINGS"
-            elif source_account == "investment":
-                previous_balance = user.investment
-                new_balance = user.investment - amount
-                source_choice = "INVESTMENT"
-            else:
-                previous_balance = user.wallet
-                new_balance = user.wallet - amount
-                source_choice = "WALLET"
-
             transaction_details = Transaction.objects.create(
                 user=user,
                 transaction_type="debit",
@@ -6665,9 +6740,46 @@ def make_withdrawal_through_paystack(user, target_bank_account, amount, referenc
         "reference": reference,
     }
 
-    response = requests.post(url, headers=headers, json=data)
+    response = requests.post(url, headers=headers, json=data, timeout=30)
 
     return response.json()
+
+
+def verify_paystack_transfer(reference):
+    """
+    Looks up a transfer by OUR reference directly on Paystack, so callers
+    can tell a genuine failure apart from "we just didn't get the response
+    in time but Paystack sent it anyway" (see 2026-09-07 double-payment
+    incident: a slow/timed-out response was treated as a failure, and the
+    retry + manual admin payout that followed paid the same withdrawal
+    twice, since neither side knew Paystack had already completed it).
+
+    Returns {"found": True, "status": <paystack transfer status>} when
+    Paystack has a record of this reference, {"found": False} when it
+    does not (safe to treat as never sent), or {"found": None} when
+    Paystack couldn't be reached at all (unknown - caller should not
+    assume it's safe to retry).
+    """
+    url = f"https://api.paystack.co/transfer/verify/{reference}"
+    headers = {"Authorization": f"Bearer {paystack_secret_key}"}
+
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+    except requests.exceptions.RequestException:
+        return {"found": None, "status": None}
+
+    if response.status_code == 404:
+        return {"found": False, "status": None}
+
+    try:
+        body = response.json()
+    except ValueError:
+        return {"found": None, "status": None}
+
+    if not body.get("status"):
+        return {"found": False, "status": None}
+
+    return {"found": True, "status": (body.get("data") or {}).get("status")}
 
 
 def make_withdrawal_through_admin(user, amount, transaction_id):
@@ -12813,6 +12925,68 @@ def withdraw_savings(request, id):
 
         with transaction.atomic():
             goal = SavingsGoal.objects.select_for_update().get(id=id, user=user)
+
+            # Duplicate-submission guard - see the matching one in
+            # withdraw_to_local_bank for why this exists (2026-09-07
+            # double-payment incident: a slow Paystack response got
+            # treated as a failure, and the retry paid the same
+            # withdrawal a second time).
+            recent_cutoff = timezone.now() - timedelta(minutes=30)
+            existing_pending = (
+                Transaction.objects.select_for_update()
+                .filter(
+                    user=user,
+                    status="pending",
+                    source="SAVINGS",
+                    total_amount=amount,
+                    transaction_type="debit",
+                    description=f"Target Savings Withdrawal ({goal.name})",
+                    date__gte=recent_cutoff,
+                )
+                .order_by("-date")
+                .first()
+            )
+
+            if existing_pending:
+                verify = verify_paystack_transfer(existing_pending.transaction_id)
+
+                if verify["status"] == "success":
+                    existing_pending.status = "confirmed"
+                    existing_pending.save(update_fields=["status"])
+
+                    return Response(
+                        {
+                            "success": True,
+                            "message": "Withdrawal already completed by Paystack.",
+                            "transaction_id": existing_pending.transaction_id,
+                            "updated_balance": float(goal.saved_amount),
+                        },
+                        status=status.HTTP_200_OK,
+                    )
+
+                if verify["found"] is None or verify["status"] in (
+                    None,
+                    "pending",
+                    "otp",
+                    "processing",
+                    "queued",
+                ):
+                    return Response(
+                        {
+                            "error": "A previous withdrawal request for this amount is still being processed. Please wait a few minutes before trying again.",
+                            "transaction_id": existing_pending.transaction_id,
+                        },
+                        status=409,
+                    )
+
+                # Genuinely failed/reversed on Paystack (or never reached
+                # it) - the goal's balance was already deducted when that
+                # pending transaction was created, so refund it, then let
+                # this request proceed as a fresh attempt below.
+                goal.saved_amount = goal.saved_amount + amount
+                goal.save(update_fields=["saved_amount"])
+                existing_pending.status = "failed"
+                existing_pending.save(update_fields=["status"])
 
             if amount > goal.saved_amount:
                 return Response(
