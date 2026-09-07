@@ -143,7 +143,14 @@ urlpatterns = [
     # so an extra "api/" prefix here doubled it to /api/api/bank-accounts/...
     # for every router-based endpoint (bank-accounts/resolve/ included) -
     # a genuine 404 for any client correctly calling /api/bank-accounts/...
-    path("", include(router.urls)),
+    #
+    # router.urls itself moved to the very end of this list (see bottom of
+    # file) - DRF's default router pk pattern (bank-accounts/<pk>/) uses a
+    # permissive [^/.]+ regex that matches ANY string, so "get-bank-accounts"
+    # and "set-default" were matching THAT pattern first whenever this
+    # include was placed above them, 404ing as if pk="get-bank-accounts"
+    # were being looked up. Explicit literal paths must be listed (and
+    # resolved) before this catch-all-ish router include, never after.
     path("add-bank-account/", views.add_bank_account, name="add-bank-account"),
     path(
         "delete-bank-account/<str:account_number>/",
@@ -558,4 +565,7 @@ urlpatterns = [
         AdminFinanceMetricsView.as_view(),
         name="admin-finance-metrics",
     ),
+    # Router include kept last on purpose - see the long comment near the
+    # top "Bank-related APIs" section for why.
+    path("", include(router.urls)),
 ]
