@@ -3856,6 +3856,22 @@ class UserTransactionListView(generics.ListAPIView):
                 | Q(description__icontains="target savings")
             )
 
+        # Same "complete, naturally-bounded subset" escape hatch, for
+        # dividend/quarterly-ROI payouts - there's no dedicated model field
+        # for these (see create_transaction's quarterly-payout call site,
+        # description=f"Dividends: {QUARTER_LABEL} ROI"), just a
+        # description convention, and by the time a user checks a full
+        # quarter later they've near-certainly made 20+ other transactions
+        # since - mirrors the frontend's own Payouts filter (Notifications.js)
+        # so what's fetched here and what's displayed there never diverge.
+        if self.request.query_params.get("payouts_only") in ("1", "true", "True"):
+            queryset = queryset.filter(
+                Q(description__icontains="dividend")
+                | Q(description__icontains="payout")
+                | Q(description__icontains="quarterly")
+                | Q(description__icontains="roi")
+            )
+
         return queryset
 
 
