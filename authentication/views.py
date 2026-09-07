@@ -3111,6 +3111,14 @@ def add_bank_account(request):
                 )
             else:
                 print("NO EXISTING BANK ACCOUNT FOUND. CREATING NEW ONE.")
+                # First bank account the user adds becomes their default
+                # automatically - same "auto-assign when none exists" rule
+                # Card already follows (see remove_card) - otherwise a
+                # brand-new user would have no default at all until they
+                # explicitly set one.
+                is_first_bank_account = not BankAccount.objects.filter(
+                    user=user, is_default=True
+                ).exists()
                 bank_account = BankAccount.objects.create(
                     user=user,
                     bank_name=bank_name,
@@ -3118,7 +3126,7 @@ def add_bank_account(request):
                     account_name=account_name,
                     bank_code=bank_code,
                     paystack_recipient_code=paystack_recipient_code,
-                    is_default=False,
+                    is_default=is_first_bank_account,
                 )
                 user.bank_accounts.add(bank_account)
 
@@ -3442,7 +3450,12 @@ def delete_bank_account(request, account_number):
 @permission_classes([IsAuthenticated])
 def get_user_banks(request):
     try:
-        user_banks = BankAccount.objects.filter(user=request.user)
+        # Default account first (matches Settings.js's own bankAccounts[0]
+        # assumption for "primary bank"), then most-recently-added -
+        # same ordering Card's own list view uses.
+        user_banks = BankAccount.objects.filter(user=request.user).order_by(
+            "-is_default", "-id"
+        )
         serializer = BankAccountSerializer(user_banks, many=True)
         logger.info(
             "Retrieved %d bank accounts for user: %s",
@@ -3591,6 +3604,37 @@ def set_default_card(request):
 
     return Response(
         {"message": "Default card updated successfully."},
+        status=status.HTTP_200_OK,
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def set_default_bank_account(request):
+    bank_account_id = request.data.get("bank_account_id")
+
+    if not bank_account_id:
+        return Response(
+            {"error": "bank_account_id is required."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        bank_account = BankAccount.objects.get(
+            id=bank_account_id,
+            user=request.user,
+        )
+    except BankAccount.DoesNotExist:
+        return Response(
+            {"error": "Bank account not found."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    bank_account.is_default = True
+    bank_account.save()
+
+    return Response(
+        {"message": "Default bank account updated successfully."},
         status=status.HTTP_200_OK,
     )
 

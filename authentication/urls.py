@@ -153,6 +153,11 @@ urlpatterns = [
     path(
         "bank-accounts/get-bank-accounts/", views.get_user_banks, name="get_user_banks"
     ),
+    path(
+        "bank-accounts/set-default/",
+        views.set_default_bank_account,
+        name="set_default_bank_account",
+    ),
     # Card-related APIs
     path("cards/", views.UserCardListView.as_view(), name="user_cards"),
     path("cards/remove/", views.remove_card, name="remove_card"),

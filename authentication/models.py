@@ -1331,6 +1331,16 @@ class BankAccount(models.Model):
     bank_code = models.CharField(max_length=10, default="")  # Add a default value
     paystack_recipient_code = models.CharField(max_length=255, blank=True, null=True)
 
+    def save(self, *args, **kwargs):
+        # Same single-default enforcement as Card.save() - setting one
+        # account default always unsets any other for the same user,
+        # rather than requiring every caller to remember to do it.
+        if self.is_default and self.user_id:
+            BankAccount.objects.filter(user=self.user, is_default=True).exclude(
+                id=self.id
+            ).update(is_default=False)
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return f"{self.user} - {self.user.email} - {self.bank_name} ({self.account_number})"
 
