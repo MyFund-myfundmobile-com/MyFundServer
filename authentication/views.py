@@ -65,7 +65,6 @@ from django.db import transaction
 from .utils import (
     send_sms_via_payless,
     validate_phone_number,
-    send_bulk_sms,
     send_admin_push_notification,
     approve_quicksave_credit,
 )
@@ -1531,38 +1530,46 @@ def test_email(request):
 
 def test_sms(request):
     """
-    Diagnostic twin of test_email, for verifying PAYLESS_SMS_URL and
-    sender ID approval against whatever environment this is actually
-    running in (env vars aren't visible from outside, this is). Makes the
-    raw request directly (not via send_sms_via_payless) so the actual
-    response body/URL used is visible, not just a collapsed True/False.
+    Diagnostic twin of test_email, for verifying PAYLESS_SMS_SEND_URL,
+    PAYLESS_SMS_API_TOKEN, and sender ID approval against whatever
+    environment this is actually running in (env vars aren't visible from
+    outside, this is). Makes the raw request directly (not via
+    send_sms_via_payless) so the actual response body/URL used is visible,
+    not just a collapsed True/False.
     """
     import requests as _requests
-    import urllib.parse as _urllib_parse
     from .utils import normalize_phone
 
     phone_number = request.GET.get("phone", "08033924595")
     clean_number = normalize_phone(phone_number)
 
-    base_url = settings.PAYLESS_SMS_URL
-    username = settings.PAYLESS_SMS_USERNAME
+    base_url = settings.PAYLESS_SMS_SEND_URL
     sender = settings.PAYLESS_SMS_SENDER_ID
     message = "MyFund SMS diagnostic test - if you received this, delivery is working."
-    encoded_message = _urllib_parse.quote(message)
 
-    full_url = (
-        f"{base_url}?option=com_spc&comm=spc_api"
-        f"&username={username}"
-        f"&password={settings.PAYLESS_SMS_PASSWORD}"
-        f"&sender={sender}"
-        f"&recipient={clean_number}"
-        f"&message={encoded_message}"
-    )
+    payload = {
+        "api_token": settings.PAYLESS_SMS_API_TOKEN,
+        "recipient": clean_number,
+        "sender_id": sender,
+        "type": "plain",
+        "message": message,
+    }
 
     try:
-        response = _requests.get(full_url, timeout=20)
-        body = response.text.strip()
+        response = _requests.post(
+            base_url,
+            json=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            timeout=20,
+        )
         status_code = response.status_code
+        try:
+            body = response.json()
+        except ValueError:
+            body = response.text.strip()
     except Exception as e:
         body = f"{type(e).__name__}: {e}"
         status_code = None
@@ -1575,7 +1582,7 @@ def test_sms(request):
             "sender": sender,
             "http_status": status_code,
             "body": body,
-            "success": body.upper().startswith("OK") if body else False,
+            "success": isinstance(body, dict) and body.get("status") == "success",
         }
     )
 

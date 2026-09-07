@@ -855,41 +855,45 @@ def normalize_phone(phone_number, region="NG"):
 
 
 # --------------------------------------------------
-# SMS SENDER (FINAL FIXED VERSION)
+# SMS SENDER - Payless Bulk SMS HTTP API (JSON body + api_token), per
+# https://app.paylessbulksms.com.ng/developers/http-docs "SMS API" - this
+# replaces the old SPC query-string GET API (username/password in the URL),
+# which the account's dashboard no longer documents as the supported path.
 # --------------------------------------------------
 def send_sms_via_payless(phone_number, message):
-    base_url = settings.PAYLESS_SMS_URL
-    username = settings.PAYLESS_SMS_USERNAME
-    password = settings.PAYLESS_SMS_PASSWORD
-    sender = settings.PAYLESS_SMS_SENDER_ID
-
     clean_number = normalize_phone(phone_number)
 
     if not clean_number:
         logger.error(f"❌ Invalid phone number: {phone_number}")
         return False
 
-    encoded_message = urllib.parse.quote(message)
-
-    full_url = (
-        f"{base_url}?option=com_spc&comm=spc_api"
-        f"&username={username}"
-        f"&password={password}"
-        f"&sender={sender}"
-        f"&recipient={clean_number}"
-        f"&message={encoded_message}"
-    )
+    payload = {
+        "api_token": settings.PAYLESS_SMS_API_TOKEN,
+        "recipient": clean_number,
+        "sender_id": settings.PAYLESS_SMS_SENDER_ID,
+        "type": "plain",
+        "message": message,
+    }
 
     logger.info(f"📲 Sending SMS to {clean_number}")
 
     try:
-        response = requests.get(full_url, timeout=20)
-        text = response.text.strip()
+        response = requests.post(
+            settings.PAYLESS_SMS_SEND_URL,
+            json=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            timeout=20,
+        )
+        data = response.json()
 
-        logger.info(f"✅ Payless Response: {text}")
+        logger.info(f"✅ Payless Response: {data}")
 
-        # STRICT SUCCESS CHECK
-        return text.upper().startswith("OK")
+        # Per the docs: {"status": "success", ...} on success,
+        # {"status": "error", "message": "..."} on failure.
+        return response.status_code == 200 and data.get("status") == "success"
 
     except Exception as e:
         logger.error(f"❌ SMS Error: {e}")
@@ -906,51 +910,6 @@ def validate_phone_number(phone_number, region="NG"):
         return {"valid": False, "error": "Invalid phone number format."}
 
     return {"valid": True, "formatted": cleaned, "error": None}
-
-
-import urllib.parse
-import os
-import requests
-import urllib.parse
-from django.conf import settings
-
-
-def send_bulk_sms(numbers, message):
-    """
-    Send bulk SMS using Payless Bulk SMS (SPC API format)
-    """
-    base_url = settings.PAYLESS_SMS_URL
-    username = settings.PAYLESS_SMS_USERNAME
-    password = settings.PAYLESS_SMS_PASSWORD
-    sender = settings.PAYLESS_SMS_SENDER_ID
-
-    encoded_message = urllib.parse.quote(message)
-    recipients = numbers.replace(" ", "")  # clean up any spaces
-
-    full_url = (
-        f"{base_url}?option=com_spc&comm=spc_api"
-        f"&username={username}"
-        f"&password={password}"
-        f"&sender={sender}"
-        f"&recipient={recipients}"
-        f"&message={encoded_message}"
-    )
-
-    print("🔗 Sending SMS via:", full_url)
-
-    try:
-        response = requests.get(full_url, timeout=20)
-        text = response.text.strip()
-        print("✅ Payless Response:", text)
-
-        if text.upper().startswith("OK"):
-            return {"success": True, "response": text}
-        else:
-            return {"success": False, "response": text}
-
-    except Exception as e:
-        print("❌ Error sending SMS:", e)
-        return {"success": False, "error": str(e)}
 
 
 def send_sms(phone_number, message):

@@ -385,10 +385,11 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 AUTH_USER_MODEL = "authentication.CustomUser"
 
 
-# PAYLESS SMS CONFIG
-PAYLESS_SMS_URL = config("PAYLESS_SMS_URL")
-PAYLESS_SMS_USERNAME = config("PAYLESS_SMS_USERNAME")
-PAYLESS_SMS_PASSWORD = config("PAYLESS_SMS_PASSWORD")
+# PAYLESS SMS CONFIG - HTTP API (JSON body + api_token), replacing the old
+# SPC query-string GET API (username/password in the URL) - see
+# https://app.paylessbulksms.com.ng/developers/http-docs, "SMS API".
+PAYLESS_SMS_SEND_URL = config("PAYLESS_SMS_SEND_URL")
+PAYLESS_SMS_API_TOKEN = config("PAYLESS_SMS_API_TOKEN")
 PAYLESS_SMS_SENDER_ID = config("PAYLESS_SMS_SENDER_ID")
 
 # CELERY_TASK_ROUTES used to live here, routing calculate_daily_roi_task/
