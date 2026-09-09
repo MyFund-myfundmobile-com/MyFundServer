@@ -605,31 +605,19 @@ def release_quarterly_roi(test_mode=True):
     from .utils import send_push_notification
     from .tasks import send_single_email_task
 
-    from datetime import date
+    # Was hardcoded to Q2 2026 (date(2026, 4, 1) - date(2026, 6, 30)), which
+    # would have silently no-opped on the Oct 1 2026 run (Q2 already paid)
+    # instead of paying Q3. get_previous_quarter() derives the quarter that
+    # just closed relative to today, so this task pays the right quarter on
+    # every scheduled run without needing a manual date update each time.
+    QUARTER_START, QUARTER_END, QUARTER_LABEL = get_previous_quarter()
 
-    QUARTER_START = date(2026, 4, 1)
-    QUARTER_END = date(2026, 6, 30)
-    from datetime import date
-
-    today = date.today()
-    year = today.year
-
-    # Determine quarter being paid (based on fixed accrual window)
-    if QUARTER_START.month == 4:
-        QUARTER_LABEL = f"Q2 {QUARTER_START.year}"
-        NEXT_PAYOUT_LABEL = f"October {QUARTER_START.year}"
-
-    elif QUARTER_START.month == 1:
-        QUARTER_LABEL = f"Q1 {QUARTER_START.year}"
-        NEXT_PAYOUT_LABEL = f"July {QUARTER_START.year}"
-
-    elif QUARTER_START.month == 7:
-        QUARTER_LABEL = f"Q3 {QUARTER_START.year}"
-        NEXT_PAYOUT_LABEL = f"January {QUARTER_START.year + 1}"
-
-    elif QUARTER_START.month == 10:
-        QUARTER_LABEL = f"Q4 {QUARTER_START.year}"
-        NEXT_PAYOUT_LABEL = f"April {QUARTER_START.year + 1}"
+    NEXT_PAYOUT_LABEL = {
+        1: f"July {QUARTER_START.year}",
+        4: f"October {QUARTER_START.year}",
+        7: f"January {QUARTER_START.year + 1}",
+        10: f"April {QUARTER_START.year + 1}",
+    }[QUARTER_START.month]
 
     TEST_EMAILS = [
         # "valuepluspublishing@gmail.com",
