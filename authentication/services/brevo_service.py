@@ -83,7 +83,9 @@ def get_brevo_usage_today():
 # ==========================================
 
 
-def send_email_via_brevo(to_email, subject, html_content, from_email=None, cc=None, tags=None):
+def send_email_via_brevo(
+    to_email, subject, html_content, from_email=None, cc=None, tags=None, reply_to=None
+):
     """
     Send a single transactional email through Brevo's Transactional Emails
     API. Raises on failure - callers decide how to log/track that. Optional
@@ -95,6 +97,13 @@ def send_email_via_brevo(to_email, subject, html_content, from_email=None, cc=No
     admin_views.get_email_campaign_report, which tags every campaign send
     "campaign-<id>" so a campaign's delivery stats can be pulled back out
     later without needing a separate webhook receiver.
+
+    `reply_to` (optional str, "Display Name <address>" or bare address) -
+    Brevo's API only accepts a single reply-to address (SendSmtpEmailReplyTo
+    is a single {email, name} object, not a list) - there is no supported
+    way to make a reply fan out to several addresses at once. If several
+    people need to see replies, point this at one shared/monitored inbox
+    and set up forwarding to the others on that mailbox itself.
     """
     from_email = from_email or settings.DEFAULT_FROM_EMAIL
 
@@ -106,12 +115,18 @@ def send_email_via_brevo(to_email, subject, html_content, from_email=None, cc=No
     if not sender_name:
         sender_name = "MyFund"
 
+    reply_to_obj = None
+    if reply_to:
+        reply_name, reply_email = parseaddr(reply_to)
+        reply_to_obj = {"email": reply_email or reply_to, "name": reply_name or sender_name}
+
     api_instance = sib_api_v3_sdk.TransactionalEmailsApi(get_brevo_client())
 
     send_smtp_email = sib_api_v3_sdk.SendSmtpEmail(
         to=[{"email": to_email}],
         cc=[{"email": e} for e in cc] if cc else None,
         sender={"name": sender_name, "email": sender_email},
+        reply_to=reply_to_obj,
         subject=subject,
         html_content=html_content,
         tags=tags or None,

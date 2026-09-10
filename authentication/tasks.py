@@ -1535,6 +1535,12 @@ def send_email_campaign_batch_task(
     # Brevo's own event log later, filtered by tag - no webhook needed.
     campaign_tags = [f"campaign-{campaign_id}"]
 
+    # Campaigns go out from DEFAULT_FROM_EMAIL (noreply@) so replies don't
+    # vanish - Brevo only supports one reply-to address (not several), so
+    # janet/joseph seeing replies too needs a forwarding rule set up on
+    # this mailbox itself, not something settable per-send.
+    CAMPAIGN_REPLY_TO = "MyFund <company@myfundmobile.com>"
+
     sent_this_call = 0
     failed_this_call = 0
     failed_emails_this_call = []
@@ -1547,6 +1553,7 @@ def send_email_campaign_batch_task(
                 subject=payload["subject"],
                 html_content=payload["html_message"],
                 from_email=from_email,
+                reply_to=CAMPAIGN_REPLY_TO,
                 tags=campaign_tags,
             )
             sent_this_call += 1
