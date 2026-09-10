@@ -153,7 +153,7 @@ urlpatterns = [
     # resolved) before this catch-all-ish router include, never after.
     path("add-bank-account/", views.add_bank_account, name="add-bank-account"),
     path(
-        "delete-bank-account/<str:account_number>/",
+        "delete-bank-account/<int:bank_account_id>/",
         views.delete_bank_account,
         name="delete-bank-account",
     ),

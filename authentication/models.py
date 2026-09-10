@@ -1324,12 +1324,26 @@ class BankAccount(models.Model):
         get_user_model(), on_delete=models.CASCADE, related_name="owned_bank_accounts"
     )  # Change related_name here
     bank_name = models.CharField(max_length=100)
-    account_number = models.CharField(max_length=20, unique=True)
+    # NOT globally unique - a NUBAN account number is only guaranteed unique
+    # WITHIN a single Nigerian bank, not across all banks. The same 10-digit
+    # number can legitimately belong to different accounts at two different
+    # banks (e.g. the same person's Moniepoint and GTBank accounts sharing a
+    # number is a real, observed case) - see the Meta.constraints below for
+    # the actual uniqueness rule (per user, per bank).
+    account_number = models.CharField(max_length=20)
     account_name = models.CharField(max_length=100, default="Default Account Name")
     is_default = models.BooleanField(default=False)
 
     bank_code = models.CharField(max_length=10, default="")  # Add a default value
     paystack_recipient_code = models.CharField(max_length=255, blank=True, null=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "account_number", "bank_code"],
+                name="unique_bank_account_per_user_and_bank",
+            )
+        ]
 
     def save(self, *args, **kwargs):
         # Same single-default enforcement as Card.save() - setting one

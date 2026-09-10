@@ -3096,9 +3096,17 @@ def add_bank_account(request):
 
         # 2. Save or update bank account
         try:
+            # Scoped by bank_code too, not just account_number - a NUBAN
+            # account number is only unique WITHIN a single bank, so the
+            # same number can legitimately belong to a different account at
+            # a different bank (see the model's own comment/constraint).
+            # Matching on account_number alone treated re-adding the same
+            # number under a different bank as an edit of the existing
+            # account instead of a genuinely separate one.
             existing_bank = BankAccount.objects.filter(
                 user=user,
                 account_number=account_number,
+                bank_code=bank_code,
             ).first()
 
             if existing_bank:
@@ -3106,13 +3114,11 @@ def add_bank_account(request):
                 bank_account = existing_bank
                 bank_account.bank_name = bank_name
                 bank_account.account_name = account_name
-                bank_account.bank_code = bank_code
                 bank_account.paystack_recipient_code = paystack_recipient_code
                 bank_account.save(
                     update_fields=[
                         "bank_name",
                         "account_name",
-                        "bank_code",
                         "paystack_recipient_code",
                     ]
                 )
@@ -3399,42 +3405,42 @@ from django.db import transaction
 
 @api_view(["DELETE"])
 @permission_classes([IsAuthenticated])
-def delete_bank_account(request, account_number):
+def delete_bank_account(request, bank_account_id):
     """
-    Deletes a bank account identified by the account number.
+    Deletes a bank account identified by its id, scoped to the
+    authenticated user.
+
+    Previously identified by account_number alone, with no user scoping
+    at all (any authenticated user could delete anyone else's bank
+    account by guessing/knowing its number) and a "clean up duplicate
+    account_numbers" step that actively deleted OTHER accounts sharing
+    the same number - both were fine only because account_number used to
+    be globally unique. It no longer is (a NUBAN account number is only
+    guaranteed unique WITHIN one bank, not across banks - the same
+    number can legitimately belong to two different real accounts at two
+    different banks), so both of those were live bugs once that
+    assumption broke. id + user is unambiguous regardless.
     """
     try:
-        # Attempt to retrieve the bank account
-        bank_account = BankAccount.objects.get(account_number=account_number)
+        bank_account = BankAccount.objects.get(id=bank_account_id, user=request.user)
     except BankAccount.DoesNotExist:
-        logger.warning("Bank account with account number %s not found.", account_number)
+        logger.warning(
+            "Bank account id %s not found for user %s.",
+            bank_account_id,
+            request.user.email,
+        )
         return Response(
             {"error": "Bank account not found."},
             status=status.HTTP_404_NOT_FOUND,
         )
 
     try:
-        # Identify duplicate accounts with the same account number
-        duplicates = (
-            BankAccount.objects.filter(account_number=account_number)
-            .annotate(count=Count("id"))
-            .filter(count__gt=1)
-        )
-
         with transaction.atomic():
-            # Delete duplicates (if any)
-            for duplicate in duplicates:
-                if duplicate.id != bank_account.id:
-                    logger.info(
-                        "Deleting duplicate bank account with ID %s", duplicate.id
-                    )
-                    duplicate.delete()
-
-            # Delete the primary bank account
             bank_account.delete()
             logger.info(
-                "Bank account with account number %s deleted successfully.",
-                account_number,
+                "Bank account id %s deleted successfully for user %s.",
+                bank_account_id,
+                request.user.email,
             )
 
         # 204 must not carry a body (HTTP spec) - returning one alongside
@@ -3446,7 +3452,7 @@ def delete_bank_account(request, account_number):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     except Exception as e:
-        logger.error("Error deleting bank account %s: %s", account_number, str(e))
+        logger.error("Error deleting bank account id %s: %s", bank_account_id, str(e))
         return Response(
             {"error": "An error occurred while deleting the bank account."},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -9766,10 +9772,28 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                 reason = event["data"]["reason"]
                 transaction_id = event["data"]["transfer_code"]
                 account_number = event["data"]["recipient"]["details"]["account_number"]
+                recipient_bank_code = event["data"]["recipient"]["details"].get(
+                    "bank_code"
+                )
 
+                # account_number alone is no longer guaranteed to resolve to
+                # a single account - the same NUBAN number can legitimately
+                # belong to different accounts at different banks - so this
+                # also matches on bank_code when Paystack provides one, and
+                # uses .first() either way instead of .get() so a leftover
+                # ambiguous case can't crash this webhook handler.
                 user = None
                 try:
-                    user = BankAccount.objects.get(account_number=account_number).user
+                    bank_lookup = BankAccount.objects.filter(
+                        account_number=account_number
+                    )
+                    if recipient_bank_code:
+                        bank_lookup = bank_lookup.filter(bank_code=recipient_bank_code)
+                    match = bank_lookup.first()
+                    if match:
+                        user = match.user
+                    else:
+                        print("User does not exist")
                 except Exception:
                     print("User does not exist")
 
