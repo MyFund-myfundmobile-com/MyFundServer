@@ -3435,6 +3435,106 @@ def list_email_campaigns(request):
         return Response({"error": str(e)}, status=500)
 
 
+@api_view(['DELETE'])
+@permission_classes([IsAdminUser])
+def delete_email_campaign(request, campaign_id):
+    try:
+        campaign = EmailCampaign.objects.get(pk=campaign_id)
+    except EmailCampaign.DoesNotExist:
+        return Response({"error": "Campaign not found."}, status=404)
+    if campaign.is_sending:
+        return Response({"error": "Wait for the active batch to finish before deleting this campaign."}, status=409)
+    campaign.delete()
+    return Response(status=204)
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAdminUser])
+def admin_push_campaigns(request):
+    from django.utils.html import strip_tags
+    from html import unescape
+    from .models import PushCampaign
+
+    if request.method == 'GET':
+        rows = PushCampaign.objects.all()[:50]
+        return Response([{
+            "id": row.id, "subject": row.subject, "body": row.body, "delivery_mode": row.delivery_mode,
+            "recipient_count": row.recipient_count, "device_count": row.device_count,
+            "accepted_count": row.accepted_count, "failed_count": row.failed_count,
+            "created_at": row.created_at, "completed_at": row.completed_at,
+            "filters_applied": row.filters_applied,
+        } for row in rows])
+
+    subject = (request.data.get('subject') or '').strip()
+    raw_body = (request.data.get('body') or '').strip()
+    body = ' '.join(unescape(strip_tags(raw_body)).split())[:500]
+    delivery_mode = request.data.get('delivery_mode') if request.data.get('delivery_mode') in ('push', 'both') else 'push'
+    explicit_emails = _dedupe_preserve_order(request.data.get('recipients') or [])
+    extra_emails = _dedupe_preserve_order(request.data.get('extra_emails') or [])
+    if not subject or not body:
+        return Response({"error": "Subject and message are required."}, status=400)
+
+    if explicit_emails:
+        users = list(CustomUser.objects.filter(email__in=explicit_emails, is_active=True))
+        filters_applied = {"individuals": True}
+    else:
+        queryset, filters_applied = _build_admin_user_queryset(request.data)
+        users = list(queryset.filter(is_active=True))
+        if extra_emails:
+            existing_ids = {user.id for user in users}
+            users.extend(
+                user for user in CustomUser.objects.filter(email__in=extra_emails, is_active=True)
+                if user.id not in existing_ids
+            )
+    if not users:
+        return Response({"error": "No registered active users matched those recipients."}, status=400)
+
+    device_count = sum(len(user.expo_push_tokens or []) for user in users)
+    campaign = PushCampaign.objects.create(
+        subject=subject, body=raw_body, delivery_mode=delivery_mode, created_by=request.user,
+        filters_applied=filters_applied, recipient_count=len(users), device_count=device_count,
+    )
+
+    def send_all():
+        from django.db import close_old_connections
+        from .utils import send_push_notification
+        close_old_connections()
+        accepted = failed = 0
+        try:
+            for user in users:
+                result = send_push_notification(user, subject, body, notif_type="ADMIN")
+                accepted += result.get("sent", 0)
+                failed += max(0, result.get("total", 0) - result.get("sent", 0))
+            PushCampaign.objects.filter(pk=campaign.id).update(
+                accepted_count=accepted, failed_count=failed, completed_at=timezone.now()
+            )
+        finally:
+            close_old_connections()
+
+    import threading
+    threading.Thread(target=send_all, daemon=True).start()
+    return Response({"id": campaign.id, "queued": True, "recipient_count": len(users), "device_count": device_count}, status=202)
+
+
+@api_view(['GET', 'DELETE'])
+@permission_classes([IsAdminUser])
+def admin_push_campaign_detail(request, campaign_id):
+    from .models import PushCampaign
+    try:
+        row = PushCampaign.objects.get(pk=campaign_id)
+    except PushCampaign.DoesNotExist:
+        return Response({"error": "Push campaign not found."}, status=404)
+    if request.method == 'DELETE':
+        row.delete()
+        return Response(status=204)
+    return Response({
+        "id": row.id, "subject": row.subject, "delivery_mode": row.delivery_mode, "recipient_count": row.recipient_count,
+        "device_count": row.device_count, "accepted_count": row.accepted_count,
+        "failed_count": row.failed_count, "created_at": row.created_at,
+        "completed_at": row.completed_at,
+    })
+
+
 @api_view(['GET'])
 @permission_classes([IsAdminUser])
 def get_email_campaigns_overview(request):
@@ -4079,7 +4179,15 @@ def brevo_daily_usage(request):
 
         return Response(get_brevo_usage_today())
     except Exception as e:
-        return Response({"error": str(e)}, status=500)
+        # This counter is supplementary dashboard information.  Do not turn a
+        # Brevo reporting outage (or a missing/invalid reporting credential)
+        # into a failed admin-screen request: older mobile builds surface every
+        # failed admin request as a global toast and will repeat it on focus.
+        logger.warning("Brevo daily usage is unavailable: %s", e)
+        return Response({
+            "available": False,
+            "error": "Brevo usage is temporarily unavailable.",
+        })
 
 
 # ============================================================================

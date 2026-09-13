@@ -624,3 +624,13 @@ class BrevoDailyUsageTest(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(response.data["near_limit"])
         self.assertEqual(response.data["remaining_today"], 15)
+
+    @patch("sib_api_v3_sdk.TransactionalEmailsApi.get_email_event_report")
+    def test_provider_failure_is_non_blocking(self, mock_report):
+        mock_report.side_effect = RuntimeError("Brevo is unavailable")
+
+        response = self.client.get(reverse("admin_brevo_daily_usage"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["available"])
+        self.assertNotIn("Brevo is unavailable", response.data["error"])

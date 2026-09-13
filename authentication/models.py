@@ -2895,6 +2895,26 @@ class EmailTemplate(models.Model):
         return self.title
 
 
+class PushCampaign(models.Model):
+    subject = models.CharField(max_length=255)
+    body = models.TextField()
+    delivery_mode = models.CharField(max_length=10, choices=(("push", "Push"), ("both", "Email + Push")), default="push")
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
+    filters_applied = models.JSONField(default=dict, blank=True)
+    recipient_count = models.PositiveIntegerField(default=0)
+    device_count = models.PositiveIntegerField(default=0)
+    accepted_count = models.PositiveIntegerField(default=0)
+    failed_count = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.subject} ({self.accepted_count}/{self.device_count})"
+
+
 class EmailCampaign(models.Model):
     """
     Tracks a segment-based admin email send that's too big to go out in one
