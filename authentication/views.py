@@ -13681,7 +13681,9 @@ def save_expo_push_token(request):
 
     # Remove old duplicates
     user.expo_push_tokens = [
-        entry for entry in user.expo_push_tokens if entry["token"] != token
+        entry
+        for entry in (user.expo_push_tokens or [])
+        if (entry.get("token") if isinstance(entry, dict) else entry) != token
     ]
 
     new_token = {

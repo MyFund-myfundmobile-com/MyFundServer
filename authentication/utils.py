@@ -148,7 +148,10 @@ def send_push_notification(
     valid_tokens_count = 0
 
     for token_entry in tokens:
-        token = token_entry.get("token")
+        # Older rows stored the Expo token as a bare string; newer rows use
+        # a metadata dictionary. Supporting both prevents one legacy entry
+        # from aborting the entire push loop.
+        token = token_entry.get("token") if isinstance(token_entry, dict) else token_entry
         if not token:
             continue
 
