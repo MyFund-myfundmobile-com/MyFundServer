@@ -3513,7 +3513,20 @@ def admin_push_campaigns(request):
 
     import threading
     threading.Thread(target=send_all, daemon=True).start()
-    return Response({"id": campaign.id, "queued": True, "recipient_count": len(users), "device_count": device_count}, status=202)
+    return Response({
+        "id": campaign.id,
+        "subject": campaign.subject,
+        "body": campaign.body,
+        "delivery_mode": campaign.delivery_mode,
+        "recipient_count": campaign.recipient_count,
+        "device_count": campaign.device_count,
+        "accepted_count": 0,
+        "failed_count": 0,
+        "created_at": campaign.created_at,
+        "completed_at": None,
+        "filters_applied": campaign.filters_applied,
+        "queued": True,
+    }, status=202)
 
 
 @api_view(['GET', 'DELETE'])
