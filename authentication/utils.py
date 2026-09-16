@@ -122,8 +122,14 @@ def send_push_notification(
         logger.warning("Push notification failed: no user or user_id provided")
         return {"sent": 0, "total": 0, "success": False}
 
-    if data.get("category") in {"ADMIN_BANK_TRANSFER", "ADMIN_INVEST_TRANSFER", "ADMIN_WITHDRAWAL", "ADMIN_KYC"}:
+    if data.get("category") in {
+        "ADMIN_BANK_TRANSFER",
+        "ADMIN_INVEST_TRANSFER",
+        "ADMIN_WITHDRAWAL",
+        "ADMIN_KYC",
+    }:
         from .request_views import REQUEST_APPROVERS
+
         if user.email.lower() not in REQUEST_APPROVERS or not user.is_staff:
             return {"sent": 0, "total": 0, "success": False}
 
@@ -156,7 +162,9 @@ def send_push_notification(
         # Older rows stored the Expo token as a bare string; newer rows use
         # a metadata dictionary. Supporting both prevents one legacy entry
         # from aborting the entire push loop.
-        token = token_entry.get("token") if isinstance(token_entry, dict) else token_entry
+        token = (
+            token_entry.get("token") if isinstance(token_entry, dict) else token_entry
+        )
         if not token:
             continue
 
@@ -269,7 +277,9 @@ def get_request_notify_users():
     from .request_views import REQUEST_APPROVERS
 
     return get_user_model().objects.filter(
-        email__in=REQUEST_APPROVERS, is_active=True, is_staff=True,
+        email__in=REQUEST_APPROVERS,
+        is_active=True,
+        is_staff=True,
     )
 
 
@@ -316,7 +326,7 @@ import logging
 import re
 import time
 import os
-from datetime import date
+from datetime import date, datetime
 from django.conf import settings
 from django.utils import timezone
 from django.utils.html import strip_tags
@@ -333,12 +343,51 @@ def validate_email(email):
     return re.match(pattern, email) is not None
 
 
-# Extracted from send_generic_email's old nested `personalize` closure so
+def format_date_joined(user_date_joined):
+    """
+    Format user's date_joined as human-readable month/year.
+
+    Returns:
+    - "May this year" (if same year as current)
+    - "May last year" (if year is exactly one year before current)
+    - "May 2024" (if more than one year ago or different year)
+    - Empty string if date is None
+    """
+    if not user_date_joined:
+        return ""
+
+    # Ensure it's a datetime object
+    if isinstance(user_date_joined, str):
+        try:
+            user_date = datetime.fromisoformat(user_date_joined.replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            return ""
+    else:
+        user_date = user_date_joined
+
+    # Get current date (handle timezone-aware datetimes)
+    now = timezone.now()
+
+    month_name = user_date.strftime("%B")  # e.g., "May"
+    joined_year = user_date.year
+    current_year = now.year
+
+    # Logic for year suffix
+    if joined_year == current_year:
+        return f"{month_name} this year"
+    elif joined_year == current_year - 1:
+        return f"{month_name} last year"
+    else:
+        return f"{month_name} {joined_year}"
+
+
 # send_email_campaign_batch_task (tasks.py) can reuse the exact same
 # placeholder-substitution logic per-recipient, instead of duplicating it -
 # the two need to match exactly or a campaign's personalized email would
 # look subtly different from a small inline send of the same content.
-def personalize_email_payload(email_addr, subject, message, extra_context=None, template="email/email.html"):
+def personalize_email_payload(
+    email_addr, subject, message, extra_context=None, template="email/email.html"
+):
     extra_context = extra_context or {}
     try:
         user = CustomUser.objects.filter(email=email_addr).first()
@@ -375,6 +424,7 @@ def personalize_email_payload(email_addr, subject, message, extra_context=None, 
             "{last_name}": user.last_name if user else "",
             "{full_name}": getattr(user, "full_name", email_addr),
             "{email}": email_addr,
+            "{date_joined}": format_date_joined(user.date_joined) if user else "",
             "{wallet}": f"{getattr(user, 'wallet', 0):,.2f}",
             "{savings}": f"{getattr(user, 'savings', 0):,.2f}",
             "{investment}": f"{getattr(user, 'investment', 0):,.2f}",
@@ -530,7 +580,14 @@ def send_generic_email(
 
                 sent_count += 1
                 message_id = getattr(brevo_response, "message_id", None)
-                accepted_messages.append({"email": p["to"], "message_id": message_id if isinstance(message_id, str) else None})
+                accepted_messages.append(
+                    {
+                        "email": p["to"],
+                        "message_id": (
+                            message_id if isinstance(message_id, str) else None
+                        ),
+                    }
+                )
                 logger.info(f"✅ Email sent via Brevo to {p['to']}")
 
             except Exception as e:
@@ -745,9 +802,7 @@ def split_amount_by_percentage(total_amount, user_percentage_pairs):
         cents_allocated += floored_share
         remainders.append((exact_share - floored_share, user_id))
 
-    leftover_cents = int(
-        ((total_amount - cents_allocated) * 100).to_integral_value()
-    )
+    leftover_cents = int(((total_amount - cents_allocated) * 100).to_integral_value())
 
     # Distribute leftover pennies to the largest fractional remainders first,
     # tie-broken deterministically by user_id.
@@ -1019,9 +1074,7 @@ def _update_top_savers_worker():
                 date__year=current_year,
                 status="confirmed",
             )
-            .filter(
-                (Q(transaction_type="credit") & deposit_prefixes) | is_withdrawal
-            )
+            .filter((Q(transaction_type="credit") & deposit_prefixes) | is_withdrawal)
             .values("user_id")
             .annotate(
                 total=Coalesce(
@@ -2846,7 +2899,13 @@ def auto_distribute_groupbuy_income(dry_run=False, group_ids=None, force=False):
     from django.db import transaction as db_transaction, IntegrityError
     from django.utils import timezone
 
-    from .models import Group, GroupOwnership, GroupIncomeEvent, GroupIncomeDistribution, CustomUser
+    from .models import (
+        Group,
+        GroupOwnership,
+        GroupIncomeEvent,
+        GroupIncomeDistribution,
+        CustomUser,
+    )
 
     now = timezone.now()
     today = now.date()
@@ -2865,17 +2924,26 @@ def auto_distribute_groupbuy_income(dry_run=False, group_ids=None, force=False):
         last_event = (
             GroupIncomeEvent.objects.filter(group=group).order_by("-period_end").first()
         )
-        period_start = last_event.period_end if last_event else group.completed_at.date()
+        period_start = (
+            last_event.period_end if last_event else group.completed_at.date()
+        )
         period_end = period_start + relativedelta(months=1)
 
         if period_end > today:
             if not force:
                 continue  # this monthly period isn't over yet
-            period_end = today if today > period_start else period_start + timedelta(days=1)
+            period_end = (
+                today if today > period_start else period_start + timedelta(days=1)
+            )
 
         amount = get_monthly_rent_for_group(group, as_of=now)
         if amount <= 0:
-            skipped.append({"group_id": str(group.id), "reason": "Property has no rent_reward set."})
+            skipped.append(
+                {
+                    "group_id": str(group.id),
+                    "reason": "Property has no rent_reward set.",
+                }
+            )
             continue
 
         ownership_rows = list(GroupOwnership.objects.filter(group=group))
@@ -2886,7 +2954,12 @@ def auto_distribute_groupbuy_income(dry_run=False, group_ids=None, force=False):
             )
         ownership_pairs = [(uid, pct) for uid, pct in pct_by_user.items() if pct > 0]
         if not ownership_pairs:
-            skipped.append({"group_id": str(group.id), "reason": "No members with a positive ownership share."})
+            skipped.append(
+                {
+                    "group_id": str(group.id),
+                    "reason": "No members with a positive ownership share.",
+                }
+            )
             continue
 
         if dry_run:
@@ -2957,10 +3030,12 @@ def auto_distribute_groupbuy_income(dry_run=False, group_ids=None, force=False):
         except IntegrityError:
             # Same period already recorded (e.g. a manual distribution beat
             # the sweep to it this month) - skip, not an error.
-            skipped.append({
-                "group_id": str(group.id),
-                "reason": f"Income for {period_start}–{period_end} was already recorded.",
-            })
+            skipped.append(
+                {
+                    "group_id": str(group.id),
+                    "reason": f"Income for {period_start}–{period_end} was already recorded.",
+                }
+            )
             continue
 
         events_created.append(
@@ -3018,7 +3093,12 @@ def send_groupbuy_deadline_reminders(dry_run=False):
         hours_left = max(int((group.deadline - now).total_seconds() // 3600), 0)
 
         contributor_users = list(
-            {row.user for row in GroupOwnership.objects.filter(group=group).select_related("user")}
+            {
+                row.user
+                for row in GroupOwnership.objects.filter(group=group).select_related(
+                    "user"
+                )
+            }
         )
 
         for member in contributor_users:
@@ -3035,7 +3115,10 @@ def send_groupbuy_deadline_reminders(dry_run=False):
                             f"(1% service charge) when the deadline passes."
                         ),
                         notif_type="GROUP",
-                        data={"group_id": str(group.id), "type": "GROUPBUY_DEADLINE_SOON"},
+                        data={
+                            "group_id": str(group.id),
+                            "type": "GROUPBUY_DEADLINE_SOON",
+                        },
                     )
                 except Exception:
                     pass
@@ -3055,4 +3138,8 @@ def send_groupbuy_deadline_reminders(dry_run=False):
             }
         )
 
-    return {"groups_notified": len(notified_groups), "total_notified": total_notified, "groups": notified_groups}
+    return {
+        "groups_notified": len(notified_groups),
+        "total_notified": total_notified,
+        "groups": notified_groups,
+    }
