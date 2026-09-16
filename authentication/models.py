@@ -2109,22 +2109,15 @@ class TargetSavings(models.Model):
         from .utils import send_push_notification
 
         target = self
+        if target.is_cancelled or not target.is_active:
+            return False
         today = timezone.now().date()
-        bonus = Decimal("0")
         completed_amount = target.current_amount
-
-        if today <= target.end_date:
-            # 🔹 Use prorated 15% p.a. bonus, prorated by the target's
-            # planned duration (start_date to end_date), not by how fast it
-            # was actually filled.
-            months = max(
-                1,
-                (target.end_date.year - target.start_date.year) * 12
-                + (target.end_date.month - target.start_date.month),
-            )
-            bonus = (
-                completed_amount * Decimal("0.15") * Decimal(months) / Decimal(12)
-            ).quantize(Decimal("0.01"))
+        if completed_amount < target.target_amount:
+            return False
+        # Successful late completions earn the same planned-duration
+        # reward; extra time taken does not increase that reward.
+        bonus = target.completion_bonus(completed_amount)
 
         user.wallet += completed_amount + bonus
         user.save(update_fields=["wallet"])
@@ -2199,6 +2192,17 @@ class TargetSavings(models.Model):
         transaction.on_commit(_notify_completion)
         return True
 
+    def completion_bonus(self, amount=None):
+        """15% p.a. on the planned calendar-month term, rounded to kobo."""
+        from decimal import ROUND_HALF_UP
+        months = max(
+            1,
+            (self.end_date.year - self.start_date.year) * 12
+            + self.end_date.month - self.start_date.month,
+        )
+        principal = self.target_amount if amount is None else amount
+        return (principal * Decimal("0.15") * Decimal(months) / Decimal(12)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
     def send_failed_deduction_email(self, max_attempts=False, reason="insufficient_funds"):
         """Send formatted email notification about failed deduction using generic email helper"""
         from .utils import send_generic_email, send_transactional_email
@@ -2236,7 +2240,7 @@ class TargetSavings(models.Model):
                 message = (
                     f"Hi {self.user.first_name},<br><br>"
                     f"The autosave of ₦{self.monthly_payment:,.2f} for your {self.name} target savings failed {cause}.<br><br>"
-                    "Kindly note that you'll forfeit the extra interest if you do not meet your target date.<br><br>"
+                    "Your completion reward is paid once you fully fund the target, even if you finish after the target date. Cancelled or failed plans do not earn a reward.<br><br>"
                     f"{fund_hint}"
                     f"We'll retry again at <strong>{retry_time}</strong>.<br><br>"
                     f"(PS: Your Target Savings plan will pause after 3 unsuccessful retries and the funds will be returned to your {self.funding_source} (1% charge). Kindly fund your {self.funding_source} to stay on track.)<br><br>"

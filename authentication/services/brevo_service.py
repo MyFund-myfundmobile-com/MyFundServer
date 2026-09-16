@@ -116,6 +116,7 @@ def send_email_via_brevo(
         sender_name = "MyFund"
 
     reply_to_obj = None
+    reply_to = reply_to or getattr(settings, "EMAIL_REPLY_TO", None)
     if reply_to:
         reply_name, reply_email = parseaddr(reply_to)
         reply_to_obj = {"email": reply_email or reply_to, "name": reply_name or sender_name}

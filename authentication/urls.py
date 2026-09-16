@@ -1,4 +1,5 @@
 from django.urls import path, include
+from .request_views import requests_list, request_action
 from . import views
 from django.conf import settings
 from django.conf.urls.static import static
@@ -68,6 +69,8 @@ router.register(r"bank-accounts", views.BankAccountViewSet, basename="bank-accou
 
 
 urlpatterns = [
+    path("admin/requests/", requests_list, name="admin_requests"),
+    path("admin/requests/<str:kind>/<int:pk>/action/", request_action, name="admin_request_action"),
     # Authentication APIs
     path("signup/", views.signup, name="signup"),
     path("confirm-otp/", views.confirm_otp, name="confirm-otp"),

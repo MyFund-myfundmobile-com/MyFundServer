@@ -1537,9 +1537,9 @@ def send_email_campaign_batch_task(
 
     # Campaigns go out from DEFAULT_FROM_EMAIL (noreply@) so replies don't
     # vanish - Brevo only supports one reply-to address (not several), so
-    # janet/joseph seeing replies too needs a forwarding rule set up on
+    # Janet/company seeing replies too needs a forwarding rule set up on
     # this mailbox itself, not something settable per-send.
-    CAMPAIGN_REPLY_TO = "MyFund <company@myfundmobile.com>"
+    CAMPAIGN_REPLY_TO = settings.EMAIL_REPLY_TO
 
     sent_this_call = 0
     failed_this_call = 0

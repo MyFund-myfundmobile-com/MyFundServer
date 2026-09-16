@@ -122,6 +122,11 @@ def send_push_notification(
         logger.warning("Push notification failed: no user or user_id provided")
         return {"sent": 0, "total": 0, "success": False}
 
+    if data.get("category") in {"ADMIN_BANK_TRANSFER", "ADMIN_INVEST_TRANSFER", "ADMIN_WITHDRAWAL", "ADMIN_KYC"}:
+        from .request_views import REQUEST_APPROVERS
+        if user.email.lower() not in REQUEST_APPROVERS or not user.is_staff:
+            return {"sent": 0, "total": 0, "success": False}
+
     # Build personalization context
     context = build_push_context(user, extra_context=extra_context)
 
@@ -257,6 +262,15 @@ def get_admin_notify_users(category=None):
     emails |= set(qs.values_list("email", flat=True))
 
     return User.objects.filter(email__in=emails)
+
+
+def get_request_notify_users():
+    """Approval requests are private to the two authorized reviewers."""
+    from .request_views import REQUEST_APPROVERS
+
+    return get_user_model().objects.filter(
+        email__in=REQUEST_APPROVERS, is_active=True, is_staff=True,
+    )
 
 
 def send_admin_push_notification(
@@ -500,12 +514,13 @@ def send_generic_email(
         logger.info(f"📧 Using INLINE Brevo send for {total_valid} recipients")
 
         sent_count = 0
+        accepted_messages = []
         failed_emails = []
         failure_reasons = []
 
         for p in payloads:
             try:
-                send_email_via_brevo(
+                brevo_response = send_email_via_brevo(
                     to_email=p["to"],
                     subject=p["subject"],
                     html_content=p["html_message"],
@@ -514,6 +529,8 @@ def send_generic_email(
                 )
 
                 sent_count += 1
+                message_id = getattr(brevo_response, "message_id", None)
+                accepted_messages.append({"email": p["to"], "message_id": message_id if isinstance(message_id, str) else None})
                 logger.info(f"✅ Email sent via Brevo to {p['to']}")
 
             except Exception as e:
@@ -529,6 +546,7 @@ def send_generic_email(
         return {
             "status": "completed",
             "sent": sent_count,
+            "accepted_messages": accepted_messages,
             "failed": len(failed_emails),
             "failed_emails": failed_emails,
             "failure_reasons": failure_reasons,

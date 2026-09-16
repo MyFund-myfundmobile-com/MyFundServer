@@ -98,6 +98,8 @@ class AdminEmailPermissionTest(TestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["status"], "success")
+        self.assertEqual(response.data["delivery_status"], "pending")
+        self.assertNotIn("confirmed delivery", response.data["message"])
         mock_send.assert_called_once()
 
     @patch("authentication.views.send_generic_email")

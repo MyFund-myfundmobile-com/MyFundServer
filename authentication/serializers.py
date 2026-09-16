@@ -236,8 +236,11 @@ class AdminUserListSerializer(UserSerializer):
     user's own profile view.
     """
 
+    joined_at = serializers.DateTimeField(source="date_joined", read_only=True)
+
     class Meta(UserSerializer.Meta):
         fields = UserSerializer.Meta.fields + [
+            "joined_at",
             "is_banned",
             "is_active",
             "is_staff",

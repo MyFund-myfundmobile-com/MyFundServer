@@ -42,6 +42,8 @@ class DeepLinks:
     def admin_bank_transfer(self, transaction_id):
         return {
             "deep_link": {
+                "screen": "Admin",
+                "screen_params": {"screen": "AdminRequestsTab", "params": {"kind": "quicksave", "transaction_id": str(transaction_id)}},
                 "action": "approve_bank_transfer",
                 "action_params": {"transaction_id": str(transaction_id)},
                 "action_url": ADMIN_BASE + "/authentication/banktransferrequest/",
@@ -54,6 +56,8 @@ class DeepLinks:
     def admin_invest_transfer(self, transaction_id):
         return {
             "deep_link": {
+                "screen": "Admin",
+                "screen_params": {"screen": "AdminRequestsTab", "params": {"kind": "quickinvest", "transaction_id": str(transaction_id)}},
                 "action": "approve_invest_transfer",
                 "action_params": {"transaction_id": str(transaction_id)},
                 "action_url": ADMIN_BASE + "/authentication/investtransferrequest/",
@@ -66,6 +70,8 @@ class DeepLinks:
     def admin_withdrawal(self, withdrawal_id):
         return {
             "deep_link": {
+                "screen": "Admin",
+                "screen_params": {"screen": "AdminRequestsTab", "params": {"kind": "withdrawal", "request_id": str(withdrawal_id)}},
                 "action": "approve_withdrawal",
                 "action_params": {"withdrawal_id": str(withdrawal_id)},
                 "action_url": ADMIN_BASE
@@ -80,6 +86,8 @@ class DeepLinks:
     def admin_kyc_submitted(self):
         return {
             "deep_link": {
+                "screen": "Admin",
+                "screen_params": {"screen": "AdminRequestsTab", "params": {"kind": "kyc"}},
                 "url": ADMIN_BASE
                 + "/authentication/customuser/?q=&kyc_status__exact=submitted",
             },

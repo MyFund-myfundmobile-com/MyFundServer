@@ -2793,6 +2793,27 @@ def target_savings_breakdown(request):
     TargetSavingsCompletion - the authoritative record for finished
     targets, distinct from the live TargetSavings row.
     """
+    detail_status = request.query_params.get("status")
+    if detail_status:
+        statuses = {"in_progress": None, "completed": "SUCCESS", "failed": "FAILED", "cancelled": "CANCELLED"}
+        if detail_status not in statuses:
+            return Response({"error": "Invalid target savings status."}, status=400)
+        try:
+            offset = max(0, int(request.query_params.get("offset", 0)))
+            limit = min(20, max(1, int(request.query_params.get("limit", 5))))
+        except ValueError:
+            return Response({"error": "Invalid pagination."}, status=400)
+        if detail_status == "in_progress":
+            qs = TargetSavings.objects.filter(is_active=True, is_cancelled=False).select_related("user").order_by("-start_date", "-pk")
+            total = qs.count()
+            targets = [(target, target.user, target.current_amount) for target in qs[offset:offset + limit]]
+        else:
+            qs = TargetSavingsCompletion.objects.filter(status=statuses[detail_status]).select_related("user", "target_savings").order_by("-completed_date", "-pk")
+            total = qs.count()
+            targets = [(row.target_savings, row.user, row.completed_amount) for row in qs[offset:offset + limit]]
+        rows = [{"id": target.pk, "name": target.name, "user_name": f"{user.first_name} {user.last_name}".strip(), "email": user.email, "target_amount": str(target.target_amount), "current_amount": str(current), "start_date": target.start_date, "end_date": target.end_date, "category": target.get_category_display(), "frequency": target.get_frequency_display(), "progress": round((float(current) / float(target.target_amount) * 100) if target.target_amount else 0, 1)} for target, user, current in targets]
+        return Response({"results": rows, "count": total, "offset": offset, "limit": limit})
+
     cache_key = "metrics:target-savings-breakdown"
     cached_data = cache.get(cache_key)
 

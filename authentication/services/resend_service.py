@@ -64,5 +64,7 @@ def send_email_via_resend(to_email, subject, html_content, from_email=None, cc=N
     }
     if cc:
         payload["cc"] = list(cc)
+    if getattr(settings, "EMAIL_REPLY_TO", ""):
+        payload["reply_to"] = settings.EMAIL_REPLY_TO
 
     return resend.Emails.send(payload)

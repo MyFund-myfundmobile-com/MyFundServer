@@ -17,7 +17,8 @@ ADMIN_BASE = "https://myfundapi-myfund-07ce351a.koyeb.app/admin"
 
 
 def _require_staff(request):
-    if not request.user.is_staff:
+    from .request_views import CanApproveRequests
+    if not CanApproveRequests().has_permission(request, None):
         return Response(
             {"error": "Admin access required."}, status=status.HTTP_403_FORBIDDEN
         )

@@ -5896,7 +5896,8 @@ def withdraw_to_local_bank(request):
 
             from .utils import get_admin_notify_users
 
-            admin_users = get_admin_notify_users(category="transactions")
+            from .utils import get_request_notify_users
+            admin_users = get_request_notify_users()
 
             admin_push_message = (
                 f"{user.first_name} {user.last_name} wants to withdraw ₦{amount:,.2f} "
@@ -6446,7 +6447,8 @@ def process_withdrawal_to_local_bank(request):
 
         from .utils import get_admin_notify_users
 
-        admin_users = get_admin_notify_users(category="transactions")
+        from .utils import get_request_notify_users
+        admin_users = get_request_notify_users()
 
         for admin_user in admin_users:
             if hasattr(admin_user, "expo_push_tokens") and admin_user.expo_push_tokens:
@@ -6486,6 +6488,13 @@ def process_withdrawal_to_local_bank(request):
                         ),
                         "withdrawal_type": withdrawal_type,
                         "type": "admin_withdrawal_alert",
+                        **({
+                            "category": "ADMIN_WITHDRAWAL",
+                            "deep_link": {"screen": "Admin", "screen_params": {"screen": "AdminRequestsTab", "params": {"kind": "withdrawal", "transaction_id": transaction_id}}},
+                        } if WithdrawalsRequestToAdmin.objects.filter(
+                            user=user_locked, transaction_id=transaction_id,
+                            is_approved=False, is_processed=False, status="pending",
+                        ).exists() else {}),
                     },
                     notif_type="ADMIN_ALERT",
                 )
@@ -7593,7 +7602,8 @@ class KYCUpdateView(generics.UpdateAPIView):
         # 4️⃣ Push notification to admin (KYC alert)
         from .utils import get_admin_notify_users
 
-        admin_users = get_admin_notify_users(category="transactions")
+        from .utils import get_request_notify_users
+        admin_users = get_request_notify_users()
 
         for admin_user in admin_users:
             if hasattr(admin_user, "expo_push_tokens") and admin_user.expo_push_tokens:
@@ -7608,6 +7618,8 @@ class KYCUpdateView(generics.UpdateAPIView):
                         "user_email": user.email,
                         "kyc_status": "pending",
                         "type": "admin_kyc_alert",
+                        "category": "ADMIN_KYC",
+                        "deep_link": {"screen": "Admin", "screen_params": {"screen": "AdminRequestsTab", "params": {"kind": "kyc", "request_id": str(user.pk)}}},
                     },
                     notif_type="ADMIN_ALERT",
                 )
@@ -7641,6 +7653,8 @@ class GetKYCStatusView(APIView):
 
 
 class KYCApprovalViewSet(viewsets.ViewSet):
+    from .request_views import CanApproveRequests
+    permission_classes = [CanApproveRequests]
     def approve_kyc(self, request, pk=None):
         user = CustomUser.objects.get(pk=pk)
         user.kyc_updated = True  # Mark KYC as updated
@@ -7909,7 +7923,8 @@ def initiate_bank_transfer(request):
                 # 4. Push notification to admins
                 from .utils import get_admin_notify_users
 
-                admin_users = get_admin_notify_users(category="transactions")
+                from .utils import get_request_notify_users
+                admin_users = get_request_notify_users()
 
                 for admin_user in admin_users:
                     if (
@@ -8083,7 +8098,8 @@ def initiate_invest_transfer(request):
         # 🔔 ADMIN PUSH
         from .utils import get_admin_notify_users
 
-        admin_users = get_admin_notify_users(category="transactions")
+        from .utils import get_request_notify_users
+        admin_users = get_request_notify_users()
 
         for admin in admin_users:
             if hasattr(admin, "expo_push_tokens") and admin.expo_push_tokens:
@@ -10403,7 +10419,7 @@ def send_email(request):
                 return Response(
                     {
                         "status": "error",
-                        "message": f"Brevo did not deliver to any recipient. {reason}",
+                        "message": f"Brevo did not accept any email for sending. {reason}",
                         "sent": 0,
                         "failed": failed,
                         "total": len(cleaned_recipients),
@@ -10420,7 +10436,9 @@ def send_email(request):
                 return Response(
                     {
                         "status": "partial",
-                        "message": f"Email sent to {sent} recipient(s), {failed} failed via Brevo.",
+                        "message": f"Brevo accepted {sent} email(s) for sending; {failed} could not be submitted. Inbox delivery is not yet confirmed.",
+                        "delivery_status": "pending",
+                        "accepted_messages": result.get("accepted_messages", []),
                         "sent": sent,
                         "failed": failed,
                         "total": len(cleaned_recipients),
@@ -10431,12 +10449,14 @@ def send_email(request):
                     status=status.HTTP_207_MULTI_STATUS,
                 )
 
-            logger.info(f"✅ Email confirmed delivered via Brevo: {sent} sent")
+            logger.info(f"Email accepted for sending by Brevo: {sent}")
             finalize_email_template(pending_template, len(cleaned_recipients))
             return Response(
                 {
                     "status": "success",
-                    "message": f"Brevo confirmed delivery to {sent} recipient(s).",
+                    "message": f"Brevo accepted {sent} email(s) for sending. Delivery is pending; check the message report for confirmation.",
+                    "delivery_status": "pending",
+                    "accepted_messages": result.get("accepted_messages", []),
                     "sent": sent,
                     "total": len(cleaned_recipients),
                     "method": "inline",
