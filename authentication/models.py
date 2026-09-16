@@ -2957,6 +2957,7 @@ class EmailCampaign(models.Model):
     # send_extra_email_campaign_batch) keeps using the same sender
     # instead of silently reverting to the default on day 2.
     sender_name = models.CharField(max_length=100, blank=True, default="")
+    sender_mode = models.CharField(max_length=20, default="hello")
     filters_applied = models.JSONField(default=dict, blank=True)
     recipient_emails = models.JSONField(default=list)
     total_recipients = models.IntegerField(default=0)

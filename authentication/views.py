@@ -10307,12 +10307,13 @@ def send_email(request):
         import re
         sender_name = (request.data.get("sender_name") or "").strip()
         sender_name = re.sub(r"[\r\n<>]", "", sender_name)[:100]
+        sender_mode = (request.data.get("sender_mode") or "hello").strip().lower()
+        sender_address = "noreply@myfundmobile.com" if sender_mode == "no_reply" else "hello@myfundmobile.com"
         if sender_name:
             from email.utils import parseaddr
-            _, default_address = parseaddr(settings.DEFAULT_FROM_EMAIL)
-            sender = f"{sender_name} from MyFund <{default_address}>"
+            sender = f"{sender_name} from MyFund <{sender_address}>"
         else:
-            sender = settings.DEFAULT_FROM_EMAIL
+            sender = f"MyFund <{sender_address}>"
         subject = request.data.get("subject", "").strip()
         body = request.data.get("body", "").strip()  # This is the HTML content
         recipients = request.data.get("recipients", [])

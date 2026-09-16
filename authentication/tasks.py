@@ -1516,11 +1516,11 @@ def send_email_campaign_batch_task(
     # first one. Only the display name changes - the address is always
     # whatever DEFAULT_FROM_EMAIL's address portion already is, so MyFund
     # branding/deliverability reputation stays on the one verified sender.
+    sender_address = "noreply@myfundmobile.com" if campaign.sender_mode == "no_reply" else "hello@myfundmobile.com"
     if campaign.sender_name:
-        _, default_address = parseaddr(settings.DEFAULT_FROM_EMAIL)
-        from_email = f"{campaign.sender_name} from MyFund <{default_address}>"
+        from_email = f"{campaign.sender_name} from MyFund <{sender_address}>"
     else:
-        from_email = from_email or settings.DEFAULT_FROM_EMAIL
+        from_email = f"MyFund <{sender_address}>"
     subject = campaign.subject
     body = campaign.body_html
     # "Personal style" toggle (see EmailCampaign.template_mode /

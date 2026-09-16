@@ -1765,7 +1765,7 @@ def transaction_success_rate(request):
 # calls influencers). Neither old endpoint was ever called by the mobile
 # app or the web admin dashboard (both of those use the real, working
 # /api/top-referrals/ instead), so nothing depended on the old shape.
-GROWTH_LEADER_CATEGORIES = ("referrals", "ambassadors", "influencers", "engagement_team")
+GROWTH_LEADER_CATEGORIES = ("referrals", "ambassadors", "influencers", "engagement_team", "savers", "investors")
 GROWTH_LEADER_RANGES = ("month", "last_month", "3months", "6months", "1year", "all")
 
 
@@ -1818,7 +1818,7 @@ def admin_top_performers(request):
         limit = 20
     limit = min(max(limit, 1), 100)
 
-    cache_key = f"multipliers:top-performers:{category}:{range_key}:{limit}"
+    cache_key = f"multipliers:v2:top-performers:{category}:{range_key}:{limit}"
     cached_data = cache.get(cache_key)
     if cached_data:
         return Response(cached_data)
@@ -1844,6 +1844,22 @@ def admin_top_performers(request):
         end = None
 
     try:
+        if category in ("savers", "investors"):
+            destination = "SAVINGS" if category == "savers" else "INVESTMENT"
+            transactions = Transaction.objects.filter(transaction_type="credit", status="confirmed", credited_to=destination)
+            if start is not None:
+                transactions = transactions.filter(date__gte=start)
+            if end is not None:
+                transactions = transactions.filter(date__lt=end)
+            ranked = transactions.values("user").annotate(total=Sum("amount"), contributions=Count("id")).order_by("-total", "-contributions")
+            total_people = ranked.count()
+            stats = ranked[:limit]
+            users = CustomUser.objects.in_bulk([row["user"] for row in stats])
+            leaderboard = [{"user_id": user.id, "first_name": user.first_name, "last_name": user.last_name, "email": user.email, "profile_picture": user.profile_picture or "", "total": str(row["total"]), "contributions": row["contributions"]} for row in stats if (user := users.get(row["user"]))]
+            response_data = {"category": category, "range": range_key, "leaderboard": leaderboard, "total_people": total_people}
+            cache.set(cache_key, response_data, 900)
+            return Response(response_data)
+
         if category == "engagement_team":
             qs = CustomUser.objects.filter(is_deleted=False, referral__isnull=True)
             if start is not None:
@@ -3354,6 +3370,9 @@ def create_email_campaign(request):
         import re
         sender_name = (request.data.get('sender_name') or '').strip()
         sender_name = re.sub(r'[\r\n<>]', '', sender_name)[:100]
+        sender_mode = (request.data.get('sender_mode') or 'hello').strip().lower()
+        if sender_mode not in ('hello', 'no_reply'):
+            return Response({"error": "Invalid sender mode."}, status=400)
 
         # "Personal style" toggle on the compose screen - drops the
         # branded header entirely and shrinks the footer to just an
@@ -3396,6 +3415,7 @@ def create_email_campaign(request):
             recipient_emails=emails,
             total_recipients=len(emails),
             sender_name=sender_name,
+            sender_mode=sender_mode,
             template_mode=template_mode,
         )
 
@@ -3488,7 +3508,24 @@ def admin_push_campaigns(request):
 
     subject = (request.data.get('subject') or '').strip()
     raw_body = (request.data.get('body') or '').strip()
-    body = ' '.join(unescape(strip_tags(raw_body)).split())[:500]
+    plain_body = ' '.join(unescape(strip_tags(raw_body)).split())
+
+    def compact_push_copy(value, limit):
+        """Keep push copy readable while guaranteeing it fits the compact notification UI."""
+        if len(value) <= limit:
+            return value
+        candidate = value[:limit - 1]
+        # Prefer a complete sentence, then a complete word. Avoid producing
+        # a tiny summary when the first sentence itself is long.
+        sentence_end = max(candidate.rfind('. '), candidate.rfind('! '), candidate.rfind('? '))
+        if sentence_end >= int(limit * .45):
+            candidate = candidate[:sentence_end + 1]
+        elif ' ' in candidate:
+            candidate = candidate.rsplit(' ', 1)[0]
+        return candidate.rstrip(' ,;:-') + '…'
+
+    push_subject = compact_push_copy(subject, 65)
+    body = compact_push_copy(plain_body, 180)
     delivery_mode = request.data.get('delivery_mode') if request.data.get('delivery_mode') in ('push', 'both') else 'push'
     explicit_emails = _dedupe_preserve_order(request.data.get('recipients') or [])
     extra_emails = _dedupe_preserve_order(request.data.get('extra_emails') or [])
@@ -3512,7 +3549,7 @@ def admin_push_campaigns(request):
 
     device_count = sum(len(user.expo_push_tokens or []) for user in users)
     campaign = PushCampaign.objects.create(
-        subject=subject, body=raw_body, delivery_mode=delivery_mode, created_by=request.user,
+        subject=subject, body=body, delivery_mode=delivery_mode, created_by=request.user,
         filters_applied=filters_applied, recipient_count=len(users), device_count=device_count,
     )
 
@@ -3523,7 +3560,7 @@ def admin_push_campaigns(request):
         accepted = failed = 0
         try:
             for user in users:
-                result = send_push_notification(user, subject, body, notif_type="ADMIN")
+                result = send_push_notification(user, push_subject, body, notif_type="ADMIN")
                 accepted += result.get("sent", 0)
                 failed += max(0, result.get("total", 0) - result.get("sent", 0))
             PushCampaign.objects.filter(pk=campaign.id).update(
@@ -3718,6 +3755,7 @@ def get_email_campaign_detail(request, campaign_id):
         "body_html": campaign.body_html,
         "filters_applied": campaign.filters_applied,
         "sender_name": campaign.sender_name,
+        "sender_mode": campaign.sender_mode,
         "template_mode": campaign.template_mode,
     })
 

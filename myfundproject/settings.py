@@ -428,8 +428,8 @@ BREVO_SENDER_NAME = "MyFund"
 
 EMAIL_BACKEND = "django.core.mail.backends.dummy.EmailBackend"
 
-DEFAULT_FROM_EMAIL = "MyFund <noreply@myfundmobile.com>"
-EMAIL_REPLY_TO = os.environ.get("EMAIL_REPLY_TO", "MyFund <ceo@myfundmobile.com>")
+DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", "MyFund <hello@myfundmobile.com>")
+EMAIL_REPLY_TO = os.environ.get("EMAIL_REPLY_TO", "MyFund <hello@myfundmobile.com>")
 
 # Google Sign-In - the WEB client ID only (every platform's Google Sign-In
 # native module is configured to mint ID tokens with this as the audience,
