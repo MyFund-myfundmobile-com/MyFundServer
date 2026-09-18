@@ -131,6 +131,11 @@ urlpatterns = [
         name="admin_update_user_status",
     ),
     path(
+        "users/<int:user_id>/ambassador-cohort/",
+        admin_views.set_user_ambassador_cohort,
+        name="admin_set_user_ambassador_cohort",
+    ),
+    path(
         "transactions/list",
         admin_views.all_transactions_list,
         name="admin_all_transactions_list",

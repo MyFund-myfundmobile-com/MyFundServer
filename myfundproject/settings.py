@@ -140,7 +140,15 @@ CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 
 CELERY_TASK_ALWAYS_EAGER = os.getenv("CELERY_TASK_ALWAYS_EAGER") == "True"
-CELERY_TASK_IGNORE_RESULT = os.getenv("CELERY_TASK_IGNORE_RESULT") == "True"
+# Hardcoded rather than env-driven (was os.getenv("CELERY_TASK_IGNORE_RESULT")
+# == "True", which defaulted to False whenever that var was unset/anything
+# else) - nothing in this codebase ever reads a task result back (no
+# AsyncResult, no .get() anywhere), so every one of the 15 daily
+# beat_schedule jobs plus every ad-hoc .delay()/.apply_async() call was
+# writing a result entry to Redis that's never read - pure wasted storage/
+# bandwidth on the Upstash-billed broker. Hardcoded so a missing/misset env
+# var in any environment can't silently re-enable the waste.
+CELERY_TASK_IGNORE_RESULT = True
 
 # from celery.schedules import crontab
 

@@ -919,6 +919,24 @@ def _build_admin_user_queryset(params, exclude_unmailable=False):
             queryset = queryset.filter(ambassador_cohort__cohort_number=cohort_number)
             filters_applied["ambassador_cohort"] = cohort_number
 
+    # Ambassador Cohort 4 outreach (2026-09) - "apply" (referred someone,
+    # never an ambassador) vs "forward" (referred someone, is/was ever an
+    # ambassador). Reuses CustomUserQuerySet.users_referred_never_
+    # ambassador/users_referred_and_ambassador (models.py) rather than
+    # re-deriving the same logic here, so this filter and the Brevo
+    # REFERRAL_SEGMENT attribute (sync_contact_to_brevo) can never drift
+    # apart - see those docstrings for why "ever an ambassador" checks
+    # ambassador_cohort, not just is_ambassador.
+    referral_segment = (params.get('referral_segment') or '').strip().lower()
+    if referral_segment in ('apply', 'forward'):
+        segment_ids = (
+            CustomUser.objects.users_referred_never_ambassador()
+            if referral_segment == 'apply'
+            else CustomUser.objects.users_referred_and_ambassador()
+        ).values('id')
+        queryset = queryset.filter(id__in=segment_ids)
+        filters_applied["referral_segment"] = referral_segment
+
     non_zero_balance = _parse_bool_param(params.get('non_zero_balance'))
     if non_zero_balance:
         queryset = queryset.filter(
@@ -1395,6 +1413,57 @@ def update_user_status(request, user_id):
 
     except Exception as e:
         return Response({"error": str(e)}, status=500)
+
+
+@api_view(['POST'])
+@permission_classes([IsAdminUser])
+def set_user_ambassador_cohort(request, user_id):
+    """
+    POST /api/admin/users/<user_id>/ambassador-cohort/
+    Body: {"cohort_id": 3} or {"cohort_id": null} to clear.
+    Separate from update_user_status above since ambassador_cohort isn't a
+    boolean toggle - a plain FK id set, deliberately independent of
+    is_ambassador (see AmbassadorCohort's docstring): the mobile "make
+    ambassador" flow calls this AND update_user_status('is_ambassador',
+    true) together when an admin picks a cohort while turning ambassador
+    status on, but either can also be called alone (e.g. re-assigning a
+    still-active ambassador to a different cohort, or backfilling a
+    cohort onto a former ambassador without touching is_ambassador).
+    """
+    cohort_id = request.data.get('cohort_id')
+
+    try:
+        user = CustomUser.objects.get(pk=user_id, is_deleted=False)
+    except CustomUser.DoesNotExist:
+        return Response({"error": "User not found."}, status=404)
+    except (ValueError, TypeError):
+        return Response({"error": "Invalid user id."}, status=400)
+
+    if cohort_id is None:
+        user.ambassador_cohort = None
+    else:
+        try:
+            cohort = AmbassadorCohort.objects.get(pk=cohort_id)
+        except AmbassadorCohort.DoesNotExist:
+            return Response({"error": "Cohort not found."}, status=404)
+        except (ValueError, TypeError):
+            return Response({"error": "Invalid cohort id."}, status=400)
+        user.ambassador_cohort = cohort
+
+    user.save(update_fields=['ambassador_cohort'])
+
+    return Response({
+        "id": user.id,
+        "ambassador_cohort": (
+            {
+                "id": user.ambassador_cohort.id,
+                "cohort_number": user.ambassador_cohort.cohort_number,
+                "name": user.ambassador_cohort.name,
+            }
+            if user.ambassador_cohort_id
+            else None
+        ),
+    })
 
 
 # ============================================================================

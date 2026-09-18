@@ -60,17 +60,51 @@ that later.
 
 ## Brevo sync
 
-`sync_contact_to_brevo` (`authentication/services/brevo_service.py`) sends two
+`sync_contact_to_brevo` (`authentication/services/brevo_service.py`) sends these
 attributes for this:
 
 - `IS_AMBASSADOR` (boolean) - mirrors `is_ambassador` exactly.
 - `AMBASSADOR_COHORT` (integer, nullable) - the user's `ambassador_cohort.cohort_number`,
   or `null` if unassigned.
+- `REFERRAL_COUNT` (integer) - how many users signed up with this user as referrer.
+- `REFERRAL_SEGMENT` (string, nullable) - `"apply"` / `"forward"` / `null`. See
+  the Referral segments section below - `null` whenever `REFERRAL_COUNT` is 0
+  (there's no campaign message for someone who hasn't referred anyone).
 
 This lets Brevo segments target e.g. "Ambassadors, Cohort 3" distinct from
-"Cohort 4," or "everyone ever in Cohort 1" regardless of current `is_ambassador`
-status. Brevo auto-creates both attributes on first sync if they don't already
+"Cohort 4," "everyone ever in Cohort 1" regardless of current `is_ambassador`
+status, or `REFERRAL_SEGMENT = apply` directly - no CSV re-export needed per
+campaign. Brevo auto-creates new attributes on first sync if they don't already
 exist in the account's contact attribute schema.
+
+## Referral segments (Ambassador Cohort 4 outreach, 2026-09)
+
+Two mutually-exclusive, jointly-exhaustive segments over everyone who's ever
+referred at least one person - added as `CustomUserQuerySet` methods
+(`models.py`), reusable for future campaigns rather than a one-off script:
+
+- **`CustomUser.objects.users_referred_never_ambassador()`** ("apply" message) -
+  `referral_count > 0`, `is_ambassador=False`, AND `ambassador_cohort` is null
+  (never assigned one, so genuinely never an ambassador - not just currently
+  inactive).
+- **`CustomUser.objects.users_referred_and_ambassador()`** ("forward" message) -
+  `referral_count > 0` AND (`is_ambassador=True` OR has an `ambassador_cohort` on
+  record). Deliberately checks `ambassador_cohort`, not just `is_ambassador` - a
+  former ambassador whose status was later revoked keeps their cohort record
+  (see the backfill section above), so they still get told "you know what it
+  takes," not "you should apply" as if they'd never done it.
+
+Both depend on `REFERRAL_COUNT` and ambassador history together - a user with
+`referral_count=0` lands in neither, same as `REFERRAL_SEGMENT=null` above.
+Verified mutually exclusive and jointly exhaustive in
+`test_ambassador_referral_segments.py`.
+
+Exposed as compose-screen segments too (not just Brevo attributes) - see
+`_build_admin_user_queryset`'s `referral_segment=apply|forward` param and
+`AdminSendEmailScreen.js`'s "Referred, Never Ambassador" / "Referred, Ever
+Ambassador" segment chips - so a campaign can be sent directly from the mobile
+admin tool the same day, without waiting on a full Brevo sync cycle or a manual
+CSV import.
 
 ## Mobile compose screen (Email/Push)
 

@@ -20,7 +20,7 @@ from django.db.models import Sum
 from django.contrib.auth.hashers import make_password, check_password
 from django.db import transaction
 import logging
-from django.db.models import F
+from django.db.models import F, Q, Exists, OuterRef
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,44 @@ def default_notification_preferences():
     }
 
 
-class CustomUserManager(BaseUserManager):
+class CustomUserQuerySet(models.QuerySet):
+    """
+    Reusable ambassador-referral segments (Ambassador Cohort 4 outreach,
+    2026-09, and any future campaign that needs the same split) - kept as
+    queryset methods rather than inline filters in a one-off script so
+    they can't drift out of sync between campaigns. Both are read-only:
+    they don't touch is_ambassador or ambassador_cohort, only read them.
+
+    "Ever been an ambassador" deliberately checks ambassador_cohort, not
+    just is_ambassador - a former ambassador whose status was later
+    revoked keeps their AmbassadorCohort record (see AmbassadorCohort's
+    docstring: cohort is additive, independent metadata that isn't
+    cleared on revoke), so ambassador_cohort__isnull is the field that
+    actually distinguishes "never was one" from "was one, not anymore".
+    """
+
+    def _with_has_referred(self):
+        referred_exists = self.model.objects.filter(
+            is_deleted=False, referral=OuterRef("pk"),
+        )
+        return self.annotate(has_referred_anyone=Exists(referred_exists))
+
+    def users_referred_never_ambassador(self):
+        """Segment A: referred >=1 person, never an ambassador (current or historical)."""
+        return self._with_has_referred().filter(
+            has_referred_anyone=True,
+            is_ambassador=False,
+            ambassador_cohort__isnull=True,
+        )
+
+    def users_referred_and_ambassador(self):
+        """Segment B: referred >=1 person AND is/was ever an ambassador."""
+        return self._with_has_referred().filter(has_referred_anyone=True).filter(
+            Q(is_ambassador=True) | Q(ambassador_cohort__isnull=False)
+        )
+
+
+class CustomUserManager(BaseUserManager.from_queryset(CustomUserQuerySet)):
     def create_user(self, email, password=None, **extra_fields):
         if not email:
             raise ValueError("The Email field must be set")

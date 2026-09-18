@@ -266,6 +266,25 @@ def determine_user_category(user):
 # ==========================================
 
 
+def determine_referral_segment(user, referral_count):
+    """
+    Ambassador Cohort 4 outreach segmentation (2026-09) - mirrors
+    CustomUserQuerySet.users_referred_never_ambassador/
+    users_referred_and_ambassador (models.py) exactly, just evaluated
+    per-contact here instead of as a queryset, so Brevo's own segment
+    builder can filter on REFERRAL_SEGMENT = apply / = forward directly
+    without a fresh CSV export per campaign. Null for anyone with
+    referral_count = 0 - there's no message to send them either way.
+    "Ever an ambassador" checks ambassador_cohort, not just is_ambassador,
+    for the same reason the queryset methods do (see their docstring): a
+    revoked former ambassador keeps their AmbassadorCohort record.
+    """
+    if referral_count <= 0:
+        return None
+    ever_ambassador = bool(user.is_ambassador) or bool(user.ambassador_cohort_id)
+    return "forward" if ever_ambassador else "apply"
+
+
 def sync_contact_to_brevo(user):
 
     if not user.email:
@@ -278,6 +297,8 @@ def sync_contact_to_brevo(user):
         metrics = get_transaction_metrics(user)
 
         total_assets = user.savings + user.investment + user.wallet
+
+        referral_count = CustomUser.objects.filter(referral=user).count()
 
         attributes = {
             # BASIC
@@ -325,7 +346,9 @@ def sync_contact_to_brevo(user):
             # KYC
             "KYC_STATUS": getattr(user, "kyc_status", "NOT_STARTED"),
             # REFERRALS
-            "REFERRAL_COUNT": CustomUser.objects.filter(referral=user).count(),
+            "REFERRAL_COUNT": referral_count,
+            # "apply" / "forward" / null - see determine_referral_segment.
+            "REFERRAL_SEGMENT": determine_referral_segment(user, referral_count),
             # DATE
             "SIGNUP_DATE": user.date_joined.date().isoformat(),
         }

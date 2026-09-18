@@ -237,6 +237,12 @@ class AdminUserListSerializer(UserSerializer):
     """
 
     joined_at = serializers.DateTimeField(source="date_joined", read_only=True)
+    # Nested {id, cohort_number, name} rather than a bare FK id - the
+    # mobile AdminUserDetailScreen needs the cohort_number to label the
+    # cohort picker and to know which option is currently selected, not
+    # just an opaque id. Same shape set_user_ambassador_cohort's response
+    # already uses, so the two stay easy to read together.
+    ambassador_cohort = serializers.SerializerMethodField()
 
     class Meta(UserSerializer.Meta):
         fields = UserSerializer.Meta.fields + [
@@ -245,7 +251,17 @@ class AdminUserListSerializer(UserSerializer):
             "is_active",
             "is_staff",
             "is_deleted",
+            "ambassador_cohort",
         ]
+
+    def get_ambassador_cohort(self, obj):
+        if not obj.ambassador_cohort_id:
+            return None
+        return {
+            "id": obj.ambassador_cohort.id,
+            "cohort_number": obj.ambassador_cohort.cohort_number,
+            "name": obj.ambassador_cohort.name,
+        }
 
 
 from .models import Transaction as _AdminTransaction

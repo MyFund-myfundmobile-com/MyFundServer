@@ -2248,20 +2248,38 @@ def requery_paystack_dva(account_number):
 def send_ambassador_status_notification(user, became_ambassador=True):
     """
     Send push notification + email when ambassador status changes.
+
+    Mentions the user's ambassador_cohort (see AmbassadorCohort's
+    docstring) when one is assigned - reads it fresh off `user` at call
+    time, so callers that set the cohort before granting (e.g. the mobile
+    "which cohort?" picker - see AdminUserDetailScreen.handleGrantAmbassador,
+    which assigns the cohort THEN grants, in that order, specifically so
+    it's already on `user` by the time this fires) get it named in the
+    message. Silently omitted if no cohort is set yet - "No cohort yet" is
+    a valid state (see set_user_ambassador_cohort), not an error.
     """
     try:
+        cohort_number = (
+            user.ambassador_cohort.cohort_number if user.ambassador_cohort_id else None
+        )
+        cohort_note = f" You've been placed in Cohort {cohort_number}." if cohort_number else ""
+
         if became_ambassador:
             push_title = "🎉 You are now a MyFund Ambassador!"
             push_message = (
                 f"Hi {user.first_name}, congratulations! "
-                "Your account has been updated to Ambassador status. You now have access to the MyFund Ambassador portal and benefits. Enjoy!"
+                "Your account has been updated to Ambassador status."
+                f"{cohort_note}"
+                " You now have access to the MyFund Ambassador portal and benefits. Enjoy!"
             )
 
             email_subject = "You are now a MyFund Ambassador 🎉"
             email_message = (
                 f"Hi {user.first_name},<br><br>"
                 "Congratulations! Your MyFund account has been updated to "
-                "<b>Ambassador status</b>.<br><br>"
+                "<b>Ambassador status</b>."
+                + (f" You've been placed in <b>Cohort {cohort_number}</b>." if cohort_number else "")
+                + "<br><br>"
                 "You can now enjoy ambassador-related benefits and opportunities on MyFund.<br><br>"
                 "Keep winning with MyFund. 🚀"
             )
@@ -2269,17 +2287,21 @@ def send_ambassador_status_notification(user, became_ambassador=True):
             data = {
                 "type": "AMBASSADOR_GRANTED",
                 "is_ambassador": True,
+                "ambassador_cohort": cohort_number,
             }
         else:
             push_title = "Ambassador Status Updated"
             push_message = (
                 f"Hi {user.first_name}, your MyFund Ambassador status has been removed."
+                f"{f' (You were previously in Cohort {cohort_number}.)' if cohort_number else ''}"
             )
 
             email_subject = "Your MyFund Ambassador Status Was Updated"
             email_message = (
                 f"Hi {user.first_name},<br><br>"
-                "Your MyFund Ambassador status has been removed from your account.<br><br>"
+                "Your MyFund Ambassador status has been removed from your account."
+                + (f" You were previously in Cohort {cohort_number}." if cohort_number else "")
+                + "<br><br>"
                 "If you believe this was done in error, please contact support.<br><br>"
                 "MyFund Team"
             )
@@ -2287,6 +2309,7 @@ def send_ambassador_status_notification(user, became_ambassador=True):
             data = {
                 "type": "AMBASSADOR_REVOKED",
                 "is_ambassador": False,
+                "ambassador_cohort": cohort_number,
             }
 
         # Push
