@@ -302,6 +302,22 @@ def sync_contact_to_brevo(user):
             "TOTAL_ASSETS": float(total_assets),
             # USER CATEGORY
             "USER_CATEGORY": determine_user_category(user),
+            # AMBASSADOR
+            # IS_AMBASSADOR mirrors CustomUser.is_ambassador exactly (the
+            # flag that drives payments/referral-threshold logic - see
+            # models.py) - this is just exposing it as its own filterable
+            # Brevo attribute instead of only being buried inside the
+            # comma-joined USER_CATEGORY string. AMBASSADOR_COHORT is
+            # separate, additive metadata (which intake they joined) and
+            # is null for anyone never assigned a cohort - lets Brevo
+            # segments target "Ambassadors, Cohort 3" distinct from
+            # "Cohort 4" regardless of current is_ambassador status.
+            "IS_AMBASSADOR": bool(user.is_ambassador),
+            "AMBASSADOR_COHORT": (
+                user.ambassador_cohort.cohort_number
+                if user.ambassador_cohort_id
+                else None
+            ),
             # PROFILE
             "GENDER": user.gender or "",
             "STATE": user.state or "",

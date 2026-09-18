@@ -24,6 +24,7 @@ from .models import (
     EmailTemplate,
     Employee,
     CxWeeklyReport,
+    AmbassadorCohort,
 )
 from .serializers import (
     UserSerializer,
@@ -903,6 +904,21 @@ def _build_admin_user_queryset(params, exclude_unmailable=False):
         queryset = queryset.filter(kyc_status=kyc_status)
         filters_applied["kyc_status"] = kyc_status
 
+    # Independent of is_ambassador on purpose - a cohort can include
+    # people who are no longer active ambassadors (see AmbassadorCohort's
+    # docstring/the 2026-09 backfill migration), and an admin messaging
+    # "everyone who was ever in Cohort 1" needs exactly those people, not
+    # just whichever of them still have is_ambassador=True today.
+    ambassador_cohort = params.get('ambassador_cohort')
+    if ambassador_cohort not in (None, ''):
+        try:
+            cohort_number = int(ambassador_cohort)
+        except (TypeError, ValueError):
+            cohort_number = None
+        if cohort_number is not None:
+            queryset = queryset.filter(ambassador_cohort__cohort_number=cohort_number)
+            filters_applied["ambassador_cohort"] = cohort_number
+
     non_zero_balance = _parse_bool_param(params.get('non_zero_balance'))
     if non_zero_balance:
         queryset = queryset.filter(
@@ -1079,6 +1095,34 @@ def _build_admin_user_queryset(params, exclude_unmailable=False):
             filters_applied["referred_within_months"] = months
 
     return queryset.order_by('-date_joined'), filters_applied
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def list_ambassador_cohorts(request):
+    """
+    GET /api/admin/ambassador-cohorts/
+    Backs the mobile admin Email/Push compose screen's Ambassadors ->
+    Cohort N picker (tapping "Ambassadors" opens this list instead of a
+    hardcoded set, so a newly-created cohort shows up immediately with no
+    app release - see AdminSendEmailScreen.js). Ordered newest-first
+    (cohort_number descending) since the most recent cohort is the one an
+    admin is almost always messaging.
+    """
+    cohorts = AmbassadorCohort.objects.all().order_by('-cohort_number')
+    data = [
+        {
+            "id": cohort.id,
+            "cohort_number": cohort.cohort_number,
+            "name": cohort.name,
+            "status": cohort.status,
+            "start_date": cohort.start_date,
+            "end_date": cohort.end_date,
+            "member_count": cohort.members.count(),
+        }
+        for cohort in cohorts
+    ]
+    return Response(data)
 
 
 @api_view(['GET'])

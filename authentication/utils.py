@@ -62,6 +62,21 @@ def build_push_context(user, extra_context=None):
         "email": email,
         "phone_number": phone_number,
         "user_id": str(user.id) if getattr(user, "id", None) else "",
+        # Same definition as personalize_email_payload's {referral_count}
+        # and sync_contact_to_brevo's REFERRAL_COUNT attribute.
+        "referral_count": str(
+            CustomUser.objects.filter(referral=user).count()
+            if getattr(user, "id", None)
+            else 0
+        ),
+        # Same definition as personalize_email_payload's
+        # {ambassador_cohort} and sync_contact_to_brevo's
+        # AMBASSADOR_COHORT attribute.
+        "ambassador_cohort": (
+            str(user.ambassador_cohort.cohort_number)
+            if getattr(user, "ambassador_cohort_id", None)
+            else ""
+        ),
     }
 
     # allow extra values like amount, savings_balance, etc.
@@ -432,6 +447,22 @@ def personalize_email_payload(
             "{savings_roi}": f"{savings_roi:,.2f}",
             "{investment_roi}": f"{investment_roi:,.2f}",
             "{quarter_label}": ql,
+            # Same definition as sync_contact_to_brevo's REFERRAL_COUNT
+            # attribute (brevo_service.py) - how many users signed up with
+            # this user as their referrer, regardless of reward status.
+            "{referral_count}": str(
+                CustomUser.objects.filter(referral=user).count() if user else 0
+            ),
+            # Same definition as sync_contact_to_brevo's AMBASSADOR_COHORT
+            # attribute - which intake (Cohort 1, 3, ...) this user joined,
+            # independent of current is_ambassador status. Blank (not
+            # "None") when unassigned, so the rendered message just omits
+            # it cleanly.
+            "{ambassador_cohort}": (
+                str(user.ambassador_cohort.cohort_number)
+                if user and user.ambassador_cohort_id
+                else ""
+            ),
         }
 
         # Add custom dynamic values

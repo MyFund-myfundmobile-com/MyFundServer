@@ -198,6 +198,24 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     is_influencer = models.BooleanField(default=False)
     is_ambassador = models.BooleanField(default=False)
 
+    # Which ambassador intake this user joined in - purely additive
+    # metadata layered on top of is_ambassador above, for cohort-specific
+    # segmentation/messaging (see AdminSendEmailScreen's Ambassadors ->
+    # Cohort N picker and sync_contact_to_brevo's AMBASSADOR_COHORT
+    # attribute). Deliberately independent of is_ambassador: a user can
+    # be in a cohort (e.g. a past one) without currently being an active
+    # ambassador, and is_ambassador's own meaning/behavior - which drives
+    # the referral-threshold and stipend/payment logic elsewhere in this
+    # file and in admin.py - is untouched by this field. See
+    # AmbassadorCohort's docstring further down for the model itself.
+    ambassador_cohort = models.ForeignKey(
+        "AmbassadorCohort",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="members",
+    )
+
     objects = CustomUserManager()
 
     USERNAME_FIELD = "email"
@@ -3481,6 +3499,48 @@ from decimal import Decimal
 from django.conf import settings
 from django.db import models
 from django.utils import timezone
+
+
+class AmbassadorCohort(models.Model):
+    """
+    Which ambassador intake a user joined (Cohort 1, 2, 3, ...) - purely
+    additive metadata for segmentation/messaging, layered on top of
+    CustomUser.is_ambassador (see that field's comment). Does NOT drive
+    payments/rewards: the stipend system (AmbassadorMonthlyReport below)
+    and the referral-threshold logic (CustomUser.confirm_referral_rewards)
+    both key off is_ambassador exactly as before this model was added.
+
+    One cohort per user (FK, not M2M) - cohort membership is modeled as
+    "which intake you joined", a one-time fact, not something a user
+    accumulates multiple of. If re-joining in a later cohort ever becomes
+    a real product decision, this can be widened to M2M then.
+    """
+
+    STATUS_CHOICES = [
+        ("upcoming", "Upcoming"),
+        ("active", "Active"),
+        ("ended", "Ended"),
+    ]
+
+    cohort_number = models.PositiveIntegerField(unique=True)
+    # Optional human label, mainly for a cohort that doesn't map cleanly
+    # to a single number - e.g. the pre-tracking backfill bucket covering
+    # historical Cohorts 1 & 2, which couldn't be told apart from existing
+    # data (see the 2026-09 migration that created it). Falls back to
+    # "Cohort {cohort_number}" in __str__ when blank.
+    name = models.CharField(max_length=100, blank=True)
+    start_date = models.DateField(null=True, blank=True)
+    end_date = models.DateField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="upcoming")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["cohort_number"]
+        verbose_name = "Ambassador Cohort"
+        verbose_name_plural = "Ambassador Cohorts"
+
+    def __str__(self):
+        return self.name or f"Cohort {self.cohort_number}"
 
 
 class AmbassadorPointConfig(models.Model):

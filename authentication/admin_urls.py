@@ -106,6 +106,11 @@ urlpatterns = [
     path("users/recent", admin_views.recent_signups, name="admin_recent_signups"),
     path("users/list", admin_views.all_users_list, name="admin_all_users_list"),
     path(
+        "ambassador-cohorts/",
+        admin_views.list_ambassador_cohorts,
+        name="admin_list_ambassador_cohorts",
+    ),
+    path(
         "users/emails/",
         admin_views.admin_user_emails_for_segment,
         name="admin_user_emails_for_segment",

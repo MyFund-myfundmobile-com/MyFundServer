@@ -17,6 +17,7 @@ from .models import (
     DailyROIAccrual,
     ROITransaction,
     FinanceMetricSnapshot,
+    AmbassadorCohort,
 )
 from django.core.mail import send_mail
 from django.urls import reverse
@@ -177,6 +178,7 @@ class CustomUserAdmin(UserAdmin):
         "how_did_you_hear",
         "is_influencer",
         "is_ambassador",
+        "ambassador_cohort",
         "kyc_status",
         "is_staff",
         "is_active",
@@ -198,6 +200,7 @@ class CustomUserAdmin(UserAdmin):
         "date_joined",
         "is_influencer",
         "is_ambassador",
+        "ambassador_cohort",
         "paystack_identified",
         "paystack_identification_status",
     )
@@ -254,6 +257,7 @@ class CustomUserAdmin(UserAdmin):
                     "is_active",
                     "is_superuser",
                     "is_ambassador",
+                    "ambassador_cohort",
                     "is_influencer",
                     "groups",
                     "user_permissions",
@@ -620,6 +624,39 @@ class CustomUserAdmin(UserAdmin):
                     user=obj,
                     became_influencer=obj.is_influencer,
                 )
+
+    def get_actions(self, request):
+        """
+        Adds one "Assign selected users to Cohort N" action per existing
+        AmbassadorCohort, on top of the static `actions` list above - so
+        approving a new cohort (create it once in the AmbassadorCohort
+        admin) immediately gets a matching bulk-assign action here with
+        no code change, matching how "when a new cohort is approved,
+        there should be a simple way to bulk-assign a list of users to
+        it" is meant to work day-to-day. Deliberately separate from
+        make_ambassador/revoke_ambassador - cohort is independent
+        metadata (see AmbassadorCohort's docstring), so assigning one
+        doesn't also flip is_ambassador, and vice versa.
+        """
+        actions = super().get_actions(request)
+        for cohort in AmbassadorCohort.objects.all():
+            action_name = f"assign_ambassador_cohort_{cohort.cohort_number}"
+
+            def action_func(modeladmin, request, queryset, _cohort=cohort):
+                updated = queryset.update(ambassador_cohort=_cohort)
+                modeladmin.message_user(
+                    request,
+                    f"{updated} user(s) assigned to {_cohort}.",
+                    level=messages.SUCCESS,
+                )
+
+            action_func.__name__ = action_name
+            actions[action_name] = (
+                action_func,
+                action_name,
+                f"📚 Assign selected users to {cohort}",
+            )
+        return actions
 
     @admin.action(description="🌟 Make selected users ambassadors")
     def make_ambassador(self, request, queryset):
@@ -2833,6 +2870,25 @@ from django.utils import timezone
 from datetime import datetime
 from .models import AmbassadorPointConfig, AmbassadorMonthlyReport, Transaction
 from .utils import send_push_notification, send_generic_email, send_transactional_email
+
+
+@admin.register(AmbassadorCohort)
+class AmbassadorCohortAdmin(admin.ModelAdmin):
+    """
+    Create/edit cohorts here (e.g. a new "Cohort 4" once finalists are
+    approved), then use CustomUserAdmin's dynamically-generated "Assign
+    selected users to Cohort N" bulk action (see get_actions below) to
+    move a list of approved users into it.
+    """
+
+    list_display = ("cohort_number", "name", "status", "start_date", "end_date", "member_count")
+    list_filter = ("status",)
+    ordering = ("cohort_number",)
+
+    def member_count(self, obj):
+        return obj.members.count()
+
+    member_count.short_description = "Members"
 
 
 @admin.register(AmbassadorPointConfig)
