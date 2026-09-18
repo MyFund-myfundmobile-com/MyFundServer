@@ -14195,11 +14195,71 @@ class AmbassadorPerformanceReportView(APIView):
             if r and (best is None or pts > Decimal(str(best["points"]))):
                 best = row
 
+        # Lifetime standing - ALL of this user's reports ever (not just
+        # the 5-month window above), ranked against every other ambassador
+        # in the same cohort on the same lifetime basis, so "position 2 of
+        # 13" means something consistent regardless of how long anyone's
+        # been reporting. Cohort-scoped rather than all-ambassadors-ever:
+        # that's who they're actually competing with for this cohort's
+        # Send-Forth awards (see AMBASSADOR_PROGRAM.md).
+        rank_data = None
+        lifetime_points_by_user = {}
+        if cohort:
+            totals = (
+                AmbassadorMonthlyReport.objects.filter(
+                    user__ambassador_cohort=cohort, user__is_ambassador=True,
+                )
+                .values("user_id")
+                .annotate(lifetime_points=Sum("total_points_awarded"))
+            )
+            lifetime_points_by_user = {
+                row["user_id"]: row["lifetime_points"] or Decimal("0.00")
+                for row in totals
+            }
+            ranked_user_ids = sorted(
+                lifetime_points_by_user,
+                key=lambda uid: lifetime_points_by_user[uid],
+                reverse=True,
+            )
+            if user.id in ranked_user_ids:
+                rank_data = {
+                    "position": ranked_user_ids.index(user.id) + 1,
+                    "total_ambassadors": len(ranked_user_ids),
+                    "lifetime_points": str(lifetime_points_by_user[user.id]),
+                }
+
+        # Plain-language takeaway - same trend logic
+        # cohort3_performance_summary_email.py uses for its email copy
+        # (recent reported month vs. the average of the prior ones in the
+        # 5-month window), plus the rank if one was computable.
+        recent_points = Decimal(months[-1]["points"]) if months else Decimal("0.00")
+        prior_points = [Decimal(m["points"]) for m in months[:-1]]
+        prior_avg = (
+            sum(prior_points) / len(prior_points) if prior_points else Decimal("0.00")
+        )
+        if recent_points >= prior_avg and recent_points > 0:
+            trend_sentence = "You're finishing strong - your most recent reported month is at or above your recent average."
+        elif total_points == 0:
+            trend_sentence = "No points on the board yet in this window - every signup, confirmed referral, and session attended still counts."
+        else:
+            trend_sentence = "Your most recent reported month dipped below your recent average - there's room to push it back up."
+
+        if rank_data:
+            rank_sentence = (
+                f" You're ranked #{rank_data['position']} of "
+                f"{rank_data['total_ambassadors']} in your cohort by total "
+                f"points earned so far."
+            )
+        else:
+            rank_sentence = ""
+
         return Response({
             "cohort": cohort_data,
             "months": months,
             "total_points": str(total_points),
             "best_month": best["month_label"] if best else None,
+            "rank": rank_data,
+            "analysis": trend_sentence + rank_sentence,
         })
 
 
