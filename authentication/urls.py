@@ -45,6 +45,7 @@ from .views import (
     profile_picture_update_base64,
     AmbassadorMonthlyReportCreateView,
     AmbassadorMonthlyReportStatusView,
+    AmbassadorPerformanceReportView,
     submit_ambassador_attendance,
     AdminFinanceMetricsView,
     request_phone_change,
@@ -528,6 +529,11 @@ urlpatterns = [
         "ambassador-report/status/",
         AmbassadorMonthlyReportStatusView.as_view(),
         name="ambassador-report-status",
+    ),
+    path(
+        "ambassador/performance-report/",
+        AmbassadorPerformanceReportView.as_view(),
+        name="ambassador-performance-report",
     ),
     path(
         "attendance/submit/",

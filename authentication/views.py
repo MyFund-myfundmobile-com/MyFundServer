@@ -14126,6 +14126,83 @@ class AmbassadorMonthlyReportStatusView(APIView):
         )
 
 
+class AmbassadorPerformanceReportView(APIView):
+    """
+    GET /api/ambassador/performance-report/
+    Self-service version of the admin Cohort Performance Push tooling
+    (see cohort3_performance_summary_email.py) - the requesting user's
+    OWN last 5 reported months (signups/confirmed/attendance/points),
+    scoped to their own ambassador_cohort, plus that cohort's
+    send_forth_date for the mobile Ambassador Performance Report
+    screen's countdown. 403s for a non-ambassador (matches
+    AmbassadorMonthlyReportCreateView/StatusView's is_ambassador gate
+    elsewhere) rather than returning an empty/misleading report.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        if not user.is_ambassador:
+            return Response(
+                {"detail": "This report is only available to current ambassadors."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        cohort = user.ambassador_cohort
+        cohort_data = None
+        if cohort:
+            cohort_data = {
+                "cohort_number": cohort.cohort_number,
+                "name": cohort.name,
+                "send_forth_date": cohort.send_forth_date,
+            }
+
+        # Last 5 calendar months up to and including the current one, so
+        # this stays correct without editing a hardcoded month list every
+        # cohort cycle (unlike the one-off campaign script this mirrors).
+        today = timezone.now().date()
+        month_keys = []
+        cursor = today.replace(day=1)
+        for _ in range(5):
+            month_keys.append(cursor.strftime("%Y-%m"))
+            cursor = (cursor - timedelta(days=1)).replace(day=1)
+        month_keys.reverse()
+
+        reports = {
+            r.month: r
+            for r in AmbassadorMonthlyReport.objects.filter(
+                user=user, month__in=month_keys
+            )
+        }
+
+        months = []
+        total_points = Decimal("0.00")
+        best = None
+        for key in month_keys:
+            r = reports.get(key)
+            pts = r.total_points_awarded if r else Decimal("0.00")
+            row = {
+                "month": key,
+                "month_label": datetime.strptime(key, "%Y-%m").strftime("%B"),
+                "signups": r.signups_approved if r else 0,
+                "confirmed": r.confirmed_approved if r else 0,
+                "attendance": r.attendance_approved if r else 0,
+                "points": str(pts),
+            }
+            months.append(row)
+            total_points += pts
+            if r and (best is None or pts > Decimal(str(best["points"]))):
+                best = row
+
+        return Response({
+            "cohort": cohort_data,
+            "months": months,
+            "total_points": str(total_points),
+            "best_month": best["month_label"] if best else None,
+        })
+
+
 from rest_framework.decorators import (
     api_view,
     permission_classes,

@@ -3568,6 +3568,13 @@ class AmbassadorCohort(models.Model):
     name = models.CharField(max_length=100, blank=True)
     start_date = models.DateField(null=True, blank=True)
     end_date = models.DateField(null=True, blank=True)
+    # The cohort's Award & Send-Forth Programme date - separate from
+    # end_date since the celebration event doesn't necessarily land on
+    # the cohort's own last day (Cohort 3 ends Sept 30, sends forth
+    # Sept 26). Drives the countdown on the mobile Ambassador Performance
+    # Report screen - nullable so creating a cohort doesn't require
+    # knowing this date yet.
+    send_forth_date = models.DateField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="upcoming")
     created_at = models.DateTimeField(auto_now_add=True)
 

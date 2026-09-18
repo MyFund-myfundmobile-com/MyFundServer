@@ -2881,7 +2881,7 @@ class AmbassadorCohortAdmin(admin.ModelAdmin):
     move a list of approved users into it.
     """
 
-    list_display = ("cohort_number", "name", "status", "start_date", "end_date", "member_count")
+    list_display = ("cohort_number", "name", "status", "start_date", "end_date", "send_forth_date", "member_count")
     list_filter = ("status",)
     ordering = ("cohort_number",)
 
