@@ -1,4 +1,5 @@
 import os
+from django.db.models.fields import NOT_PROVIDED
 from rest_framework import status, viewsets
 from rest_framework.authtoken.models import Token
 from rest_framework.authtoken.views import ObtainAuthToken
@@ -2192,7 +2193,70 @@ def get_user_profile(request):
 
         bank_accounts = BankAccount.objects.filter(user=user)
 
+        # Profile completion measures saved details, independently of
+        # approval. Several of these fields are declared with a
+        # placeholder model default rather than null/blank (gender=
+        # "Choose", address="Enter Address", date_of_birth=1900-01-01,
+        # id_upload="kyc_documents/placeholder.png", etc. - see
+        # CustomUser in models.py) so an untouched field is never empty,
+        # just still sitting at its sentinel value. A plain truthiness
+        # check like this used to count every one of those as "filled
+        # in" - a brand-new user who's only signed up and added a
+        # profile photo would read 100% complete despite never having
+        # opened the KYC form. _field_is_completed compares against
+        # each field's own declared default instead, so "still at
+        # whatever it started as" never counts as completed regardless
+        # of whether that default happens to be an obvious placeholder
+        # string or a real-looking one (country's default "Nigeria").
+        def _field_is_completed(field_name):
+            value = str(getattr(user, field_name, "") or "").strip()
+            if not value:
+                return False
+            field_default = CustomUser._meta.get_field(field_name).default
+            if field_default is NOT_PROVIDED:
+                return True
+            return value != str(field_default).strip()
+
+        completion_fields = (
+            "profile_picture", "gender", "relationship_status",
+            "employment_status", "yearly_income", "date_of_birth", "address",
+            "mothers_maiden_name", "identification_type", "id_upload",
+            "next_of_kin_name", "relationship_with_next_of_kin",
+            "next_of_kin_phone_number", "state", "country",
+        )
+        completed_fields = sum(_field_is_completed(field) for field in completion_fields)
+        profile_completion = round(100 * completed_fields / len(completion_fields))
+
+        # Lets a rejected/returning KYC submitter see what they already
+        # entered instead of a blank form - only genuinely-saved values
+        # are sent (via the same _field_is_completed check the completion
+        # % above uses), so a field still sitting at its model default
+        # (e.g. gender="Choose") comes through as None rather than that
+        # placeholder string.
+        kyc_detail_fields = (
+            "gender", "relationship_status", "employment_status",
+            "yearly_income", "date_of_birth", "address",
+            "mothers_maiden_name", "identification_type",
+            "next_of_kin_name", "relationship_with_next_of_kin",
+            "next_of_kin_phone_number", "state", "country",
+        )
+        kyc_details = {
+            field: (getattr(user, field) if _field_is_completed(field) else None)
+            for field in kyc_detail_fields
+        }
+
         profile_data = {
+            "profile_completion": profile_completion,
+            # Separate from profile_completion above - that one measures
+            # saved FIELDS regardless of approval, so a fully-filled-in
+            # but not-yet-reviewed submission already reads 100% there.
+            # kyc_status is the actual admin-reviewed state (see
+            # CustomUser.KYC_STATUS_CHOICES) - the mobile app's profile
+            # completion ring uses this, not profile_completion, to
+            # decide whether it's earned the "verified" checkmark.
+            "kyc_status": user.kyc_status,
+            "kyc_rejection_reason": user.kyc_rejection_reason or "",
+            "kyc_details": kyc_details,
             "id": user.id,
             "firstName": user.first_name,
             "lastName": user.last_name,
@@ -2211,6 +2275,15 @@ def get_user_profile(request):
             "is_subscribed": user.is_subscribed,
             "is_ambassador": user.is_ambassador,
             "is_influencer": user.is_influencer,
+            "ambassador_cohort": (
+                {
+                    "cohort_number": user.ambassador_cohort.cohort_number,
+                    "name": user.ambassador_cohort.name,
+                    "status": user.ambassador_cohort.status,
+                    "end_date": user.ambassador_cohort.end_date,
+                }
+                if user.ambassador_cohort_id else None
+            ),
             "savings": user.savings,
             "investment": user.investment,
             "properties": user.properties,
@@ -4416,6 +4489,92 @@ def autosave(request):
     )
 
 
+def deactivate_autosave_for_user(user, frequency):
+    """Shared by the user-facing endpoint below and AutoSaveAdmin's staff
+    action - lets support deactivate a stuck user's AutoSave (cancelling
+    the real Paystack subscription, not just the local flag) when their
+    own in-app attempt fails, instead of only being able to edit the DB
+    row directly and leave them still being charged.
+
+    Returns "no_active" | "deactivated" on success; raises
+    requests.RequestException (Paystack) or ValueError (nothing to do
+    beyond clearing the flag) the same way the view already handled
+    inline.
+    """
+    active_autosaves = AutoSave.objects.filter(
+        user=user,
+        frequency=frequency,
+        active=True,
+    )
+
+    if not active_autosaves.exists():
+        user.autosave_enabled = False
+        user.save(update_fields=["autosave_enabled"])
+        return "no_active"
+
+    headers = {
+        "Authorization": f"Bearer {paystack_secret_key}",
+        "Content-Type": "application/json",
+    }
+
+    for autosave in active_autosaves:
+        # If Paystack subscription exists, disable it first
+        if autosave.paystack_sub_code and autosave.paystack_sub_token:
+            data = {
+                "code": autosave.paystack_sub_code,
+                "token": autosave.paystack_sub_token,
+            }
+
+            deactivate_response = requests.post(
+                "https://api.paystack.co/subscription/disable",
+                json=data,
+                headers=headers,
+                timeout=30,
+            )
+            deactivate_response.raise_for_status()
+
+        # Whether or not Paystack details exist, make sure record is no longer active
+        autosave.active = False
+        autosave.save(update_fields=["active"])
+        autosave.delete()
+
+    # Check if user still has any active autosave left
+    still_has_active_autosave = AutoSave.objects.filter(
+        user=user,
+        active=True,
+    ).exists()
+
+    user.autosave_enabled = still_has_active_autosave
+    user.save(update_fields=["autosave_enabled"])
+
+    subject = "AutoSave Deactivated!"
+    message = (
+        f"Hi {user.first_name},<br><br>"
+        f"Your {frequency} AutoSave has been deactivated successfully."
+        f"<br><br>Keep growing your funds.🥂"
+    )
+    send_transactional_email(
+        subject=subject,
+        message=message,
+        from_email="MyFund <info@myfundmobile.com>",
+        recipient_list=[user.email],
+    )
+
+    # AutoSave activation sends a push notification (see above) but
+    # deactivation never did - added so a user (or staff acting on their
+    # behalf via AutoSaveAdmin's deactivate action) gets the same
+    # immediate confirmation either way, not just an email.
+    send_push_notification(
+        user=user,
+        title="AutoSave Deactivated",
+        message=f"Your {frequency} AutoSave has been deactivated successfully.",
+        data={"frequency": frequency, "type": "AutoSave", "status": "deactivated"},
+        notif_type="SYSTEM",
+    )
+
+    return "deactivated"
+
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def deactivate_autosave(request):
@@ -4431,71 +4590,12 @@ def deactivate_autosave(request):
         )
 
     try:
-        active_autosaves = AutoSave.objects.filter(
-            user=user,
-            frequency=frequency,
-            active=True,
-        )
-
-        if not active_autosaves.exists():
-            user.autosave_enabled = False
-            user.save(update_fields=["autosave_enabled"])
+        result = deactivate_autosave_for_user(user, frequency)
+        if result == "no_active":
             return Response(
                 {"message": "No active AutoSave found for this frequency."},
                 status=status.HTTP_200_OK,
             )
-
-        headers = {
-            "Authorization": f"Bearer {paystack_secret_key}",
-            "Content-Type": "application/json",
-        }
-
-        for autosave in active_autosaves:
-            # If Paystack subscription exists, disable it first
-            if autosave.paystack_sub_code and autosave.paystack_sub_token:
-                data = {
-                    "code": autosave.paystack_sub_code,
-                    "token": autosave.paystack_sub_token,
-                }
-
-                deactivate_response = requests.post(
-                    "https://api.paystack.co/subscription/disable",
-                    json=data,
-                    headers=headers,
-                    timeout=30,
-                )
-                deactivate_response.raise_for_status()
-
-            # Whether or not Paystack details exist, make sure record is no longer active
-            autosave.active = False
-            autosave.save(update_fields=["active"])
-            autosave.delete()
-
-        # Check if user still has any active autosave left
-        still_has_active_autosave = AutoSave.objects.filter(
-            user=user,
-            active=True,
-        ).exists()
-
-        user.autosave_enabled = still_has_active_autosave
-        user.save(update_fields=["autosave_enabled"])
-
-        subject = "AutoSave Deactivated!"
-        message = (
-            f"Hi {user.first_name},<br><br>"
-            f"Your {frequency} AutoSave has been deactivated successfully."
-            f"<br><br>Keep growing your funds.🥂"
-        )
-        from_email = "MyFund <info@myfundmobile.com>"
-        recipient_list = [user.email]
-
-        send_transactional_email(
-            subject=subject,
-            message=message,
-            from_email=from_email,
-            recipient_list=recipient_list,
-        )
-
         return Response(
             {"message": "AutoSave deactivated"},
             status=status.HTTP_200_OK,
@@ -7545,7 +7645,37 @@ class KYCUpdateView(generics.UpdateAPIView):
 
     def update(self, request, *args, **kwargs):
         user = self.get_object()
-        serializer = self.get_serializer(user, data=request.data, partial=True)
+        data = request.data
+
+        # A freshly-picked ID photo arrives as a raw multipart file here.
+        # Route it through the same ImageKit pipeline profile_picture
+        # uploads use (upload_to_imagekit above) instead of letting it
+        # fall through to Django's local-disk storage, which doesn't
+        # survive a redeploy/restart on Koyeb's ephemeral filesystem -
+        # see CustomUser.id_upload's comment for the bug this replaces.
+        uploaded_id = request.FILES.get("id_upload")
+        if uploaded_id:
+            if uploaded_id.size > 5 * 1024 * 1024:
+                return Response(
+                    {"id_upload": ["Image too large. Max size is 5MB"]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            try:
+                uploaded_id.seek(0)
+                encoded = base64.b64encode(uploaded_id.read()).decode("utf-8")
+                id_upload_url = upload_to_imagekit(
+                    encoded, user.id, uploaded_id.name, prefix="kyc"
+                )
+            except Exception as e:
+                logger.error(f"ImageKit KYC upload failed for user {user.id}: {str(e)}")
+                return Response(
+                    {"id_upload": [f"Upload failed: {str(e)}"]},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+            data = data.copy()
+            data["id_upload"] = id_upload_url
+
+        serializer = self.get_serializer(user, data=data, partial=True)
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)
 
@@ -7648,7 +7778,12 @@ class GetKYCStatusView(APIView):
             message = "Your KYC was rejected."
 
         return Response(
-            {"kycStatus": kyc_status, "message": message}, status=status.HTTP_200_OK
+            {
+                "kycStatus": kyc_status,
+                "message": message,
+                "kycRejectionReason": user.kyc_rejection_reason or "",
+            },
+            status=status.HTTP_200_OK,
         )
 
 

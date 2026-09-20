@@ -402,9 +402,23 @@ class CxWeeklyReportSerializer(serializers.ModelSerializer):
 
 
 class KYCUpdateSerializer(serializers.ModelSerializer):
-    id_upload = serializers.ImageField(
-        max_length=None, use_url=True
-    )  # This handles image uploads
+    # id_upload is now a plain CharField holding an ImageKit URL (see
+    # CustomUser.id_upload) - KYCUpdateView swaps any raw uploaded file
+    # for its ImageKit URL before this serializer ever sees it, so no
+    # ImageField override is needed here; the auto-generated CharField
+    # just carries that string straight through.
+
+    def validate(self, attrs):
+        profile_picture = attrs.get(
+            "profile_picture", getattr(self.instance, "profile_picture", None)
+        )
+        if not str(profile_picture or "").strip():
+            raise serializers.ValidationError({
+                "profile_picture": [
+                    "Please upload a profile picture before updating KYC."
+                ]
+            })
+        return attrs
 
     class Meta:
         model = CustomUser

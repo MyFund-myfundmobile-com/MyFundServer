@@ -324,9 +324,16 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         ],
         default="Choose",
     )
-    id_upload = models.ImageField(
-        upload_to="kyc_documents/", default="kyc_documents/placeholder.png"
-    )
+    # Was an ImageField saving to local disk (upload_to="kyc_documents/") -
+    # on Koyeb that disk is ephemeral, so every redeploy/restart silently
+    # wiped previously-uploaded KYC images while the DB kept pointing at
+    # the now-missing file ("not found" in Django/mobile admin even
+    # though the user genuinely uploaded one). Same class of bug
+    # profile_picture already hit and fixed by moving to a permanent
+    # ImageKit URL (see CustomUser.save() above) - id_upload now follows
+    # the same pattern: a plain CharField holding the ImageKit URL,
+    # populated by KYCUpdateView instead of Django's file storage.
+    id_upload = models.CharField(max_length=1000, null=True, blank=True)
     next_of_kin_name = models.CharField(max_length=100, default="Enter Name")
     relationship_with_next_of_kin = models.CharField(
         max_length=20,

@@ -983,7 +983,7 @@ class CustomUserAdmin(UserAdmin):
                     (
                         "Yes"
                         if user.id_upload
-                        and not user.id_upload.name.endswith("placeholder.png")
+                        and not str(user.id_upload).endswith("placeholder.png")
                         else "No"
                     ),
                     user.mothers_maiden_name,
@@ -2107,6 +2107,49 @@ class AutoSaveAdmin(admin.ModelAdmin):
         "active",
     )
     search_fields = ("user__email", "frequency")  # Add search options
+    actions = ["deactivate_autosave_action"]
+
+    @admin.action(description="🛑 Deactivate AutoSave (cancels Paystack + notifies user)")
+    def deactivate_autosave_action(self, request, queryset):
+        # For when a user's own in-app "deactivate" attempt fails (they
+        # only have their own auth token to call deactivate_autosave with
+        # - there was previously no way for support to do this for them)
+        # and they escalate to support instead - this runs the exact same
+        # Paystack-cancel + notify flow, just triggered by staff instead
+        # of the user's own request. Editing "active" here directly
+        # instead would leave their real Paystack subscription running
+        # and still charging them.
+        from .views import deactivate_autosave_for_user
+        import requests
+
+        deactivated, already_off, failed = 0, 0, 0
+        for autosave in queryset:
+            try:
+                result = deactivate_autosave_for_user(autosave.user, autosave.frequency)
+                if result == "no_active":
+                    already_off += 1
+                else:
+                    deactivated += 1
+            except requests.RequestException as e:
+                failed += 1
+                self.message_user(
+                    request,
+                    f"{autosave.user.email}: failed to cancel on Paystack ({e}).",
+                    level="ERROR",
+                )
+            except Exception as e:
+                failed += 1
+                self.message_user(
+                    request, f"{autosave.user.email}: {e}", level="ERROR"
+                )
+
+        if deactivated:
+            self.message_user(request, f"Deactivated AutoSave for {deactivated} user(s).")
+        if already_off:
+            self.message_user(
+                request,
+                f"{already_off} selected record(s) had no active subscription to cancel.",
+            )
 
 
 class AutoInvestAdmin(admin.ModelAdmin):
