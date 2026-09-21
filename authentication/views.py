@@ -10526,13 +10526,17 @@ def send_email(request):
             [email_template_brevo_tag(pending_template.id)] if pending_template else None
         )
 
-        # Use the smart email sender. use_celery_threshold is left at its
-        # default (30) rather than forced to 0 - forcing inline-always
-        # meant a large campaign would try to send synchronously within
-        # this HTTP request (timeout risk) and skip the daily-300 batching
-        # entirely. send_generic_email now handles routing: small sends go
-        # out immediately, anything bigger is queued and automatically
-        # spread across days to respect Brevo's daily sending limit.
+        # force_queue=True: this view previously let send_generic_email
+        # pick inline-vs-queued off recipient count alone (inline for
+        # <=30). The inline path does one Brevo call + time.sleep(1) PER
+        # recipient inside this single HTTP request - a 24-recipient
+        # admin broadcast measured ~24+ seconds, long enough to hit
+        # Koyeb's request timeout in production. The client got a
+        # generic 500 with no way to tell whether 0, some, or all 24
+        # recipients had already been sent to before the worker was
+        # killed - this endpoint needs a clean yes/no, so it now always
+        # queues via Celery regardless of size (see send_generic_email's
+        # force_queue docstring for the incident this traces back to).
         logger.info("📧 Calling send_generic_email...")
         result = send_generic_email(
             subject=subject,
@@ -10541,6 +10545,7 @@ def send_email(request):
             from_email=sender,
             template=email_template,
             tags=send_tags,
+            force_queue=True,
         )
 
         logger.info(f"📧 send_generic_email result: {result}")

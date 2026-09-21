@@ -517,6 +517,7 @@ def send_generic_email(
     template="email/email.html",
     extra_context=None,
     tags=None,
+    force_queue=False,
 ):
     """
     Smart, universal email sender - sends via Brevo (see
@@ -532,6 +533,20 @@ def send_generic_email(
     template sends are the only caller today, and those are always small
     enough to go inline; wire it into send_bulk_email_task's payload if a
     tagged send ever needs to be large enough to queue.
+
+    force_queue: skip the inline path entirely regardless of recipient
+    count, even below use_celery_threshold. The inline loop below does
+    one Brevo call + time.sleep(1) per recipient, so ~24 recipients alone
+    is ~24+ seconds inside a single HTTP request - long enough to hit a
+    platform request timeout (seen in production on Koyeb for a 24-
+    recipient admin broadcast: client saw a generic 500, but the pending
+    EmailTemplate row was left with was_sent=False/recipient_count=None,
+    meaning the worker was killed mid-loop rather than the send failing
+    cleanly - see authentication.views.send_email). A caller that can't
+    tolerate that class of failure (e.g. any admin-composed broadcast,
+    where "did this actually go out, and to whom" needs to be a clean
+    yes/no) should set this. Loses tag-based delivery reports, same
+    already-accepted trade-off the >30-recipient celery path makes today.
     """
 
     logger.info(
@@ -585,8 +600,9 @@ def send_generic_email(
     # A send larger than Brevo's daily cap can never safely go out inline
     # in one shot regardless of use_celery_threshold - it has to be spread
     # across days. use_celery_threshold only gets to pick inline-vs-queued
-    # for sends that already fit in a single day.
-    send_inline = total_valid <= DAILY_EMAIL_LIMIT and (
+    # for sends that already fit in a single day. force_queue overrides
+    # both - see its own docstring above.
+    send_inline = (not force_queue) and total_valid <= DAILY_EMAIL_LIMIT and (
         use_celery_threshold == 0 or total_valid <= use_celery_threshold
     )
 
