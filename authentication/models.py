@@ -57,19 +57,19 @@ class CustomUserQuerySet(models.QuerySet):
         )
         return self.annotate(has_referred_anyone=Exists(referred_exists))
 
+    def ever_ambassador(self):
+        """Anyone currently an ambassador or assigned a historical cohort."""
+        return self.filter(Q(is_ambassador=True) | Q(ambassador_cohort__isnull=False))
+
     def users_referred_never_ambassador(self):
         """Segment A: referred >=1 person, never an ambassador (current or historical)."""
-        return self._with_has_referred().filter(
-            has_referred_anyone=True,
-            is_ambassador=False,
-            ambassador_cohort__isnull=True,
+        return self._with_has_referred().filter(has_referred_anyone=True).exclude(
+            pk__in=self.model.objects.ever_ambassador().values("pk")
         )
 
     def users_referred_and_ambassador(self):
         """Segment B: referred >=1 person AND is/was ever an ambassador."""
-        return self._with_has_referred().filter(has_referred_anyone=True).filter(
-            Q(is_ambassador=True) | Q(ambassador_cohort__isnull=False)
-        )
+        return self.ever_ambassador()._with_has_referred().filter(has_referred_anyone=True)
 
 
 class CustomUserManager(BaseUserManager.from_queryset(CustomUserQuerySet)):

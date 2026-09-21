@@ -334,6 +334,7 @@ def sync_contact_to_brevo(user):
             # segments target "Ambassadors, Cohort 3" distinct from
             # "Cohort 4" regardless of current is_ambassador status.
             "IS_AMBASSADOR": bool(user.is_ambassador),
+            "EVER_AMBASSADOR": bool(user.is_ambassador or user.ambassador_cohort_id),
             "AMBASSADOR_COHORT": (
                 user.ambassador_cohort.cohort_number
                 if user.ambassador_cohort_id

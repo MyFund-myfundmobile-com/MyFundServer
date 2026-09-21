@@ -909,6 +909,15 @@ def _build_admin_user_queryset(params, exclude_unmailable=False):
     # docstring/the 2026-09 backfill migration), and an admin messaging
     # "everyone who was ever in Cohort 1" needs exactly those people, not
     # just whichever of them still have is_ambassador=True today.
+    ever_ambassador = _parse_bool_param(params.get('ever_ambassador'))
+    if ever_ambassador is not None:
+        ambassador_ids = CustomUser.objects.ever_ambassador().values('pk')
+        if ever_ambassador:
+            queryset = queryset.filter(pk__in=ambassador_ids)
+        else:
+            queryset = queryset.exclude(pk__in=ambassador_ids)
+        filters_applied["ever_ambassador"] = ever_ambassador
+
     ambassador_cohort = params.get('ambassador_cohort')
     if ambassador_cohort not in (None, ''):
         try:

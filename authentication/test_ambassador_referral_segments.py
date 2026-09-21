@@ -84,3 +84,48 @@ class AmbassadorReferralSegmentTest(TestCase):
         a_ids = set(CustomUser.objects.users_referred_never_ambassador().values_list("id", flat=True))
         b_ids = set(CustomUser.objects.users_referred_and_ambassador().values_list("id", flat=True))
         self.assertEqual(a_ids | b_ids, all_referred_ids)
+
+    def test_ever_ambassador_includes_members_without_referrals(self):
+        current = _make_user("currentonly@example.com", "97000000018", is_ambassador=True)
+        former = _make_user("formeronly@example.com", "97000000019", ambassador_cohort=self.cohort)
+        expected = {self.current_ambassador.pk, self.former_ambassador.pk, current.pk, former.pk}
+        self.assertEqual(set(CustomUser.objects.ever_ambassador().values_list("pk", flat=True)), expected)
+        self.assertFalse(CustomUser.objects.filter(pk=self.no_referrals.pk).ever_ambassador().exists())
+
+    def test_mobile_filter_and_apply_are_disjoint(self):
+        from .admin_views import _build_admin_user_queryset
+
+        recipients, _ = _build_admin_user_queryset({"ever_ambassador": "true"})
+        self.assertEqual(set(recipients.values_list("pk", flat=True)),
+                         {self.current_ambassador.pk, self.former_ambassador.pk})
+        apply, _ = _build_admin_user_queryset({"ever_ambassador": "true", "referral_segment": "apply"})
+        self.assertFalse(apply.exists())
+
+    def test_brevo_referral_segment_excludes_former_ambassadors_from_apply(self):
+        from .services.brevo_service import determine_referral_segment
+
+        self.assertEqual(determine_referral_segment(self.current_ambassador, 1), "forward")
+        self.assertEqual(determine_referral_segment(self.former_ambassador, 1), "forward")
+        self.assertEqual(determine_referral_segment(self.segment_a_user, 1), "apply")
+        self.assertIsNone(determine_referral_segment(self.former_ambassador, 0))
+
+    def test_brevo_sync_sends_boolean_history_attribute(self):
+        from unittest.mock import patch
+        from .services import brevo_service
+
+        with patch.object(brevo_service, "get_brevo_client"), \
+             patch.object(brevo_service.sib_api_v3_sdk, "ContactsApi") as api, \
+             patch.object(brevo_service, "get_transaction_metrics", return_value={
+                 "last_date": None, "count": 0, "total": 0,
+                 "last_type": "", "last_source": "",
+             }), patch("builtins.print"):
+            for user, expected in [(self.current_ambassador, True),
+                                   (self.former_ambassador, True),
+                                   (self.segment_a_user, False)]:
+                with self.subTest(user=user.pk):
+                    api.return_value.create_contact.reset_mock()
+                    brevo_service.sync_contact_to_brevo(user)
+                    api.return_value.create_contact.assert_called_once()
+                    contact = api.return_value.create_contact.call_args.args[0]
+                    self.assertIs(contact.attributes["EVER_AMBASSADOR"], expected)
+                    self.assertIs(contact.attributes["IS_AMBASSADOR"], user.is_ambassador)

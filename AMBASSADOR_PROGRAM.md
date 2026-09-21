@@ -63,7 +63,10 @@ that later.
 `sync_contact_to_brevo` (`authentication/services/brevo_service.py`) sends these
 attributes for this:
 
-- `IS_AMBASSADOR` (boolean) - mirrors `is_ambassador` exactly.
+- `IS_AMBASSADOR` (boolean) - current status; mirrors `is_ambassador` exactly,
+  preserving active payment/reward eligibility.
+- `EVER_AMBASSADOR` (boolean) - current status OR a non-null cohort membership;
+  historical targeting for past and present ambassadors, including those with zero referrals.
 - `AMBASSADOR_COHORT` (integer, nullable) - the user's `ambassador_cohort.cohort_number`,
   or `null` if unassigned.
 - `REFERRAL_COUNT` (integer) - how many users signed up with this user as referrer.
@@ -74,8 +77,8 @@ attributes for this:
 This lets Brevo segments target e.g. "Ambassadors, Cohort 3" distinct from
 "Cohort 4," "everyone ever in Cohort 1" regardless of current `is_ambassador`
 status, or `REFERRAL_SEGMENT = apply` directly - no CSV re-export needed per
-campaign. Brevo auto-creates new attributes on first sync if they don't already
-exist in the account's contact attribute schema.
+campaign. Ensure these attributes exist in the account contact attribute schema
+before syncing.
 
 ## Referral segments (Ambassador Cohort 4 outreach, 2026-09)
 
@@ -116,3 +119,27 @@ from `GET /api/admin/ambassador-cohorts/` on mount and folds it into the
 recipients by `ambassador_cohort=N` alone (not ANDed with `is_ambassador=True`),
 since a cohort-targeted send is often meant to reach a cohort's members
 regardless of whether they're still active ambassadors today.
+
+
+## Ever Ambassador targeting
+
+In mobile admin compose, select **Ambassadors → Ever Ambassador** to email
+past and current ambassadors, regardless of referral count. The shared recipient
+filter uses `ever_ambassador=true` and `CustomUser.objects.ever_ambassador()`;
+existing subscription, delivery and deletion exclusions still apply.
+
+`revoke_user_ambassador_status()` explicitly resets `is_ambassador=False` and
+preserves the cohort. The two ambassador flags therefore are not equivalent.
+Historical coverage relies on cohort assignments being retained and the existing
+backfill having run; an unrecorded former membership cannot be inferred.
+
+Segment A now excludes the shared `ever_ambassador()` queryset. Its previous
+implementation already excluded non-null cohorts, so this refactor changes no
+membership for the same data. Actual overlap with the last two sends requires
+production recipient logs; local regression tests cannot establish who received them.
+
+Before Brevo targeting, ensure `EVER_AMBASSADOR` exists as a boolean contact
+attribute in Brevo and run the existing contact sync to backfill it. The sync
+command resumes from `brevo_sync_progress.txt`: archive/reset that checkpoint
+before a full backfill so previously synced contacts receive the new attribute.
+No database migration is needed for this derived attribute.
