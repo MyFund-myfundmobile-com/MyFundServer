@@ -14403,6 +14403,22 @@ class AmbassadorPerformanceReportView(APIView):
         else:
             rank_sentence = ""
 
+        # Certificate: only surfaced once the cohort's own send_forth_date
+        # has passed - before that this screen still has a countdown to
+        # show, and an early-uploaded certificate shouldn't jump the gun.
+        certificate_data = None
+        send_forth_date = cohort.send_forth_date if cohort else None
+        if send_forth_date and today >= send_forth_date:
+            cert = getattr(user, "ambassador_certificate", None)
+            if cert and not cert.dismissed_at:
+                certificate_data = {
+                    "url": request.build_absolute_uri(cert.file.url),
+                    "file_type": "pdf"
+                    if cert.file.name.lower().endswith(".pdf")
+                    else "image",
+                    "uploaded_at": cert.uploaded_at,
+                }
+
         return Response({
             "cohort": cohort_data,
             "months": months,
@@ -14410,7 +14426,31 @@ class AmbassadorPerformanceReportView(APIView):
             "best_month": best["month_label"] if best else None,
             "rank": rank_data,
             "analysis": trend_sentence + rank_sentence,
+            "certificate": certificate_data,
         })
+
+
+class AmbassadorCertificateDismissView(APIView):
+    """
+    POST /api/ambassador/certificate/dismiss/
+    Lets the ambassador remove their certificate card from their own
+    AmbassadorPerformanceReportScreen without deleting the underlying
+    file - see AmbassadorCertificate's docstring.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        from .models import AmbassadorCertificate
+
+        cert = AmbassadorCertificate.objects.filter(user=request.user).first()
+        if not cert:
+            return Response(
+                {"detail": "No certificate found."}, status=status.HTTP_404_NOT_FOUND
+            )
+        cert.dismissed_at = timezone.now()
+        cert.save(update_fields=["dismissed_at"])
+        return Response({"detail": "Certificate removed."})
 
 
 from rest_framework.decorators import (

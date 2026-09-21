@@ -46,6 +46,7 @@ from .views import (
     AmbassadorMonthlyReportCreateView,
     AmbassadorMonthlyReportStatusView,
     AmbassadorPerformanceReportView,
+    AmbassadorCertificateDismissView,
     submit_ambassador_attendance,
     AdminFinanceMetricsView,
     request_phone_change,
@@ -534,6 +535,11 @@ urlpatterns = [
         "ambassador/performance-report/",
         AmbassadorPerformanceReportView.as_view(),
         name="ambassador-performance-report",
+    ),
+    path(
+        "ambassador/certificate/dismiss/",
+        AmbassadorCertificateDismissView.as_view(),
+        name="ambassador-certificate-dismiss",
     ),
     path(
         "attendance/submit/",

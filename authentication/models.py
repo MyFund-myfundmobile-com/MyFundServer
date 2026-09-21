@@ -3595,6 +3595,35 @@ class AmbassadorCohort(models.Model):
         return self.name or f"Cohort {self.cohort_number}"
 
 
+class AmbassadorCertificate(models.Model):
+    """
+    An ambassador's own Award & Send-Forth certificate (PDF or PNG),
+    issued once per cohort. Shown on AmbassadorPerformanceReportScreen
+    once the owning cohort's send_forth_date has passed (see
+    AmbassadorPerformanceReportView) - before that date it stays hidden
+    even if uploaded early, since the screen still has a countdown to show.
+
+    `dismissed_at` lets the ambassador remove it from their own view
+    without deleting the file - it's a one-time issued document, not
+    something they'd re-upload if they changed their mind, and support
+    may still need to point them back to it.
+    """
+
+    user = models.OneToOneField(
+        CustomUser, on_delete=models.CASCADE, related_name="ambassador_certificate"
+    )
+    file = models.FileField(upload_to="ambassador_certificates/")
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+    dismissed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = "Ambassador Certificate"
+        verbose_name_plural = "Ambassador Certificates"
+
+    def __str__(self):
+        return f"{self.user.email} certificate"
+
+
 class AmbassadorPointConfig(models.Model):
     """
     Central place to adjust ambassador points without touching code.

@@ -2911,7 +2911,12 @@ from django.contrib import admin, messages
 from django.db import transaction as db_transaction
 from django.utils import timezone
 from datetime import datetime
-from .models import AmbassadorPointConfig, AmbassadorMonthlyReport, Transaction
+from .models import (
+    AmbassadorPointConfig,
+    AmbassadorMonthlyReport,
+    AmbassadorCertificate,
+    Transaction,
+)
 from .utils import send_push_notification, send_generic_email, send_transactional_email
 
 
@@ -2932,6 +2937,25 @@ class AmbassadorCohortAdmin(admin.ModelAdmin):
         return obj.members.count()
 
     member_count.short_description = "Members"
+
+
+@admin.register(AmbassadorCertificate)
+class AmbassadorCertificateAdmin(admin.ModelAdmin):
+    """
+    Upload a certificate for a single ambassador here for a one-off fix
+    (wrong name match, a late addition) - bulk-loading a whole cohort's
+    certificates from a folder of files is what the
+    `upload_ambassador_certificates` management command is for.
+    """
+
+    list_display = ("user", "uploaded_at", "is_dismissed")
+    search_fields = ("user__email", "user__first_name", "user__last_name")
+    autocomplete_fields = ("user",)
+
+    def is_dismissed(self, obj):
+        return obj.dismissed_at is not None
+
+    is_dismissed.boolean = True
 
 
 @admin.register(AmbassadorPointConfig)
