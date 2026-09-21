@@ -4124,6 +4124,30 @@ admin.site.register(GroupIncomeEvent, GroupIncomeEventAdmin)
 admin.site.register(GroupIncomeDistribution, GroupIncomeDistributionAdmin)
 
 
+from .models import OTPDeliveryLog
+
+
+class OTPDeliveryLogAdmin(admin.ModelAdmin):
+    # Wasn't registered at all before - the only way to check whether an
+    # OTP genuinely sent (vs a support complaint that it "never arrived")
+    # was digging through raw server logs. Read-only: these rows are a
+    # send record, not something staff should be editing.
+    list_display = ("user", "otp", "email_status", "sms_sent", "created_at")
+    list_filter = ("email_status", "sms_sent")
+    search_fields = ("user__email", "otp")
+    readonly_fields = ("user", "otp", "email_status", "sms_sent", "created_at", "updated_at")
+    ordering = ("-created_at",)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
+admin.site.register(OTPDeliveryLog, OTPDeliveryLogAdmin)
+
+
 from .models import AdminNotifyRecipient
 
 

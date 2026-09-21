@@ -1893,7 +1893,16 @@ def _send_otp(user, otp, purpose="signup"):
     """
     Internal helper to send OTP via email and SMS.
     purpose: 'signup' | 'password_reset'
+
+    Returns True/False for whether the email genuinely sent, and logs the
+    attempt to OTPDeliveryLog - signup OTPs (send_otp_for_user) already get
+    this tracking; password-reset OTPs never did, so a failed send was
+    only ever a line in server logs nobody was watching, while the API
+    told the caller "sent successfully" regardless (see request_password_reset/
+    resend_password_otp, which used to fire this via a background thread
+    whose return value was discarded entirely).
     """
+    otp_log = OTPDeliveryLog.objects.create(user=user, otp=otp)
     try:
         # Compose template message
         # Shared boxed-OTP markup (see email_light.html / send_otp_email) -
@@ -1957,10 +1966,18 @@ def _send_otp(user, otp, purpose="signup"):
                 logger.error(
                     f"OTP email to {user.email} for {purpose} did not actually send: {result}"
                 )
-            else:
-                logger.info(f"OTP email sent to {user.email} for {purpose}")
+                otp_log.email_status = "failed"
+                otp_log.save(update_fields=["email_status"])
+                return False
+
+            logger.info(f"OTP email sent to {user.email} for {purpose}")
+            otp_log.email_status = "sent"
+            otp_log.save(update_fields=["email_status"])
         except Exception as e:
             logger.error(f"Error sending OTP email to {user.email}: {e}")
+            otp_log.email_status = "failed"
+            otp_log.save(update_fields=["email_status"])
+            return False
 
         # Send SMS OTP if phone is available
         # Password reset uses email only.
@@ -1970,7 +1987,9 @@ def _send_otp(user, otp, purpose="signup"):
 
     except Exception as e:
         logger.exception(f"Error sending OTP to {user.email}: {e}")
-        raise
+        otp_log.email_status = "failed"
+        otp_log.save(update_fields=["email_status"])
+        return False
 
 
 def send_password_change_confirmation(user):
@@ -2041,14 +2060,22 @@ def request_password_reset(request):
             )
         )
 
-        # Send OTP with try-except to avoid breaking UX
+        # Sent synchronously (not fired into a background thread) so a
+        # genuine send failure is caught here and reflected in the
+        # response, instead of the caller always being told "sent
+        # successfully" while the failure sits invisibly in server logs.
         try:
-            threading.Thread(
-                target=_send_otp, args=(user, otp, "password_reset")
-            ).start()
+            sent = _send_otp(user, otp, "password_reset")
         except Exception as e:
             logger.error(
                 f"Failed to send email/SMS for password reset to {user.email}: {e}"
+            )
+            sent = False
+
+        if not sent:
+            return Response(
+                {"detail": "We couldn't send the reset code right now. Please try again in a moment."},
+                status=502,
             )
 
         return Response({"detail": "Password reset OTP sent successfully."}, status=200)
@@ -2146,12 +2173,17 @@ def resend_password_otp(request):
         )
 
         try:
-            threading.Thread(
-                target=_send_otp, args=(user, otp, "password_reset")
-            ).start()
+            sent = _send_otp(user, otp, "password_reset")
         except Exception as e:
             logger.error(
                 f"Failed to resend email/SMS for password reset to {user.email}: {e}"
+            )
+            sent = False
+
+        if not sent:
+            return Response(
+                {"detail": "We couldn't resend the reset code right now. Please try again in a moment."},
+                status=502,
             )
 
         return Response({"detail": "OTP resent successfully."}, status=200)
