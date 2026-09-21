@@ -1536,6 +1536,7 @@ class PhoneChangeRequest(models.Model):
 
     old_phone_otp = models.CharField(max_length=6, null=True, blank=True)
     new_phone_otp = models.CharField(max_length=6, null=True, blank=True)
+    otp_attempts = models.PositiveSmallIntegerField(default=0)
 
     created_at = models.DateTimeField(auto_now_add=True)
     verified_at = models.DateTimeField(null=True, blank=True)

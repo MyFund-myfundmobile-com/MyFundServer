@@ -2380,7 +2380,13 @@ def request_phone_change(request):
     if not new_phone:
         return Response({"error": "new_phone is required"}, status=400)
 
-    req = create_phone_change_request(request.user, new_phone)
+    from authentication.services.phone_change import SMSDeliveryError
+    try:
+        req = create_phone_change_request(request.user, new_phone)
+    except ValueError as exc:
+        return Response({"error": str(exc)}, status=400)
+    except SMSDeliveryError as exc:
+        return Response({"error": str(exc)}, status=502)
 
     return Response(
         {
@@ -2406,7 +2412,7 @@ def verify_phone_change(request):
 
     try:
         req = verify_phone_change_otp(
-            request_id=request_id, old_otp=old_otp, new_otp=new_otp
+            request_id=request_id, old_otp=old_otp, new_otp=new_otp, user=request.user
         )
     except ValueError as e:
         return Response({"error": str(e)}, status=400)
@@ -2420,16 +2426,19 @@ def verify_phone_change(request):
     )
 
 
+from authentication.request_views import CanApproveRequests
+from authentication.models import PhoneChangeRequest
+
+
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([CanApproveRequests])
 def approve_phone_change_view(request):
     request_id = request.data.get("request_id")
-
-    req = approve_phone_change(request_id=request_id, admin_user=request.user)
-
-    return Response(
-        {"status": req.status, "message": "Phone number updated successfully"}
-    )
+    try:
+        req = approve_phone_change(request_id=request_id, admin_user=request.user)
+    except (ValueError, PhoneChangeRequest.DoesNotExist) as exc:
+        return Response({"error": str(exc)}, status=400)
+    return Response({"status": req.status, "message": "Phone number updated successfully"})
 
 
 import base64
@@ -7584,6 +7593,7 @@ def get_top_savers(request):
                     "first_name": tsh.user.first_name or "",
                     "email": tsh.user.email or "",
                     "profile_picture": tsh.user.profile_picture or "",
+                    "kyc_status": tsh.user.kyc_status,
                     "amount": float(tsh.total_savings),
                     "percentage": (
                         round((tsh.total_savings / top_amount) * 100, 1)

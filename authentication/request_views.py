@@ -11,7 +11,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import BasePermission
 from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError
-from .models import CustomUser, BankTransferRequest, InvestTransferRequest, WithdrawalsRequestToAdmin, Transaction
+from .models import CustomUser, BankTransferRequest, InvestTransferRequest, WithdrawalsRequestToAdmin, Transaction, PhoneChangeRequest
 from .utils import approve_quicksave_credit, approve_quickinvest_credit, process_scheduled_withdrawal
 
 REQUEST_APPROVERS = {"tolulopeahmed@gmail.com", "janet.adegbenro@gmail.com"}
@@ -23,10 +23,12 @@ class CanApproveRequests(BasePermission):
         return bool(user.is_authenticated and user.is_active and user.is_staff and user.email.lower() in REQUEST_APPROVERS)
 
 
-MODELS = {"quicksave": BankTransferRequest, "quickinvest": InvestTransferRequest, "kyc": CustomUser, "withdrawal": WithdrawalsRequestToAdmin}
+MODELS = {"phone_change": PhoneChangeRequest, "quicksave": BankTransferRequest, "quickinvest": InvestTransferRequest, "kyc": CustomUser, "withdrawal": WithdrawalsRequestToAdmin}
 
 
 def queue(kind):
+    if kind == "phone_change":
+        return PhoneChangeRequest.objects.select_related("user").filter(status="verified").order_by("-created_at", "-pk")
     if kind == "kyc":
         return CustomUser.objects.filter(kyc_status="submitted").order_by("-updated_at", "-pk")
     qs = MODELS[kind].objects.select_related("user").filter(is_approved=False)
@@ -38,6 +40,8 @@ def queue(kind):
 
 
 def resolved_queue(kind):
+    if kind == "phone_change":
+        return PhoneChangeRequest.objects.select_related("user").filter(status__in=["approved", "rejected"]).order_by("-created_at", "-pk")
     if kind == "kyc":
         return CustomUser.objects.filter(kyc_status__in=["approved", "rejected"]).order_by("-date_joined")
     qs = MODELS[kind].objects.select_related("user")
@@ -62,12 +66,16 @@ def serialize(obj, kind, request):
     data = {"id": obj.pk, "kind": kind, "name": f"{user.first_name} {user.last_name}".strip(), "email": user.email, "phone": user.phone_number, "avatar": image("profile_picture"), "created_at": user.updated_at if kind == "kyc" else obj.created_at}
     if kind == "kyc":
         data.update(identification_type=user.identification_type, id_document=image("id_upload"), address=user.address, date_of_birth=user.date_of_birth, actions=["approve", "reject"])
+    elif kind == "phone_change":
+        data.update(old_phone=obj.old_phone, new_phone=obj.new_phone, verified_at=obj.verified_at, actions=["approve", "reject"])
     else:
         data.update(amount=str(obj.amount), transaction_id=obj.transaction_id, actions=["approve", "abandon"])
     if kind == "withdrawal":
         data.update(total_amount=str(obj.total_amount), charge_amount=str(obj.charge_amount), charge_percentage=str(obj.charge_percentage), source_account=obj.source_account, bank=obj.target_bank, account_number=obj.target_account_number, account_name=obj.target_account_name, withdrawal_type=obj.withdrawal_type, scheduled_date=obj.scheduled_processing_date, actions=["credit_wallet"] if obj.withdrawal_type == "scheduled" else ["confirm_paid"])
     if kind == "kyc":
         status = "pending" if user.kyc_status == "submitted" else user.kyc_status
+    elif kind == "phone_change":
+        status = "pending" if obj.status == "verified" else obj.status
     elif kind == "withdrawal":
         status = "completed" if obj.is_approved or obj.is_processed else obj.status
     elif obj.is_approved:
@@ -99,7 +107,7 @@ def requests_list(request):
         raise ValidationError("Invalid request sort.")
     def ordered(qs, request_kind):
         date_field = "updated_at" if request_kind == "kyc" else "created_at"
-        if sort.startswith("amount") and request_kind != "kyc":
+        if sort.startswith("amount") and request_kind not in {"kyc", "phone_change"}:
             return qs.order_by("-amount" if sort == "amount_high" else "amount", "-" + date_field, "-pk")
         return qs.order_by(date_field if sort == "oldest" else "-" + date_field, "pk" if sort == "oldest" else "-pk")
     if kind == "all":
@@ -118,7 +126,7 @@ def requests_list(request):
         results.sort(key=lambda item: (item["created_at"], item["kind"], item["id"]), reverse=sort != "oldest")
         if sort.startswith("amount"):
             # Stable sorting keeps newest first for equal amounts; KYC has no amount.
-            results.sort(key=lambda item: (item["kind"] == "kyc", -Decimal(item.get("amount", "0")) if sort == "amount_high" else Decimal(item.get("amount", "0"))))
+            results.sort(key=lambda item: (item["kind"] in {"kyc", "phone_change"}, -Decimal(item.get("amount", "0")) if sort == "amount_high" else Decimal(item.get("amount", "0"))))
         return Response({"results": results[offset:offset + 20], "count": total, "counts": {key: queue(key).count() for key in MODELS}})
     qs = resolved_queue(kind) if scope == "resolved" else queue(kind)
     if scope == "all":
@@ -129,7 +137,7 @@ def requests_list(request):
         qs = qs.order_by("-updated_at", "-pk") if kind == "kyc" else qs.select_related("user").order_by("-created_at", "-pk")
     if request.query_params.get("request_id"):
         qs = qs.filter(pk=request.query_params["request_id"])
-    if request.query_params.get("transaction_id") and kind != "kyc":
+    if request.query_params.get("transaction_id") and kind not in {"kyc", "phone_change"}:
         qs = qs.filter(transaction_id=request.query_params["transaction_id"])
     qs = ordered(qs, kind)
     return Response({"results": [serialize(obj, kind, request) for obj in qs[offset:offset + 20]], "count": qs.count(), "counts": {key: queue(key).count() for key in MODELS}})
@@ -165,6 +173,25 @@ def request_action(request, kind, pk):
             # Registered admin handler is the source of truth for status,
             # timestamps and user email/push notifications.
             admin.site._registry[CustomUser].process_kyc_transition(obj, "approved" if action == "approve" else "rejected")
+        elif kind == "phone_change":
+            if obj.status != "verified":
+                raise ValidationError("This phone change is not awaiting approval.")
+            if action == "approve":
+                from .services.phone_change import approve_phone_change
+                try:
+                    approve_phone_change(obj.pk, request.user)
+                except ValueError as exc:
+                    raise ValidationError(str(exc))
+            elif action == "reject":
+                reason = str(request.data.get("reason", "")).strip()
+                if not reason:
+                    raise ValidationError("Enter a rejection reason.")
+                obj.status = "rejected"
+                obj.save(update_fields=["status"])
+                from .services.phone_change import _notify
+                transaction.on_commit(lambda: _notify(user, "Phone change rejected", reason))
+            else:
+                raise ValidationError("Choose approve or reject.")
         elif kind in {"quicksave", "quickinvest"}:
             if obj.is_approved:
                 raise ValidationError("This transfer has already been approved.")
@@ -204,5 +231,5 @@ def request_action(request, kind, pk):
                     raise ValidationError("Could not confirm this withdrawal. Review its transaction record.")
             else:
                 raise ValidationError("Invalid withdrawal action.")
-        LogEntry.objects.log_action(user_id=request.user.pk, content_type_id=ContentType.objects.get_for_model(obj).pk, object_id=str(obj.pk), object_repr=str(obj)[:200], action_flag=CHANGE, change_message=f"Mobile requests: {action}")
+        LogEntry.objects.log_action(user_id=request.user.pk, content_type_id=ContentType.objects.get_for_model(obj).pk, object_id=str(obj.pk), object_repr=str(obj)[:200], action_flag=CHANGE, change_message=f"Mobile requests: {action}" + (f" — {reason}" if kind == "phone_change" and action == "reject" else ""))
     return Response({"message": "Request addressed successfully."})

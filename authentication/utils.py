@@ -996,7 +996,7 @@ def send_sms_via_payless(phone_number, message):
         )
         data = response.json()
 
-        logger.info(f"✅ Payless Response: {data}")
+        logger.info("Payless HTTP %s, status %s", response.status_code, data.get("status"))
 
         # Per the docs: {"status": "success", ...} on success,
         # {"status": "error", "message": "..."} on failure.

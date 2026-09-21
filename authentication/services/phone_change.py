@@ -1,190 +1,131 @@
-import random
+"""Verified phone changes: provider acceptance, owner OTPs, then admin approval."""
 import logging
-import threading
+import secrets
+from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
+from django.db import transaction, IntegrityError
 from django.utils import timezone
 from authentication.models import PhoneChangeRequest, CustomUser
-from authentication.utils import (
-    send_generic_email,
-    send_push_notification,
-    send_sms_via_payless,
-    validate_phone_number,
-)
+from authentication.utils import send_push_notification, send_sms_via_payless, validate_phone_number
 
 logger = logging.getLogger(__name__)
+OTP_LIFETIME = timedelta(minutes=10)
+MAX_ATTEMPTS = 5
+
+
+class SMSDeliveryError(Exception):
+    pass
 
 
 def generate_otp():
-    return str(random.randint(100000, 999999))
+    return str(secrets.randbelow(900000) + 100000)
 
 
-# --------------------------------------------------
-# PHONE VALIDATION (STRICT)
-# --------------------------------------------------
 def safe_validate_phone(phone):
     if not phone:
         return {"valid": False, "error": "Phone number is required"}
-
-    phone = str(phone).strip().replace(" ", "").replace("-", "")
-    return validate_phone_number(phone)
+    return validate_phone_number(str(phone).strip().replace(" ", "").replace("-", ""))
 
 
-# --------------------------------------------------
-# BACKGROUND SMS WORKER (NON-BLOCKING)
-# --------------------------------------------------
-def _send_sms_async(phone, message):
+def _phone_in_use(number, user_id):
+    # Existing accounts may store Nigerian numbers locally or with +234.
+    variants = {number, "+" + number}
+    if number.startswith("234"):
+        variants.add("0" + number[3:])
+    return CustomUser.objects.filter(phone_number__in=variants).exclude(pk=user_id).exists()
+
+
+def _notify(user, title, message):
     try:
-        send_sms_via_payless(phone, message)
-    except Exception as e:
-        logger.error(f"SMS FAILED: {phone} | {str(e)}")
+        send_push_notification(user=user, title=title, message=message, data={"type": "phone_update"})
+    except Exception:
+        logger.exception("Phone-change notification failed for user %s", user.pk)
 
 
-def _send_email_async(user, old_phone, new_phone):
-    try:
-        send_generic_email(
-            subject="Phone Change Request Initiated",
-            message=f"""
-            <p><strong>Phone Change Request</strong></p>
-
-            <p>Hello {user.first_name},</p>
-
-            <p>
-                Old: {old_phone}<br>
-                New: {new_phone}
-            </p>
-
-            <p>OTP has been sent to both numbers.</p>
-            """,
-            recipient_list=[user.email],
-        )
-    except Exception as e:
-        logger.error(f"EMAIL FAILED: {str(e)}")
-
-
-def _send_push_async(user):
-    try:
-        send_push_notification(
-            user=user,
-            title="Phone Change Request",
-            message="OTP sent to both numbers",
-            data={"type": "phone_change_request"},
-        )
-    except Exception as e:
-        logger.error(f"PUSH FAILED: {str(e)}")
-
-
-# --------------------------------------------------
-# MAIN FUNCTION (FAST RESPONSE VERSION)
-# --------------------------------------------------
 def create_phone_change_request(user, new_phone):
-
-    logger.info("🔥 PHONE CHANGE FLOW STARTED")
-
-    phone_check = safe_validate_phone(new_phone)
-
-    if not phone_check.get("valid"):
-        raise ValueError(phone_check.get("error") or "Invalid phone number")
-
-    normalized_new_phone = phone_check["formatted"]
-
-    if normalized_new_phone == user.phone_number:
+    new = safe_validate_phone(new_phone)
+    old = safe_validate_phone(user.phone_number)
+    if not new.get("valid"):
+        raise ValueError(new.get("error") or "Invalid phone number")
+    if not old.get("valid"):
+        raise ValueError("Your current phone number is invalid. Contact support.")
+    if new["formatted"] == old["formatted"]:
         raise ValueError("New number must be different")
-
-    if (
-        CustomUser.objects.filter(phone_number=normalized_new_phone)
-        .exclude(id=user.id)
-        .exists()
-    ):
-        raise ValueError("Phone already in use")
-
-    old_otp = generate_otp()
-    new_otp = generate_otp()
-
-    req = PhoneChangeRequest.objects.create(
-        user=user,
-        old_phone=user.phone_number,
-        new_phone=normalized_new_phone,
-        old_phone_otp=old_otp,
-        new_phone_otp=new_otp,
-    )
-
-    # --------------------------------------------------
-    # FIRE AND FORGET (THIS IS THE SPEED FIX)
-    # --------------------------------------------------
-    threading.Thread(
-        target=_send_sms_async,
-        args=(user.phone_number, f"Your OTP (old): {old_otp}. Do not share."),
-        daemon=True,
-    ).start()
-
-    threading.Thread(
-        target=_send_sms_async,
-        args=(normalized_new_phone, f"Your OTP (new): {new_otp}. Do not share."),
-        daemon=True,
-    ).start()
-
-    threading.Thread(
-        target=_send_email_async,
-        args=(user, user.phone_number, normalized_new_phone),
-        daemon=True,
-    ).start()
-
-    threading.Thread(
-        target=_send_push_async,
-        args=(user,),
-        daemon=True,
-    ).start()
-
+    with transaction.atomic():
+        # Serialize requests for the same user, including concurrent retries.
+        CustomUser.objects.select_for_update().get(pk=user.pk)
+        if PhoneChangeRequest.objects.filter(user=user, status="verified").exists():
+            raise ValueError("Your verified phone change is awaiting admin approval.")
+        if PhoneChangeRequest.objects.filter(user=user, created_at__gte=timezone.now() - timedelta(seconds=60)).exists():
+            raise ValueError("Please wait one minute before requesting new codes.")
+        if _phone_in_use(new["formatted"], user.pk):
+            raise ValueError("Phone already in use")
+        PhoneChangeRequest.objects.filter(user=user, status="pending").update(status="rejected", old_phone_otp=None, new_phone_otp=None)
+        req = PhoneChangeRequest.objects.create(user=user, old_phone=user.phone_number, new_phone=new["formatted"], old_phone_otp=generate_otp(), new_phone_otp=generate_otp())
+    # Wait for both provider responses; never claim success for a failed send.
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda pair: send_sms_via_payless(*pair), [
+                (old["formatted"], f"MyFund phone change OTP (old): {req.old_phone_otp}. Expires in 10 minutes. Do not share."),
+                (new["formatted"], f"MyFund phone change OTP (new): {req.new_phone_otp}. Expires in 10 minutes. Do not share."),
+            ]))
+        accepted = all(results)
+    except Exception:
+        accepted = False
+    if not accepted:
+        PhoneChangeRequest.objects.filter(pk=req.pk, status="pending").update(status="rejected", old_phone_otp=None, new_phone_otp=None)
+        raise SMSDeliveryError("Could not send both verification codes. Please wait one minute and try again.")
     return req
 
 
-# --------------------------------------------------
-# VERIFY OTP (UNCHANGED BUT CLEANED)
-# --------------------------------------------------
-def verify_phone_change_otp(request_id, old_otp=None, new_otp=None):
-
-    req = PhoneChangeRequest.objects.get(id=request_id)
-
-    if old_otp and str(old_otp).strip() == str(req.old_phone_otp).strip():
-        req.old_phone_otp_verified = True
-    elif old_otp:
-        raise ValueError("Old OTP incorrect")
-
-    if new_otp and str(new_otp).strip() == str(req.new_phone_otp).strip():
-        req.new_phone_otp_verified = True
-    elif new_otp:
-        raise ValueError("New OTP incorrect")
-
-    if req.old_phone_otp_verified and req.new_phone_otp_verified:
-        req.status = "verified"
-        req.verified_at = timezone.now()
-
-    req.save()
+def verify_phone_change_otp(request_id, old_otp=None, new_otp=None, user=None):
+    failure = None
+    with transaction.atomic():
+        req = PhoneChangeRequest.objects.select_for_update().filter(pk=request_id, user=user).first()
+        if not req:
+            raise ValueError("Phone change request not found.")
+        if req.status != "pending":
+            raise ValueError("This request is no longer awaiting verification.")
+        if timezone.now() >= req.created_at + OTP_LIFETIME or req.otp_attempts >= MAX_ATTEMPTS:
+            failure = "Codes expired or attempt limit reached. Please request new codes."
+        elif not (old_otp and new_otp and secrets.compare_digest(str(old_otp).strip(), req.old_phone_otp or "") and secrets.compare_digest(str(new_otp).strip(), req.new_phone_otp or "")):
+            req.otp_attempts += 1
+            failure = "Incorrect verification codes. Check both messages and try again."
+        else:
+            req.old_phone_otp_verified = req.new_phone_otp_verified = True
+            req.status = "verified"
+            req.verified_at = timezone.now()
+        if failure and (req.otp_attempts >= MAX_ATTEMPTS or timezone.now() >= req.created_at + OTP_LIFETIME):
+            req.status = "rejected"
+        if req.status != "pending":
+            req.old_phone_otp = req.new_phone_otp = None
+        req.save()
+    if failure:
+        raise ValueError(failure)
     return req
 
 
-# --------------------------------------------------
-# APPROVAL (UNCHANGED)
-# --------------------------------------------------
 def approve_phone_change(request_id, admin_user):
-
-    req = PhoneChangeRequest.objects.get(id=request_id)
-
-    if req.status != "verified":
-        raise Exception("Not verified")
-
-    user = req.user
-    user.phone_number = req.new_phone
-    user.save(update_fields=["phone_number"])
-
-    req.status = "approved"
-    req.approved_at = timezone.now()
-    req.save()
-
-    send_push_notification(
-        user=user,
-        title="Phone Updated",
-        message="Your phone number was updated",
-        data={"type": "phone_update"},
-    )
-
+    from authentication.request_views import REQUEST_APPROVERS
+    if not (admin_user.is_active and admin_user.is_staff and admin_user.email.lower() in REQUEST_APPROVERS):
+        raise ValueError("You cannot approve phone changes.")
+    with transaction.atomic():
+        req = PhoneChangeRequest.objects.select_for_update().get(pk=request_id)
+        if req.status != "verified" or not (req.old_phone_otp_verified and req.new_phone_otp_verified):
+            raise ValueError("This request is not verified or has already been reviewed.")
+        user = CustomUser.objects.select_for_update().get(pk=req.user_id)
+        if safe_validate_phone(user.phone_number).get("formatted") != safe_validate_phone(req.old_phone).get("formatted"):
+            raise ValueError("The current phone number has changed. Ask the user to submit a new request.")
+        if _phone_in_use(req.new_phone, user.pk):
+            raise ValueError("Phone already in use")
+        user.phone_number = req.new_phone
+        try:
+            with transaction.atomic():
+                user.save(update_fields=["phone_number"])
+        except IntegrityError:
+            raise ValueError("Phone already in use")
+        req.status = "approved"
+        req.approved_at = timezone.now()
+        req.save(update_fields=["status", "approved_at"])
+        transaction.on_commit(lambda: _notify(user, "Phone Updated", "Your phone number change was approved."))
     return req
