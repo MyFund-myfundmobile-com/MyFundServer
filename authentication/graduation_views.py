@@ -25,6 +25,8 @@ def graduation_access(user):
 
 
 class ApplicationInput(serializers.Serializer):
+    why_influencer = serializers.CharField(min_length=10, max_length=2000)
+    niche = serializers.CharField(min_length=2, max_length=150)
     monthly_content = serializers.IntegerField(min_value=1, max_value=10000)
     monthly_signups = serializers.IntegerField(min_value=1, max_value=1000000)
     monthly_savers = serializers.IntegerField(min_value=1, max_value=1000000)
@@ -34,7 +36,17 @@ class ApplicationInput(serializers.Serializer):
     # like an actual URL, since messy free text is hard to parse later
     # for follower-count verification or outreach.
     social_links = serializers.CharField(max_length=3000)
+    # {"instagram": 1200, ...} - self-reported, keyed by whichever
+    # platforms the applicant actually filled a link in for.
+    social_followers = serializers.DictField(child=serializers.IntegerField(min_value=0), required=False, default=dict)
+    engagement_rate = serializers.CharField(max_length=100, required=False, allow_blank=True, default='')
+    portfolio_link = serializers.CharField(max_length=1000, required=False, allow_blank=True, default='')
     plan = serializers.CharField(min_length=20, max_length=5000)
+    contact_method = serializers.ChoiceField(choices=['whatsapp', 'email'])
+    tshirt_size = serializers.ChoiceField(choices=['S', 'M', 'L', 'XL', 'XXL'])
+    # Sets the ongoing-vs-6-month-cohort expectation up front rather than
+    # as a surprise later.
+    commitment_confirmed = serializers.BooleanField()
     # Self-attested, not actually verified - checking real follow status
     # would need a separate OAuth integration per platform, out of scope
     # here.
@@ -51,9 +63,23 @@ class ApplicationInput(serializers.Serializer):
             )
         return value
 
+    def validate_portfolio_link(self, value):
+        lines = [line.strip() for line in value.splitlines() if line.strip()]
+        bad = [line for line in lines if not URL_RE.match(line)]
+        if bad:
+            raise serializers.ValidationError(
+                f'These don’t look like valid links (must start with http:// or https://): {", ".join(bad)}'
+            )
+        return value
+
     def validate_follow_confirmed(self, value):
         if not value:
             raise serializers.ValidationError('Please confirm you follow MyFund on social media.')
+        return value
+
+    def validate_commitment_confirmed(self, value):
+        if not value:
+            raise serializers.ValidationError('Please confirm you understand this role is ongoing.')
         return value
 
     def validate(self, data):
@@ -95,6 +121,7 @@ def graduation(request):
         'email': user.email,
         'phone_number': user.phone_number,
         'kyc_status': user.kyc_status,
+        'date_joined': user.date_joined,
         'cohort': str(cohort) if cohort else 'Ambassador Programme',
         'start_date': cohort.start_date if cohort else None,
         'end_date': cohort.end_date if cohort else None,

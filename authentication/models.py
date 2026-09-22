@@ -4113,12 +4113,32 @@ class PayrollEntry(models.Model):
 
 
 class InfluencerApplication(models.Model):
+    TSHIRT_SIZES = [('S','S'), ('M','M'), ('L','L'), ('XL','XL'), ('XXL','XXL')]
+    CONTACT_METHODS = [('whatsapp','WhatsApp'), ('email','Email')]
+
     user = models.OneToOneField(CustomUser, on_delete=models.CASCADE, related_name='influencer_application')
+    # Blank defaults exist only to backfill the one pre-existing test row
+    # from before this field existed - the serializer always requires a
+    # real value on every future submission.
+    why_influencer = models.TextField(default='')
+    niche = models.CharField(max_length=150, default='')
     monthly_content = models.PositiveIntegerField()
     monthly_signups = models.PositiveIntegerField()
     monthly_savers = models.PositiveIntegerField()
     social_links = models.TextField()
+    # {"instagram": 1200, "tiktok": 5000, ...} - only platforms the
+    # applicant actually filled a link in for, self-reported like
+    # everything else here.
+    social_followers = models.JSONField(default=dict, blank=True)
+    engagement_rate = models.CharField(max_length=100, blank=True)
+    portfolio_link = models.TextField(blank=True)
     plan = models.TextField()
+    contact_method = models.CharField(max_length=10, choices=CONTACT_METHODS, default='email')
+    tshirt_size = models.CharField(max_length=4, choices=TSHIRT_SIZES, default='M')
+    # Sets the open-ended-vs-6-month-cohort expectation up front rather
+    # than as a surprise later, same self-attested pattern as
+    # follow_confirmed below.
+    commitment_confirmed = models.BooleanField(default=False)
     # Self-attested only ("I confirm I follow MyFund on social media") -
     # not independently verified, since that would need a separate OAuth
     # integration per platform.
