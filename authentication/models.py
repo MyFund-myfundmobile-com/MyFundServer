@@ -4119,6 +4119,10 @@ class InfluencerApplication(models.Model):
     monthly_savers = models.PositiveIntegerField()
     social_links = models.TextField()
     plan = models.TextField()
+    # Self-attested only ("I confirm I follow MyFund on social media") -
+    # not independently verified, since that would need a separate OAuth
+    # integration per platform.
+    follow_confirmed = models.BooleanField(default=False)
     status = models.CharField(max_length=12, default='pending', choices=[('pending','Pending'),('approved','Approved'),('rejected','Rejected')])
     review_reason = models.TextField(blank=True)
     reviewed_at = models.DateTimeField(null=True, blank=True)
