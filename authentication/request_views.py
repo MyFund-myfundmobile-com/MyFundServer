@@ -12,6 +12,7 @@ from rest_framework.permissions import BasePermission
 from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError
 from .models import CustomUser, BankTransferRequest, InvestTransferRequest, WithdrawalsRequestToAdmin, Transaction, PhoneChangeRequest
+from .models import InfluencerApplication
 from .utils import approve_quicksave_credit, approve_quickinvest_credit, process_scheduled_withdrawal
 
 REQUEST_APPROVERS = {"tolulopeahmed@gmail.com", "janet.adegbenro@gmail.com"}
@@ -23,10 +24,12 @@ class CanApproveRequests(BasePermission):
         return bool(user.is_authenticated and user.is_active and user.is_staff and user.email.lower() in REQUEST_APPROVERS)
 
 
-MODELS = {"phone_change": PhoneChangeRequest, "quicksave": BankTransferRequest, "quickinvest": InvestTransferRequest, "kyc": CustomUser, "withdrawal": WithdrawalsRequestToAdmin}
+MODELS = {"influencer": InfluencerApplication,"phone_change": PhoneChangeRequest, "quicksave": BankTransferRequest, "quickinvest": InvestTransferRequest, "kyc": CustomUser, "withdrawal": WithdrawalsRequestToAdmin}
 
 
 def queue(kind):
+    if kind == "influencer":
+        return InfluencerApplication.objects.select_related("user").filter(status="pending").order_by("-created_at")
     if kind == "phone_change":
         return PhoneChangeRequest.objects.select_related("user").filter(status="verified").order_by("-created_at", "-pk")
     if kind == "kyc":
@@ -40,6 +43,8 @@ def queue(kind):
 
 
 def resolved_queue(kind):
+    if kind == "influencer":
+        return InfluencerApplication.objects.select_related("user").exclude(status="pending").order_by("-created_at")
     if kind == "phone_change":
         return PhoneChangeRequest.objects.select_related("user").filter(status__in=["approved", "rejected"]).order_by("-created_at", "-pk")
     if kind == "kyc":
@@ -64,6 +69,9 @@ def serialize(obj, kind, request):
             return name
         return request.build_absolute_uri(value.url if hasattr(value, "url") else name)
     data = {"id": obj.pk, "kind": kind, "name": f"{user.first_name} {user.last_name}".strip(), "email": user.email, "phone": user.phone_number, "avatar": image("profile_picture"), "created_at": user.updated_at if kind == "kyc" else obj.created_at}
+    if kind == "influencer":
+        data.update(monthly_content=obj.monthly_content, monthly_signups=obj.monthly_signups, monthly_savers=obj.monthly_savers, social_links=obj.social_links, plan=obj.plan, status=obj.status, status_label=obj.status.title(), actions=["approve", "reject"] if obj.status == "pending" else [])
+        return data
     if kind == "kyc":
         data.update(identification_type=user.identification_type, id_document=image("id_upload"), address=user.address, date_of_birth=user.date_of_birth, actions=["approve", "reject"])
     elif kind == "phone_change":
@@ -107,7 +115,7 @@ def requests_list(request):
         raise ValidationError("Invalid request sort.")
     def ordered(qs, request_kind):
         date_field = "updated_at" if request_kind == "kyc" else "created_at"
-        if sort.startswith("amount") and request_kind not in {"kyc", "phone_change"}:
+        if sort.startswith("amount") and request_kind not in {"kyc", "phone_change", "influencer"}:
             return qs.order_by("-amount" if sort == "amount_high" else "amount", "-" + date_field, "-pk")
         return qs.order_by(date_field if sort == "oldest" else "-" + date_field, "pk" if sort == "oldest" else "-pk")
     if kind == "all":
@@ -126,7 +134,7 @@ def requests_list(request):
         results.sort(key=lambda item: (item["created_at"], item["kind"], item["id"]), reverse=sort != "oldest")
         if sort.startswith("amount"):
             # Stable sorting keeps newest first for equal amounts; KYC has no amount.
-            results.sort(key=lambda item: (item["kind"] in {"kyc", "phone_change"}, -Decimal(item.get("amount", "0")) if sort == "amount_high" else Decimal(item.get("amount", "0"))))
+            results.sort(key=lambda item: (item["kind"] in {"kyc", "phone_change", "influencer"}, -Decimal(item.get("amount", "0")) if sort == "amount_high" else Decimal(item.get("amount", "0"))))
         return Response({"results": results[offset:offset + 20], "count": total, "counts": {key: queue(key).count() for key in MODELS}})
     qs = resolved_queue(kind) if scope == "resolved" else queue(kind)
     if scope == "all":
@@ -137,7 +145,7 @@ def requests_list(request):
         qs = qs.order_by("-updated_at", "-pk") if kind == "kyc" else qs.select_related("user").order_by("-created_at", "-pk")
     if request.query_params.get("request_id"):
         qs = qs.filter(pk=request.query_params["request_id"])
-    if request.query_params.get("transaction_id") and kind not in {"kyc", "phone_change"}:
+    if request.query_params.get("transaction_id") and kind not in {"kyc", "phone_change", "influencer"}:
         qs = qs.filter(transaction_id=request.query_params["transaction_id"])
     qs = ordered(qs, kind)
     return Response({"results": [serialize(obj, kind, request) for obj in qs[offset:offset + 20]], "count": qs.count(), "counts": {key: queue(key).count() for key in MODELS}})
@@ -161,7 +169,20 @@ def request_action(request, kind, pk):
     with transaction.atomic():
         obj = get_object_or_404(MODELS[kind].objects.select_for_update(), pk=pk)
         user = obj if kind == "kyc" else obj.user
-        if kind == "kyc":
+        if kind == "influencer":
+            if obj.status != 'pending' or action not in ('approve', 'reject'):
+                raise ValidationError('This application is not awaiting that action.')
+            reason = str(request.data.get('reason', '')).strip()
+            if action == 'reject' and not reason:
+                raise ValidationError('Enter a rejection reason.')
+            obj.status = 'approved' if action == 'approve' else 'rejected'
+            obj.review_reason = reason
+            obj.reviewed_at = timezone.now()
+            obj.save()
+            if action == 'approve':
+                user.is_influencer = True
+                user.save(update_fields=['is_influencer'])
+        elif kind == "kyc":
             if obj.kyc_status != "submitted":
                 raise ValidationError("This KYC request has already been reviewed.")
             if action not in {"approve", "reject"}:

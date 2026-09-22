@@ -14440,7 +14440,8 @@ class AmbassadorPerformanceReportView(APIView):
         # show, and an early-uploaded certificate shouldn't jump the gun.
         certificate_data = None
         send_forth_date = cohort.send_forth_date if cohort else None
-        if send_forth_date and today >= send_forth_date:
+        from .graduation_views import graduation_access
+        if graduation_access(user):
             cert = getattr(user, "ambassador_certificate", None)
             if cert and not cert.dismissed_at:
                 certificate_data = {

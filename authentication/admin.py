@@ -2948,7 +2948,7 @@ class AmbassadorCertificateAdmin(admin.ModelAdmin):
     `upload_ambassador_certificates` management command is for.
     """
 
-    list_display = ("user", "uploaded_at", "is_dismissed")
+    list_display = ("user", "uploaded_at", "early_access", "is_dismissed")
     search_fields = ("user__email", "user__first_name", "user__last_name")
     autocomplete_fields = ("user",)
 
@@ -4192,3 +4192,11 @@ class AppVersionConfigAdmin(admin.ModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False
+
+from .models import InfluencerApplication
+
+@admin.register(InfluencerApplication)
+class InfluencerApplicationAdmin(admin.ModelAdmin):
+    list_display = ("user", "status", "monthly_content", "monthly_signups", "monthly_savers", "created_at")
+    readonly_fields = ("status", "reviewed_at", "review_reason")
+    search_fields = ("user__email",)

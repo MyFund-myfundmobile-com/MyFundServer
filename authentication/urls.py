@@ -1,3 +1,4 @@
+from .graduation_views import graduation
 from django.urls import path, include
 from .request_views import requests_list, request_action
 from . import views
@@ -71,6 +72,7 @@ router.register(r"bank-accounts", views.BankAccountViewSet, basename="bank-accou
 
 
 urlpatterns = [
+    path("ambassador/graduation/", graduation),
     path("admin/requests/", requests_list, name="admin_requests"),
     path("admin/requests/<str:kind>/<int:pk>/action/", request_action, name="admin_request_action"),
     # Authentication APIs

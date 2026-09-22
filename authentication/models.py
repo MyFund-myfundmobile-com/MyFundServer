@@ -3612,6 +3612,7 @@ class AmbassadorCertificate(models.Model):
     user = models.OneToOneField(
         CustomUser, on_delete=models.CASCADE, related_name="ambassador_certificate"
     )
+    early_access = models.BooleanField(default=False, help_text="Allow this certificate holder access before their cohort release date.")
     file = models.FileField(upload_to="ambassador_certificates/")
     uploaded_at = models.DateTimeField(auto_now_add=True)
     dismissed_at = models.DateTimeField(null=True, blank=True)
@@ -4109,3 +4110,16 @@ class PayrollEntry(models.Model):
 
     def __str__(self):
         return f"{self.name} - ₦{self.amount} - {self.status}"
+
+
+class InfluencerApplication(models.Model):
+    user = models.OneToOneField(CustomUser, on_delete=models.CASCADE, related_name='influencer_application')
+    monthly_content = models.PositiveIntegerField()
+    monthly_signups = models.PositiveIntegerField()
+    monthly_savers = models.PositiveIntegerField()
+    social_links = models.TextField()
+    plan = models.TextField()
+    status = models.CharField(max_length=12, default='pending', choices=[('pending','Pending'),('approved','Approved'),('rejected','Rejected')])
+    review_reason = models.TextField(blank=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
