@@ -122,6 +122,7 @@ def graduation(request):
         'phone_number': user.phone_number,
         'kyc_status': user.kyc_status,
         'date_joined': user.date_joined,
+        'profile_picture': user.profile_picture,
         'cohort': str(cohort) if cohort else 'Ambassador Programme',
         'start_date': cohort.start_date if cohort else None,
         'end_date': cohort.end_date if cohort else None,
