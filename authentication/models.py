@@ -4125,11 +4125,11 @@ class InfluencerApplication(models.Model):
     monthly_content = models.PositiveIntegerField()
     monthly_signups = models.PositiveIntegerField()
     monthly_savers = models.PositiveIntegerField()
+    # Self-reported total across every platform, not per-platform - asked
+    # once up front rather than once per link, since what matters for
+    # screening is overall reach, not how it's split.
+    total_followers = models.PositiveIntegerField(default=0)
     social_links = models.TextField()
-    # {"instagram": 1200, "tiktok": 5000, ...} - only platforms the
-    # applicant actually filled a link in for, self-reported like
-    # everything else here.
-    social_followers = models.JSONField(default=dict, blank=True)
     engagement_rate = models.CharField(max_length=100, blank=True)
     portfolio_link = models.TextField(blank=True)
     plan = models.TextField()

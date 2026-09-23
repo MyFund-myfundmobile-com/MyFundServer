@@ -30,15 +30,14 @@ class ApplicationInput(serializers.Serializer):
     monthly_content = serializers.IntegerField(min_value=1, max_value=10000)
     monthly_signups = serializers.IntegerField(min_value=1, max_value=1000000)
     monthly_savers = serializers.IntegerField(min_value=1, max_value=1000000)
+    # Total across every platform, not per-platform.
+    total_followers = serializers.IntegerField(min_value=0)
     # One free-text field (not per-platform inputs) - less friction for
     # someone with only 1-2 platforms and no fixed list to maintain as
     # new platforms show up - but each non-blank line still has to look
     # like an actual URL, since messy free text is hard to parse later
     # for follower-count verification or outreach.
     social_links = serializers.CharField(max_length=3000)
-    # {"instagram": 1200, ...} - self-reported, keyed by whichever
-    # platforms the applicant actually filled a link in for.
-    social_followers = serializers.DictField(child=serializers.IntegerField(min_value=0), required=False, default=dict)
     engagement_rate = serializers.CharField(max_length=100, required=False, allow_blank=True, default='')
     portfolio_link = serializers.CharField(max_length=1000, required=False, allow_blank=True, default='')
     plan = serializers.CharField(min_length=20, max_length=5000)
