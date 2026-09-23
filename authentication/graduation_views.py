@@ -7,8 +7,28 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from .models import CustomUser, InfluencerApplication
+from .utils import get_request_notify_users, send_push_notification
+from .push_deep_links import dl
 
 URL_RE = re.compile(r'^https?://\S+\.\S+', re.IGNORECASE)
+
+
+def _notify_admins_of_influencer_application(user, application):
+    message = f'{user.first_name} {user.last_name} applied for the Influencer programme.'
+    for admin_user in get_request_notify_users():
+        if getattr(admin_user, 'expo_push_tokens', None):
+            send_push_notification(
+                user=admin_user,
+                title='🌟 New Influencer application',
+                message=message,
+                data={
+                    'application_id': str(application.id),
+                    'user_email': user.email,
+                    'type': 'admin_influencer_application',
+                    **dl.admin_influencer_application(application.id),
+                },
+                notif_type='ADMIN_ALERT',
+            )
 
 
 def graduation_access(user):
@@ -114,7 +134,8 @@ def graduation(request):
             existing = InfluencerApplication.objects.filter(user=user).first()
             if existing and existing.status != 'rejected':
                 return Response({'detail':'Your application has already been submitted.'}, status=409)
-            InfluencerApplication.objects.update_or_create(user=user, defaults={**form.validated_data, 'status':'pending', 'review_reason':'', 'reviewed_at':None})
+            application, _ = InfluencerApplication.objects.update_or_create(user=user, defaults={**form.validated_data, 'status':'pending', 'review_reason':'', 'reviewed_at':None})
+        _notify_admins_of_influencer_application(user, application)
     app = InfluencerApplication.objects.filter(user=user).first()
     cohort = user.ambassador_cohort
     cert = getattr(user, 'ambassador_certificate', None)

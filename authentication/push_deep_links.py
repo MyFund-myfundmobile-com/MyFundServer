@@ -83,6 +83,20 @@ class DeepLinks:
             + "/authentication/withdrawalsrequesttoadmin/?o=1.-12",
         }
 
+    def admin_influencer_application(self, application_id):
+        return {
+            "deep_link": {
+                "screen": "Admin",
+                "screen_params": {"screen": "AdminRequestsTab", "params": {"kind": "influencer", "request_id": str(application_id)}},
+                "action": "approve_influencer_application",
+                "action_params": {"application_id": str(application_id)},
+                "action_url": ADMIN_BASE + "/authentication/influencerapplication/",
+            },
+            "category": "ADMIN_INFLUENCER_APPLICATION",
+            "application_id": str(application_id),
+            "action_url": ADMIN_BASE + "/authentication/influencerapplication/",
+        }
+
     def admin_kyc_submitted(self):
         return {
             "deep_link": {
