@@ -9945,10 +9945,63 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                 return
 
             case "invoice.payment_failed":
+                from .models import AutoSave, AutoInvest
+                from .utils import send_push_notification
+
                 event_data = event["data"]
 
-                subject = "Paystack Webhook(Payment Failed)"
-                message = f"Invoice Data: <br><br>{event_data}"
+                raw_amount = event_data.get("amount")
+                amount_display = (
+                    f"₦{raw_amount / 100:,.2f}"
+                    if isinstance(raw_amount, (int, float))
+                    else "an unknown amount"
+                )
+                invoice_code = event_data.get("invoice_code", "Unknown")
+                period_start = event_data.get("period_start", "Unknown")
+
+                customer = event_data.get("customer") or {}
+                customer_email = customer.get("email")
+                subscription = event_data.get("subscription") or {}
+                subscription_code = subscription.get("subscription_code")
+
+                # A failed invoice is only ever tied to one AutoSave or
+                # AutoInvest subscription - resolved via paystack_sub_code so
+                # the alert says who actually needs a follow-up instead of
+                # making someone decode invoice_code by hand. Falls back to
+                # matching Paystack's customer email if the subscription code
+                # doesn't resolve (e.g. it predates paystack_sub_code being
+                # saved).
+                plan_record = None
+                plan_label = None
+                if subscription_code:
+                    plan_record = AutoSave.objects.filter(paystack_sub_code=subscription_code).select_related("user").first()
+                    if plan_record:
+                        plan_label = "AutoSave"
+                    else:
+                        plan_record = AutoInvest.objects.filter(paystack_sub_code=subscription_code).select_related("user").first()
+                        if plan_record:
+                            plan_label = "AutoInvest"
+
+                user = plan_record.user if plan_record else None
+                if not user and customer_email:
+                    user = CustomUser.objects.filter(email__iexact=customer_email).first()
+
+                if user:
+                    user_line = f"{user.first_name} {user.last_name} ({user.email}, {user.phone_number})"
+                elif customer_email:
+                    user_line = f"Unidentified - Paystack customer email: {customer_email}"
+                else:
+                    user_line = "Could not identify the user from this webhook."
+
+                subject = f"Paystack Webhook(Payment Failed) - {plan_label or 'Subscription'} charge declined"
+                message = (
+                    f"A recurring {plan_label or 'AutoSave/AutoInvest'} charge failed.<br><br>"
+                    f"User: {user_line}<br>"
+                    f"Amount: {amount_display}<br>"
+                    f"Invoice code: {invoice_code}<br>"
+                    f"Subscription code: {subscription_code or 'Unknown'}<br>"
+                    f"Period start: {period_start}<br>"
+                )
                 from_email = "MyFund <info@myfundmobile.com>"
                 recipient_list = ["info@myfundmobile.com", "sammy@myfundmobile.com"]
 
@@ -9958,6 +10011,32 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     from_email=from_email,
                     recipient_list=recipient_list,
                 )
+
+                # Tell the actual user too - previously this only ever
+                # reached admins, so nobody's card-on-file ever got flagged
+                # to them and a repeatedly-failing subscription could go
+                # unnoticed by everyone but us.
+                if user:
+                    plan_name = plan_label or "AutoSave/AutoInvest"
+                    send_transactional_email(
+                        subject="We couldn't process your scheduled payment",
+                        message=(
+                            f"Hi {user.first_name},<br><br>"
+                            f"Your scheduled {plan_name} charge of {amount_display} didn't go through - "
+                            f"your card may have been declined, expired, or had insufficient funds.<br><br>"
+                            f"Please update your card details in the app to keep your {plan_name} active."
+                            f"<br><br>- MyFund"
+                        ),
+                        from_email=from_email,
+                        recipient_list=[user.email],
+                    )
+                    if getattr(user, "expo_push_tokens", None):
+                        send_push_notification(
+                            user=user,
+                            title="Payment failed",
+                            message=f"Your {plan_name} charge of {amount_display} didn't go through. Tap to update your card.",
+                            notif_type="SYSTEM",
+                        )
                 return
 
             case "transfer.failed":
