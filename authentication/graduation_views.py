@@ -21,7 +21,11 @@ def graduation_access(user):
     if not cohort:
         return False
     release = cohort.send_forth_date or cohort.end_date
-    return bool(release and timezone.localdate() >= release) or (cohort.status == 'ended' and cohort.cohort_number != 3)
+    # No status-based bypass here on purpose - a cohort marked "ended" in
+    # admin (a separate, earlier workflow step) was letting ambassadors
+    # through before their actual send-forth date. The release date (or
+    # the explicit exceptions above) is the only gate now.
+    return bool(release and timezone.localdate() >= release)
 
 
 class ApplicationInput(serializers.Serializer):
