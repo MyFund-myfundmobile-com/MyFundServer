@@ -177,6 +177,11 @@ urlpatterns = [
         name="admin_signup_segment_users",
     ),
     path(
+        "metrics/signups/export/",
+        admin_views.admin_signup_segment_export_csv,
+        name="admin_signup_segment_export_csv",
+    ),
+    path(
         "metrics/signups/summary",
         admin_views.signup_summary,
         name="admin_signup_summary",

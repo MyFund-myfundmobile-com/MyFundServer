@@ -2658,6 +2658,36 @@ def signup_summary(request):
 
 
 SIGNUP_USER_LIST_CAP = 500
+SIGNUP_EXPORT_CAP = 5000
+
+# Same convention as CASHFLOW_RANGE_SUMMARY_RANGES/AdminDashboard's global
+# range picker (This Month/Last Month/3 Months/6 Months/1 Year), minus
+# "today"/"all" which don't make sense for a monthly-cohort signup list.
+SIGNUP_RANGES = ("month", "last_month", "3months", "6months", "1year")
+SIGNUP_RANGE_LABELS = {
+    "month": "This Month",
+    "last_month": "Last Month",
+    "3months": "Last 3 Months",
+    "6months": "Last 6 Months",
+    "1year": "Last Year",
+}
+
+
+def _resolve_signup_range(range_key):
+    """(start, end) for a SIGNUP_RANGES key - end is None for every range
+    except last_month, meaning "up to now"."""
+    now = timezone.now()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    this_month_start = today_start.replace(day=1)
+    if range_key == "last_month":
+        return this_month_start - relativedelta(months=1), this_month_start
+    starts = {
+        "month": this_month_start,
+        "3months": today_start - relativedelta(months=3),
+        "6months": today_start - relativedelta(months=6),
+        "1year": today_start - relativedelta(years=1),
+    }
+    return starts.get(range_key, this_month_start), None
 
 
 @api_view(['GET'])
@@ -2665,29 +2695,41 @@ SIGNUP_USER_LIST_CAP = 500
 def signup_segment_users(request):
     """
     GET /api/admin/metrics/signups/users?segment=new|activated|not_yet_saved&month=current
+    GET /api/admin/metrics/signups/users?segment=...&range=month|last_month|3months|6months|1year
     Drill-down list behind signup_metrics's aggregate counts - "new" is
     every signup in the month, "activated" is the same credited_to-based
     check signup_metrics uses (kept in lockstep so the list and the count
-    can never disagree), "not_yet_saved" is the complement.
+    can never disagree), "not_yet_saved" is the complement. `range` (the
+    mobile screen's filter chips) takes a wider, rolling window instead
+    of one calendar month when passed; `month` (a specific "YYYY-MM",
+    from the dashboard's per-month drill-down) still works unchanged
+    when `range` is omitted.
     """
     segment = request.GET.get('segment', 'new')
+    range_param = request.GET.get('range')
     month_param = request.GET.get('month', 'current')
 
     if segment not in ('new', 'activated', 'not_yet_saved'):
         return Response({"error": f"Unknown segment '{segment}'."}, status=400)
 
     try:
-        if month_param == 'current':
-            month_start = timezone.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        if range_param:
+            if range_param not in SIGNUP_RANGES:
+                return Response({"error": f"Invalid range '{range_param}'. Must be one of {SIGNUP_RANGES}."}, status=400)
+            month_start, month_end = _resolve_signup_range(range_param)
+            period_label = SIGNUP_RANGE_LABELS[range_param]
         else:
-            date_obj = datetime.strptime(month_param, '%Y-%m')
-            month_start = timezone.make_aware(date_obj.replace(day=1))
+            if month_param == 'current':
+                month_start = timezone.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            else:
+                date_obj = datetime.strptime(month_param, '%Y-%m')
+                month_start = timezone.make_aware(date_obj.replace(day=1))
+            month_end = month_start + relativedelta(months=1)
+            period_label = month_start.strftime('%B %Y')
 
-        month_end = month_start + relativedelta(months=1)
-
-        new_users_qs = CustomUser.objects.filter(
-            date_joined__gte=month_start, date_joined__lt=month_end, is_deleted=False
-        )
+        new_users_qs = CustomUser.objects.filter(date_joined__gte=month_start, is_deleted=False)
+        if month_end is not None:
+            new_users_qs = new_users_qs.filter(date_joined__lt=month_end)
 
         activated_ids = Transaction.objects.filter(
             user__in=new_users_qs,
@@ -2723,11 +2765,91 @@ def signup_segment_users(request):
 
         return Response({
             "segment": segment,
-            "period": month_start.strftime('%B %Y'),
+            "period": period_label,
             "total_count": total_count,
             "truncated": total_count > SIGNUP_USER_LIST_CAP,
             "data": data,
         })
+
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def admin_signup_segment_export_csv(request):
+    """
+    GET /api/admin/metrics/signups/export/?segment=new|activated|not_yet_saved&range=month|last_month|3months|6months|1year
+    CSV export of signup_segment_users' current filters (segment + range
+    chip), for the mobile admin New Signups/Started Saving screens - same
+    File+native-share-sheet pattern as admin_user_export_csv. Capped at
+    SIGNUP_EXPORT_CAP, wider than the 500-row on-screen list cap since an
+    export is a deliberate one-off pull, not something rendered live.
+    """
+    import csv
+    from django.http import HttpResponse
+
+    segment = request.GET.get('segment', 'new')
+    range_param = request.GET.get('range', 'month')
+
+    if segment not in ('new', 'activated', 'not_yet_saved'):
+        return Response({"error": f"Unknown segment '{segment}'."}, status=400)
+    if range_param not in SIGNUP_RANGES:
+        return Response({"error": f"Invalid range '{range_param}'. Must be one of {SIGNUP_RANGES}."}, status=400)
+
+    try:
+        month_start, month_end = _resolve_signup_range(range_param)
+        new_users_qs = CustomUser.objects.filter(date_joined__gte=month_start, is_deleted=False)
+        if month_end is not None:
+            new_users_qs = new_users_qs.filter(date_joined__lt=month_end)
+
+        activated_ids = Transaction.objects.filter(
+            user__in=new_users_qs,
+            credited_to__in=['SAVINGS', 'INVESTMENT'],
+            transaction_type='credit',
+            status='confirmed',
+        ).values_list('user', flat=True).distinct()
+
+        if segment == 'activated':
+            users_qs = new_users_qs.filter(id__in=list(activated_ids))
+        elif segment == 'not_yet_saved':
+            users_qs = new_users_qs.exclude(id__in=list(activated_ids))
+        else:
+            users_qs = new_users_qs
+
+        activated_id_set = set(activated_ids)
+        users = users_qs.order_by('-date_joined')[:SIGNUP_EXPORT_CAP]
+
+        segment_label = _csv_safe_filename(f'{segment}_{SIGNUP_RANGE_LABELS[range_param]}')
+        today_str = timezone.now().strftime('%Y-%m-%d')
+
+        response = HttpResponse(content_type="text/csv")
+        response["Content-Disposition"] = (
+            f'attachment; filename="{segment_label}_{today_str}.csv"'
+        )
+
+        writer = csv.writer(response)
+        writer.writerow([
+            "First Name",
+            "Last Name",
+            "Email",
+            "Phone Number",
+            "KYC Status",
+            "Date Joined",
+            "Has Saved",
+        ])
+        for user in users:
+            writer.writerow([
+                user.first_name or "",
+                user.last_name or "",
+                user.email or "",
+                user.phone_number or "",
+                user.kyc_status or "",
+                user.date_joined.strftime('%Y-%m-%d') if user.date_joined else "",
+                "Yes" if user.id in activated_id_set else "No",
+            ])
+
+        return response
 
     except Exception as e:
         return Response({"error": str(e)}, status=500)
