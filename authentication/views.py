@@ -3966,6 +3966,14 @@ class UserTransactionListView(generics.ListAPIView):
         # page(s). Comma-separated, exact match (mirrors how these
         # transactions are created - see CustomUser.create_pending_referral_reward,
         # description="Referral Reward").
+        if self.request.query_params.get("pending_withdrawals_only") in ("1", "true", "True"):
+            queryset = queryset.filter(
+                status__iexact="pending", is_processed=False,
+            ).filter(
+                Q(scheduled_date__isnull=False)
+                | Q(description__iregex=r"^(savings|investment|properties|property)\s*>\s*wallet")
+            )
+
         descriptions_param = self.request.query_params.get("descriptions")
         if descriptions_param:
             descriptions = [d.strip() for d in descriptions_param.split(",") if d.strip()]
