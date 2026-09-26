@@ -2876,12 +2876,22 @@ def cashflow_summary(request):
             offset = max(0, int(request.query_params.get("offset", 0)))
         except (TypeError, ValueError):
             return Response({"error": "Invalid offset"}, status=400)
+        from zoneinfo import ZoneInfo
+        today = timezone.now().astimezone(ZoneInfo("Africa/Lagos")).date()
+        summary = scheduled.aggregate(
+            total_amount=Sum("amount"),
+            due_today=Count("id", filter=Q(scheduled_processing_date=today)),
+            overdue=Count("id", filter=Q(scheduled_processing_date__lt=today)),
+            processing=Count("id", filter=Q(status="processing")),
+        )
+        summary["total_amount"] = str(summary["total_amount"] or 0)
         count = scheduled.count()
         rows = scheduled.select_related("user").order_by(
             F("scheduled_processing_date").asc(nulls_last=True), "id",
         )[offset:offset + 50]
         return Response({
             "count": count,
+            "summary": summary,
             "next_offset": offset + 50 if offset + 50 < count else None,
             "results": [{
                 "id": row.pk, "name": " ".join(filter(None, [row.user.first_name, row.user.last_name])),
