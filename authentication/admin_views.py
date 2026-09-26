@@ -2865,7 +2865,33 @@ def cashflow_summary(request):
     defined as confirmed debit transactions out of SAVINGS/INVESTMENT,
     mirroring net_fum_change's "money_withdrawn" definition.
     """
-    cache_key = "financial:cashflow-summary"
+    from django.db.models import F
+
+    scheduled = WithdrawalsRequestToAdmin.objects.filter(
+        withdrawal_type="scheduled", status__in=["pending", "processing"],
+        is_processed=False,
+    )
+    if request.query_params.get("scheduled") == "1":
+        try:
+            offset = max(0, int(request.query_params.get("offset", 0)))
+        except (TypeError, ValueError):
+            return Response({"error": "Invalid offset"}, status=400)
+        count = scheduled.count()
+        rows = scheduled.select_related("user").order_by(
+            F("scheduled_processing_date").asc(nulls_last=True), "id",
+        )[offset:offset + 50]
+        return Response({
+            "count": count,
+            "next_offset": offset + 50 if offset + 50 < count else None,
+            "results": [{
+                "id": row.pk, "name": " ".join(filter(None, [row.user.first_name, row.user.last_name])),
+                "email": row.user.email, "avatar": row.user.profile_picture, "amount": str(row.amount),
+                "total_amount": str(row.total_amount), "source_account": row.source_account,
+                "status": row.status, "due_date": row.scheduled_processing_date,
+                "created_at": row.created_at, "transaction_id": row.transaction_id,
+            } for row in rows],
+        })
+    cache_key = "financial:cashflow-summary:v2"
     cached_data = cache.get(cache_key)
 
     if cached_data:
@@ -2924,9 +2950,7 @@ def cashflow_summary(request):
             "growth_rate": rate_str(this_month_withdrawals, last_month_withdrawals),
         }
 
-        scheduled_agg = WithdrawalsRequestToAdmin.objects.filter(
-            withdrawal_type='scheduled'
-        ).aggregate(
+        scheduled_agg = scheduled.aggregate(
             count=Count('id'),
             total_amount=Sum('total_amount'),
             pending_count=Count('id', filter=Q(status='pending')),

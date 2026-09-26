@@ -289,6 +289,36 @@ class CashflowSummaryTest(TestCase):
             user=user, amount=100, total_amount=100, withdrawal_type="immediate", status="pending",
         )
 
+    def test_scheduled_list_excludes_resolved_and_orders_by_due_date(self):
+        from django.core.cache import cache
+        cache.clear()
+        rows = list(WithdrawalsRequestToAdmin.objects.filter(withdrawal_type="scheduled"))
+        today = timezone.now().date()
+        rows[0].scheduled_processing_date = today + timedelta(days=3)
+        rows[0].save()
+        rows[1].scheduled_processing_date = today
+        rows[1].save()
+        for status_value in ["completed", "cancelled", "failed"]:
+            WithdrawalsRequestToAdmin.objects.create(
+                user=rows[0].user, amount=100, total_amount=100,
+                withdrawal_type="scheduled", status=status_value,
+            )
+        WithdrawalsRequestToAdmin.objects.create(
+            user=rows[0].user, amount=100, total_amount=100,
+            withdrawal_type="scheduled", status="pending", is_processed=True,
+        )
+        response = self.client.get(reverse("admin_cashflow_summary"), {"scheduled": "1"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["count"], 2)
+        self.assertEqual([row["id"] for row in response.data["results"]], [rows[1].pk, rows[0].pk])
+        self.assertEqual(response.data["results"][0]["due_date"], today)
+        self.assertEqual(response.data["results"][0]["email"], rows[1].user.email)
+        summary = self.client.get(reverse("admin_cashflow_summary"))
+        self.assertEqual(summary.data["scheduled_withdrawals"]["count"], 2)
+        self.assertEqual(summary.data["scheduled_withdrawals"]["total_amount"], 1500.0)
+        self.client.force_authenticate(user=rows[0].user)
+        self.assertEqual(self.client.get(reverse("admin_cashflow_summary"), {"scheduled": "1"}).status_code, 403)
+
     def test_summary(self):
         response = self.client.get(reverse("admin_cashflow_summary"))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
