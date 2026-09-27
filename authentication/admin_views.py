@@ -3778,6 +3778,7 @@ def admin_push_campaigns(request):
         rows = PushCampaign.objects.all()[:50]
         return Response([{
             "id": row.id, "subject": row.subject, "body": row.body, "delivery_mode": row.delivery_mode,
+            "link_url": row.link_url,
             "recipient_count": row.recipient_count, "device_count": row.device_count,
             "accepted_count": row.accepted_count, "failed_count": row.failed_count,
             "created_at": row.created_at, "completed_at": row.completed_at,
@@ -3804,6 +3805,14 @@ def admin_push_campaigns(request):
 
     push_subject = compact_push_copy(subject, 65)
     body = compact_push_copy(plain_body, 180)
+    # The composer's "Button (Link)" URL, if one was inserted - becomes
+    # the notification's tap target (see NotificationDeepLink.js's generic
+    # "anything else with a url" fallback), since strip_tags above already
+    # threw away any <a href> the button would have rendered as.
+    link_url = (request.data.get('link_url') or '').strip()
+    if link_url and not link_url.startswith(('http://', 'https://')):
+        link_url = f'https://{link_url}'
+    push_data = {'deep_link': {'url': link_url}} if link_url else None
     delivery_mode = request.data.get('delivery_mode') if request.data.get('delivery_mode') in ('push', 'both') else 'push'
     explicit_emails = _dedupe_preserve_order(request.data.get('recipients') or [])
     extra_emails = _dedupe_preserve_order(request.data.get('extra_emails') or [])
@@ -3827,7 +3836,7 @@ def admin_push_campaigns(request):
 
     device_count = sum(len(user.expo_push_tokens or []) for user in users)
     campaign = PushCampaign.objects.create(
-        subject=subject, body=body, delivery_mode=delivery_mode, created_by=request.user,
+        subject=subject, body=body, link_url=link_url, delivery_mode=delivery_mode, created_by=request.user,
         filters_applied=filters_applied, recipient_count=len(users), device_count=device_count,
     )
 
@@ -3838,7 +3847,7 @@ def admin_push_campaigns(request):
         accepted = failed = 0
         try:
             for user in users:
-                result = send_push_notification(user, push_subject, body, notif_type="ADMIN")
+                result = send_push_notification(user, push_subject, body, data=push_data, notif_type="ADMIN")
                 accepted += result.get("sent", 0)
                 failed += max(0, result.get("total", 0) - result.get("sent", 0))
             PushCampaign.objects.filter(pk=campaign.id).update(
@@ -3853,6 +3862,7 @@ def admin_push_campaigns(request):
         "id": campaign.id,
         "subject": campaign.subject,
         "body": campaign.body,
+        "link_url": campaign.link_url,
         "delivery_mode": campaign.delivery_mode,
         "recipient_count": campaign.recipient_count,
         "device_count": campaign.device_count,

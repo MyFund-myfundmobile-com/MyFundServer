@@ -2965,6 +2965,10 @@ class EmailTemplate(models.Model):
 class PushCampaign(models.Model):
     subject = models.CharField(max_length=255)
     body = models.TextField()
+    # From the composer's "Button (Link)" insert - the email side already
+    # rendered it as a clickable button; this is what the push notification
+    # itself opens when tapped, since a push can't render a button.
+    link_url = models.URLField(max_length=500, blank=True, default="")
     delivery_mode = models.CharField(max_length=10, choices=(("push", "Push"), ("both", "Email + Push")), default="push")
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
     filters_applied = models.JSONField(default=dict, blank=True)
