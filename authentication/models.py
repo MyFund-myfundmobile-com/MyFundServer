@@ -786,6 +786,21 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
             logger.warning(f"❌ Welcome email failed for {self.email}: {e}")
 
     def create_pending_referral_reward(self):
+        if not self.referral_id:
+            return
+        with transaction.atomic():
+            locked = {
+                user.pk: user
+                for user in CustomUser.objects.select_for_update().filter(
+                    pk__in=[self.pk, self.referral_id]
+                ).order_by("pk")
+            }
+            current = locked[self.pk]
+            current.referral = locked[current.referral_id]
+            current._create_pending_referral_reward_locked()
+            self.refresh_from_db()
+
+    def _create_pending_referral_reward_locked(self):
         """
         Creates pending referral reward transactions for new signup,
         sends referral emails and pushes.
@@ -794,7 +809,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
 
         # Prevent duplicates
         if Transaction.objects.filter(
-            user=self, description="Referral Reward"
+            user=self, referral_email=self.referral.email, description="Referral Reward"
         ).exists():
             logger.info(f"Pending referral reward already exists for {self.email}")
             return
@@ -817,27 +832,28 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         self.save(update_fields=["pending_referral_reward"])
 
         # Referrer reward (pending)
-        if not self.referral.is_influencer:
+        if self.referral:
+            referrer_reward = 1000 if self.referral.is_influencer else 500
             transaction_id = str(uuid.uuid4())[:10]
             Transaction.objects.create(
                 user=self.referral,
                 referral_email=self.email,
                 transaction_type="credit",
                 status="pending",
-                amount=500,
+                amount=referrer_reward,
                 description="Referral Reward",
                 transaction_id=transaction_id,
-                total_amount=500,
+                total_amount=referrer_reward,
             )
 
-            self.referral.pending_referral_reward = F("pending_referral_reward") + 500
+            self.referral.pending_referral_reward = F("pending_referral_reward") + referrer_reward
             self.referral.save(update_fields=["pending_referral_reward"])
 
             # Send email to referrer
             subject = f"{self.referral.first_name}, Your Referral Reward is Pending..."
             message = f"""
             Hi {self.referral.first_name},<br><br>
-            Your referral reward of ₦500 is pending. When your friend ({self.email}) makes their first savings/investment, it will be confirmed in your wallet.<br><br>
+            Your referral reward of ₦{referrer_reward:,.0f} is pending. When your friend ({self.email}) makes their first savings/investment, it will be confirmed in your wallet.<br><br>
             Thank you for using MyFund!<br><br>
             Keep growing your funds.🥂<br><br>
             """
@@ -891,14 +907,34 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
             )
             send_push_notification(
                 user=self.referral,
-                title="₦500 Referral Reward Pending 💰",
-                message=f"{self.referral.first_name}, your friend, {self.first_name} signed up. ₦500 referral reward pending for you. It'll be confirmed when they make their first savings.",
+                title=f"₦{referrer_reward:,.0f} Referral Reward Pending 💰",
+                message=f"{self.referral.first_name}, your friend, {self.first_name} signed up. ₦{referrer_reward:,.0f} referral reward pending for you. It'll be confirmed when they make their first savings.",
                 data={"type": "referral_pending"},
             )
         except Exception as e:
             logger.warning(f"Referral push failed: {e}")
 
     def confirm_referral_rewards(self, is_referrer):
+        # Serialize repeated confirmations and wallet updates for both recipients.
+        with transaction.atomic():
+            locked = {
+                user.pk: user
+                for user in CustomUser.objects.select_for_update().filter(
+                    pk__in=[pk for pk in (self.pk, self.referral_id) if pk]
+                ).order_by("pk")
+            }
+            current = locked[self.pk]
+            if current.referral_id:
+                current.referral = locked[current.referral_id]
+            # Some deposit handlers call this before saving their new balances.
+            current.savings = self.savings
+            current.investment = self.investment
+            current._confirm_referral_rewards_locked(is_referrer)
+            for field in ("wallet", "pending_referral_reward", "referral_reward_granted",
+                          "referral_reward_confirmed_at"):
+                setattr(self, field, getattr(current, field))
+
+    def _confirm_referral_rewards_locked(self, is_referrer):
         if self.referral and not self.referral_reward_granted:
             current_time = timezone.now()
             is_december_promo = current_time.month == 12 and current_time.year == 2025
@@ -906,7 +942,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
             if is_december_promo:
                 savings_threshold = 5000
             else:
-                if self.referral.is_ambassador:
+                if self.referral.is_ambassador or self.referral.is_influencer:
                     savings_threshold = 10000
                 else:
                     savings_threshold = 20000
@@ -917,6 +953,31 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
             qualifies_by_investment = self.investment >= investment_threshold
 
             if qualifies_by_savings or qualifies_by_investment:
+                # Older influencer signups had no referrer reward row. Repair
+                # only unconfirmed referrals when they qualify, never paid history.
+                if self.referral.is_influencer:
+                    reward, created = Transaction.objects.get_or_create(
+                        user=self.referral,
+                        referral_email=self.email,
+                        transaction_type="credit",
+                        description="Referral Reward",
+                        defaults={
+                            "status": "pending", "amount": 1000,
+                            "total_amount": 1000,
+                            "transaction_id": str(uuid.uuid4())[:10],
+                        },
+                    )
+                    adjustment = Decimal("0")
+                    if created:
+                        adjustment = Decimal("1000")
+                    elif reward.status == "pending":
+                        adjustment = Decimal("1000") - reward.amount
+                        reward.amount = reward.total_amount = Decimal("1000")
+                        reward.save(update_fields=["amount", "total_amount"])
+                    if adjustment:
+                        self.referral.pending_referral_reward += adjustment
+                        self.referral.save(update_fields=["pending_referral_reward"])
+
                 self.referral_reward_granted = True
                 self.referral_reward_confirmed_at = current_time
                 self.save(
@@ -929,6 +990,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                 # Confirm referred user's pending transaction
                 referred_transaction = Transaction.objects.filter(
                     user=self,
+                    referral_email=self.referral.email,
                     transaction_type="credit",
                     status="pending",
                     description="Referral Reward",
@@ -995,44 +1057,47 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                         update_fields=["wallet", "pending_referral_reward"]
                     )
 
-                from .utils import send_push_notification
+                def notify_confirmation():
+                    from .utils import send_push_notification
 
-                if referred_transaction:
-                    send_push_notification(
-                        user=self,
-                        title="Referral Reward Received! 🎉",
-                        message=f"You've got ₦{referred_transaction.amount:,.2f} for signing up on MyFund. Thank you for using MyFund!",
-                        data={
-                            "amount": str(referred_transaction.amount),
-                            "transaction_id": referred_transaction.transaction_id,
-                            "type": "Referral",
-                            "role": "referred",
-                            "status": "confirmed",
-                        },
-                        notif_type="CREDIT",
+                    if referred_transaction:
+                        send_push_notification(
+                            user=self,
+                            title="Referral Reward Received! 🎉",
+                            message=f"You've got ₦{referred_transaction.amount:,.2f} for signing up on MyFund. Thank you for using MyFund!",
+                            data={
+                                "amount": str(referred_transaction.amount),
+                                "transaction_id": referred_transaction.transaction_id,
+                                "type": "Referral",
+                                "role": "referred",
+                                "status": "confirmed",
+                            },
+                            notif_type="CREDIT",
+                        )
+
+                    if referrer_transaction:
+                        send_push_notification(
+                            user=self.referral,
+                            title="Referral Reward Confirmed! 🎊",
+                            message=f"You've earned ₦{referrer_transaction.amount:,.2f} for referring {self.first_name} and improved your chances for more rewards. Check the Referral List for your ranking. Keep it up!",
+                            data={
+                                "amount": str(referrer_transaction.amount),
+                                "transaction_id": referrer_transaction.transaction_id,
+                                "type": "Referral",
+                                "role": "referrer",
+                                "status": "confirmed",
+                            },
+                            notif_type="CREDIT",
+                        )
+
+                    self.send_confirmation_email(self, is_referrer=False)
+                    self.send_confirmation_email(self.referral, is_referrer=True)
+
+                    logger.info(
+                        f"Referral rewards confirmed for {self.email} and {self.referral.email}"
                     )
 
-                if referrer_transaction:
-                    send_push_notification(
-                        user=self.referral,
-                        title="Referral Reward Confirmed! 🎊",
-                        message=f"You've earned ₦{referrer_transaction.amount:,.2f} for referring {self.first_name} and improved your chances for more rewards. Check the Referral List for your ranking. Keep it up!",
-                        data={
-                            "amount": str(referrer_transaction.amount),
-                            "transaction_id": referrer_transaction.transaction_id,
-                            "type": "Referral",
-                            "role": "referrer",
-                            "status": "confirmed",
-                        },
-                        notif_type="CREDIT",
-                    )
-
-                self.send_confirmation_email(self, is_referrer=False)
-                self.send_confirmation_email(self.referral, is_referrer=True)
-
-                logger.info(
-                    f"Referral rewards confirmed for {self.email} and {self.referral.email}"
-                )
+                transaction.on_commit(notify_confirmation, robust=True)
 
     def send_confirmation_email(self, user, is_referrer):
         current_time = timezone.now()
@@ -1054,7 +1119,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
             subject = f"Congrats!🎊🥂 Referral Reward for {self.first_name} Confirmed!"
             message = (
                 f"Congratulations {user.first_name},\n\n"
-                f"You have received a referral reward of ₦500.00 in your wallet for referring {self.first_name}."
+                f"You have received a referral reward of ₦{1000 if user.is_influencer else 500:,.2f} in your wallet for referring {self.first_name}."
                 f"{ambassador_note}"
                 f"{december_note}"
                 f"\n\nThank you for using MyFund and referring others!"

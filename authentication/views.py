@@ -14108,28 +14108,27 @@ class TopReferralsAPIView(APIView):
 
     def get(self, request):
         user = request.user
-        now = timezone.now()
-        start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-
-        ambassador_view = getattr(user, "is_ambassador", False)
-
+        from .performance_periods import performance_months, PERIOD_LABELS
+        period = request.query_params.get("period", "this_month")
+        earliest_user = CustomUser.objects.order_by("date_joined").first()
+        try:
+            months = performance_months(period, (earliest_user or user).date_joined.date())
+        except ValueError as error:
+            return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+        start_of_month = timezone.make_aware(datetime.strptime(months[0], "%Y-%m"))
+        end = timezone.make_aware(datetime.strptime(months[-1], "%Y-%m"))
+        end = (end.replace(day=28) + timedelta(days=4)).replace(day=1)
+        signup_filter = Q(date_joined__gte=start_of_month, date_joined__lt=end)
+        confirmed_filter = Q(referral_reward_confirmed_at__gte=start_of_month,
+                             referral_reward_confirmed_at__lt=end, referral_reward_granted=True)
+        ambassador_view = user.is_ambassador and not user.is_influencer
         ref_stats = (
-            CustomUser.objects.filter(
-                referral__isnull=False,
-                date_joined__gte=start_of_month,
-            )
+            CustomUser.objects.filter(referral__isnull=False)
+            .filter(signup_filter | confirmed_filter)
             .values("referral")
-            .annotate(
-                monthly_signups=Count("id"),
-                monthly_confirmed=Count(
-                    "id",
-                    filter=Q(
-                        referral_reward_confirmed_at__gte=start_of_month,
-                        referral_reward_granted=True,
-                    ),
-                ),
-            )
-            .order_by("-monthly_confirmed", "-monthly_signups")
+            .annotate(monthly_signups=Count("id", filter=signup_filter),
+                      monthly_confirmed=Count("id", filter=confirmed_filter))
+            .order_by("-monthly_confirmed", "-monthly_signups", "referral")
         )
 
         ref_ids = [stat["referral"] for stat in ref_stats]
@@ -14154,9 +14153,7 @@ class TopReferralsAPIView(APIView):
                     "profile_picture": self.get_profile_pic_url(ref_user),
                     "monthly_signups": stat["monthly_signups"],
                     "monthly_confirmed": stat["monthly_confirmed"],
-                    "monthly_attendance": self.get_user_monthly_attendance_count(
-                        ref_user, start_of_month
-                    ),
+                    "monthly_attendance": AmbassadorAttendanceSubmission.objects.filter(user=ref_user, month__in=months).count(),
                     "is_influencer": ref_user.is_influencer,
                     "is_ambassador": getattr(ref_user, "is_ambassador", False),
                 }
@@ -14165,7 +14162,7 @@ class TopReferralsAPIView(APIView):
         top_users.sort(key=lambda x: (-x["monthly_confirmed"], -x["monthly_signups"]))
 
         rank_changes = {}
-        for index, user_data in enumerate(top_users):
+        for index, user_data in enumerate(top_users if period == "this_month" else []):
             ranked_user = CustomUser.objects.get(id=user_data["id"])
             new_rank = index + 1
             old_rank = ranked_user.last_referral_rank or 0
@@ -14178,14 +14175,9 @@ class TopReferralsAPIView(APIView):
         for user_obj, (old_rank, new_rank) in rank_changes.items():
             self.send_rank_notification(user_obj, old_rank, new_rank)
 
-        my_signups = CustomUser.objects.filter(
-            referral=user,
-            date_joined__gte=start_of_month,
-        )
-        my_confirmed = my_signups.filter(
-            referral_reward_confirmed_at__gte=start_of_month,
-            referral_reward_granted=True,
-        )
+        referrals = CustomUser.objects.filter(referral=user)
+        my_signups = referrals.filter(signup_filter)
+        my_confirmed = referrals.filter(confirmed_filter)
 
         current_user_stats = {
             "id": user.id,
@@ -14195,9 +14187,7 @@ class TopReferralsAPIView(APIView):
             "profile_picture": self.get_profile_pic_url(user),
             "monthly_signups": my_signups.count(),
             "monthly_confirmed": my_confirmed.count(),
-            "monthly_attendance": self.get_user_monthly_attendance_count(
-                user, start_of_month
-            ),
+            "monthly_attendance": AmbassadorAttendanceSubmission.objects.filter(user=user, month__in=months).count(),
             "is_ambassador": getattr(user, "is_ambassador", False),
             "rank": next(
                 (
@@ -14211,7 +14201,9 @@ class TopReferralsAPIView(APIView):
 
         return Response(
             {
-                "top_referrers": top_users[:50],
+                "top_referrers": top_users,
+                "period": period,
+                "period_label": PERIOD_LABELS[period],
                 "current_user": current_user_stats,
             }
         )
@@ -14400,7 +14392,7 @@ class AmbassadorPerformanceReportView(APIView):
     GET /api/ambassador/performance-report/
     Self-service version of the admin Cohort Performance Push tooling
     (see cohort3_performance_summary_email.py) - the requesting user's
-    OWN last 5 reported months (signups/confirmed/attendance/points),
+    OWN selected calendar months (signups/confirmed/activity/rewards),
     scoped to their own ambassador_cohort, plus that cohort's
     send_forth_date for the mobile Ambassador Performance Report
     screen's countdown. 403s for a non-ambassador (matches
@@ -14412,13 +14404,13 @@ class AmbassadorPerformanceReportView(APIView):
 
     def get(self, request):
         user = request.user
-        if not user.is_ambassador:
+        if not (user.is_ambassador or user.is_influencer):
             return Response(
-                {"detail": "This report is only available to current ambassadors."},
+                {"detail": "This report is only available to ambassadors and influencers."},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        cohort = user.ambassador_cohort
+        cohort = None if user.is_influencer else user.ambassador_cohort
         cohort_data = None
         if cohort:
             cohort_data = {
@@ -14427,16 +14419,16 @@ class AmbassadorPerformanceReportView(APIView):
                 "send_forth_date": cohort.send_forth_date,
             }
 
-        # Last 5 calendar months up to and including the current one, so
-        # this stays correct without editing a hardcoded month list every
-        # cohort cycle (unlike the one-off campaign script this mirrors).
-        today = timezone.now().date()
-        month_keys = []
-        cursor = today.replace(day=1)
-        for _ in range(5):
-            month_keys.append(cursor.strftime("%Y-%m"))
-            cursor = (cursor - timedelta(days=1)).replace(day=1)
-        month_keys.reverse()
+        from .performance_periods import performance_months, PERIOD_LABELS
+        period = request.query_params.get("period", "this_month")
+        earliest = user.date_joined.date()
+        first_report = AmbassadorMonthlyReport.objects.filter(user=user).order_by("month").values_list("month", flat=True).first()
+        if first_report:
+            earliest = min(earliest, datetime.strptime(first_report, "%Y-%m").date())
+        try:
+            month_keys = performance_months(period, earliest)
+        except ValueError as error:
+            return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
 
         reports = {
             r.month: r
@@ -14453,19 +14445,38 @@ class AmbassadorPerformanceReportView(APIView):
             pts = r.total_points_awarded if r else Decimal("0.00")
             row = {
                 "month": key,
-                "month_label": datetime.strptime(key, "%Y-%m").strftime("%B"),
+                "month_label": datetime.strptime(key, "%Y-%m").strftime("%b %Y"),
                 "signups": r.signups_approved if r else 0,
                 "confirmed": r.confirmed_approved if r else 0,
                 "attendance": r.attendance_approved if r else 0,
                 "points": str(pts),
             }
+            if user.is_influencer:
+                start = timezone.make_aware(datetime.strptime(key, "%Y-%m"))
+                end = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+                referrals = CustomUser.objects.filter(referral=user)
+                confirmed = referrals.filter(
+                    referral_reward_granted=True,
+                    referral_reward_confirmed_at__gte=start,
+                    referral_reward_confirmed_at__lt=end,
+                )
+                row["signups"] = referrals.filter(date_joined__gte=start, date_joined__lt=end).count()
+                row["confirmed"] = confirmed.count()
+                row["attendance"] = AmbassadorAttendanceSubmission.objects.filter(user=user, month=key).count()
+                row["content"] = r.social_media_submitted if r else 0
+                row["earned"] = str(Transaction.objects.filter(
+                    user=user, description="Referral Reward", status="confirmed",
+                    referral_email__in=confirmed.values("email"),
+                ).aggregate(total=Sum("amount"))["total"] or Decimal("0"))
             months.append(row)
             total_points += pts
-            if r and (best is None or pts > Decimal(str(best["points"]))):
+            score = Decimal(row["earned"]) if user.is_influencer else pts
+            best_score = Decimal(best["earned"] if user.is_influencer else best["points"]) if best else None
+            if (user.is_influencer or r) and (best_score is None or score > best_score):
                 best = row
 
         # Lifetime standing - ALL of this user's reports ever (not just
-        # the 5-month window above), ranked against every other ambassador
+        # the selected window above), ranked against every other ambassador
         # in the same cohort on the same lifetime basis, so "position 2 of
         # 13" means something consistent regardless of how long anyone's
         # been reporting. Cohort-scoped rather than all-ambassadors-ever:
@@ -14500,7 +14511,7 @@ class AmbassadorPerformanceReportView(APIView):
         # Plain-language takeaway - same trend logic
         # cohort3_performance_summary_email.py uses for its email copy
         # (recent reported month vs. the average of the prior ones in the
-        # 5-month window), plus the rank if one was computable.
+        # selected window), plus the rank if one was computable.
         recent_points = Decimal(months[-1]["points"]) if months else Decimal("0.00")
         prior_points = [Decimal(m["points"]) for m in months[:-1]]
         prior_avg = (
@@ -14539,7 +14550,15 @@ class AmbassadorPerformanceReportView(APIView):
                     "uploaded_at": cert.uploaded_at,
                 }
 
+        if user.is_influencer:
+            trend_sentence = "Signups and confirmations update automatically. Content counts come from your submitted monthly reports. Earned amounts show confirmed referral wallet credits."
+            rank_sentence = ""
+
         return Response({
+            "period": period,
+            "period_label": PERIOD_LABELS[period],
+            "is_influencer": user.is_influencer,
+            "total_earned": str(sum(Decimal(row.get("earned", "0")) for row in months)),
             "cohort": cohort_data,
             "months": months,
             "total_points": str(total_points),
