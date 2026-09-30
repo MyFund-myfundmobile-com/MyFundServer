@@ -1435,6 +1435,7 @@ def send_bulk_email_task(self, emails, from_email, batch_size=None, delay_second
                 subject=e["subject"],
                 html_content=e["html_message"],
                 from_email=from_email,
+                tags=e.get("tags"),
             )
 
             sent += 1

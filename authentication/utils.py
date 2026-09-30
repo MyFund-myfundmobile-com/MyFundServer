@@ -526,13 +526,10 @@ def send_generic_email(
     spread across multiple days.
 
     tags: optional list of strings, passed straight through to
-    send_email_via_brevo on the inline path - see its own docstring.
+    send_email_via_brevo on both inline and queued paths.
     Lets a caller (e.g. send_email below, tagging "template-<id>") pull a
     delivery report back out later the same way campaign sends do.
-    Celery-batched sends don't carry this through yet - individual/
-    template sends are the only caller today, and those are always small
-    enough to go inline; wire it into send_bulk_email_task's payload if a
-    tagged send ever needs to be large enough to queue.
+    Queued payloads carry the tags through every daily batch.
 
     force_queue: skip the inline path entirely regardless of recipient
     count, even below use_celery_threshold. The inline loop below does
@@ -545,8 +542,7 @@ def send_generic_email(
     cleanly - see authentication.views.send_email). A caller that can't
     tolerate that class of failure (e.g. any admin-composed broadcast,
     where "did this actually go out, and to whom" needs to be a clean
-    yes/no) should set this. Loses tag-based delivery reports, same
-    already-accepted trade-off the >30-recipient celery path makes today.
+    yes/no) should set this. Tag-based delivery reports remain available.
     """
 
     logger.info(
@@ -666,6 +662,12 @@ def send_generic_email(
         from .tasks import send_bulk_email_task
 
         num_days = (total_valid + DAILY_EMAIL_LIMIT - 1) // DAILY_EMAIL_LIMIT
+
+        # Keep tracking metadata in each payload so deferred daily batches
+        # retain it too, without changing the task signature for queued jobs.
+        if tags:
+            for payload in payloads:
+                payload["tags"] = list(tags)
 
         # One task call - it chunks into DAILY_EMAIL_LIMIT-sized batches and
         # reschedules itself a day later for any remainder. See tasks.py.

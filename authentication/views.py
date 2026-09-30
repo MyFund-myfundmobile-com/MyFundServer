@@ -10736,10 +10736,8 @@ def send_email(request):
 
         elif result["status"] == "queued":
             logger.info(f"📦 Email queued to Celery: {result['total']} recipients")
-            # The celery-batched path doesn't carry the tag through (see
-            # send_generic_email's docstring), so this template's Report
-            # tap will come back with no delivery data - handled
-            # gracefully client-side same as any untagged/too-early send.
+            # Queued payloads retain this template's tracking tag. Reports
+            # become available after the worker sends and Brevo processes it.
             finalize_email_template(pending_template, result["total"])
             return Response(
                 {
