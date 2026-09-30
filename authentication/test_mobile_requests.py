@@ -19,7 +19,7 @@ class MobileRequestTests(TestCase):
         return self.client.post(f"/api/admin/requests/{kind}/{pk}/action/", {"action": action, **extra}, format="json")
 
     def test_cx_and_regular_staff_cannot_read_or_act(self):
-        for index, email in enumerate(["valueplusrecords@gmail.com", "josephgideon95@gmail.com", "company@myfundmobile.com"]):
+        for index, email in enumerate(["valueplusrecords@gmail.com", "josephgideon95@gmail.com", "otherstaff@example.com"]):
             staff = CustomUser.objects.create_user(email=email, password="test", phone_number=f"0910000000{index}", is_staff=True)
             self.client.force_authenticate(staff)
             self.assertEqual(self.client.get("/api/admin/requests/").status_code, 403)
@@ -59,6 +59,17 @@ class MobileRequestTests(TestCase):
         janet = CustomUser.objects.create_user(email="janet.adegbenro@gmail.com", password="test", phone_number="09200000001", is_staff=True)
         self.client.force_authenticate(janet)
         self.assertEqual(self.client.get("/api/admin/requests/").status_code, 200)
+
+    def test_christine_has_matching_request_access(self):
+        christine = CustomUser.objects.create_user(email="company@myfundmobile.com", password="test", phone_number="09200000002", is_staff=True)
+        self.client.force_authenticate(christine)
+        self.assertEqual(self.client.get("/api/admin/requests/").status_code, 200)
+        with patch("authentication.request_views.approve_quicksave_credit", return_value=(True, "OK")) as helper:
+            self.assertEqual(self.action("quicksave", self.transfer.pk, "approve").status_code, 200)
+            helper.assert_called_once()
+        christine.is_staff = False
+        christine.save(update_fields=["is_staff"])
+        self.assertEqual(self.client.get("/api/admin/requests/").status_code, 403)
 
     def test_founder_email_without_staff_is_not_enough(self):
         self.founder.is_staff = False

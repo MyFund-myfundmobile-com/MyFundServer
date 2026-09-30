@@ -14647,6 +14647,7 @@ from .finance_metrics import calculate_finance_metrics
 FINANCE_METRICS_ALLOWED_EMAILS = {
     "tolulopeahmed@gmail.com",
     "janet.adegbenro@gmail.com",
+    "company@myfundmobile.com",
 }
 
 

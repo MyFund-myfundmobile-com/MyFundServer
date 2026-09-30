@@ -15,7 +15,7 @@ from .models import CustomUser, BankTransferRequest, InvestTransferRequest, With
 from .models import InfluencerApplication
 from .utils import approve_quicksave_credit, approve_quickinvest_credit, process_scheduled_withdrawal
 
-REQUEST_APPROVERS = {"tolulopeahmed@gmail.com", "janet.adegbenro@gmail.com"}
+REQUEST_APPROVERS = {"tolulopeahmed@gmail.com", "janet.adegbenro@gmail.com", "company@myfundmobile.com"}
 
 
 class CanApproveRequests(BasePermission):
