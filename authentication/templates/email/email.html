@@ -420,9 +420,19 @@
                                       mso-line-height-alt: 55px;
                                     "
                                   >
-                                    <div style="margin: 0; word-break: break-word">
-                                      {{message | safe}}
-                                    </div>
+                                    <p
+                                      style="margin: 0; word-break: break-word"
+                                    >
+                                      {% comment %}
+                                      <span
+                                        style="
+                                          word-break: break-word;
+                                          color: #003188;
+                                        "
+                                        ><strong>{{subject}}</strong></span
+                                      >
+                                      {% endcomment %}
+                                    </p>
                                   </div>
                                 </td>
                               </tr>

@@ -683,6 +683,14 @@ def release_quarterly_roi(test_mode=True):
                     description=f"Dividends: {QUARTER_LABEL} ROI",
                 )
 
+                # 2. Deduct 10% WHT in the same transaction, so there's no
+                # window to withdraw the gross dividend before tax is taken
+                # (Q3 2026 and earlier needed a separate catch-up run - see
+                # apply_withholding_tax).
+                # No push/email for WHT - it shows as its own wallet
+                # transaction in the user's history.
+                charge_wht_for_user(user_id, total_payout, QUARTER_LABEL)
+
                 # 3. Mark ROI records as paid
                 ROITransaction.objects.filter(
                     user=user,
@@ -1722,24 +1730,80 @@ DME, MyFund
     return result
 
 
+from decimal import Decimal
+
+WHT_RATE = Decimal("0.10")
+
+
+def compute_wht(total_payout):
+    from decimal import ROUND_HALF_UP
+
+    return (Decimal(str(total_payout)) * WHT_RATE).quantize(
+        Decimal("0.01"), rounding=ROUND_HALF_UP
+    )
+
+
+def charge_wht_for_user(user_id, total_payout, quarter_label, dry_run=False):
+    """
+    Debit 10% WHT on one user's quarterly dividend from their wallet.
+
+    Never takes the wallet below ₦0: if the user already withdrew/spent part
+    of the dividend, only what's left is debited and the rest is returned as
+    `shortfall` for finance to follow up. Idempotent per user per quarter
+    (keyed on the "WHT|<quarter>" description), and locks the user row so a
+    concurrent withdrawal can't race the balance check.
+
+    Must be called inside a db transaction (select_for_update needs one).
+    Returns (charged, shortfall, already_charged).
+    """
+    from .models import CustomUser, Transaction
+
+    wht_amount = compute_wht(total_payout)
+    if wht_amount <= 0:
+        return Decimal("0.00"), Decimal("0.00"), False
+
+    if Transaction.objects.filter(
+        user_id=user_id,
+        transaction_type="debit",
+        source="WALLET",
+        description__startswith=f"WHT|{quarter_label}|",
+    ).exists():
+        return Decimal("0.00"), Decimal("0.00"), True
+
+    user = CustomUser.objects.select_for_update().get(id=user_id)
+    available = max(Decimal(str(user.wallet or 0)), Decimal("0.00"))
+    charged = min(wht_amount, available)
+    shortfall = wht_amount - charged
+
+    if charged > 0 and not dry_run:
+        create_transaction(
+            user=user,
+            amount=charged,
+            transaction_type="debit",
+            source="WALLET",
+            status="confirmed",
+            description=f"WHT|{quarter_label}|10%",
+        )
+    return charged, shortfall, False
+
+
 @shared_task
-def apply_withholding_tax_q1_2026(test_mode=True):
+def apply_withholding_tax(test_mode=True, dry_run=False):
     """
-    Apply 10% Withholding Tax on Q1 2026 dividend payouts.
-    Debits wallet and creates a transaction record only — no push, no email.
+    Catch-up WHT for a quarter whose dividends were paid out gross (Q3 2026
+    and earlier). From the Jan 2027 payout onward release_quarterly_roi
+    deducts WHT itself, so this only ever needs running by hand, and is a
+    safe no-op for users already charged.
+
+    Charges the quarter that just closed (get_previous_quarter()), so run it
+    during the month after quarter end. dry_run=True computes everything and
+    writes nothing - run that first and check the totals.
     """
-    from decimal import Decimal, ROUND_HALF_UP
-    from datetime import date
     from django.db import transaction as db_transaction
     from django.db.models import Sum
-    from .models import CustomUser, Transaction, ROITransaction
+    from .models import CustomUser, ROITransaction
 
-    from dateutil.relativedelta import relativedelta
-
-    QUARTER_START = date(2026, 4, 1)
-    QUARTER_END = date(2026, 6, 30)
-    QUARTER_LABEL = "Q2 2026"
-    WHT_RATE = Decimal("0.10")
+    QUARTER_START, QUARTER_END, QUARTER_LABEL = get_previous_quarter()
 
     TEST_EMAILS = [
         # "company@myfundmobile.com",
@@ -1747,9 +1811,11 @@ def apply_withholding_tax_q1_2026(test_mode=True):
         "tolulopeahmed@gmail.com",
     ]
 
-    logger.info(f"🚀 apply_withholding_tax_q1_2026 started. test_mode={test_mode}")
+    logger.info(
+        f"🚀 apply_withholding_tax started for {QUARTER_LABEL}. "
+        f"test_mode={test_mode} dry_run={dry_run}"
+    )
 
-    # Get all users who were paid out this quarter
     qs = (
         ROITransaction.objects.filter(
             accrued_date__range=[QUARTER_START, QUARTER_END],
@@ -1767,66 +1833,50 @@ def apply_withholding_tax_q1_2026(test_mode=True):
         qs = qs.filter(user_id__in=test_user_ids)
         logger.info(f"🧪 TEST MODE — restricted to {TEST_EMAILS}")
 
-    if not qs.exists():
-        msg = "No paid ROI found for the quarter."
-        logger.info(msg)
-        return msg
-
-    processed = 0
-    skipped = 0
-    errors = 0
+    processed = skipped = errors = 0
+    total_charged = total_shortfall = Decimal("0.00")
+    shortfalls = []
 
     for row in qs:
         user_id = row["user_id"]
-        total_payout = Decimal(str(row["total_payout"] or 0))
-        wht_amount = (total_payout * WHT_RATE).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP
-        )
-
-        if wht_amount <= 0:
-            skipped += 1
-            continue
-
-        # Skip if WHT already applied for this user this quarter
-        already_charged = Transaction.objects.filter(
-            user_id=user_id,
-            transaction_type="debit",
-            status="confirmed",
-            source="WALLET",
-            description__icontains=f"WHT|{QUARTER_LABEL}",
-        ).exists()
-
-        if already_charged:
-            logger.info(f"⏭️ WHT already applied for user {user_id}, skipping.")
-            skipped += 1
-            continue
-
         try:
-            user = CustomUser.objects.get(id=user_id)
-
             with db_transaction.atomic():
-                # 1. Debit wallet
-                create_transaction(
-                    user=user,
-                    amount=wht_amount,
-                    transaction_type="debit",
-                    source="WALLET",
-                    status="confirmed",
-                    description=f"WHT|{QUARTER_LABEL}|10%",
+                charged, shortfall, already = charge_wht_for_user(
+                    user_id, row["total_payout"], QUARTER_LABEL, dry_run=dry_run
                 )
-
-            processed += 1
-            logger.info(f"✅ WHT ₦{wht_amount:,.2f} debited from {user.email}")
-
         except Exception as e:
             errors += 1
             logger.error(f"❌ Error applying WHT for user {user_id}: {e}")
+            continue
 
-    result = (
-        f"✅ apply_withholding_tax_q1_2026 complete. "
-        f"Processed: {processed}, Skipped: {skipped}, Errors: {errors}"
-    )
-    logger.info(result)
+        if already or (charged == 0 and shortfall == 0):
+            skipped += 1
+            continue
+
+        processed += 1
+        total_charged += charged
+        if shortfall > 0:
+            total_shortfall += shortfall
+            shortfalls.append(
+                {"user_id": user_id, "charged": str(charged), "shortfall": str(shortfall)}
+            )
+            logger.warning(
+                f"⚠️ WHT shortfall for user {user_id}: charged ₦{charged:,.2f}, "
+                f"₦{shortfall:,.2f} not covered by wallet"
+            )
+
+    result = {
+        "quarter": QUARTER_LABEL,
+        "dry_run": dry_run,
+        "test_mode": test_mode,
+        "processed": processed,
+        "skipped": skipped,
+        "errors": errors,
+        "total_charged": str(total_charged),
+        "total_shortfall": str(total_shortfall),
+        "shortfalls": shortfalls,
+    }
+    logger.info(f"✅ apply_withholding_tax complete: {result}")
     return result
 
 
