@@ -344,7 +344,7 @@ def retry_failed_deductions():
                 f"New balance: ₦{target.current_amount:,.2f}.\n\n "
                 "Keep going! You're doing great. 🚀"
             )
-            send_transactional_email(
+            send_generic_email(
                 subject=subject,
                 message=message,
                 recipient_list=[user.email],
@@ -728,12 +728,14 @@ def release_quarterly_roi(test_mode=True):
                 f"The MyFund Team"
             )
 
-            send_transactional_email(
+            # Brevo, not Resend: one email per paid user in a single run
+            # used up the whole Resend quota on Oct 1 2026, leaving
+            # signup/password OTPs (which need Resend) with nothing left.
+            send_generic_email(
                 subject=f"Quarterly ROI Paid! ({QUARTER_LABEL})",
                 message=email_body,
                 recipient_list=[user.email],
                 from_email="MyFund <noreply@myfundmobile.com>",
-                use_celery_threshold=0,  # force direct send
             )
 
             processed += 1
@@ -908,7 +910,7 @@ def reward_top_savers_of_month():
                     — The MyFund Team
                     """
 
-                send_transactional_email(
+                send_generic_email(
                     subject=f"🏆 Congrats! You are the #{rank} Top Saver for {prev_month_name}!",
                     message=email_message,
                     from_email="MyFund <info@myfundmobile.com>",
@@ -937,7 +939,7 @@ def reward_top_savers_of_month():
                 — The MyFund Team
                 """
 
-                send_transactional_email(
+                send_generic_email(
                     subject=f"You're the #{rank} Top Saver for {prev_month_name}! 🚀",
                     message=email_message,
                     from_email="MyFund <info@myfundmobile.com>",
@@ -983,8 +985,14 @@ def send_birthday_greetings():
             🥳 Keep saving and keep shining!<br><br>
             — The MyFund Team
             """
-            send_transactional_email(
-                subject, message, "MyFund <info@myfundmobile.com>", [user.email]
+            # Was positional (subject, message, from_email, recipients) against
+            # a (subject, message, recipient_list, from_email) signature, so
+            # every birthday email went to the sender address and was dropped.
+            send_generic_email(
+                subject=subject,
+                message=message,
+                recipient_list=[user.email],
+                from_email="MyFund <info@myfundmobile.com>",
             )
 
             # 🎊 Push notification

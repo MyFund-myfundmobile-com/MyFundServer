@@ -71,7 +71,7 @@ class ApplyWithholdingTaxTest(TestCase):
         self.assertEqual(result["processed"], 0)
 
 
-@patch("authentication.tasks.send_transactional_email")
+@patch("authentication.tasks.send_generic_email")
 @patch("authentication.tasks.send_push_notification")
 @patch("authentication.tasks.date", _FrozenDate)
 class ReleaseQuarterlyRoiWhtTest(TestCase):
