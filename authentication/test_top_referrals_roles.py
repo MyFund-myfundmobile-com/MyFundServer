@@ -63,7 +63,7 @@ class TopReferralsRoleTest(TestCase):
         viewer = self.referrers[3]
         factory = APIRequestFactory()
         for period, expected_signups, expected_confirmed in [
-            ("last_month", 1, 0), ("last_6_months", 1, 1), ("all_time", 1, 1),
+            ("last_month", 1, 0), ("last_3_months", 1, 1), ("last_6_months", 1, 1), ("all_time", 1, 1),
         ]:
             request = factory.get("/", {"period": period})
             force_authenticate(request, user=viewer)
@@ -77,3 +77,32 @@ class TopReferralsRoleTest(TestCase):
         rows = self.leaderboard(viewer)
         row = next(r for r in rows if r["id"] == self.referrers[0].id)
         self.assertEqual((row["monthly_signups"], row["monthly_confirmed"]), (0, 1))
+
+    @patch("authentication.performance_periods.timezone.localdate")
+    def test_three_month_window_counts_signup_and_confirmation_dates_independently(self, localdate):
+        from datetime import date, datetime
+        from django.utils import timezone
+        localdate.return_value = date(2026, 1, 15)
+        viewer = self.referrers[2]
+        friend = CustomUser.objects.get(email="signup2@example.com")
+        cases = [
+            ((2025, 10, 31), (2025, 11, 1), 0, 1),
+            ((2025, 11, 1), (2026, 1, 31), 1, 1),
+            ((2026, 1, 31), (2026, 2, 1), 1, 0),
+            ((2026, 2, 1), (2026, 2, 1), 0, 0),
+        ]
+        for joined, confirmed, signups, confirmations in cases:
+            CustomUser.objects.filter(pk=friend.pk).update(
+                date_joined=timezone.make_aware(datetime(*joined)),
+                referral_reward_granted=True,
+                referral_reward_confirmed_at=timezone.make_aware(datetime(*confirmed)),
+            )
+            request = APIRequestFactory().get("/api/top-referrals/", {"period": "last_3_months"})
+            force_authenticate(request, user=viewer)
+            with patch.object(TopReferralsAPIView, "send_rank_notification") as notify:
+                response = TopReferralsAPIView.as_view()(request)
+                notify.assert_not_called()
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.data["period_label"], "Last 3 months")
+            self.assertEqual(response.data["current_user"]["monthly_signups"], signups)
+            self.assertEqual(response.data["current_user"]["monthly_confirmed"], confirmations)

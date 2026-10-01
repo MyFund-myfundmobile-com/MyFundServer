@@ -13,6 +13,8 @@ class CalendarWindowsTest(SimpleTestCase):
         earliest = date(2024, 11, 2)
         self.assertEqual(performance_months("this_month", earliest, today), ["2026-01"])
         self.assertEqual(performance_months("last_month", earliest, today), ["2025-12"])
+        self.assertEqual(performance_months("last_3_months", earliest, today),
+                         ["2025-11", "2025-12", "2026-01"])
         self.assertEqual(performance_months("last_6_months", earliest, today),
                          ["2025-08", "2025-09", "2025-10", "2025-11", "2025-12", "2026-01"])
         self.assertEqual(performance_months("last_year", earliest, today),
@@ -30,7 +32,7 @@ class PerformanceFiltersTest(TestCase):
         for index, role in enumerate(["is_ambassador", "is_influencer"]):
             user = CustomUser.objects.create_user(email=f"role{index}@example.com",
                 phone_number=f"1000000000{index}", password="testpass", **{role: True})
-            for period, count in [(None, 1), ("last_month", 1), ("last_6_months", 6), ("last_year", 12), ("all_time", 1)]:
+            for period, count in [(None, 1), ("last_month", 1), ("last_3_months", 3), ("last_6_months", 6), ("last_year", 12), ("all_time", 1)]:
                 request = APIRequestFactory().get("/", {"period": period} if period else {})
                 force_authenticate(request, user=user)
                 response = AmbassadorPerformanceReportView.as_view()(request)

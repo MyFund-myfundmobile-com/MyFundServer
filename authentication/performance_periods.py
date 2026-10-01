@@ -5,6 +5,7 @@ from django.utils import timezone
 PERIOD_LABELS = {
     "this_month": "This month",
     "last_month": "Last month",
+    "last_3_months": "Last 3 months",
     "last_6_months": "Last 6 months",
     "last_year": "Last year",
     "all_time": "All time",
@@ -21,6 +22,8 @@ def performance_months(period, earliest, today=None):
         start = current
     elif period == "last_month":
         start = end = current - 1
+    elif period == "last_3_months":
+        start = current - 2
     elif period == "last_6_months":
         start = current - 5
     elif period == "last_year":
