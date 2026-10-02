@@ -118,3 +118,52 @@ class InfluencerRewardsTest(TestCase):
         response = AmbassadorPerformanceReportView.as_view()(request)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["months"][-1]["content"], 4)
+
+    def test_legacy_rewards_repair_even_after_premature_confirmation(self):
+        self.referrer.is_influencer = False
+        self.referrer.save(update_fields=["is_influencer"])
+        self.friend.create_pending_referral_reward()
+        Transaction.objects.all().update(description="Referral Reward (Pending)")
+        Transaction.objects.filter(user=self.friend).update(transaction_type="pending")
+        confirmed_at = timezone.now() - timedelta(days=30)
+        CustomUser.objects.filter(pk=self.friend.pk).update(
+            referral_reward_granted=True, referral_reward_confirmed_at=confirmed_at)
+        self.friend.refresh_from_db()
+        self.friend.create_pending_referral_reward()
+        self.assertEqual(Transaction.objects.count(), 2)
+        self.qualify(20000)
+        self.friend.refresh_from_db()
+        self.referrer.refresh_from_db()
+        self.assertEqual(self.friend.wallet, 500)
+        self.assertEqual(self.referrer.wallet, 500)
+        self.assertEqual(self.friend.pending_referral_reward, 0)
+        self.assertEqual(self.referrer.pending_referral_reward, 0)
+        self.assertEqual(self.friend.referral_reward_confirmed_at, confirmed_at)
+        self.qualify(20000)
+        self.referrer.refresh_from_db()
+        self.assertEqual(self.referrer.wallet, 500)
+        self.assertEqual(Transaction.objects.filter(status="confirmed", credited_to="WALLET").count(), 2)
+
+    def test_missing_or_duplicate_ledger_never_marks_referral_paid(self):
+        self.referrer.is_influencer = False
+        self.referrer.save(update_fields=["is_influencer"])
+        self.qualify(20000)
+        self.assertFalse(self.friend.referral_reward_granted)
+        self.friend.create_pending_referral_reward()
+        Transaction.objects.create(user=self.friend, referral_email=self.referrer.email,
+            description="Referral Reward (Pending)", status="pending", amount=500,
+            transaction_type="pending", total_amount=500)
+        self.qualify(20000)
+        self.assertFalse(self.friend.referral_reward_granted)
+        self.assertEqual(self.friend.wallet, 0)
+
+    def test_partial_payment_does_not_credit_paid_side_twice(self):
+        self.friend.create_pending_referral_reward()
+        Transaction.objects.filter(user=self.friend).update(
+            status="confirmed", credited_to="WALLET", balance_before=0, balance_after=500)
+        CustomUser.objects.filter(pk=self.friend.pk).update(wallet=500, pending_referral_reward=0)
+        self.friend.refresh_from_db()
+        self.qualify()
+        self.referrer.refresh_from_db()
+        self.assertEqual(self.friend.wallet, 500)
+        self.assertEqual(self.referrer.wallet, 1000)

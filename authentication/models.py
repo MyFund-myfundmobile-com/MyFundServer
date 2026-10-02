@@ -809,7 +809,8 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
 
         # Prevent duplicates
         if Transaction.objects.filter(
-            user=self, referral_email=self.referral.email, description="Referral Reward"
+            user=self, referral_email__iexact=self.referral.email,
+            description__in=["Referral Reward", "Referral Reward (Pending)"]
         ).exists():
             logger.info(f"Pending referral reward already exists for {self.email}")
             return
@@ -935,7 +936,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                 setattr(self, field, getattr(current, field))
 
     def _confirm_referral_rewards_locked(self, is_referrer):
-        if self.referral and not self.referral_reward_granted:
+        if self.referral:
             current_time = timezone.now()
             is_december_promo = current_time.month == 12 and current_time.year == 2025
 
@@ -953,15 +954,47 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
             qualifies_by_investment = self.investment >= investment_threshold
 
             if qualifies_by_savings or qualifies_by_investment:
+                # Reconcile both ledger sides before touching balances. Older
+                # signups used a pending description and even a pending type.
+                # Refuse ambiguous pairs rather than risk a duplicate credit.
+                reward_rows = []
+                for recipient, counterpart in ((self, self.referral), (self.referral, self)):
+                    rows = list(Transaction.objects.select_for_update().filter(
+                        user=recipient, referral_email__iexact=counterpart.email,
+                        description__in=["Referral Reward", "Referral Reward (Pending)"],
+                    ))
+                    if len(rows) > 1 or any(
+                        row.status not in ("pending", "confirmed") or row.amount <= 0
+                        or row.transaction_type not in ("credit", "pending")
+                        or (row.status == "confirmed" and
+                            (row.transaction_type != "credit" or row.credited_to != "WALLET"))
+                        for row in rows
+                    ):
+                        logger.warning("Ambiguous referral reward ledger for user %s", self.pk)
+                        return
+                    reward_rows.append(rows[0] if rows else None)
+                if not reward_rows[0] or (not reward_rows[1] and
+                        (not self.referral.is_influencer or self.referral_reward_granted)):
+                    logger.warning("Missing referral reward ledger for user %s", self.pk)
+                    return
+                if all(row and row.status == "confirmed" for row in reward_rows):
+                    return
+                for row in reward_rows:
+                    if row and row.status == "pending":
+                        row.transaction_type = "credit"
+                        row.description = "Referral Reward"
+                        row.save(update_fields=["transaction_type", "description"])
+
                 # Older influencer signups had no referrer reward row. Repair
                 # only unconfirmed referrals when they qualify, never paid history.
-                if self.referral.is_influencer:
+                if self.referral.is_influencer and not self.referral_reward_granted:
                     reward, created = Transaction.objects.get_or_create(
                         user=self.referral,
-                        referral_email=self.email,
+                        referral_email__iexact=self.email,
                         transaction_type="credit",
                         description="Referral Reward",
                         defaults={
+                            "referral_email": self.email,
                             "status": "pending", "amount": 1000,
                             "total_amount": 1000,
                             "transaction_id": str(uuid.uuid4())[:10],
@@ -978,19 +1011,10 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                         self.referral.pending_referral_reward += adjustment
                         self.referral.save(update_fields=["pending_referral_reward"])
 
-                self.referral_reward_granted = True
-                self.referral_reward_confirmed_at = current_time
-                self.save(
-                    update_fields=[
-                        "referral_reward_granted",
-                        "referral_reward_confirmed_at",
-                    ]
-                )
-
                 # Confirm referred user's pending transaction
                 referred_transaction = Transaction.objects.filter(
                     user=self,
-                    referral_email=self.referral.email,
+                    referral_email__iexact=self.referral.email,
                     transaction_type="credit",
                     status="pending",
                     description="Referral Reward",
@@ -1024,7 +1048,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                 # Confirm referrer's pending transaction
                 referrer_transaction = Transaction.objects.filter(
                     user=self.referral,
-                    referral_email=self.email,
+                    referral_email__iexact=self.email,
                     transaction_type="credit",
                     status="pending",
                     description="Referral Reward",
@@ -1056,6 +1080,15 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                     self.referral.save(
                         update_fields=["wallet", "pending_referral_reward"]
                     )
+
+                self.referral_reward_granted = True
+                self.referral_reward_confirmed_at = self.referral_reward_confirmed_at or current_time
+                self.save(
+                    update_fields=[
+                        "referral_reward_granted",
+                        "referral_reward_confirmed_at",
+                    ]
+                )
 
                 def notify_confirmation():
                     from .utils import send_push_notification
@@ -1090,8 +1123,10 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                             notif_type="CREDIT",
                         )
 
-                    self.send_confirmation_email(self, is_referrer=False)
-                    self.send_confirmation_email(self.referral, is_referrer=True)
+                    if referred_transaction:
+                        self.send_confirmation_email(self, is_referrer=False)
+                    if referrer_transaction:
+                        self.send_confirmation_email(self.referral, is_referrer=True)
 
                     logger.info(
                         f"Referral rewards confirmed for {self.email} and {self.referral.email}"
