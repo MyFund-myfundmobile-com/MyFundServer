@@ -8466,7 +8466,6 @@ def initiate_dva_quicksave(request):
     try:
         user = request.user
         print("INITIATING DVA QUICKSAVE")
-        print("PAYSTACK SECRET PREFIX:", settings.PAYSTACK_SECRET_KEY[:10])
         print("USER DVA:", user.dva_account_number, user.dva_bank_name)
 
         amount_raw = request.data.get("amount")
@@ -9313,7 +9312,6 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
     print("========== PAYSTACK WEBHOOK HIT ==========")
     print("WEBHOOK EVENT RECEIVED:", event.get("event"))
     print("WEBHOOK FULL DATA:", event)
-    print("PAYSTACK SECRET PREFIX:", settings.PAYSTACK_SECRET_KEY[:10])
     print("WEBHOOK URL HIT LOCALLY")
 
     try:
@@ -9365,8 +9363,8 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                 # Existing card / autosave / autoinvest flow
                 # --------------------------------------------------
                 paystack_auth_code = authorization.get("authorization_code")
-                plan = event["data"].get("plan") or {}
-                plan_code = plan.get("plan_code")
+                from .services.paystack_payload import get_plan_code
+                plan_code = get_plan_code(event["data"])
 
                 try:
                     user = CustomUser.objects.get(email=email)
@@ -9436,6 +9434,13 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     )
                 except Transaction.DoesNotExist:
                     transaction = None
+
+                # A provider retry or delayed webhook can arrive after a
+                # successful reconciliation. Never credit an existing payment twice.
+                if transaction and transaction.status == "confirmed":
+                    if transaction.user_id != user.pk:
+                        raise ValueError("Payment reference belongs to a different user")
+                    return
 
                 if plan_code:
                     autosave = AutoSave.objects.filter(
@@ -9953,8 +9958,6 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                 return
 
             case "invoice.payment_failed":
-                from .models import AutoSave, AutoInvest
-                from .utils import send_push_notification
 
                 event_data = event["data"]
 
