@@ -4627,9 +4627,20 @@ def operating_expenses_delete(request, expense_id):
     return Response({"success": True})
 
 
+def _can_submit_department_report(user, department):
+    if department == "CX":
+        return True  # Preserve the existing CX staff permission.
+    if department != "Engagement":
+        return False
+    from .models import Employee
+    return _is_finance_allowed(user) or Employee.objects.filter(
+        email__iexact=user.email, department="Engagement", is_active=True,
+    ).exists()
+
+
 @api_view(['POST'])
 @permission_classes([IsAdminUser])
-def submit_cx_weekly_report(request):
+def submit_cx_weekly_report(request, department="CX"):
     """
     POST /api/admin/cx/weekly-reports/create/
     Body: {"report": "...", "recommendation": "...", "week_start": "YYYY-MM-DD"}
@@ -4648,6 +4659,9 @@ def submit_cx_weekly_report(request):
     resubmitting/adding another report for a week already covered is
     allowed. Defaults to the Monday of the current week if omitted.
     """
+    if not _can_submit_department_report(request.user, department):
+        return Response({"detail": "Permission denied"}, status=403)
+
     from datetime import date
 
     report_text = (request.data.get('report') or '').strip()
@@ -4669,6 +4683,7 @@ def submit_cx_weekly_report(request):
     try:
         cx_report = CxWeeklyReport.objects.create(
             submitted_by=request.user,
+            department=department,
             report=report_text,
             recommendation=recommendation_text,
             week_start=week_start,
@@ -4692,9 +4707,9 @@ def submit_cx_weekly_report(request):
 
         try:
             send_admin_push_notification(
-                title=f"📋 Weekly report from {submitter_name} (week of {week_start.strftime('%b %d')})",
+                title=f"📋 {department} weekly report from {submitter_name} (week of {week_start.strftime('%b %d')})",
                 message=message,
-                data={"type": "cx_weekly_report", "report_id": cx_report.id},
+                data={"type": f"{department.lower()}_weekly_report", "report_id": cx_report.id},
                 notif_type="ADMIN",
                 category="system",
             )
@@ -4709,7 +4724,7 @@ def submit_cx_weekly_report(request):
 
 @api_view(['GET'])
 @permission_classes([IsAdminUser])
-def list_cx_weekly_reports(request):
+def list_cx_weekly_reports(request, department="CX"):
     """
     GET /api/admin/cx/weekly-reports/
     Founders only (_is_finance_allowed) - the full feed across all of CX,
@@ -4719,13 +4734,13 @@ def list_cx_weekly_reports(request):
     if not _is_finance_allowed(request.user):
         return Response({"detail": "Permission denied"}, status=403)
 
-    reports = CxWeeklyReport.objects.select_related('submitted_by').all()[:200]
+    reports = CxWeeklyReport.objects.select_related('submitted_by').filter(department=department)[:200]
     return Response(CxWeeklyReportSerializer(reports, many=True).data)
 
 
 @api_view(['GET'])
 @permission_classes([IsAdminUser])
-def my_cx_weekly_reports(request):
+def my_cx_weekly_reports(request, department="CX"):
     """
     GET /api/admin/cx/weekly-reports/mine/
     Self-service read-back, always filtered to request.user regardless of
@@ -4735,5 +4750,7 @@ def my_cx_weekly_reports(request):
     picking a week to report on, now that week_start means they aren't
     limited to "this week only".
     """
-    reports = CxWeeklyReport.objects.filter(submitted_by=request.user)[:200]
+    if not _can_submit_department_report(request.user, department):
+        return Response({"detail": "Permission denied"}, status=403)
+    reports = CxWeeklyReport.objects.filter(submitted_by=request.user, department=department)[:200]
     return Response(CxWeeklyReportSerializer(reports, many=True).data)

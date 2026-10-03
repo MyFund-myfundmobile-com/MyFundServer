@@ -387,6 +387,7 @@ class CxWeeklyReportSerializer(serializers.ModelSerializer):
         model = CxWeeklyReport
         fields = [
             "id",
+            "department",
             "report",
             "recommendation",
             "week_start",

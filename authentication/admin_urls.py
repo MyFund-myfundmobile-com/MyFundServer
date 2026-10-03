@@ -311,4 +311,10 @@ urlpatterns = [
         admin_views.list_cx_weekly_reports,
         name="admin_list_cx_weekly_reports",
     ),
+    path("engagement/weekly-reports/create/", admin_views.submit_cx_weekly_report,
+         {"department": "Engagement"}, name="admin_submit_engagement_weekly_report"),
+    path("engagement/weekly-reports/mine/", admin_views.my_cx_weekly_reports,
+         {"department": "Engagement"}, name="admin_my_engagement_weekly_reports"),
+    path("engagement/weekly-reports/", admin_views.list_cx_weekly_reports,
+         {"department": "Engagement"}, name="admin_list_engagement_weekly_reports"),
 ]

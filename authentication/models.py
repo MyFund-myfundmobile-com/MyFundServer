@@ -3521,6 +3521,11 @@ class CxWeeklyReport(models.Model):
     covered.
     """
 
+    department = models.CharField(
+        max_length=20, choices=[("CX", "CX"), ("Engagement", "Engagement")],
+        default="CX", db_index=True,
+    )
+
     submitted_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
