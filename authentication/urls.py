@@ -1,3 +1,4 @@
+from . import ambassador_application_views as applications
 from .graduation_views import graduation
 from django.urls import path, include
 from .request_views import requests_list, request_action
@@ -72,6 +73,15 @@ router.register(r"bank-accounts", views.BankAccountViewSet, basename="bank-accou
 
 
 urlpatterns = [
+    path("ambassador/applications/config/", applications.application_config),
+    path("ambassador/applications/lookup/", applications.lookup_email),
+    path("ambassador/applications/password/", applications.password_login),
+    path("ambassador/applications/code/", applications.request_code),
+    path("ambassador/applications/verify/", applications.verify_code),
+    path("ambassador/applications/draft/", applications.application_draft),
+    path("ambassador/applications/submit/", applications.application_submit),
+    path("ambassador/applications/video/", applications.application_video),
+
     path("ambassador/graduation/", graduation),
     path("admin/requests/", requests_list, name="admin_requests"),
     path("admin/requests/<str:kind>/<int:pk>/action/", request_action, name="admin_request_action"),

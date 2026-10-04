@@ -4200,3 +4200,6 @@ class InfluencerApplicationAdmin(admin.ModelAdmin):
     list_display = ("user", "status", "niche", "tshirt_size", "monthly_content", "monthly_signups", "monthly_savers", "follow_confirmed", "created_at")
     readonly_fields = ("status", "reviewed_at", "review_reason")
     search_fields = ("user__email",)
+
+# Recruitment review and draft follow-up.
+from . import ambassador_application_admin

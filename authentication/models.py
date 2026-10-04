@@ -4258,3 +4258,6 @@ class InfluencerApplication(models.Model):
     review_reason = models.TextField(blank=True)
     reviewed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+# Separate recruitment records; submitting an application never grants a role.
+from .ambassador_application_models import AmbassadorIntake, AmbassadorApplication, AmbassadorEmailChallenge
