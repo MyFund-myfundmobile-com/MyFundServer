@@ -6909,6 +6909,111 @@ def make_withdrawal_through_paystack(user, target_bank_account, amount, referenc
     return response.json()
 
 
+def refund_failed_withdrawal(reference, transfer_code=None, reason=""):
+    """
+    Paystack accepted a withdrawal transfer, then reported it failed or
+    reversed (webhook). Return the money to the balance it came from instead
+    of leaving it debited with no payout - previously this only queued a
+    half-filled admin request that its own approve action couldn't process,
+    so users waited days (e.g. 2026-10-02, ₦2,420).
+
+    Refunds exactly what was deducted (amount + any service charge), once:
+    the refund row's transaction_id is f"refund-{reference}" (unique), and it
+    never refunds a withdrawal an admin already marked paid. Returns
+    "refunded", "handled" (already refunded / paid by hand - a repeat
+    webhook, nothing to do) or None (no matching withdrawal - fall back to
+    manual admin review).
+    """
+    from django.db import IntegrityError, transaction as db_transaction
+    from decimal import Decimal
+    from .utils import create_transaction, send_transactional_email, send_push_notification
+
+    if not reference or not str(reference).startswith("withdrawal-"):
+        return None
+    refund_ref = f"refund-{reference}"[:255]
+    refs = [r for r in (reference, transfer_code) if r]
+    try:
+        with db_transaction.atomic():
+            original = (
+                Transaction.objects.select_for_update()
+                .filter(transaction_id=reference, transaction_type="debit")
+                .first()
+            )
+            if not original:
+                return None
+            if Transaction.objects.filter(transaction_id=refund_ref).exists():
+                return "handled"  # Paystack re-sent the webhook
+            if WithdrawalsRequestToAdmin.objects.filter(
+                transaction_id__in=refs, status="completed"
+            ).exists():
+                return "handled"  # an admin already paid it out by hand
+            user = CustomUser.objects.select_for_update().get(pk=original.user_id)
+            if original.balance_before is not None and original.balance_after is not None:
+                deducted = Decimal(original.balance_before) - Decimal(original.balance_after)
+            else:
+                deducted = Decimal(original.amount or 0) + Decimal(original.service_charge or 0)
+            source = (original.source or "WALLET").upper()
+            if deducted <= 0 or source not in ("WALLET", "SAVINGS", "INVESTMENT"):
+                return None
+            create_transaction(
+                user=user, amount=deducted, transaction_type="credit",
+                credited_to=source, source=source, status="confirmed",
+                description="Refund: failed withdrawal to bank", reference=refund_ref,
+            )
+            original.status = "failed"
+            original.save(update_fields=["status"])
+            WithdrawalsRequestToAdmin.objects.filter(transaction_id__in=refs).exclude(
+                status="completed"
+            ).update(status="cancelled", is_processed=True)
+    except IntegrityError:
+        return "handled"  # a concurrent webhook delivery already refunded it
+
+    amount_text = f"₦{deducted:,.2f}".replace(".00", "")
+    where = source.lower()
+
+    def notify():
+        try:
+            send_transactional_email(
+                subject=f"Your {amount_text} withdrawal has been returned to your {where}",
+                message=(
+                    f"Hi {user.first_name or 'there'},<br><br>Your recent withdrawal of "
+                    f"<strong>{amount_text}</strong> could not be completed by the bank, so the "
+                    f"money did not reach your account. We have returned the full "
+                    f"<strong>{amount_text}</strong> to your MyFund {where}.<br><br>"
+                    "You can withdraw it again from the app at any time. If it doesn't go "
+                    "through, just reply to this email.<br><br>The MyFund Team"
+                ),
+                recipient_list=[user.email], from_email="MyFund <info@myfundmobile.com>",
+            )
+        except Exception:
+            logger.exception("Failed-withdrawal refund email failed")
+        try:
+            send_push_notification(
+                user=user, title=f"{amount_text} returned to your {where}",
+                message=f"Your withdrawal could not be completed by the bank, so we've returned {amount_text} to your MyFund {where}.",
+                data={"type": "WITHDRAWAL_REFUNDED"}, notif_type="SYSTEM",
+            )
+        except Exception:
+            logger.exception("Failed-withdrawal refund push failed")
+        try:
+            send_transactional_email(
+                subject=f"[AUTO-REFUNDED] {user.first_name} withdrawal failed",
+                message=(
+                    f"A {amount_text} withdrawal by {user.first_name} {user.last_name} "
+                    f"({user.email}) failed at the bank (reason: {reason or 'not given'}). "
+                    f"It has been refunded to their {where} automatically - no action needed."
+                    f"<br><br>Reference: {reference}"
+                ),
+                recipient_list=["company@myfundmobile.com", "info@myfundmobile.com"],
+                from_email="MyFund <info@myfundmobile.com>",
+            )
+        except Exception:
+            logger.exception("Failed-withdrawal admin email failed")
+
+    db_transaction.on_commit(notify)
+    return "refunded"
+
+
 def verify_paystack_transfer(reference):
     """
     Looks up a transfer by OUR reference directly on Paystack, so callers
@@ -10050,10 +10155,17 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         )
                 return
 
-            case "transfer.failed":
+            case "transfer.failed" | "transfer.reversed":
                 amount = int(event["data"]["amount"] / 100)
-                reason = event["data"]["reason"]
+                reason = event["data"].get("reason")
                 transaction_id = event["data"]["transfer_code"]
+                # Refund the user straight away when we can find their
+                # withdrawal by our own reference; otherwise fall back to the
+                # manual admin review below.
+                if refund_failed_withdrawal(
+                    event["data"].get("reference"), transaction_id, reason
+                ):
+                    return
                 account_number = event["data"]["recipient"]["details"]["account_number"]
                 recipient_bank_code = event["data"]["recipient"]["details"].get(
                     "bank_code"
