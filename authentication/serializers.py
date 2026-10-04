@@ -637,6 +637,11 @@ class TargetSavingsSerializer(serializers.ModelSerializer):
             "is_completed",
             "next_deduction",
             "last_processed",
+            # Retry state, so the app can show "AutoSave failed - next retry
+            # at ..." and offer Retry now (retry_target_deduction).
+            "deduction_attempts",
+            "max_attempts",
+            "next_retry",
         ]
         read_only_fields = [
             "user",
@@ -647,6 +652,9 @@ class TargetSavingsSerializer(serializers.ModelSerializer):
             "is_completed",
             "next_deduction",
             "last_processed",
+            "deduction_attempts",
+            "max_attempts",
+            "next_retry",
         ]
         extra_kwargs = {
             "end_date": {"required": True},

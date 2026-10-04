@@ -471,6 +471,11 @@ urlpatterns = [
         name="target-savings-category-stats",
     ),
     path(
+        "target-savings/<int:pk>/retry/",
+        views.retry_target_deduction,
+        name="retry-target-deduction",
+    ),
+    path(
         "target-savings/<int:target_id>/force/",
         views.force_target_deduction,
         name="force-target-deduction",

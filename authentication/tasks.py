@@ -238,7 +238,7 @@ def process_target_savings_deductions():
     logger.info(f"🔍 Checking for due targets with next_deduction <= {now}")
 
     # A failed deduction leaves next_deduction in the past and sets
-    # next_retry (5 days out for MONTHLY, see schedule_retry). Without the
+    # next_retry (4 days out for MONTHLY, see schedule_retry). Without the
     # next_retry check this hourly sweep retried such a plan every hour,
     # burning all max_attempts in ~4 hours and cancelling it with the 1%
     # refund charge (e.g. target 612 on Sep 30 2026) instead of giving the

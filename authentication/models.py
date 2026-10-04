@@ -1861,32 +1861,34 @@ class TargetSavings(models.Model):
         failure + 3 retries), a MONTHLY plan used to get only 3 * 2 = 6
         days total grace before being cancelled and refunded (20% of its
         ~30-day cycle) - not much room for a user's income timing to catch
-        up. WEEKLY/MONTHLY now get 3 * 2 = 6 days and 3 * 5 = 15 days
-        respectively (comfortably inside a week and about half a month).
-        HOURLY/DAILY were already a reasonable fraction of their own cycle
-        and are unchanged.
+        up. WEEKLY gets 3 * 2 = 6 days (just inside a week), MONTHLY
+        3 * 4 = 12 days (enough for a salary that lands late) and DAILY
+        3 * 4h = 12 hours (settled well before the next day's deduction).
+        Exhausting retries cancels the plan with a 1% charge, so these err
+        on the generous side. Keep AutoSaveRetryPolicyModal.js (mobile) in
+        sync with these numbers.
         """
         now = timezone.now()
 
         if self.frequency == "HOURLY":
             self.next_retry = now + timedelta(minutes=30)  # Retry in 30 minutes
         elif self.frequency == "DAILY":
-            self.next_retry = now + timedelta(hours=6)  # Retry in 6 hours
+            self.next_retry = now + timedelta(hours=4)  # Retry in 4 hours
         elif self.frequency == "WEEKLY":
             self.next_retry = now + timedelta(days=2)  # Retry in 2 days
         elif self.frequency == "MONTHLY":
-            self.next_retry = now + timedelta(days=5)  # Retry in 5 days
+            self.next_retry = now + timedelta(days=4)  # Retry in 4 days
 
     def get_retry_interval_display(self):
         """Get human-readable retry interval"""
         if self.frequency == "HOURLY":
             return "30 minutes"
         elif self.frequency == "DAILY":
-            return "6 hours"
+            return "4 hours"
         elif self.frequency == "WEEKLY":
             return "2 days"
         elif self.frequency == "MONTHLY":
-            return "5 days"
+            return "4 days"
         return "soon"
 
     def process_deduction(self):

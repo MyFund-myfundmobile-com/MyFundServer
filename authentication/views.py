@@ -13716,6 +13716,60 @@ def force_target_deduction(request, target_id):
     )
 
 
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def retry_target_deduction(request, pk):
+    """Let a user retry a failed AutoSave right after topping up, instead of
+    waiting up to 4 days for the next scheduled retry.
+
+    Runs inline (no Celery task) and checks the balance *before* attempting,
+    so a premature tap never consumes one of the plan's limited retries -
+    exhausting those cancels the plan with a 1% charge.
+    """
+    target = get_object_or_404(
+        TargetSavings, pk=pk, user=request.user, is_active=True, is_cancelled=False
+    )
+    if target.deduction_attempts <= 0:
+        return Response(
+            {"detail": "This AutoSave isn't waiting on a retry."}, status=400
+        )
+
+    amount = target.monthly_payment or Decimal("0")
+    amount = min(amount, target.target_amount - target.current_amount)
+    source_balance = (
+        request.user.savings
+        if target.funding_source == "SAVINGS"
+        else request.user.investment
+    )
+    if source_balance < amount:
+        return Response(
+            {
+                "detail": (
+                    f"Your {target.funding_source.lower()} balance is "
+                    f"₦{source_balance:,.2f}. Top up to at least ₦{amount:,.2f} "
+                    "and try again."
+                ),
+                "required_amount": str(amount),
+            },
+            status=400,
+        )
+
+    success = target.process_deduction()
+    target.refresh_from_db()
+    return Response(
+        {
+            "success": bool(success),
+            "detail": (
+                "AutoSave successful."
+                if success
+                else "AutoSave couldn't go through. Please try again."
+            ),
+            "target": TargetSavingsSerializer(target, context={"request": request}).data,
+        },
+        status=200 if success else 400,
+    )
+
+
 class TargetSavingsRetrieveUpdateDestroy(RetrieveUpdateDestroyAPIView):
     serializer_class = TargetSavingsSerializer
     permission_classes = [IsAuthenticated]
