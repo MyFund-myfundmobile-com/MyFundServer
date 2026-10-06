@@ -80,32 +80,36 @@ def _run_in_background(fn):
     threading.Thread(target=fn, daemon=True).start()
 
 
-# Pre-launch testing runs against the live DB, so until launch these pushes
-# go to the founder only. Flip to True at launch to alert the admin list and
-# the Engagement team.
-NOTIFY_FULL_TEAM = False
-PRELAUNCH_NOTIFY_EMAILS = ['tolulopeahmed@gmail.com']
+# Who gets pushed when an ambassador application is started or submitted:
+# the founders (who also review them in Admin -> Requests) and Chubi, who
+# runs the Engagement team. Each push carries the intake's running totals.
+AMBASSADOR_ALERT_EMAILS = [
+    'tolulopeahmed@gmail.com',
+    'janet.adegbenro@gmail.com',
+    'josephgideon95@gmail.com',
+]
 
 
-def notify_team(title, message, data):
-    """Push to the admin alert list plus every active Engagement team
-    member (who run the ambassador programme), once each - or, before
-    launch, to PRELAUNCH_NOTIFY_EMAILS only."""
-    from .models import Employee
-    from .utils import get_admin_notify_users, send_push_notification
+def application_totals(intake):
+    apps = AmbassadorApplication.objects.filter(intake=intake)
+    return apps.count(), apps.filter(submitted_at__isnull=False).count()
+
+
+def notify_team(title, message, data, intake=None):
+    """Push AMBASSADOR_ALERT_EMAILS once each, after the save commits, with
+    "Started: N · Completed: M" for the intake appended to the message."""
+    from .utils import send_push_notification
 
     def send():
         try:
-            if NOTIFY_FULL_TEAM:
-                engagement = Employee.objects.filter(department='Engagement', is_active=True).values_list('email', flat=True)
-                recipients = {u.pk: u for u in get_admin_notify_users(category='system')}
-                for u in CustomUser.objects.filter(email__in=list(engagement), is_active=True):
-                    recipients.setdefault(u.pk, u)
-            else:
-                recipients = {u.pk: u for u in CustomUser.objects.filter(email__in=PRELAUNCH_NOTIFY_EMAILS, is_active=True)}
-            for user in recipients.values():
+            text = message
+            if intake is not None:
+                started, completed = application_totals(intake)
+                text = f'{message} Started: {started} · Completed: {completed}'
+                data.update(started=started, completed=completed)
+            for user in CustomUser.objects.filter(email__in=AMBASSADOR_ALERT_EMAILS, is_active=True):
                 if getattr(user, 'expo_push_tokens', None):
-                    send_push_notification(user=user, title=title, message=message, data=data, notif_type='ADMIN_ALERT')
+                    send_push_notification(user=user, title=title, message=text, data=data, notif_type='ADMIN_ALERT')
         except Exception:
             logger.exception('Ambassador application team push failed')
 
@@ -129,7 +133,7 @@ def make_application(intake, email, user=None, consent=True):
         notify_team('🌱 Ambassador application started',
                     f'{_applicant_name(app)} just started an ambassador application'
                     f'{" (MyFund user)" if user else ""}.',
-                    {'type': 'AMBASSADOR_APPLICATION_STARTED', 'application_id': str(app.pk)})
+                    {'type': 'AMBASSADOR_APPLICATION_STARTED', 'application_id': str(app.pk)}, intake=intake)
     return app
 
 
@@ -364,8 +368,8 @@ def application_submit(request):
         app.save()
         where = str(app.answers.get('location') or '').strip()
         notify_team('✅ Ambassador application submitted',
-                    f'{_applicant_name(app)}{f" from {where}" if where else ""} just submitted an ambassador application. Tap to review.',
-                    {'type': 'AMBASSADOR_APPLICATION_SUBMITTED', 'application_id': str(app.pk)})
+                    f'{_applicant_name(app)}{f" from {where}" if where else ""} just submitted an ambassador application.',
+                    {'type': 'AMBASSADOR_APPLICATION_SUBMITTED', 'application_id': str(app.pk)}, intake=app.intake)
     # Receipt is durable in-app. No unsolicited mail or role changes at submission.
     return Response({'application': serialize(app)})
 

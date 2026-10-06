@@ -7,8 +7,8 @@ from django.db import transaction
 from django.db.models import Exists, OuterRef, Subquery, Q
 from django.utils import timezone
 from django.shortcuts import get_object_or_404
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import BasePermission
+from rest_framework.decorators import api_view, authentication_classes, permission_classes
+from rest_framework.permissions import AllowAny, BasePermission
 from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError
 from .models import CustomUser, BankTransferRequest, InvestTransferRequest, WithdrawalsRequestToAdmin, Transaction, PhoneChangeRequest
@@ -97,11 +97,81 @@ def serialize(obj, kind, request):
     return data
 
 
+# ---- MyFund Ambassador applications (read-only review + CSV export) ------
+# Not part of MODELS: there's no approve/reject here (selection happens
+# separately), and applicants may not have a MyFund account at all.
+AMBASSADOR_RESOLVED = ["shortlisted", "accepted", "rejected"]
+
+
+def ambassador_queue(scope):
+    from .models import AmbassadorApplication
+    qs = AmbassadorApplication.objects.select_related("user", "intake")
+    if scope == "pending":
+        return qs.filter(status="submitted")
+    if scope == "resolved":
+        return qs.filter(status__in=AMBASSADOR_RESOLVED)
+    return qs  # "all" includes drafts (applications still in progress)
+
+
+def ambassador_responses(app):
+    """[(label, text)] for every answered question, in form order."""
+    from .ambassador_application_schema import STEPS, visible
+    rows = []
+    for step in STEPS:
+        for field in step["fields"]:
+            value = app.answers.get(field["key"])
+            if not visible(field, app.answers) or value in (None, "", []):
+                continue
+            if isinstance(value, list):
+                value = ", ".join(str(v) for v in value)
+            elif isinstance(value, bool):
+                value = "Yes" if value else "No"
+            rows.append((field["label"], str(value)))
+    return rows
+
+
+def serialize_ambassador(app):
+    name = str(app.answers.get("full_name") or "").strip() or (app.user.full_name if app.user_id else "") or app.email
+    if app.status == "draft":
+        status, label = "draft", f"In progress · {app.progress}%"
+    elif app.status == "submitted":
+        status, label = "pending", "Submitted"
+    else:
+        status, label = app.status, dict(app.STATUS).get(app.status, app.status.title())
+    return {
+        "id": str(app.pk), "kind": "ambassador", "name": name, "email": app.email,
+        "phone": app.answers.get("phone") or (app.user.phone_number if app.user_id else ""),
+        "avatar": None, "created_at": app.submitted_at or app.created_at,
+        "started_at": app.created_at, "submitted_at": app.submitted_at, "progress": app.progress,
+        "location": app.answers.get("location") or "", "is_member": bool(app.user_id),
+        "intake": app.intake.title, "video": app.answers.get("video_link") or ("Uploaded video" if app.video_path else ""),
+        "responses": [{"label": label_, "value": value} for label_, value in ambassador_responses(app)],
+        "status": status, "status_label": label, "actions": [],
+    }
+
+
+def request_counts():
+    counts = {key: queue(key).count() for key in MODELS}
+    counts["ambassador"] = ambassador_queue("pending").count()
+    return counts
+
+
+def ambassador_list(request, scope, sort, offset):
+    qs = ambassador_queue(scope).order_by("created_at" if sort == "oldest" else "-created_at")
+    everything = ambassador_queue("all")
+    return Response({
+        "results": [serialize_ambassador(app) for app in qs[offset:offset + 20]],
+        "count": qs.count(),
+        "counts": request_counts(),
+        "summary": {"started": everything.count(), "completed": everything.filter(submitted_at__isnull=False).count()},
+    })
+
+
 @api_view(["GET"])
 @permission_classes([CanApproveRequests])
 def requests_list(request):
     kind = request.query_params.get("kind", "quicksave")
-    if kind not in MODELS and kind != "all":
+    if kind not in MODELS and kind not in ("all", "ambassador"):
         raise ValidationError("Invalid request type.")
     try:
         offset = max(0, int(request.query_params.get("offset", 0)))
@@ -113,6 +183,8 @@ def requests_list(request):
     sort = request.query_params.get("sort", "newest")
     if sort not in ["newest", "oldest", "amount_high", "amount_low"]:
         raise ValidationError("Invalid request sort.")
+    if kind == "ambassador":
+        return ambassador_list(request, scope, sort, offset)
     def ordered(qs, request_kind):
         date_field = "updated_at" if request_kind == "kyc" else "created_at"
         if sort.startswith("amount") and request_kind not in {"kyc", "phone_change", "influencer"}:
@@ -135,7 +207,7 @@ def requests_list(request):
         if sort.startswith("amount"):
             # Stable sorting keeps newest first for equal amounts; KYC has no amount.
             results.sort(key=lambda item: (item["kind"] in {"kyc", "phone_change", "influencer"}, -Decimal(item.get("amount", "0")) if sort == "amount_high" else Decimal(item.get("amount", "0"))))
-        return Response({"results": results[offset:offset + 20], "count": total, "counts": {key: queue(key).count() for key in MODELS}})
+        return Response({"results": results[offset:offset + 20], "count": total, "counts": request_counts()})
     qs = resolved_queue(kind) if scope == "resolved" else queue(kind)
     if scope == "all":
         # Include only actual submitted requests, not users without KYC submissions.
@@ -148,7 +220,7 @@ def requests_list(request):
     if request.query_params.get("transaction_id") and kind not in {"kyc", "phone_change", "influencer"}:
         qs = qs.filter(transaction_id=request.query_params["transaction_id"])
     qs = ordered(qs, kind)
-    return Response({"results": [serialize(obj, kind, request) for obj in qs[offset:offset + 20]], "count": qs.count(), "counts": {key: queue(key).count() for key in MODELS}})
+    return Response({"results": [serialize(obj, kind, request) for obj in qs[offset:offset + 20]], "count": qs.count(), "counts": request_counts()})
 
 
 class ActionMessages:
@@ -254,3 +326,55 @@ def request_action(request, kind, pk):
                 raise ValidationError("Invalid withdrawal action.")
         LogEntry.objects.log_action(user_id=request.user.pk, content_type_id=ContentType.objects.get_for_model(obj).pk, object_id=str(obj.pk), object_repr=str(obj)[:200], action_flag=CHANGE, change_message=f"Mobile requests: {action}" + (f" — {reason}" if kind == "phone_change" and action == "reject" else ""))
     return Response({"message": "Request addressed successfully."})
+
+
+AMBASSADOR_EXPORT_SALT = "ambassador-applications-export"
+
+
+@api_view(["POST"])
+@permission_classes([CanApproveRequests])
+def ambassador_export_link(request):
+    """Short-lived (10 min) link the phone opens in its browser to download
+    the CSV - the browser can't send the app's auth header itself."""
+    from django.core import signing
+    from django.urls import reverse
+    token = signing.dumps({"u": request.user.pk}, salt=AMBASSADOR_EXPORT_SALT)
+    return Response({"url": request.build_absolute_uri(reverse("admin_ambassador_export")) + "?token=" + token})
+
+
+@api_view(["GET"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def ambassador_export(request):
+    import csv
+    from django.core import signing
+    from django.http import HttpResponse
+    from .ambassador_application_schema import STEPS
+    try:
+        payload = signing.loads(request.query_params.get("token", ""), salt=AMBASSADOR_EXPORT_SALT, max_age=600)
+        user = CustomUser.objects.get(pk=payload["u"], is_active=True, is_staff=True)
+    except Exception:
+        return HttpResponse("This download link has expired. Request a new one from the app.", status=403, content_type="text/plain")
+    if user.email.lower() not in REQUEST_APPROVERS:
+        return HttpResponse("Not allowed.", status=403, content_type="text/plain")
+    fields = [f for step in STEPS for f in step["fields"]]
+    response = HttpResponse(content_type="text/csv; charset=utf-8")
+    response["Content-Disposition"] = f'attachment; filename="myfund-ambassador-applications-{timezone.now():%Y-%m-%d}.csv"'
+    response.write("\ufeff")  # BOM so Excel opens Naira signs/accents correctly
+    writer = csv.writer(response)
+    writer.writerow(["Status", "Progress %", "Started", "Submitted", "Intake", "Application email", "MyFund user", "Uploaded video"]
+                    + [f["label"] for f in fields])
+    for app in ambassador_queue("all").order_by("created_at"):
+        def cell(field):
+            value = app.answers.get(field["key"])
+            if isinstance(value, list):
+                return ", ".join(str(v) for v in value)
+            if isinstance(value, bool):
+                return "Yes" if value else "No"
+            return "" if value is None else str(value)
+        writer.writerow([
+            dict(app.STATUS).get(app.status, app.status), app.progress,
+            f"{app.created_at:%Y-%m-%d %H:%M}", f"{app.submitted_at:%Y-%m-%d %H:%M}" if app.submitted_at else "",
+            app.intake.title, app.email, "Yes" if app.user_id else "No", "Yes" if app.video_path else "No",
+        ] + [cell(f) for f in fields])
+    return response

@@ -1,7 +1,7 @@
 from . import ambassador_application_views as applications
 from .graduation_views import graduation
 from django.urls import path, include
-from .request_views import requests_list, request_action
+from .request_views import requests_list, request_action, ambassador_export_link, ambassador_export
 from . import views
 from django.conf import settings
 from django.conf.urls.static import static
@@ -84,6 +84,8 @@ urlpatterns = [
 
     path("ambassador/graduation/", graduation),
     path("admin/requests/", requests_list, name="admin_requests"),
+    path("admin/requests/ambassador/export-link/", ambassador_export_link, name="admin_ambassador_export_link"),
+    path("admin/requests/ambassador/export/", ambassador_export, name="admin_ambassador_export"),
     path("admin/requests/<str:kind>/<int:pk>/action/", request_action, name="admin_request_action"),
     # Authentication APIs
     path("signup/", views.signup, name="signup"),
