@@ -121,6 +121,12 @@ def _applicant_name(app):
             or (app.user.full_name if app.user_id else '') or app.email)
 
 
+def member_note(app):
+    # app.user is matched by email when the application starts, so this is
+    # their MyFund status at sign-up, not anything linked later.
+    return 'Existing MyFund user' if app.user_id else 'Not a MyFund user yet'
+
+
 def make_application(intake, email, user=None, consent=True):
     user = user or CustomUser.objects.filter(email__iexact=email, is_deleted=False, is_active=True).first()
     defaults = {}
@@ -131,8 +137,7 @@ def make_application(intake, email, user=None, consent=True):
         defaults={'user': user, 'answers': defaults, 'reminder_consent': consent, 'progress': progress_for(defaults)})
     if created:
         notify_team('🌱 Ambassador application started',
-                    f'{_applicant_name(app)} just started an ambassador application'
-                    f'{" (MyFund user)" if user else ""}.',
+                    f'{_applicant_name(app)} just started an ambassador application. {member_note(app)}.',
                     {'type': 'AMBASSADOR_APPLICATION_STARTED', 'application_id': str(app.pk)}, intake=intake)
     return app
 
@@ -368,7 +373,7 @@ def application_submit(request):
         app.save()
         where = str(app.answers.get('location') or '').strip()
         notify_team('✅ Ambassador application submitted',
-                    f'{_applicant_name(app)}{f" from {where}" if where else ""} just submitted an ambassador application.',
+                    f'{_applicant_name(app)}{f" from {where}" if where else ""} just submitted an ambassador application. {member_note(app)}.',
                     {'type': 'AMBASSADOR_APPLICATION_SUBMITTED', 'application_id': str(app.pk)}, intake=app.intake)
     # Receipt is durable in-app. No unsolicited mail or role changes at submission.
     return Response({'application': serialize(app)})

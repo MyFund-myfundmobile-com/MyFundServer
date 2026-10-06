@@ -147,6 +147,13 @@ class ApplicationTeamPushTest(TestCase):
         self.applicant = mk("applicant@example.com", "08030000014")
         self.client = APIClient()
 
+    def test_alert_flags_non_members(self, push):
+        from authentication.ambassador_application_views import make_application
+        intake = AmbassadorIntake.objects.get(slug="october-2026")
+        with self.captureOnCommitCallbacks(execute=True):
+            make_application(intake, "newcomer@example.com")
+        self.assertIn("Not a MyFund user yet", push.call_args.kwargs["message"])
+
     def recipients(self, push):
         return sorted(c.kwargs["user"].email for c in push.call_args_list)
 
@@ -158,6 +165,7 @@ class ApplicationTeamPushTest(TestCase):
         self.assertEqual(self.recipients(push), team)
         self.assertIn("started", push.call_args.kwargs["title"])
         self.assertIn("Started: 1 · Completed: 0", push.call_args.kwargs["message"])
+        self.assertIn("Existing MyFund user", push.call_args.kwargs["message"])
 
         push.reset_mock()
         auth = f"Application {res.data['token']}"
@@ -169,6 +177,7 @@ class ApplicationTeamPushTest(TestCase):
         self.assertIn("submitted", push.call_args.kwargs["title"])
         self.assertIn("Ada Lovelace from Ikeja, Lagos", push.call_args.kwargs["message"])
         self.assertIn("Started: 1 · Completed: 1", push.call_args.kwargs["message"])
+        self.assertIn("Existing MyFund user", push.call_args.kwargs["message"])
 
         push.reset_mock()  # a retried submit (lost response) must not re-alert
         with self.captureOnCommitCallbacks(execute=True):
