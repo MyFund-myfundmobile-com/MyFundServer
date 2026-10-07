@@ -42,7 +42,7 @@ from .utils import (
 )
 
 logger = logging.getLogger(__name__)
-from django.db.models.functions import ExtractMonth, ExtractYear, Coalesce, Cast
+from django.db.models.functions import ExtractMonth, ExtractYear, Coalesce, Cast, Lower
  
 
 
@@ -860,6 +860,46 @@ def _annotate_activity(queryset, as_of):
     )
 
 
+# Ambassador web applications (AmbassadorApplication) as email segments.
+# "started" = began but not yet submitted, "finished" = submitted, "all" =
+# everyone who started. An application belongs to a MyFund user when it is
+# linked to one or uses their email; everyone else has no CustomUser row,
+# so senders add them separately via ambassador_applicant_outside_emails.
+AMBASSADOR_APPLICANT_SCOPES = ('started', 'finished', 'all')
+
+
+def _ambassador_applications(scope):
+    from .ambassador_application_models import AmbassadorApplication
+    apps = AmbassadorApplication.objects.all()
+    if scope == 'started':
+        return apps.filter(submitted_at__isnull=True)
+    if scope == 'finished':
+        return apps.filter(submitted_at__isnull=False)
+    return apps
+
+
+def _ambassador_applicant_scope(params):
+    scope = (params.get('ambassador_application') or '').strip().lower()
+    return scope if scope in AMBASSADOR_APPLICANT_SCOPES else None
+
+
+def ambassador_applicant_outside_emails(params):
+    """Applicant emails with no MyFund account at all (deleted ones
+    included, so an opted-out/closed account is never re-added here)."""
+    scope = _ambassador_applicant_scope(params)
+    if not scope:
+        return []
+    emails = _dedupe_preserve_order(
+        _ambassador_applications(scope).filter(user__isnull=True).values_list('email', flat=True)
+    )
+    known = set(
+        CustomUser.objects.annotate(_email_lower=Lower('email'))
+        .filter(_email_lower__in=emails).values_list('_email_lower', flat=True)
+    )
+    outside = [email for email in emails if email not in known]
+    return _dedupe_preserve_order(outside)
+
+
 def _build_admin_user_queryset(params, exclude_unmailable=False):
     """
     Shared search/filter logic behind all_users_list,
@@ -1121,6 +1161,17 @@ def _build_admin_user_queryset(params, exclude_unmailable=False):
             queryset = queryset.filter(has_recent_referral=True)
             filters_applied["referred_within_months"] = months
 
+    applicant_scope = _ambassador_applicant_scope(params)
+    if applicant_scope:
+        apps = _ambassador_applications(applicant_scope)
+        queryset = queryset.annotate(
+            _email_lower=Lower('email'),
+        ).filter(
+            Q(pk__in=apps.exclude(user__isnull=True).values('user_id'))
+            | Q(_email_lower__in=apps.annotate(_l=Lower('email')).values('_l'))
+        )
+        filters_applied["ambassador_application"] = applicant_scope
+
     return queryset.order_by('-date_joined'), filters_applied
 
 
@@ -1231,7 +1282,9 @@ def admin_user_emails_for_segment(request):
 
         count_only = _parse_bool_param(request.GET.get('count_only')) or False
 
-        total_count = queryset.count()
+        # Ambassador applicants without a MyFund account still get mailed.
+        outside_emails = ambassador_applicant_outside_emails(request.GET)
+        total_count = queryset.count() + len(outside_emails)
 
         if count_only:
             return Response({
@@ -1240,9 +1293,9 @@ def admin_user_emails_for_segment(request):
             })
 
         truncated = total_count > MAX_SEGMENT_EMAIL_RECIPIENTS
-        emails = list(
-            queryset.values_list('email', flat=True)[:MAX_SEGMENT_EMAIL_RECIPIENTS]
-        )
+        emails = _dedupe_preserve_order(
+            list(queryset.values_list('email', flat=True)) + outside_emails
+        )[:MAX_SEGMENT_EMAIL_RECIPIENTS]
 
         return Response({
             "count": total_count,
@@ -3673,7 +3726,7 @@ def create_email_campaign(request):
 
         segment_emails = list(
             queryset.values_list('email', flat=True)[:MAX_SEGMENT_EMAIL_RECIPIENTS]
-        )
+        ) + ambassador_applicant_outside_emails(request.data)
 
         emails = _dedupe_preserve_order(extra_emails + segment_emails)[
             :MAX_SEGMENT_EMAIL_RECIPIENTS

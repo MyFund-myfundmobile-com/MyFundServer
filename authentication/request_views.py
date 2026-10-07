@@ -163,7 +163,8 @@ def ambassador_list(request, scope, sort, offset):
         "results": [serialize_ambassador(app) for app in qs[offset:offset + 20]],
         "count": qs.count(),
         "counts": request_counts(),
-        "summary": {"started": everything.count(), "completed": everything.filter(submitted_at__isnull=False).count()},
+        "summary": {"started": everything.count(), "completed": everything.filter(submitted_at__isnull=False).count(),
+                    "members": everything.filter(user__isnull=False).count()},
     })
 
 

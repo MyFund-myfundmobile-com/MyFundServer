@@ -213,7 +213,7 @@ class AmbassadorRequestsAdminTest(TestCase):
         self.client.force_authenticate(self.founder)
         pending = self.client.get("/api/admin/requests/", {"kind": "ambassador", "scope": "pending"}).data
         self.assertEqual([r["email"] for r in pending["results"]], ["ada@example.com"])
-        self.assertEqual(pending["summary"], {"started": 2, "completed": 1})
+        self.assertEqual(pending["summary"], {"started": 2, "completed": 1, "members": 0})
         self.assertEqual(pending["counts"]["ambassador"], 1)
         labels = {r["label"]: r["value"] for r in pending["results"][0]["responses"]}
         self.assertEqual(labels["City and state"], "Ikeja, Lagos")
@@ -234,3 +234,46 @@ class AmbassadorRequestsAdminTest(TestCase):
         self.assertIn("Ikeja, Lagos", body)
         self.assertIn("draft@example.com", body)
         self.assertEqual(self.client.get("/api/admin/requests/ambassador/export/?token=forged").status_code, 403)
+
+
+class AmbassadorApplicantSegmentTest(TestCase):
+    """Email segments over ambassador applications - MyFund users matched
+    by link or email, applicants without an account added as extra emails."""
+
+    def setUp(self):
+        from .models import CustomUser
+        from .ambassador_application_models import AmbassadorApplication
+        now = timezone.now()
+        intake = AmbassadorIntake.objects.create(slug="october-2026", title="October 2026",
+                                                 opens_at=now - timedelta(days=1), closes_at=now + timedelta(days=5), active=True)
+        mk = lambda email, phone, **extra: CustomUser.objects.create_user(email=email, password="Secret#123", first_name="T", last_name="U", phone_number=phone, **extra)
+        self.staff = mk("staff.seg@example.com", "08031000001", is_staff=True)
+        linked = mk("linked@example.com", "08031000002", is_confirmed=True)
+        mk("Matched@Example.com", "08031000003", is_confirmed=True)
+        mk("optedout@example.com", "08031000004", is_confirmed=True, is_subscribed=False)
+        new = lambda email, done, user=None: AmbassadorApplication.objects.create(
+            intake=intake, email=email, user=user, submitted_at=now if done else None, status="submitted" if done else "draft")
+        new("linked@example.com", False, user=linked)
+        new("matched@example.com", True)           # account found by email only
+        new("optedout@example.com", True)          # unsubscribed account - never mailed
+        new("outsider@example.com", False)         # no MyFund account
+        new("finisher@example.com", True)          # no MyFund account
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.staff)
+
+    def emails(self, scope):
+        res = self.client.get("/api/admin/users/emails/", {"ambassador_application": scope})
+        self.assertEqual(res.status_code, 200, res.data)
+        return sorted(e.lower() for e in res.data["emails"]), res.data
+
+    def test_started_finished_all(self):
+        started, data = self.emails("started")
+        self.assertEqual(started, ["linked@example.com", "outsider@example.com"])
+        self.assertEqual(data["filters_applied"]["ambassador_application"], "started")
+        finished, _ = self.emails("finished")
+        self.assertEqual(finished, ["finisher@example.com", "matched@example.com"])
+        everyone, data = self.emails("all")
+        self.assertEqual(len(everyone), 4)
+        self.assertNotIn("optedout@example.com", everyone)
+        count = self.client.get("/api/admin/users/emails/", {"ambassador_application": "all", "count_only": "true"})
+        self.assertEqual(count.data["count"], 4)
