@@ -27,6 +27,9 @@ class FoyaCampaign(models.Model):
     categories = models.JSONField(default=list)
     # {"0": "founder", ..., "6": "founder"} - Monday is 0, in Lagos time.
     weekday_schedule = models.JSONField(default=dict)
+    # Show today's ranking on the banner. Off until FOYA confirms rankings
+    # can be shared and real votes are in.
+    show_position = models.BooleanField(default=False)
 
     class Meta:
         verbose_name = "FOYA campaign"
@@ -77,6 +80,32 @@ class FoyaPush(models.Model):
         if not self.pk:
             self.clean()
         super().save(*args, **kwargs)
+
+
+class FoyaPosition(models.Model):
+    """MyFund's standing in one category. A new row per update, so the
+    rows are the change history (with the value it replaced)."""
+    campaign = models.ForeignKey(FoyaCampaign, on_delete=models.CASCADE, related_name="positions")
+    category_key = models.CharField(max_length=40, db_index=True)
+    position = models.PositiveIntegerField()
+    field_size = models.PositiveIntegerField()
+    is_tied = models.BooleanField(default=False)
+    previous_position = models.PositiveIntegerField(null=True, blank=True)
+    previous_field_size = models.PositiveIntegerField(null=True, blank=True)
+    previous_is_tied = models.BooleanField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL)
+
+    class Meta:
+        verbose_name = "FOYA position"
+        ordering = ["-updated_at", "-id"]
+
+    def __str__(self):
+        return f"{self.category_key}: {self.position}/{self.field_size}{' (tied)' if self.is_tied else ''}"
+
+    def clean(self):
+        if not 1 <= self.position <= self.field_size:
+            raise ValidationError("Position must be between 1 and the field size.")
 
 
 class FoyaEvent(models.Model):

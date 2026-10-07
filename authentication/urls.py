@@ -2,7 +2,7 @@ from . import ambassador_application_views as applications
 from .graduation_views import graduation
 from django.urls import path, include
 from .request_views import requests_list, request_action, ambassador_export_link, ambassador_export
-from .foya import foya_today, foya_event
+from .foya import foya_today, foya_event, foya_admin, foya_admin_positions
 from . import views
 from django.conf import settings
 from django.conf.urls.static import static
@@ -77,6 +77,8 @@ urlpatterns = [
     # FOYA voting campaign (Home banner + push tap)
     path("foya-campaign/today/", foya_today, name="foya_today"),
     path("foya-campaign/event/", foya_event, name="foya_event"),
+    path("admin/foya/", foya_admin, name="foya_admin"),
+    path("admin/foya/positions/", foya_admin_positions, name="foya_admin_positions"),
     path("ambassador/applications/config/", applications.application_config),
     path("ambassador/applications/lookup/", applications.lookup_email),
     path("ambassador/applications/password/", applications.password_login),

@@ -7,7 +7,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from .foya import send_due_foya_pushes, today_payload
-from .foya_models import WAT, FoyaCampaign, FoyaEvent, FoyaPush
+from .foya_models import WAT, FoyaCampaign, FoyaEvent, FoyaPosition, FoyaPush
 from .models import CustomUser
 
 CATEGORIES = [
@@ -15,7 +15,8 @@ CATEGORIES = [
     {"key": "realestate", "label": "Real Estate & Urban Development", "url": "https://foyaglobal.com/r"},
     {"key": "fintech", "label": "Fintech & Financial Innovation", "url": "https://foyaglobal.com/x"},
 ]
-SCHEDULE = {"0": "founder", "1": "realestate", "2": "founder", "3": "fintech", "4": "founder", "5": "realestate", "6": "founder"}
+# Mon-Fri founder, Sat realestate, Sun fintech (migration 0116).
+SCHEDULE = {"0": "founder", "1": "founder", "2": "founder", "3": "founder", "4": "founder", "5": "realestate", "6": "fintech"}
 # Lagos wall-clock times used below (2026-10-05 is a Monday).
 MON_NOON = datetime(2026, 10, 5, 12, 0, tzinfo=WAT)
 
@@ -29,11 +30,14 @@ def campaign(**extra):
 class FoyaTodayTest(TestCase):
     def test_weekday_mapping_uses_lagos_time_around_midnight(self):
         c = campaign()
-        # 22:59 UTC Monday = 23:59 Lagos Monday -> founder
-        self.assertEqual(c.category_for(datetime(2026, 10, 5, 22, 59, tzinfo=dt_tz.utc))["key"], "founder")
-        # 23:00 UTC Monday = 00:00 Lagos Tuesday -> realestate (UTC still says Monday)
-        self.assertEqual(c.category_for(datetime(2026, 10, 5, 23, 0, tzinfo=dt_tz.utc))["key"], "realestate")
-        self.assertEqual(c.category_for(datetime(2026, 10, 8, 9, 0, tzinfo=WAT))["key"], "fintech")  # Thursday
+        days = {d: c.category_for(datetime(2026, 10, 5 + d, 12, 0, tzinfo=WAT))["key"] for d in range(7)}
+        self.assertEqual(days, {0: "founder", 1: "founder", 2: "founder", 3: "founder", 4: "founder", 5: "realestate", 6: "fintech"})
+        # 22:59 UTC Friday = 23:59 Lagos Friday -> founder
+        self.assertEqual(c.category_for(datetime(2026, 10, 9, 22, 59, tzinfo=dt_tz.utc))["key"], "founder")
+        # 23:00 UTC Friday = 00:00 Lagos Saturday -> realestate (UTC still says Friday)
+        self.assertEqual(c.category_for(datetime(2026, 10, 9, 23, 0, tzinfo=dt_tz.utc))["key"], "realestate")
+        # 23:00 UTC Saturday = 00:00 Lagos Sunday -> fintech
+        self.assertEqual(c.category_for(datetime(2026, 10, 10, 23, 0, tzinfo=dt_tz.utc))["key"], "fintech")
 
     def test_payload_active_and_inactive(self):
         c = campaign()
@@ -127,3 +131,66 @@ class FoyaPushTest(TestCase):
         self.push.save()
         self.assertEqual(send_due_foya_pushes(datetime(2026, 10, 30, 12, 0, tzinfo=WAT)), [])
         send.assert_not_called()
+
+
+class FoyaPositionTest(TestCase):
+    def setUp(self):
+        now = timezone.now()
+        self.c = campaign(start_at=now - timedelta(days=1), end_at=now + timedelta(days=10), show_position=True)
+        mk = lambda email, phone, **extra: CustomUser.objects.create_user(email=email, password="x", first_name="S", last_name="T", phone_number=phone, **extra)
+        self.staff = mk("staff.foya@example.com", "08037000001", is_staff=True)
+        self.member = mk("member.foya@example.com", "08037000002")
+        self.client = APIClient()
+        self.today_key = self.c.category_for()["key"]
+
+    def save(self, rows, user=None):
+        self.client.force_authenticate(user or self.staff)
+        return self.client.post("/api/admin/foya/positions/", {"positions": rows}, format="json")
+
+    def test_banner_position_rules(self):
+        self.assertIsNone(today_payload()["position"])  # no data yet
+        res = self.save([{"category_key": self.today_key, "position": 2, "field_size": 9, "is_tied": False}])
+        self.assertEqual(res.status_code, 200, res.data)
+        pos = today_payload()["position"]
+        self.assertEqual((pos["position"], pos["field_size"], pos["is_tied"]), (2, 9, False))
+        # Older than 48h -> hidden.
+        self.assertIsNone(today_payload(timezone.now() + timedelta(hours=49))["position"])
+        # Switched off -> hidden.
+        self.c.show_position = False
+        self.c.save()
+        self.assertIsNone(today_payload()["position"])
+
+    def test_only_todays_category_is_shown(self):
+        other = next(k for k in ("founder", "realestate", "fintech") if k != self.today_key)
+        self.save([{"category_key": other, "position": 1, "field_size": 5}])
+        self.assertIsNone(today_payload()["position"])
+
+    def test_staff_only_and_validation(self):
+        res = self.save([{"category_key": "founder", "position": 1, "field_size": 5}], user=self.member)
+        self.assertEqual(res.status_code, 403)
+        res = self.save([{"category_key": "founder", "position": 6, "field_size": 5}])
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("founder", res.data["fields"])
+        self.assertEqual(self.save([{"category_key": "nope", "position": 1, "field_size": 5}]).status_code, 400)
+        self.assertFalse(FoyaPosition.objects.exists())
+
+    def test_history_records_old_and_new(self):
+        rows = [{"category_key": k, "position": 3, "field_size": 8} for k in ("founder", "realestate", "fintech")]
+        self.save(rows)
+        self.save([{"category_key": "founder", "position": 1, "field_size": 8, "is_tied": True},
+                   {"category_key": "realestate", "position": 3, "field_size": 8}])  # unchanged -> no new row
+        self.assertEqual(FoyaPosition.objects.count(), 4)
+        latest = FoyaPosition.objects.filter(category_key="founder").first()
+        self.assertEqual((latest.position, latest.is_tied, latest.previous_position, latest.updated_by), (1, True, 3, self.staff))
+        state = self.client.get("/api/admin/foya/").data
+        self.assertEqual(len(state["history"]), 4)
+        self.assertEqual(len(state["pushes"]), 0)
+
+    def test_toggle_show_position(self):
+        self.client.force_authenticate(self.staff)
+        res = self.client.patch("/api/admin/foya/", {"show_position": False}, format="json")
+        self.assertEqual(res.status_code, 200)
+        self.c.refresh_from_db()
+        self.assertFalse(self.c.show_position)
+        self.client.force_authenticate(self.member)
+        self.assertEqual(self.client.patch("/api/admin/foya/", {"show_position": True}, format="json").status_code, 403)
