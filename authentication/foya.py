@@ -56,7 +56,9 @@ def today_payload(now=None):
         return {"active": False}
     return {
         "active": True,
-        "category": {key: category.get(key) for key in ("key", "label", "url")},
+        # banner_body: the banner's line for this category (editable in the
+        # admin categories JSON); **text** marks bold.
+        "category": {key: category.get(key) for key in ("key", "label", "url", "banner_body")},
         "signup_url": campaign.signup_url,
         "login_url": campaign.login_url,
         "end_at": campaign.end_at,

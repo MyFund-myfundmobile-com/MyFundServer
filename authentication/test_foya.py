@@ -11,7 +11,8 @@ from .foya_models import WAT, FoyaCampaign, FoyaEvent, FoyaPosition, FoyaPush
 from .models import CustomUser
 
 CATEGORIES = [
-    {"key": "founder", "label": "Founder of the Year", "url": "https://foyaglobal.com/f"},
+    {"key": "founder", "label": "Founder of the Year", "url": "https://foyaglobal.com/f",
+     "banner_body": "Today, vote for our founder, Dr. Tee, as **Founder of the Year**. It's free, once a day."},
     {"key": "realestate", "label": "Real Estate & Urban Development", "url": "https://foyaglobal.com/r"},
     {"key": "fintech", "label": "Fintech & Financial Innovation", "url": "https://foyaglobal.com/x"},
 ]
@@ -44,6 +45,7 @@ class FoyaTodayTest(TestCase):
         data = today_payload(MON_NOON)
         self.assertTrue(data["active"])
         self.assertEqual(data["category"]["label"], "Founder of the Year")
+        self.assertIn("**Founder of the Year**", data["category"]["banner_body"])
         self.assertEqual(data["signup_url"], "https://foyaglobal.com/signup")
         # After the vote closes, before it starts, or switched off -> inactive.
         self.assertFalse(today_payload(datetime(2026, 11, 4, 22, 0, tzinfo=WAT))["active"])
@@ -57,7 +59,7 @@ class FoyaTodayTest(TestCase):
         res = APIClient().get("/api/foya-campaign/today/")
         self.assertEqual(res.status_code, 200)
         self.assertTrue(res.data["active"])
-        self.assertEqual(set(res.data["category"]), {"key", "label", "url"})
+        self.assertEqual(set(res.data["category"]), {"key", "label", "url", "banner_body"})
 
     def test_event_logging(self):
         user = CustomUser.objects.create_user(email="v@example.com", password="x", first_name="V", last_name="T", phone_number="08035000001")
