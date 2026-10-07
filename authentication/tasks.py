@@ -2542,3 +2542,10 @@ def sync_user_to_brevo(self, user_id):
 
     except Exception as exc:
         raise self.retry(exc=exc)
+
+
+@shared_task
+def send_due_foya_pushes_task():
+    """Hourly: sends any due FOYA campaign push (at most 3, each once)."""
+    from .foya import send_due_foya_pushes
+    return send_due_foya_pushes()

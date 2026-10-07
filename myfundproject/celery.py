@@ -172,6 +172,13 @@ app.conf.beat_schedule = {
         "task": "authentication.tasks.process_due_scheduled_withdrawals",
         "schedule": crontab(minute=0),
     },
+    # FOYA voting campaign pushes (max 3, each sent once, never 9pm-8am
+    # WAT). Hourly rather than every few minutes to keep broker traffic
+    # low - the scheduled slots are on the hour anyway.
+    "send-due-foya-pushes-hourly": {
+        "task": "authentication.tasks.send_due_foya_pushes_task",
+        "schedule": crontab(minute=0),
+    },
     "autosubmit-missing-ambassador-reports-monthly": {
         "task": "authentication.tasks.autosubmit_missing_ambassador_reports_task",
         "schedule": crontab(minute=5, hour=23, day_of_month="28-31"),

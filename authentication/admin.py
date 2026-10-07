@@ -4203,3 +4203,4 @@ class InfluencerApplicationAdmin(admin.ModelAdmin):
 
 # Recruitment review and draft follow-up.
 from . import ambassador_application_admin
+from . import foya_admin
