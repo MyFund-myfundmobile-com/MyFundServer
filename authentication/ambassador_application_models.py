@@ -6,6 +6,10 @@ from django.utils import timezone
 
 
 class AmbassadorIntake(models.Model):
+    # One application engine, several programmes: each intake belongs to one,
+    # and that picks the question set (ambassador_application_schema).
+    PROGRAMMES = [('ambassador', 'Ambassador'), ('influencer', 'Influencer')]
+    programme = models.CharField(max_length=20, choices=PROGRAMMES, default='ambassador', db_index=True)
     slug = models.SlugField(unique=True)
     title = models.CharField(max_length=120)
     opens_at = models.DateTimeField()
@@ -17,7 +21,7 @@ class AmbassadorIntake(models.Model):
         return self.active and self.opens_at <= timezone.now() < self.closes_at
 
     def __str__(self):
-        return self.title
+        return f'{self.get_programme_display()}: {self.title}'
 
 
 class AmbassadorApplication(models.Model):

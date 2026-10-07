@@ -81,6 +81,15 @@ urlpatterns = [
     path("ambassador/applications/draft/", applications.application_draft),
     path("ambassador/applications/submit/", applications.application_submit),
     path("ambassador/applications/video/", applications.application_video),
+    # Influencer portal (www.myfundmobile.com/influencer) - same engine, own questions.
+    path("influencer/applications/config/", applications.application_config, {"programme": "influencer"}),
+    path("influencer/applications/lookup/", applications.lookup_email, {"programme": "influencer"}),
+    path("influencer/applications/password/", applications.password_login, {"programme": "influencer"}),
+    path("influencer/applications/code/", applications.request_code, {"programme": "influencer"}),
+    path("influencer/applications/verify/", applications.verify_code, {"programme": "influencer"}),
+    path("influencer/applications/draft/", applications.application_draft, {"programme": "influencer"}),
+    path("influencer/applications/submit/", applications.application_submit, {"programme": "influencer"}),
+    path("influencer/applications/video/", applications.application_video, {"programme": "influencer"}),
 
     path("ambassador/graduation/", graduation),
     path("admin/requests/", requests_list, name="admin_requests"),

@@ -19,15 +19,19 @@ from rest_framework.exceptions import APIException, AuthenticationFailed, Valida
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.authentication import TokenAuthentication
 from .models import AmbassadorIntake, AmbassadorApplication, AmbassadorEmailChallenge, CustomUser, Transaction
-from .ambassador_application_schema import STEPS, errors_for, progress_for
+from .ambassador_application_schema import steps_for, fields_for, errors_for, progress_for
 from .utils import send_transactional_email
 
 logger = logging.getLogger(__name__)
 SALT = 'ambassador-application-v1'
 
 
-def current_intake():
-    intake = AmbassadorIntake.objects.filter(active=True).order_by('-opens_at').first()
+# Display words per programme, for alerts and emails.
+PROGRAMME_NAMES = {'ambassador': 'ambassador', 'influencer': 'influencer'}
+
+
+def current_intake(programme='ambassador'):
+    intake = AmbassadorIntake.objects.filter(active=True, programme=programme).order_by('-opens_at').first()
     if not intake:
         raise APIValidationError({'error': 'There is no application intake at the moment.'})
     return intake
@@ -42,12 +46,14 @@ def application_token(app):
     return signing.dumps({'id': str(app.pk)}, salt=SALT)
 
 
-def get_application(request):
+def get_application(request, programme='ambassador'):
     auth = request.headers.get('Authorization', '')
     if auth.startswith('Application '):
         try:
             payload = signing.loads(auth[12:], salt=SALT, max_age=7 * 86400)
-            return AmbassadorApplication.objects.select_related('intake', 'user').get(pk=payload['id'])
+            # A token only opens an application in the programme it was issued for.
+            return AmbassadorApplication.objects.select_related('intake', 'user').get(
+                pk=payload['id'], intake__programme=programme)
         except (signing.BadSignature, KeyError, ValueError, AmbassadorApplication.DoesNotExist):
             raise AuthenticationFailed('Please verify your email again to resume your application.')
     # Existing MyFund logins may use JWT or DRF tokens. No anonymous profile lookup.
@@ -57,7 +63,7 @@ def get_application(request):
     user = authenticated[0]
     if user.is_deleted or not user.is_active:
         raise AuthenticationFailed('This account is not available.')
-    intake = current_intake()
+    intake = current_intake(programme)
     app = AmbassadorApplication.objects.filter(intake=intake, email=user.email.lower()).first()
     if not app:
         require_open(intake)
@@ -129,16 +135,22 @@ def member_note(app):
 
 def make_application(intake, email, user=None, consent=True):
     user = user or CustomUser.objects.filter(email__iexact=email, is_deleted=False, is_active=True).first()
+    programme = intake.programme
     defaults = {}
     if user:
         defaults = dict(full_name=user.full_name, phone=user.phone_number, has_account='Yes',
-                        account_email=user.email, has_saved='Yes' if profile_for(user)['has_saved'] else 'No')
+                        account_email=user.email, has_saved='Yes' if profile_for(user)['has_saved'] else 'No',
+                        was_ambassador='Yes' if user.is_ambassador or user.ambassador_cohort_id else 'No')
+        # Prefill only questions this programme asks.
+        fields = fields_for(programme)
+        defaults = {key: value for key, value in defaults.items() if key in fields}
     app, created = AmbassadorApplication.objects.get_or_create(intake=intake, email=email,
-        defaults={'user': user, 'answers': defaults, 'reminder_consent': consent, 'progress': progress_for(defaults)})
+        defaults={'user': user, 'answers': defaults, 'reminder_consent': consent, 'progress': progress_for(defaults, programme)})
     if created:
-        notify_team('🌱 Ambassador application started',
-                    f'{_applicant_name(app)} just started an ambassador application. {member_note(app)}.',
-                    {'type': 'AMBASSADOR_APPLICATION_STARTED', 'application_id': str(app.pk)}, intake=intake)
+        name = PROGRAMME_NAMES[programme]
+        notify_team(f'{"🌟 Influencer" if programme == "influencer" else "🌱 Ambassador"} application started',
+                    f'{_applicant_name(app)} just started an {name} application. {member_note(app)}.',
+                    {'type': f'{programme.upper()}_APPLICATION_STARTED', 'application_id': str(app.pk)}, intake=intake)
     return app
 
 
@@ -158,21 +170,23 @@ def serialize(app):
 
 
 def intake_data(intake):
-    return dict(title=intake.title, slug=intake.slug, closes_at=intake.closes_at, is_open=intake.is_open)
+    return dict(title=intake.title, slug=intake.slug, closes_at=intake.closes_at, is_open=intake.is_open,
+                programme=intake.programme)
 
 
 @api_view(['GET'])
 @authentication_classes([])
 @permission_classes([AllowAny])
-def application_config(request):
-    return Response({'intake': intake_data(current_intake()), 'steps': STEPS, 'video_max_bytes': 25 * 1024 * 1024})
+def application_config(request, programme='ambassador'):
+    return Response({'intake': intake_data(current_intake(programme)), 'steps': steps_for(programme),
+                     'video_max_bytes': 25 * 1024 * 1024})
 
 
 @api_view(['POST'])
 @authentication_classes([])
 @permission_classes([AllowAny])
-def request_code(request):
-    intake = current_intake()
+def request_code(request, programme='ambassador'):
+    intake = current_intake(programme)
     email = str(request.data.get('email', '')).strip().lower()
     try:
         validate_email(email)
@@ -198,7 +212,7 @@ def request_code(request):
         challenge = AmbassadorEmailChallenge.objects.create(intake=intake, email=email, ip_hash=ip_hash,
             code_hash=make_password(code), reminder_consent=request.data.get('reminder_consent') is not False)
     try:
-        result = send_transactional_email('Your MyFund ambassador application code',
+        result = send_transactional_email(f'Your MyFund {PROGRAMME_NAMES[programme]} application code',
             f'Your verification code is <strong>{code}</strong>. It expires in 10 minutes. '
             'Enter it on the MyFund application page. If you did not request it, you can ignore this email.', [email], template='email/email_light.html')
         if not result or not result.get('sent'):
@@ -238,7 +252,7 @@ def _member(email):
 @api_view(['POST'])
 @authentication_classes([])
 @permission_classes([AllowAny])
-def lookup_email(request):
+def lookup_email(request, programme='ambassador'):
     """Existing MyFund members sign in with their password instead of an
     emailed code. Reveals only whether to ask for a password and the first
     name (Google-style "Welcome back, Ada"), never other account details;
@@ -258,8 +272,8 @@ def lookup_email(request):
 @api_view(['POST'])
 @authentication_classes([])
 @permission_classes([AllowAny])
-def password_login(request):
-    intake = current_intake()
+def password_login(request, programme='ambassador'):
+    intake = current_intake(programme)
     email = _clean_email(request)
     if not email:
         return Response({'error': 'Enter a valid email address.'}, status=400)
@@ -281,10 +295,11 @@ def password_login(request):
 @api_view(['POST'])
 @authentication_classes([])
 @permission_classes([AllowAny])
-def verify_code(request):
+def verify_code(request, programme='ambassador'):
     try:
         with transaction.atomic():
-            challenge = AmbassadorEmailChallenge.objects.select_for_update().select_related('intake').get(pk=request.data.get('challenge'))
+            challenge = AmbassadorEmailChallenge.objects.select_for_update().select_related('intake').get(
+                pk=request.data.get('challenge'), intake__programme=programme)
             if challenge.used or challenge.attempts >= 5 or challenge.created_at < timezone.now()-timedelta(minutes=10):
                 return Response({'error': 'This code has expired. Request a new code.'}, status=400)
             challenge.attempts += 1
@@ -313,8 +328,8 @@ def check_revision(app, data):
 @api_view(['GET', 'PATCH'])
 @authentication_classes([])
 @permission_classes([AllowAny])
-def application_draft(request):
-    app = get_application(request)
+def application_draft(request, programme='ambassador'):
+    app = get_application(request, programme)
     if request.method == 'GET':
         return Response({'application': serialize(app), 'token': application_token(app)})
     with transaction.atomic():
@@ -326,22 +341,21 @@ def application_draft(request):
         answers = request.data.get('answers', {})
         if not isinstance(answers, dict):
             return Response({'error': 'Invalid answers.'}, status=400)
-        errors = errors_for(answers)
         # Incomplete typing (phone/email/number) is saved as a draft; only reject unsafe shapes/sizes.
-        from .ambassador_application_schema import FIELDS
-        if any(key not in FIELDS or not isinstance(value, (str, int, bool, list, type(None)))
-               or isinstance(value, str) and len(value) > FIELDS[key].get('maxLength', 2500)
+        fields = fields_for(programme)
+        if any(key not in fields or not isinstance(value, (str, int, bool, list, type(None)))
+               or isinstance(value, str) and len(value) > fields[key].get('maxLength', 2500)
                or isinstance(value, list) and (len(value) > 20 or any(not isinstance(v, str) or len(v) > 100 for v in value))
                for key, value in answers.items()):
             return Response({'error': 'An answer is too long or has an invalid format.'}, status=400)
         step = request.data.get('step', 0)
-        if type(step) is not int or not 0 <= step <= len(STEPS):
+        if type(step) is not int or not 0 <= step <= len(steps_for(programme)):
             return Response({'error': 'Invalid step.'}, status=400)
         if app.video_path and answers.get('video_link'):
             return Response({'error': 'Remove your uploaded video before adding a video link.'}, status=400)
         app.answers = answers
         app.step = step
-        app.progress = progress_for(answers)
+        app.progress = progress_for(answers, programme)
         # Reminders are on for every applicant (no opt-in checkbox); only an
         # explicit false turns them off.
         app.reminder_consent = request.data.get('reminder_consent') is not False
@@ -353,15 +367,15 @@ def application_draft(request):
 @api_view(['POST'])
 @authentication_classes([])
 @permission_classes([AllowAny])
-def application_submit(request):
-    app = get_application(request)
+def application_submit(request, programme='ambassador'):
+    app = get_application(request, programme)
     with transaction.atomic():
         app = AmbassadorApplication.objects.select_for_update().get(pk=app.pk)
         if app.status != 'draft':
             return Response({'application': serialize(app)})  # Safe retry after lost response.
         require_open(app.intake)
         check_revision(app, request.data)
-        errors = errors_for(app.answers, complete=True)
+        errors = errors_for(app.answers, complete=True, programme=programme)
         if request.data.get('confirmed') is not True:
             errors['confirmed'] = 'Confirm that your answers are accurate.'
         if errors:
@@ -372,9 +386,9 @@ def application_submit(request):
         app.revision += 1
         app.save()
         where = str(app.answers.get('location') or '').strip()
-        notify_team('✅ Ambassador application submitted',
-                    f'{_applicant_name(app)}{f" from {where}" if where else ""} just submitted an ambassador application. {member_note(app)}.',
-                    {'type': 'AMBASSADOR_APPLICATION_SUBMITTED', 'application_id': str(app.pk)}, intake=app.intake)
+        notify_team(f'✅ {PROGRAMME_NAMES[programme].title()} application submitted',
+                    f'{_applicant_name(app)}{f" from {where}" if where else ""} just submitted an {PROGRAMME_NAMES[programme]} application. {member_note(app)}.',
+                    {'type': f'{programme.upper()}_APPLICATION_SUBMITTED', 'application_id': str(app.pk)}, intake=app.intake)
     # Receipt is durable in-app. No unsolicited mail or role changes at submission.
     return Response({'application': serialize(app)})
 
@@ -383,8 +397,8 @@ def application_submit(request):
 @authentication_classes([])
 @permission_classes([AllowAny])
 @parser_classes([MultiPartParser])
-def application_video(request):
-    app = get_application(request)
+def application_video(request, programme='ambassador'):
+    app = get_application(request, programme)
     from utils.imageKit import imagekit
     from imagekitio.models.UploadFileRequestOptions import UploadFileRequestOptions
     old_file = None
@@ -413,7 +427,7 @@ def application_video(request):
             try:
                 result = imagekit.upload(file=base64.b64encode(upload.read()).decode(),
                     file_name=f'{app.pk}-{secrets.token_hex(6)}.{ext}',
-                    options=UploadFileRequestOptions(is_private_file=True, folder='/ambassador-applications', use_unique_file_name=True))
+                    options=UploadFileRequestOptions(is_private_file=True, folder=f'/{programme}-applications', use_unique_file_name=True))
                 if not result.file_id or not result.file_path or not result.is_private_file:
                     raise RuntimeError('Private video upload failed')
             except Exception:

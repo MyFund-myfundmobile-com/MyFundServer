@@ -866,11 +866,14 @@ def _annotate_activity(queryset, as_of):
 # linked to one or uses their email; everyone else has no CustomUser row,
 # so senders add them separately via ambassador_applicant_outside_emails.
 AMBASSADOR_APPLICANT_SCOPES = ('started', 'finished', 'all')
+# Segment param -> application programme (influencer_application works
+# exactly like ambassador_application, over the influencer portal).
+APPLICANT_SEGMENT_PARAMS = {'ambassador_application': 'ambassador', 'influencer_application': 'influencer'}
 
 
-def _ambassador_applications(scope):
+def _ambassador_applications(scope, programme='ambassador'):
     from .ambassador_application_models import AmbassadorApplication
-    apps = AmbassadorApplication.objects.all()
+    apps = AmbassadorApplication.objects.filter(intake__programme=programme)
     if scope == 'started':
         return apps.filter(submitted_at__isnull=True)
     if scope == 'finished':
@@ -878,20 +881,25 @@ def _ambassador_applications(scope):
     return apps
 
 
-def _ambassador_applicant_scope(params):
-    scope = (params.get('ambassador_application') or '').strip().lower()
-    return scope if scope in AMBASSADOR_APPLICANT_SCOPES else None
+def _applicant_scopes(params):
+    """[(param, programme, scope)] for each applicant segment in params."""
+    found = []
+    for param, programme in APPLICANT_SEGMENT_PARAMS.items():
+        scope = (params.get(param) or '').strip().lower()
+        if scope in AMBASSADOR_APPLICANT_SCOPES:
+            found.append((param, programme, scope))
+    return found
 
 
 def ambassador_applicant_outside_emails(params):
     """Applicant emails with no MyFund account at all (deleted ones
     included, so an opted-out/closed account is never re-added here)."""
-    scope = _ambassador_applicant_scope(params)
-    if not scope:
+    emails = []
+    for _param, programme, scope in _applicant_scopes(params):
+        emails += list(_ambassador_applications(scope, programme).filter(user__isnull=True).values_list('email', flat=True))
+    if not emails:
         return []
-    emails = _dedupe_preserve_order(
-        _ambassador_applications(scope).filter(user__isnull=True).values_list('email', flat=True)
-    )
+    emails = _dedupe_preserve_order(emails)
     known = set(
         CustomUser.objects.annotate(_email_lower=Lower('email'))
         .filter(_email_lower__in=emails).values_list('_email_lower', flat=True)
@@ -1161,16 +1169,15 @@ def _build_admin_user_queryset(params, exclude_unmailable=False):
             queryset = queryset.filter(has_recent_referral=True)
             filters_applied["referred_within_months"] = months
 
-    applicant_scope = _ambassador_applicant_scope(params)
-    if applicant_scope:
-        apps = _ambassador_applications(applicant_scope)
+    for param, programme, scope in _applicant_scopes(params):
+        apps = _ambassador_applications(scope, programme)
         queryset = queryset.annotate(
             _email_lower=Lower('email'),
         ).filter(
             Q(pk__in=apps.exclude(user__isnull=True).values('user_id'))
             | Q(_email_lower__in=apps.annotate(_l=Lower('email')).values('_l'))
         )
-        filters_applied["ambassador_application"] = applicant_scope
+        filters_applied[param] = scope
 
     return queryset.order_by('-date_joined'), filters_applied
 

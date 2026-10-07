@@ -101,11 +101,13 @@ def serialize(obj, kind, request):
 # Not part of MODELS: there's no approve/reject here (selection happens
 # separately), and applicants may not have a MyFund account at all.
 AMBASSADOR_RESOLVED = ["shortlisted", "accepted", "rejected"]
+# Request kinds backed by the web application engine, by programme.
+APPLICATION_KINDS = {"ambassador": "ambassador", "influencer_portal": "influencer"}
 
 
-def ambassador_queue(scope):
+def ambassador_queue(scope, programme="ambassador"):
     from .models import AmbassadorApplication
-    qs = AmbassadorApplication.objects.select_related("user", "intake")
+    qs = AmbassadorApplication.objects.select_related("user", "intake").filter(intake__programme=programme)
     if scope == "pending":
         return qs.filter(status="submitted")
     if scope == "resolved":
@@ -115,9 +117,9 @@ def ambassador_queue(scope):
 
 def ambassador_responses(app):
     """[(label, text)] for every answered question, in form order."""
-    from .ambassador_application_schema import STEPS, visible
+    from .ambassador_application_schema import steps_for, visible
     rows = []
-    for step in STEPS:
+    for step in steps_for(app.intake.programme):
         for field in step["fields"]:
             value = app.answers.get(field["key"])
             if not visible(field, app.answers) or value in (None, "", []):
@@ -139,7 +141,7 @@ def serialize_ambassador(app):
     else:
         status, label = app.status, dict(app.STATUS).get(app.status, app.status.title())
     return {
-        "id": str(app.pk), "kind": "ambassador", "name": name, "email": app.email,
+        "id": str(app.pk), "kind": "influencer_portal" if app.intake.programme == "influencer" else "ambassador", "name": name, "email": app.email,
         "phone": app.answers.get("phone") or (app.user.phone_number if app.user_id else ""),
         "avatar": None, "created_at": app.submitted_at or app.created_at,
         "started_at": app.created_at, "submitted_at": app.submitted_at, "progress": app.progress,
@@ -152,13 +154,14 @@ def serialize_ambassador(app):
 
 def request_counts():
     counts = {key: queue(key).count() for key in MODELS}
-    counts["ambassador"] = ambassador_queue("pending").count()
+    for kind, programme in APPLICATION_KINDS.items():
+        counts[kind] = ambassador_queue("pending", programme).count()
     return counts
 
 
-def ambassador_list(request, scope, sort, offset):
-    qs = ambassador_queue(scope).order_by("created_at" if sort == "oldest" else "-created_at")
-    everything = ambassador_queue("all")
+def ambassador_list(request, scope, sort, offset, programme="ambassador"):
+    qs = ambassador_queue(scope, programme).order_by("created_at" if sort == "oldest" else "-created_at")
+    everything = ambassador_queue("all", programme)
     return Response({
         "results": [serialize_ambassador(app) for app in qs[offset:offset + 20]],
         "count": qs.count(),
@@ -172,7 +175,7 @@ def ambassador_list(request, scope, sort, offset):
 @permission_classes([CanApproveRequests])
 def requests_list(request):
     kind = request.query_params.get("kind", "quicksave")
-    if kind not in MODELS and kind not in ("all", "ambassador"):
+    if kind not in MODELS and kind != "all" and kind not in APPLICATION_KINDS:
         raise ValidationError("Invalid request type.")
     try:
         offset = max(0, int(request.query_params.get("offset", 0)))
@@ -184,8 +187,8 @@ def requests_list(request):
     sort = request.query_params.get("sort", "newest")
     if sort not in ["newest", "oldest", "amount_high", "amount_low"]:
         raise ValidationError("Invalid request sort.")
-    if kind == "ambassador":
-        return ambassador_list(request, scope, sort, offset)
+    if kind in APPLICATION_KINDS:
+        return ambassador_list(request, scope, sort, offset, APPLICATION_KINDS[kind])
     def ordered(qs, request_kind):
         date_field = "updated_at" if request_kind == "kyc" else "created_at"
         if sort.startswith("amount") and request_kind not in {"kyc", "phone_change", "influencer"}:
@@ -339,7 +342,10 @@ def ambassador_export_link(request):
     the CSV - the browser can't send the app's auth header itself."""
     from django.core import signing
     from django.urls import reverse
-    token = signing.dumps({"u": request.user.pk}, salt=AMBASSADOR_EXPORT_SALT)
+    programme = request.data.get("programme", "ambassador")
+    if programme not in APPLICATION_KINDS.values():
+        raise ValidationError("Invalid programme.")
+    token = signing.dumps({"u": request.user.pk, "p": programme}, salt=AMBASSADOR_EXPORT_SALT)
     return Response({"url": request.build_absolute_uri(reverse("admin_ambassador_export")) + "?token=" + token})
 
 
@@ -350,29 +356,32 @@ def ambassador_export(request):
     import csv
     from django.core import signing
     from django.http import HttpResponse
-    from .ambassador_application_schema import STEPS
+    from .ambassador_application_schema import steps_for
     try:
         payload = signing.loads(request.query_params.get("token", ""), salt=AMBASSADOR_EXPORT_SALT, max_age=600)
         user = CustomUser.objects.get(pk=payload["u"], is_active=True, is_staff=True)
+        programme = payload.get("p", "ambassador")
     except Exception:
         return HttpResponse("This download link has expired. Request a new one from the app.", status=403, content_type="text/plain")
     if user.email.lower() not in REQUEST_APPROVERS:
         return HttpResponse("Not allowed.", status=403, content_type="text/plain")
-    fields = [f for step in STEPS for f in step["fields"]]
+    fields = [f for step in steps_for(programme) for f in step["fields"]]
     response = HttpResponse(content_type="text/csv; charset=utf-8")
-    response["Content-Disposition"] = f'attachment; filename="myfund-ambassador-applications-{timezone.now():%Y-%m-%d}.csv"'
+    response["Content-Disposition"] = f'attachment; filename="myfund-{programme}-applications-{timezone.now():%Y-%m-%d}.csv"'
     response.write("\ufeff")  # BOM so Excel opens Naira signs/accents correctly
     writer = csv.writer(response)
     writer.writerow(["Status", "Progress %", "Started", "Submitted", "Intake", "Application email", "MyFund user", "Uploaded video"]
                     + [f["label"] for f in fields])
-    for app in ambassador_queue("all").order_by("created_at"):
+    for app in ambassador_queue("all", programme).order_by("created_at"):
         def cell(field):
             value = app.answers.get(field["key"])
             if isinstance(value, list):
-                return ", ".join(str(v) for v in value)
-            if isinstance(value, bool):
-                return "Yes" if value else "No"
-            return "" if value is None else str(value)
+                value = ", ".join(str(v) for v in value)
+            elif isinstance(value, bool):
+                value = "Yes" if value else "No"
+            value = "" if value is None else str(value)
+            # Applicant-typed text: stop spreadsheets running it as a formula.
+            return "'" + value if value.lstrip().startswith(("=", "+", "-", "@")) else value
         writer.writerow([
             dict(app.STATUS).get(app.status, app.status), app.progress,
             f"{app.created_at:%Y-%m-%d %H:%M}", f"{app.submitted_at:%Y-%m-%d %H:%M}" if app.submitted_at else "",

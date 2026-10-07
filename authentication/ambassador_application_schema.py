@@ -44,6 +44,66 @@ STEPS = [
 ]
 FIELDS = {f['key']: f for step in STEPS for f in step['fields']}
 
+# Influencer programme (www.myfundmobile.com/influencer). Same five-step
+# shape as STEPS - the web form treats step 5 as the optional video - built
+# from the in-app influencer application (GraduationBanner.js), opened to
+# creators who were never ambassadors.
+INFLUENCER_STEPS = [
+    dict(title='About you', subtitle='The basics.', fields=[
+        field('full_name', 'Full name', autocomplete='name', maxLength=120),
+        field('age', 'Age', 'number', min=18, max=100),
+        field('phone', 'WhatsApp number', 'tel', autocomplete='tel', maxLength=20),
+        field('location', 'City and state', autocomplete='address-level2', maxLength=120, help='e.g. Ikeja, Lagos.'),
+        field('has_account', 'Do you have a MyFund account?', 'choice', options=['Yes', 'No']),
+        field('account_email', 'MyFund account email', 'email', required=False, when=['has_account', 'Yes'], help='Only if it differs from the email you signed in with.'),
+        field('was_ambassador', 'Have you been a MyFund Ambassador?', 'choice', options=['Yes', 'No']),
+    ]),
+    dict(title='Your platforms', subtitle='Where your audience is.', fields=[
+        field('platforms', 'Where do you create content?', 'multi', options=['Instagram', 'TikTok', 'YouTube', 'X', 'LinkedIn', 'Facebook', 'Threads', 'Snapchat'], help='Pick every platform you post on. We\'ll ask for each link.'),
+        field('link_instagram', 'Your Instagram link', 'url', when=['platforms', 'Instagram'], maxLength=300, help='e.g. https://instagram.com/yourhandle'),
+        field('link_tiktok', 'Your TikTok link', 'url', when=['platforms', 'TikTok'], maxLength=300, help='e.g. https://tiktok.com/@yourhandle'),
+        field('link_youtube', 'Your YouTube link', 'url', when=['platforms', 'YouTube'], maxLength=300, help='e.g. https://youtube.com/@yourchannel'),
+        field('link_x', 'Your X link', 'url', when=['platforms', 'X'], maxLength=300, help='e.g. https://x.com/yourhandle'),
+        field('link_linkedin', 'Your LinkedIn link', 'url', when=['platforms', 'LinkedIn'], maxLength=300, help='e.g. https://linkedin.com/in/yourname'),
+        field('link_facebook', 'Your Facebook link', 'url', when=['platforms', 'Facebook'], maxLength=300, help='e.g. https://facebook.com/yourpage'),
+        field('link_threads', 'Your Threads link', 'url', when=['platforms', 'Threads'], maxLength=300, help='e.g. https://threads.net/@yourhandle'),
+        field('link_snapchat', 'Your Snapchat link', 'url', when=['platforms', 'Snapchat'], maxLength=300, help='e.g. https://snapchat.com/add/yourhandle'),
+        field('total_followers', 'Total followers across all platforms', 'select', options=['Under 1K', '1K–5K', '5K–10K', '10K–50K', '50K–100K', '100K–500K', '500K+']),
+        field('niche', 'Your content niche', maxLength=150, help='e.g. personal finance, lifestyle, comedy, tech, faith, campus life.'),
+        field('engagement', 'Typical engagement or reach', required=False, maxLength=150, help='e.g. 5% engagement, or 10K average views per post.'),
+    ]),
+    dict(title='Your content plan', subtitle='How you would tell the MyFund story.', fields=[
+        field('why_influencer', 'Why do you want to be a MyFund Influencer?', 'textarea', maxLength=2000),
+        field('content_ideas', 'What content would you make about MyFund?', 'textarea', maxLength=2500, help='Formats, series ideas or angles that suit your audience. Please use your own words.'),
+        field('monthly_content', 'Posts about MyFund per month', 'choice', options=['4', '8', '12', '20', '30+']),
+        field('monthly_signups', 'Target signups per month', 'choice', options=['5', '10', '20', '50', '100+']),
+        field('monthly_savers', 'Target new savers per month', 'choice', options=['5', '10', '20', '50', '100+']),
+        field('portfolio_link', 'Link to a post you are proud of', 'url', required=False, maxLength=300, help='Optional. Any https:// link to your best recent content.'),
+        field('has_brand_deals', 'Have you worked with brands before?', 'choice', options=['Yes', 'No']),
+        field('brand_experience', 'Which brands, and what did you create?', 'textarea', required=False, when=['has_brand_deals', 'Yes'], maxLength=1500),
+    ]),
+    dict(title='Your commitment', subtitle='How we work together.', fields=[
+        field('ongoing_role', 'The role is ongoing until either side ends it. Are you in?', 'choice', options=['Yes', 'No']),
+        field('disclose_partnership', 'Will you label MyFund posts as a partnership (e.g. #ad)?', 'choice', options=['Yes', 'No']),
+        field('follows_myfund', 'Do you follow MyFund on social media?', 'choice', options=['Yes', 'Not yet']),
+        field('contact_method', 'Best way to reach you', 'choice', options=['WhatsApp', 'Email']),
+        field('tshirt_size', 'T-shirt size for your merch', 'choice', options=['S', 'M', 'L', 'XL', 'XXL']),
+    ]),
+    dict(title='Say hello', subtitle='Optional: a short intro video.', fields=[
+        field('video_link', 'Video link', 'url', required=False, maxLength=1000),
+        field('video_shared', 'Anyone with the link can watch', 'boolean', required=False),
+    ]),
+]
+STEPS_BY_PROGRAMME = {'ambassador': STEPS, 'influencer': INFLUENCER_STEPS}
+
+
+def steps_for(programme):
+    return STEPS_BY_PROGRAMME.get(programme, STEPS)
+
+
+def fields_for(programme):
+    return {f['key']: f for step in steps_for(programme) for f in step['fields']}
+
 
 def visible(f, answers):
     if not f.get('when'):
@@ -52,13 +112,14 @@ def visible(f, answers):
     return value in answers.get(key, []) if isinstance(answers.get(key), list) else answers.get(key) == value
 
 
-def errors_for(answers, complete=False):
+def errors_for(answers, complete=False, programme='ambassador'):
     from django.core.validators import validate_email, URLValidator
     from django.core.exceptions import ValidationError
     import re
+    fields = fields_for(programme)
     errors = {}
     for key, value in answers.items():
-        f = FIELDS.get(key)
+        f = fields.get(key)
         if not f:
             errors[key] = 'Unknown question.'
             continue
@@ -85,7 +146,7 @@ def errors_for(answers, complete=False):
         if not valid:
             errors[key] = 'Please enter a valid answer.'
     if complete:
-        for key, f in FIELDS.items():
+        for key, f in fields.items():
             value = answers.get(key)
             if f['required'] and visible(f, answers) and (value in ('', None, []) or isinstance(value, str) and not value.strip()):
                 errors[key] = 'Please answer this question.'
@@ -94,7 +155,7 @@ def errors_for(answers, complete=False):
     return errors
 
 
-def progress_for(answers):
-    required = [f['key'] for f in FIELDS.values() if f['required'] and visible(f, answers)]
-    errors = errors_for(answers, complete=True)
+def progress_for(answers, programme='ambassador'):
+    required = [f['key'] for f in fields_for(programme).values() if f['required'] and visible(f, answers)]
+    errors = errors_for(answers, complete=True, programme=programme)
     return round(100 * sum(key not in errors for key in required) / len(required))
