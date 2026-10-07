@@ -1,5 +1,6 @@
 from datetime import timedelta
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+from django.core.files.uploadedfile import SimpleUploadedFile
 
 from django.test import TestCase
 from django.utils import timezone
@@ -17,7 +18,7 @@ INFLUENCER_COMPLETE = {
     "why_influencer": "I teach my followers to save every week.",
     "content_ideas": "A weekly #SaveWithAda series showing my MyFund target savings.",
     "monthly_content": "8", "monthly_signups": "20", "monthly_savers": "10", "has_brand_deals": "No",
-    "ongoing_role": "Yes", "disclose_partnership": "Yes", "follows_myfund": "Yes",
+    "follow_confirmed": True, "ongoing_role": "Yes", "disclose_partnership": "Yes",
     "contact_method": "WhatsApp", "tshirt_size": "M",
 }
 
@@ -103,3 +104,60 @@ class InfluencerPortalTest(TestCase):
         self.assertEqual(csv.status_code, 200)
         self.assertIn("myfund-influencer-applications", csv["Content-Disposition"])
         self.assertIn("Why do you want to be a MyFund Influencer?", csv.content.decode())
+
+    def test_must_confirm_following_myfund(self, push):
+        data = self.sign_in(INF)
+        auth = f"Application {data['token']}"
+        config = self.client.get(f"{INF}/config/").data
+        fields = {f["key"]: f for step in config["steps"] for f in step["fields"]}
+        self.assertEqual(fields["link_instagram"]["follow"], "https://instagram.com/myfundmobile1")
+        self.assertIn("TikTok", fields["follow_confirmed"]["follow_all"])
+        save = self.client.patch(f"{INF}/draft/", {"answers": {**INFLUENCER_COMPLETE, "follow_confirmed": False}, "step": 4, "revision": data["application"]["revision"]}, format="json", HTTP_AUTHORIZATION=auth)
+        self.assertLess(save.data["application"]["progress"], 100)
+        sub = self.client.post(f"{INF}/submit/", {"revision": save.data["application"]["revision"], "confirmed": True}, format="json", HTTP_AUTHORIZATION=auth)
+        self.assertEqual(sub.status_code, 400)
+        self.assertIn("follow_confirmed", sub.data["fields"])
+
+
+def fake_imagekit(private_in_details):
+    """ImageKit as it really behaves: the upload response omits
+    isPrivateFile (SDK reports False); the file details carry the truth."""
+    kit = MagicMock()
+    kit.upload.return_value = MagicMock(file_id="f1", file_path="/influencer-applications/v.webm", is_private_file=False)
+    kit.get_file_details.return_value.response_metadata.raw = {"isPrivateFile": private_in_details}
+    kit.url.return_value = "https://ik.imagekit.io/myfundmobile/signed"
+    return kit
+
+
+@patch("authentication.ambassador_application_views._run_in_background", lambda fn: None)
+class ApplicationVideoUploadTest(TestCase):
+    def setUp(self):
+        now = timezone.now()
+        intake = AmbassadorIntake.objects.create(slug="inf", title="Influencers", programme="influencer",
+                                                 opens_at=now - timedelta(days=1), closes_at=now + timedelta(days=30), active=True)
+        self.app = AmbassadorApplication.objects.create(intake=intake, email="vid@example.com")
+        from .ambassador_application_views import application_token
+        self.auth = f"Application {application_token(self.app)}"
+        self.client = APIClient()
+
+    def upload(self, kit):
+        video = SimpleUploadedFile("myfund-introduction.webm", b"\x1aE\xdf\xa3" + b"0" * 64, content_type="video/webm")
+        with patch("utils.imageKit.imagekit", kit):
+            return self.client.post(f"{INF}/video/?revision=0", {"video": video}, HTTP_AUTHORIZATION=self.auth)
+
+    def test_private_upload_is_accepted(self):
+        kit = fake_imagekit(True)
+        res = self.upload(kit)
+        self.assertEqual(res.status_code, 200, res.data)
+        self.app.refresh_from_db()
+        self.assertEqual(self.app.video_file_id, "f1")
+        kit.upload.assert_called_once()
+        self.assertEqual(kit.upload.call_args.kwargs["options"].folder, "/influencer-applications")
+
+    def test_public_upload_is_rejected_and_removed(self):
+        kit = fake_imagekit(False)
+        res = self.upload(kit)
+        self.assertEqual(res.status_code, 503)
+        kit.delete_file.assert_called_once_with("f1")
+        self.app.refresh_from_db()
+        self.assertEqual(self.app.video_file_id, "")

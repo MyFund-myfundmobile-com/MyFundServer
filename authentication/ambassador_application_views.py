@@ -422,16 +422,21 @@ def application_video(request, programme='ambassador'):
             head = upload.read(32)
             upload.seek(0)
             ext = 'webm' if head.startswith(b'\x1aE\xdf\xa3') else 'mp4' if head[4:8] == b'ftyp' else None
-            if not ext or upload.content_type not in ('video/mp4', 'video/quicktime', 'video/webm'):
+            if not ext or upload.content_type.split(';')[0].strip() not in ('video/mp4', 'video/quicktime', 'video/webm'):
                 return Response({'error': 'Use an MP4, MOV or WebM video.'}, status=400)
             try:
                 result = imagekit.upload(file=base64.b64encode(upload.read()).decode(),
                     file_name=f'{app.pk}-{secrets.token_hex(6)}.{ext}',
                     options=UploadFileRequestOptions(is_private_file=True, folder=f'/{programme}-applications', use_unique_file_name=True))
-                if not result.file_id or not result.file_path or not result.is_private_file:
+                if not result.file_id or not result.file_path:
                     raise RuntimeError('Private video upload failed')
+                # The upload response leaves isPrivateFile out (the SDK then
+                # reports False), so confirm privacy from the file's details.
+                if not imagekit.get_file_details(result.file_id).response_metadata.raw.get('isPrivateFile'):
+                    imagekit.delete_file(result.file_id)
+                    raise RuntimeError('Uploaded video is not private')
             except Exception:
-                logger.warning('Ambassador video upload failed for application %s', app.pk)
+                logger.exception('Application video upload failed for application %s', app.pk)
                 return Response({'error': 'Video upload failed. Please retry or use a shared video link.'}, status=503)
             old_file = app.video_file_id
             app.video_file_id, app.video_path = result.file_id, result.file_path
