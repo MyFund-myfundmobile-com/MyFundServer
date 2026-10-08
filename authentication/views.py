@@ -2312,6 +2312,7 @@ def get_user_profile(request):
                     "cohort_number": user.ambassador_cohort.cohort_number,
                     "name": user.ambassador_cohort.name,
                     "status": user.ambassador_cohort.status,
+                    "start_date": user.ambassador_cohort.start_date,
                     "end_date": user.ambassador_cohort.end_date,
                 }
                 if user.ambassador_cohort_id else None
@@ -14486,7 +14487,7 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import AmbassadorMonthlyReport
+from .models import AmbassadorMonthlyReport, AmbassadorPointConfig
 from .serializers import AmbassadorMonthlyReportSerializer
 from .tasks import send_ambassador_report_notifications_task
 
@@ -14558,6 +14559,38 @@ class AmbassadorMonthlyReportStatusView(APIView):
         )
 
 
+def _live_ambassador_month(user, key, config):
+    """Live figures for a month with no monthly report yet - sign-ups and
+    confirmed referrals from the referral records, attendance from session
+    submissions - with points estimated by the same AmbassadorPointConfig
+    rules (savings/content points only come with the approved report)."""
+    start = timezone.make_aware(datetime.strptime(key, "%Y-%m"))
+    end = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+    referrals = CustomUser.objects.filter(referral=user)
+    signups = referrals.filter(date_joined__gte=start, date_joined__lt=end).count()
+    confirmed = referrals.filter(
+        referral_reward_granted=True,
+        referral_reward_confirmed_at__gte=start,
+        referral_reward_confirmed_at__lt=end,
+    ).count()
+    attendance = AmbassadorAttendanceSubmission.objects.filter(user=user, month=key).count()
+    signup_pts = min(Decimal(signups) * config.signup_points, config.signup_points_cap)
+    points = (signup_pts + Decimal(confirmed) * config.confirmed_points
+              + Decimal(attendance) * config.attendance_points).quantize(Decimal("0.01"))
+    return signups, confirmed, attendance, points
+
+
+def _cohort_month_points(user, month_keys, config):
+    """Points per month for one ambassador: the report's awarded points when
+    a report exists, otherwise the live estimate."""
+    reports = {r.month: r for r in AmbassadorMonthlyReport.objects.filter(user=user, month__in=month_keys)}
+    total = Decimal("0.00")
+    for key in month_keys:
+        r = reports.get(key)
+        total += r.total_points_awarded if r else _live_ambassador_month(user, key, config)[3]
+    return total
+
+
 class AmbassadorPerformanceReportView(APIView):
     """
     GET /api/ambassador/performance-report/
@@ -14596,10 +14629,18 @@ class AmbassadorPerformanceReportView(APIView):
         first_report = AmbassadorMonthlyReport.objects.filter(user=user).order_by("month").values_list("month", flat=True).first()
         if first_report:
             earliest = min(earliest, datetime.strptime(first_report, "%Y-%m").date())
+        # Ambassadors are measured on their current cohort only: no months
+        # from before it started (e.g. Cohort 4 counts from 1 Oct 2026).
+        cohort_start_key = cohort.start_date.strftime("%Y-%m") if cohort and cohort.start_date else None
+        if cohort and cohort.start_date:
+            earliest = cohort.start_date
         try:
             month_keys = performance_months(period, earliest)
         except ValueError as error:
             return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+        if cohort_start_key:
+            month_keys = [k for k in month_keys if k >= cohort_start_key]
+        config = AmbassadorPointConfig.get_active()
 
         reports = {
             r.month: r
@@ -14613,14 +14654,19 @@ class AmbassadorPerformanceReportView(APIView):
         best = None
         for key in month_keys:
             r = reports.get(key)
-            pts = r.total_points_awarded if r else Decimal("0.00")
+            live = None
+            if not r and not user.is_influencer:
+                live = _live_ambassador_month(user, key, config)
+            pts = r.total_points_awarded if r else (live[3] if live else Decimal("0.00"))
             row = {
                 "month": key,
                 "month_label": datetime.strptime(key, "%Y-%m").strftime("%b %Y"),
-                "signups": r.signups_approved if r else 0,
-                "confirmed": r.confirmed_approved if r else 0,
-                "attendance": r.attendance_approved if r else 0,
+                "signups": r.signups_approved if r else (live[0] if live else 0),
+                "confirmed": r.confirmed_approved if r else (live[1] if live else 0),
+                "attendance": r.attendance_approved if r else (live[2] if live else 0),
                 "points": str(pts),
+                # True: live estimate until the monthly report is approved.
+                "estimated": bool(live),
             }
             if user.is_influencer:
                 start = timezone.make_aware(datetime.strptime(key, "%Y-%m"))
@@ -14643,7 +14689,7 @@ class AmbassadorPerformanceReportView(APIView):
             total_points += pts
             score = Decimal(row["earned"]) if user.is_influencer else pts
             best_score = Decimal(best["earned"] if user.is_influencer else best["points"]) if best else None
-            if (user.is_influencer or r) and (best_score is None or score > best_score):
+            if (user.is_influencer or r or live) and (best_score is None or score > best_score):
                 best = row
 
         # Lifetime standing - ALL of this user's reports ever (not just
@@ -14654,29 +14700,37 @@ class AmbassadorPerformanceReportView(APIView):
         # that's who they're actually competing with for this cohort's
         # Send-Forth awards (see AMBASSADOR_PROGRAM.md).
         rank_data = None
-        lifetime_points_by_user = {}
+        month_summary = None
         if cohort:
-            totals = (
-                AmbassadorMonthlyReport.objects.filter(
-                    user__ambassador_cohort=cohort, user__is_ambassador=True,
-                )
-                .values("user_id")
-                .annotate(lifetime_points=Sum("total_points_awarded"))
-            )
-            lifetime_points_by_user = {
-                row["user_id"]: row["lifetime_points"] or Decimal("0.00")
-                for row in totals
-            }
-            ranked_user_ids = sorted(
-                lifetime_points_by_user,
-                key=lambda uid: lifetime_points_by_user[uid],
-                reverse=True,
-            )
-            if user.id in ranked_user_ids:
+            from django.utils.timezone import localdate
+            this_key = localdate().strftime("%Y-%m")
+            cohort_keys = performance_months("all_time", cohort.start_date or earliest)
+            if cohort_start_key:
+                cohort_keys = [k for k in cohort_keys if k >= cohort_start_key]
+            members = list(CustomUser.objects.filter(ambassador_cohort=cohort, is_ambassador=True, is_deleted=False))
+            cohort_points = {m.id: _cohort_month_points(m, cohort_keys, config) for m in members}
+            this_month_points = {m.id: _cohort_month_points(m, [this_key], config) for m in members}
+            ranked = sorted(cohort_points, key=lambda uid: cohort_points[uid], reverse=True)
+            if user.id in cohort_points:
                 rank_data = {
-                    "position": ranked_user_ids.index(user.id) + 1,
-                    "total_ambassadors": len(ranked_user_ids),
-                    "lifetime_points": str(lifetime_points_by_user[user.id]),
+                    "position": ranked.index(user.id) + 1,
+                    "total_ambassadors": len(ranked),
+                    "lifetime_points": str(cohort_points[user.id]),
+                }
+                month_ranked = sorted(this_month_points, key=lambda uid: this_month_points[uid], reverse=True)
+                signups, confirmed, attendance, live_pts = _live_ambassador_month(user, this_key, config)
+                report = AmbassadorMonthlyReport.objects.filter(user=user, month=this_key).first()
+                pts = report.total_points_awarded if report else live_pts
+                month_summary = {
+                    "month_label": localdate().strftime("%B %Y"),
+                    "signups": report.signups_approved if report else signups,
+                    "confirmed": report.confirmed_approved if report else confirmed,
+                    "attendance": report.attendance_approved if report else attendance,
+                    "points": str(pts),
+                    "stipend_estimate": str((pts * Decimal("100")).quantize(Decimal("0.01"))),
+                    "estimated": report is None,
+                    "month_position": month_ranked.index(user.id) + 1,
+                    "total_ambassadors": len(month_ranked),
                 }
 
         # Plain-language takeaway - same trend logic
@@ -14710,7 +14764,11 @@ class AmbassadorPerformanceReportView(APIView):
         certificate_data = None
         send_forth_date = cohort.send_forth_date if cohort else None
         from .graduation_views import graduation_access
-        if graduation_access(user):
+        send_forth_passed = bool(send_forth_date and timezone.localdate() >= send_forth_date)
+        # Only once the CURRENT cohort's send-forth has happened - someone
+        # who moved into a new cohort (e.g. Cohort 3 -> 4) doesn't see last
+        # cohort's certificate on this cohort's report.
+        if graduation_access(user) and (send_forth_passed or not cohort):
             cert = getattr(user, "ambassador_certificate", None)
             if cert and not cert.dismissed_at:
                 certificate_data = {
@@ -14737,6 +14795,7 @@ class AmbassadorPerformanceReportView(APIView):
             "rank": rank_data,
             "analysis": trend_sentence + rank_sentence,
             "certificate": certificate_data,
+            "month_summary": month_summary,
         })
 
 
