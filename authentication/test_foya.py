@@ -220,8 +220,9 @@ class FoyaDailyPushTest(TestCase):
         self.assertEqual(send.call_count, 3)
         self.assertEqual(send.call_args.kwargs["data"], {"type": "foya_vote"})
         title, body = send.call_args.args[1], send.call_args.args[2]
-        self.assertEqual(title, "Vote MyFund for Fintech & Financial Innovation today")
-        self.assertEqual(body, "It's free, once a day. 24 days left. Tap to vote.")
+        self.assertEqual(title, "Vote for MyFund (FOYA)")
+        # No position showing -> "Vote for <category>."
+        self.assertEqual(body, "MyFund has been nominated for the FOYA Global Awards 2026. Vote for Fintech & Financial Innovation. 24 days left. Tap to vote for today.")
         from .foya_models import FoyaDailyPush
         self.assertEqual(FoyaDailyPush.objects.count(), 3)
 
@@ -246,3 +247,17 @@ class FoyaDailyPushTest(TestCase):
         from .foya import days_left_text
         self.assertEqual(days_left_text(self.c, datetime(2026, 11, 3, 10, 0, tzinfo=WAT)), "1 day left")
         self.assertEqual(days_left_text(self.c, datetime(2026, 11, 4, 10, 0, tzinfo=WAT)), "Voting closes tonight")
+
+
+    def test_copy_includes_position_when_showing(self, send):
+        from .foya import daily_push_copy
+        now = datetime(2026, 10, 9, 10, 0, tzinfo=WAT)
+        self.c.show_position = True
+        self.c.save()
+        p = FoyaPosition.objects.create(campaign=self.c, category_key="founder", position=2, field_size=9)
+        FoyaPosition.objects.filter(pk=p.pk).update(updated_at=now - timedelta(hours=1))
+        _key, title, body = daily_push_copy(self.c, now)
+        self.assertEqual(body, "MyFund has been nominated for the FOYA Global Awards 2026. Now 2nd of 9 for Founder of the Year. 26 days left. Tap to vote for today.")
+        # Older than 48h -> falls back.
+        FoyaPosition.objects.filter(pk=p.pk).update(updated_at=now - timedelta(hours=49))
+        self.assertIn("Vote for Founder of the Year.", daily_push_copy(self.c, now)[2])

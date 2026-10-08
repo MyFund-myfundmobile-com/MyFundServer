@@ -166,10 +166,29 @@ def days_left_text(campaign, now):
     return f"{days} day{'' if days == 1 else 's'} left"
 
 
+def ordinal(n):
+    return f"{n}{'th' if 11 <= n % 100 <= 13 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
+
+
 def daily_push_copy(campaign, now):
+    """Fill the admin-edited templates. Placeholders: {label}, {days_left},
+    {position}, {field}, {standing}. {standing} is "Now 2nd of 9 for
+    <label>." when a position is showing (same rule as the banner: switched
+    on and under 48h old), otherwise "Vote for <label>."."""
+    from collections import defaultdict
     category = campaign.category_for(now) or {}
-    values = {"label": category.get("label", "MyFund"), "days_left": days_left_text(campaign, now)}
-    return category.get("key", ""), campaign.daily_push_title.format(**values), campaign.daily_push_body.format(**values)
+    label = category.get("label", "MyFund")
+    pos = banner_position(campaign, category.get("key"), now)
+    rank = f"{'tied ' if pos and pos['is_tied'] else ''}{ordinal(pos['position'])}" if pos else ""
+    values = defaultdict(str, {
+        "label": label,
+        "days_left": days_left_text(campaign, now),
+        "position": rank,
+        "field": str(pos["field_size"]) if pos else "",
+        "standing": f"Now {rank} of {pos['field_size']} for {label}." if pos else f"Vote for {label}.",
+    })
+    fill = lambda template: " ".join(template.format_map(values).split())  # tidy gaps
+    return category.get("key", ""), fill(campaign.daily_push_title), fill(campaign.daily_push_body)
 
 
 def send_daily_foya_push(now=None):

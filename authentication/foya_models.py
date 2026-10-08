@@ -36,8 +36,12 @@ class FoyaCampaign(models.Model):
     daily_push_enabled = models.BooleanField(default=False)
     daily_push_start = models.DateField(null=True, blank=True, help_text="First day (WAT) the daily push goes out.")
     daily_push_hour = models.PositiveSmallIntegerField(default=10, help_text="Hour of day in WAT (8-20).")
-    daily_push_title = models.CharField(max_length=120, default="Vote MyFund for {label} today")
-    daily_push_body = models.CharField(max_length=240, default="It's free, once a day. {days_left}. Tap to vote.")
+    daily_push_title = models.CharField(max_length=120, default="Vote for MyFund (FOYA)")
+    daily_push_body = models.CharField(
+        max_length=240,
+        default="MyFund has been nominated for the FOYA Global Awards 2026. {standing} {days_left}. Tap to vote for today.",
+        help_text="Placeholders: {standing} (\"Now 2nd of 9 for <category>.\" or \"Vote for <category>.\"), {label}, {position}, {field}, {days_left}.",
+    )
 
     class Meta:
         verbose_name = "FOYA campaign"
