@@ -14309,6 +14309,10 @@ class TopReferralsAPIView(APIView):
 
             if ambassador_view and not getattr(ref_user, "is_ambassador", False):
                 continue
+            # Ambassadors only see their own cohort (Cohort 4 sees Cohort 4,
+            # Cohort 3 sees Cohort 3). No cohort assigned: everyone, as before.
+            if ambassador_view and user.ambassador_cohort_id and ref_user.ambassador_cohort_id != user.ambassador_cohort_id:
+                continue
 
             top_users.append(
                 {
