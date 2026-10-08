@@ -1,7 +1,7 @@
 from django.contrib import admin, messages
 
-from .foya import send_to
-from .foya_models import MAX_PUSHES_PER_CAMPAIGN, FoyaCampaign, FoyaEvent, FoyaPosition, FoyaPush
+from .foya import daily_push_copy, send_to
+from .foya_models import MAX_PUSHES_PER_CAMPAIGN, FoyaCampaign, FoyaDailyPush, FoyaEvent, FoyaPosition, FoyaPush
 
 
 class FoyaPushInline(admin.TabularInline):
@@ -14,8 +14,28 @@ class FoyaPushInline(admin.TabularInline):
 
 @admin.register(FoyaCampaign)
 class FoyaCampaignAdmin(admin.ModelAdmin):
-    list_display = ["__str__", "is_active", "show_position", "start_at", "end_at"]
+    list_display = ["__str__", "is_active", "show_position", "daily_push_enabled", "daily_push_start", "start_at", "end_at"]
     inlines = [FoyaPushInline]
+    actions = ["send_daily_test_to_me"]
+
+    @admin.action(description="Send today's daily push to me (test, not recorded)")
+    def send_daily_test_to_me(self, request, queryset):
+        from django.utils import timezone
+        from .foya_models import FoyaPush as Copy
+        for campaign in queryset:
+            _key, title, body = daily_push_copy(campaign, timezone.now())
+            reached = send_to([request.user], Copy(title=title, body=body))
+            self.message_user(request, f"Test sent to {request.user.email}: “{title}” ({'delivered' if reached else 'no device token'}).",
+                              messages.SUCCESS if reached else messages.WARNING)
+
+
+@admin.register(FoyaDailyPush)
+class FoyaDailyPushAdmin(admin.ModelAdmin):
+    list_display = ["date", "category_key", "title", "recipients_count", "sent_at"]
+    readonly_fields = ["campaign", "date", "category_key", "title", "body", "sent_at", "recipients_count"]
+
+    def has_add_permission(self, request):
+        return False
 
 
 @admin.register(FoyaPush)

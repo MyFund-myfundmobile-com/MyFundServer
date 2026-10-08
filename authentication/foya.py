@@ -12,7 +12,7 @@ from rest_framework.throttling import AnonRateThrottle, UserRateThrottle
 
 from datetime import timedelta
 
-from .foya_models import WAT, FoyaCampaign, FoyaEvent, FoyaPosition, FoyaPush
+from .foya_models import WAT, FoyaCampaign, FoyaDailyPush, FoyaEvent, FoyaPosition, FoyaPush
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +153,50 @@ def send_due_foya_pushes(now=None):
         FoyaPush.objects.filter(pk=push.pk).update(recipients_count=count)
         logger.info("FOYA push %s sent to %s users", push.slot, count)
         sent.append(push.slot)
+    daily = send_daily_foya_push(now)
+    if daily:
+        sent.append(f"daily:{daily}")
     return sent
+
+
+def days_left_text(campaign, now):
+    days = (campaign.end_at.astimezone(WAT).date() - now.astimezone(WAT).date()).days
+    if days <= 0:
+        return "Voting closes tonight"
+    return f"{days} day{'' if days == 1 else 's'} left"
+
+
+def daily_push_copy(campaign, now):
+    category = campaign.category_for(now) or {}
+    values = {"label": category.get("label", "MyFund"), "days_left": days_left_text(campaign, now)}
+    return category.get("key", ""), campaign.daily_push_title.format(**values), campaign.daily_push_body.format(**values)
+
+
+def send_daily_foya_push(now=None):
+    """Once per Lagos day, at/after daily_push_hour: push today's category.
+    Skipped on a day one of the 3 campaign pushes is due, so nobody gets two."""
+    now = now or timezone.now()
+    campaign = live_campaign(now)
+    if not campaign or not campaign.daily_push_enabled or in_quiet_hours(now):
+        return None
+    local = now.astimezone(WAT)
+    today = local.date()
+    if (campaign.daily_push_start and today < campaign.daily_push_start) or local.hour < campaign.daily_push_hour:
+        return None
+    if any(p.send_at and p.send_at.astimezone(WAT).date() == today for p in campaign.pushes.exclude(status="cancelled")):
+        return None
+    key, title, body = daily_push_copy(campaign, now)
+    with transaction.atomic():
+        # The unique (campaign, date) row is the "already sent today" lock.
+        record, created = FoyaDailyPush.objects.get_or_create(
+            campaign=campaign, date=today, defaults={"category_key": key, "title": title, "body": body})
+    if not created:
+        return None
+    push = FoyaPush(title=title, body=body)  # unsaved: just carries the copy
+    count = send_to(push_recipients(), push)
+    FoyaDailyPush.objects.filter(pk=record.pk).update(recipients_count=count)
+    logger.info("FOYA daily push %s (%s) sent to %s users", today, key, count)
+    return key
 
 
 # ── Staff: daily positions + campaign status (web admin FOYA page) ───────
@@ -182,6 +225,12 @@ def admin_state(campaign):
         "categories": [{**c, "latest": _position_row(latest[c["key"]]) if latest[c["key"]] else None}
                        for c in campaign.categories or []],
         "history": [_position_row(p) for p in campaign.positions.select_related("updated_by")[:14]],
+        "daily_push": {
+            "enabled": campaign.daily_push_enabled, "start": campaign.daily_push_start, "hour": campaign.daily_push_hour,
+            "title": campaign.daily_push_title, "body": campaign.daily_push_body,
+            "recent": [{"date": d.date, "category_key": d.category_key, "title": d.title, "recipients_count": d.recipients_count}
+                       for d in campaign.daily_pushes.all()[:7]],
+        },
         "pushes": [{"slot": p.slot, "label": p.get_slot_display(), "title": p.title, "send_at": p.send_at,
                     "status": p.status, "sent_at": p.sent_at, "recipients_count": p.recipients_count}
                    for p in campaign.pushes.order_by("id")],

@@ -30,6 +30,14 @@ class FoyaCampaign(models.Model):
     # Show today's ranking on the banner. Off until FOYA confirms rankings
     # can be shared and real votes are in.
     show_position = models.BooleanField(default=False)
+    # Automatic daily push (FoyaDailyPush): once a day at daily_push_hour
+    # (WAT) from daily_push_start, naming that day's category. {label} and
+    # {days_left} are filled in when it's sent.
+    daily_push_enabled = models.BooleanField(default=False)
+    daily_push_start = models.DateField(null=True, blank=True, help_text="First day (WAT) the daily push goes out.")
+    daily_push_hour = models.PositiveSmallIntegerField(default=10, help_text="Hour of day in WAT (8-20).")
+    daily_push_title = models.CharField(max_length=120, default="Vote MyFund for {label} today")
+    daily_push_body = models.CharField(max_length=240, default="It's free, once a day. {days_left}. Tap to vote.")
 
     class Meta:
         verbose_name = "FOYA campaign"
@@ -106,6 +114,26 @@ class FoyaPosition(models.Model):
     def clean(self):
         if not 1 <= self.position <= self.field_size:
             raise ValidationError("Position must be between 1 and the field size.")
+
+
+class FoyaDailyPush(models.Model):
+    """One row per Lagos day the daily push went out - the unique date is
+    what stops a second send that day, whatever retries or restarts do."""
+    campaign = models.ForeignKey(FoyaCampaign, on_delete=models.CASCADE, related_name="daily_pushes")
+    date = models.DateField()
+    category_key = models.CharField(max_length=40, blank=True)
+    title = models.CharField(max_length=120, blank=True)
+    body = models.CharField(max_length=240, blank=True)
+    sent_at = models.DateTimeField(auto_now_add=True)
+    recipients_count = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        verbose_name = "FOYA daily push"
+        constraints = [models.UniqueConstraint(fields=["campaign", "date"], name="unique_foya_daily_push_date")]
+        ordering = ["-date"]
+
+    def __str__(self):
+        return f"{self.date}: {self.title}"
 
 
 class FoyaEvent(models.Model):

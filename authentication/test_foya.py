@@ -196,3 +196,53 @@ class FoyaPositionTest(TestCase):
         self.assertFalse(self.c.show_position)
         self.client.force_authenticate(self.member)
         self.assertEqual(self.client.patch("/api/admin/foya/", {"show_position": True}, format="json").status_code, 403)
+
+
+@patch("authentication.foya.time.sleep", lambda s: None)
+@patch("authentication.utils.send_push_notification", return_value={"sent": 1, "total": 1, "success": True})
+class FoyaDailyPushTest(TestCase):
+    def setUp(self):
+        from datetime import date
+        self.c = campaign(daily_push_enabled=True, daily_push_start=date(2026, 10, 9), daily_push_hour=10)
+        user = CustomUser.objects.create_user(email="d@example.com", password="x", first_name="D", last_name="P", phone_number="08038000001")
+        user.expo_push_tokens = [{"token": "ExponentPushToken[x]"}]
+        user.save()
+
+    def run_at(self, *args):
+        return send_due_foya_pushes(datetime(*args, tzinfo=WAT))
+
+    def test_once_a_day_at_ten_with_todays_category(self, send):
+        self.assertEqual(self.run_at(2026, 10, 9, 9, 0), [])            # before 10:00
+        self.assertEqual(self.run_at(2026, 10, 9, 10, 0), ["daily:founder"])  # Friday
+        self.assertEqual(self.run_at(2026, 10, 9, 11, 0), [])           # already sent today
+        self.assertEqual(self.run_at(2026, 10, 10, 10, 0), ["daily:realestate"])  # Saturday
+        self.assertEqual(self.run_at(2026, 10, 11, 10, 0), ["daily:fintech"])     # Sunday
+        self.assertEqual(send.call_count, 3)
+        self.assertEqual(send.call_args.kwargs["data"], {"type": "foya_vote"})
+        title, body = send.call_args.args[1], send.call_args.args[2]
+        self.assertEqual(title, "Vote MyFund for Fintech & Financial Innovation today")
+        self.assertEqual(body, "It's free, once a day. 24 days left. Tap to vote.")
+        from .foya_models import FoyaDailyPush
+        self.assertEqual(FoyaDailyPush.objects.count(), 3)
+
+    def test_not_before_start_disabled_quiet_or_after_end(self, send):
+        self.assertEqual(self.run_at(2026, 10, 8, 12, 0), [])  # before start date
+        self.assertEqual(self.run_at(2026, 10, 9, 21, 0), [])  # quiet hours
+        self.assertEqual(self.run_at(2026, 11, 5, 12, 0), [])  # after the vote
+        self.c.daily_push_enabled = False
+        self.c.save()
+        self.assertEqual(self.run_at(2026, 10, 9, 12, 0), [])
+        send.assert_not_called()
+
+    def test_skipped_on_a_special_push_day(self, send):
+        FoyaPush.objects.create(campaign=self.c, slot="final_week", title="One week left", body="Vote",
+                                send_at=datetime(2026, 10, 28, 10, 0, tzinfo=WAT))
+        self.assertEqual(self.run_at(2026, 10, 28, 10, 0), ["final_week"])  # only the special one
+        self.assertEqual(self.run_at(2026, 10, 28, 12, 0), [])
+        self.assertEqual(send.call_count, 1)
+        self.assertEqual(self.run_at(2026, 10, 29, 10, 0), ["daily:founder"])
+
+    def test_final_day_copy(self, send):
+        from .foya import days_left_text
+        self.assertEqual(days_left_text(self.c, datetime(2026, 11, 3, 10, 0, tzinfo=WAT)), "1 day left")
+        self.assertEqual(days_left_text(self.c, datetime(2026, 11, 4, 10, 0, tzinfo=WAT)), "Voting closes tonight")
