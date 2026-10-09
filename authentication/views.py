@@ -14333,19 +14333,10 @@ class TopReferralsAPIView(APIView):
 
         top_users.sort(key=lambda x: (-x["monthly_confirmed"], -x["monthly_signups"]))
 
-        rank_changes = {}
-        for index, user_data in enumerate(top_users if period == "this_month" else []):
-            ranked_user = CustomUser.objects.get(id=user_data["id"])
-            new_rank = index + 1
-            old_rank = ranked_user.last_referral_rank or 0
-
-            if old_rank != new_rank:
-                rank_changes[ranked_user] = (old_rank, new_rank)
-                ranked_user.last_referral_rank = new_rank
-                ranked_user.save(update_fields=["last_referral_rank"])
-
-        for user_obj, (old_rank, new_rank) in rank_changes.items():
-            self.send_rank_notification(user_obj, old_rank, new_rank)
+        # Reading a filtered leaderboard must not mutate a global rank or send
+        # milestone alerts. Cohort and overall ranks are different, and the
+        # legacy last_referral_rank field has neither scope nor month metadata.
+        # Notifications require separately tracked, scoped ranking snapshots.
 
         referrals = CustomUser.objects.filter(referral=user)
         my_signups = referrals.filter(signup_filter)

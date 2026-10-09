@@ -38,3 +38,24 @@ class CohortLeaderboardTest(TestCase):
     def test_each_cohort_sees_only_itself(self, *_):
         self.assertEqual(self.emails(self.a4), ["four@example.com", "fourb@example.com"])
         self.assertEqual(self.emails(self.a3), ["three@example.com"])
+
+    def test_switching_cohort_and_overall_views_does_not_send_rank_alerts(self, *_):
+        viewer = CustomUser.objects.create_user(
+            email="viewer@example.com", password="x", first_name="V",
+            last_name="R", phone_number="08039999999",
+        )
+        self.a4.last_referral_rank = 5
+        self.a4.save(update_fields=["last_referral_rank"])
+        with patch("authentication.views.TopReferralsAPIView.send_rank_notification") as notify:
+            for user in (self.a4, viewer, self.a3, self.a4):
+                client = APIClient()
+                client.force_authenticate(user)
+                response = client.get("/api/top-referrals/")
+                self.assertEqual(response.status_code, 200)
+                rows = response.data["top_referrers"]
+                expected = next((i + 1 for i, row in enumerate(rows)
+                                 if row["id"] == user.id), None)
+                self.assertEqual(response.data["current_user"]["rank"], expected)
+            notify.assert_not_called()
+        self.a4.refresh_from_db()
+        self.assertEqual(self.a4.last_referral_rank, 5)
