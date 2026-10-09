@@ -14598,7 +14598,9 @@ class AmbassadorPerformanceReportView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
-        user = request.user
+        return self.build_report(request.user, request.query_params.get("period", "this_month"))
+
+    def build_report(self, user, period="this_month"):
         if not (user.is_ambassador or user.is_influencer):
             return Response(
                 {"detail": "This report is only available to ambassadors and influencers."},
@@ -14615,7 +14617,6 @@ class AmbassadorPerformanceReportView(APIView):
             }
 
         from .performance_periods import performance_months, PERIOD_LABELS
-        period = request.query_params.get("period", "this_month")
         earliest = user.date_joined.date()
         first_report = AmbassadorMonthlyReport.objects.filter(user=user).order_by("month").values_list("month", flat=True).first()
         if first_report:
@@ -14698,7 +14699,7 @@ class AmbassadorPerformanceReportView(APIView):
             cohort_keys = performance_months("all_time", cohort.start_date or earliest)
             if cohort_start_key:
                 cohort_keys = [k for k in cohort_keys if k >= cohort_start_key]
-            members = list(CustomUser.objects.filter(ambassador_cohort=cohort, is_ambassador=True, is_deleted=False))
+            members = list(CustomUser.objects.filter(ambassador_cohort=cohort, is_ambassador=True, is_deleted=False).order_by("id"))
             cohort_points = {m.id: _cohort_month_points(m, cohort_keys, config) for m in members}
             this_month_points = {m.id: _cohort_month_points(m, [this_key], config) for m in members}
             ranked = sorted(cohort_points, key=lambda uid: cohort_points[uid], reverse=True)

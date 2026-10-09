@@ -4263,3 +4263,13 @@ class InfluencerApplication(models.Model):
 from .ambassador_application_models import AmbassadorIntake, AmbassadorApplication, AmbassadorEmailChallenge
 # FOYA Global Honors 2026 voting campaign (Home banner + max 3 pushes).
 from .foya_models import FoyaCampaign, FoyaPush, FoyaEvent
+
+
+class AmbassadorPerformanceNotificationState(models.Model):
+    """Separate delivery baselines for each ambassador's cohort-wide points rank."""
+    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE)
+    cohort = models.ForeignKey(AmbassadorCohort, on_delete=models.CASCADE)
+    channels = models.JSONField(default=dict)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["user", "cohort"], name="unique_ambassador_notification_scope")]

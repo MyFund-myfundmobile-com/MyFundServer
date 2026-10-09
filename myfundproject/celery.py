@@ -92,6 +92,15 @@ app.autodiscover_tasks()
 # range already produced the same multiplicity in most/all months before
 # this change, just under the old WAT-evaluated schedule.
 app.conf.beat_schedule = {
+    "ambassador-weekly-performance": {
+        "task": "authentication.ambassador_performance_notifications.send_ambassador_performance_updates",
+        "schedule": crontab(day_of_week=1, hour=8, minute=0),  # Monday 09:00 WAT
+        "kwargs": {"weekly": True},
+    },
+    "ambassador-position-updates": {
+        "task": "authentication.ambassador_performance_notifications.send_ambassador_performance_updates",
+        "schedule": crontab(minute=15),
+    },
     # Target savings
     #
     # Hourly, not once/day: next_deduction is anchored to whatever

@@ -2549,3 +2549,6 @@ def send_due_foya_pushes_task():
     """Hourly: sends any due FOYA campaign push (at most 3, each once)."""
     from .foya import send_due_foya_pushes
     return send_due_foya_pushes()
+
+# Register scheduled ambassador performance notifications with Celery discovery.
+from .ambassador_performance_notifications import send_ambassador_performance_updates
