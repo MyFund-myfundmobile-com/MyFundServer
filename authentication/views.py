@@ -14582,6 +14582,31 @@ def _cohort_month_points(user, month_keys, config):
     return total
 
 
+def _cohort_points_batch(members, month_keys, config):
+    """Aggregate each month for the entire cohort, avoiding per-member queries."""
+    ids = [m.id for m in members]
+    scores = {uid: {} for uid in ids}
+    reports = {(r.user_id, r.month): r.total_points_awarded
+               for r in AmbassadorMonthlyReport.objects.filter(user_id__in=ids, month__in=month_keys)}
+    for key in month_keys:
+        start = timezone.make_aware(datetime.strptime(key, "%Y-%m"))
+        end = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+        referrals = CustomUser.objects.filter(referral_id__in=ids)
+        signups = dict(referrals.filter(date_joined__gte=start, date_joined__lt=end)
+                       .values("referral_id").annotate(n=Count("id")).values_list("referral_id", "n"))
+        confirmed = dict(referrals.filter(referral_reward_granted=True,
+                          referral_reward_confirmed_at__gte=start, referral_reward_confirmed_at__lt=end)
+                         .values("referral_id").annotate(n=Count("id")).values_list("referral_id", "n"))
+        attendance = dict(AmbassadorAttendanceSubmission.objects.filter(user_id__in=ids, month=key)
+                          .values("user_id").annotate(n=Count("id")).values_list("user_id", "n"))
+        for uid in ids:
+            live = (min(Decimal(signups.get(uid, 0)) * config.signup_points, config.signup_points_cap)
+                    + Decimal(confirmed.get(uid, 0)) * config.confirmed_points
+                    + Decimal(attendance.get(uid, 0)) * config.attendance_points).quantize(Decimal("0.01"))
+            scores[uid][key] = reports.get((uid, key), live)
+    return scores
+
+
 class AmbassadorPerformanceReportView(APIView):
     """
     GET /api/ambassador/performance-report/
@@ -14700,8 +14725,9 @@ class AmbassadorPerformanceReportView(APIView):
             if cohort_start_key:
                 cohort_keys = [k for k in cohort_keys if k >= cohort_start_key]
             members = list(CustomUser.objects.filter(ambassador_cohort=cohort, is_ambassador=True, is_deleted=False).order_by("id"))
-            cohort_points = {m.id: _cohort_month_points(m, cohort_keys, config) for m in members}
-            this_month_points = {m.id: _cohort_month_points(m, [this_key], config) for m in members}
+            scores = _cohort_points_batch(members, sorted(set(cohort_keys + [this_key])), config)
+            cohort_points = {m.id: sum((scores[m.id][key] for key in cohort_keys), Decimal("0.00")) for m in members}
+            this_month_points = {m.id: scores[m.id][this_key] for m in members}
             ranked = sorted(cohort_points, key=lambda uid: cohort_points[uid], reverse=True)
             if user.id in cohort_points:
                 rank_data = {

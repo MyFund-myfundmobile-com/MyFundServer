@@ -49,3 +49,13 @@ class CohortPerformanceTest(TestCase):
         self.assertEqual(Decimal(s["stipend_estimate"]), Decimal("1100.00"))
         self.assertIsNone(data["certificate"])
         self.assertTrue(all(m["month"] >= self.this_key for m in data["months"]))
+
+    def test_batch_ranking_matches_existing_scores_with_fixed_query_count(self):
+        from .models import AmbassadorPointConfig
+        from .views import _cohort_points_batch, _cohort_month_points
+        members = [self.me, self.other, self.idle]
+        config = AmbassadorPointConfig.get_active()
+        expected = {u.id: _cohort_month_points(u, [self.this_key], config) for u in members}
+        with self.assertNumQueries(4):
+            scores = _cohort_points_batch(members, [self.this_key], config)
+        self.assertEqual({uid: values[self.this_key] for uid, values in scores.items()}, expected)
