@@ -146,3 +146,20 @@ class MobileRequestTests(TestCase):
         self.assertEqual(self.action("withdrawal", withdrawal.pk, "credit_wallet").status_code, 400)
         self.owner.refresh_from_db()
         self.assertEqual(self.owner.wallet, balance + 100)
+
+    @patch("authentication.utils.send_generic_email")
+    @patch("authentication.utils.send_push_notification")
+    @patch.object(CustomUser, "update_total_savings_and_investment_this_month")
+    def test_force_credit_requires_reason_and_credits_once(self, metrics, push, email):
+        from django.contrib.admin.models import LogEntry
+        withdrawal = WithdrawalsRequestToAdmin.objects.create(user=self.owner, amount=100, total_amount=100, transaction_id="EARLY-TEST", withdrawal_type="scheduled", scheduled_processing_date=timezone.localdate() + timedelta(days=30))
+        balance = self.owner.wallet
+        self.assertEqual(self.action("withdrawal", withdrawal.pk, "force_credit_wallet").status_code, 400)
+        self.assertEqual(self.action("withdrawal", withdrawal.pk, "force_credit_wallet", reason="Approved emergency release").status_code, 200)
+        self.assertEqual(self.action("withdrawal", withdrawal.pk, "force_credit_wallet", reason="Retry").status_code, 400)
+        self.owner.refresh_from_db()
+        self.assertEqual(self.owner.wallet, balance + 100)
+        withdrawal.refresh_from_db()
+        self.assertTrue(withdrawal.is_processed)
+        self.assertEqual(withdrawal.status, "completed")
+        self.assertTrue(LogEntry.objects.filter(object_id=str(withdrawal.pk), change_message__contains="Approved emergency release").exists())

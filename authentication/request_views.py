@@ -79,7 +79,7 @@ def serialize(obj, kind, request):
     else:
         data.update(amount=str(obj.amount), transaction_id=obj.transaction_id, actions=["approve", "abandon"])
     if kind == "withdrawal":
-        data.update(total_amount=str(obj.total_amount), charge_amount=str(obj.charge_amount), charge_percentage=str(obj.charge_percentage), source_account=obj.source_account, bank=obj.target_bank, account_number=obj.target_account_number, account_name=obj.target_account_name, withdrawal_type=obj.withdrawal_type, scheduled_date=obj.scheduled_processing_date, actions=["credit_wallet"] if obj.withdrawal_type == "scheduled" else ["confirm_paid"])
+        data.update(total_amount=str(obj.total_amount), charge_amount=str(obj.charge_amount), charge_percentage=str(obj.charge_percentage), source_account=obj.source_account, bank=obj.target_bank, account_number=obj.target_account_number, account_name=obj.target_account_name, withdrawal_type=obj.withdrawal_type, scheduled_date=obj.scheduled_processing_date, actions=(["force_credit_wallet"] if obj.scheduled_processing_date and obj.scheduled_processing_date > timezone.localdate() else ["credit_wallet"]) if obj.withdrawal_type == "scheduled" else ["confirm_paid"])
     if kind == "kyc":
         status = "pending" if user.kyc_status == "submitted" else user.kyc_status
     elif kind == "phone_change":
@@ -310,10 +310,17 @@ def request_action(request, kind, pk):
         else:
             if obj.is_approved or obj.is_processed or obj.status != "pending":
                 raise ValidationError("This withdrawal is no longer pending.")
-            if action == "credit_wallet" and obj.withdrawal_type == "scheduled":
-                if not obj.scheduled_processing_date or obj.scheduled_processing_date > timezone.localdate():
+            if action in {"credit_wallet", "force_credit_wallet"} and obj.withdrawal_type == "scheduled":
+                reason = request.data.get("reason", "")
+                if action == "force_credit_wallet":
+                    if not isinstance(reason, str) or not reason.strip() or len(reason.strip()) > 1000:
+                        raise ValidationError("Enter a reason for early wallet credit (up to 1000 characters).")
+                    reason = reason.strip()
+                    if not obj.scheduled_processing_date:
+                        raise ValidationError("Scheduled withdrawal has no processing date. Review it first.")
+                if action == "credit_wallet" and (not obj.scheduled_processing_date or obj.scheduled_processing_date > timezone.localdate()):
                     raise ValidationError("Scheduled withdrawal is not due yet.")
-                result = process_scheduled_withdrawal(obj, triggered_by="mobile_admin")
+                result = process_scheduled_withdrawal(obj, triggered_by="mobile_admin_early" if action == "force_credit_wallet" else "mobile_admin")
                 obj.refresh_from_db()
                 if not obj.is_processed or obj.status != "completed":
                     raise ValidationError("Withdrawal could not be credited.")
@@ -328,7 +335,7 @@ def request_action(request, kind, pk):
                     raise ValidationError("Could not confirm this withdrawal. Review its transaction record.")
             else:
                 raise ValidationError("Invalid withdrawal action.")
-        LogEntry.objects.log_action(user_id=request.user.pk, content_type_id=ContentType.objects.get_for_model(obj).pk, object_id=str(obj.pk), object_repr=str(obj)[:200], action_flag=CHANGE, change_message=f"Mobile requests: {action}" + (f" — {reason}" if kind == "phone_change" and action == "reject" else ""))
+        LogEntry.objects.log_action(user_id=request.user.pk, content_type_id=ContentType.objects.get_for_model(obj).pk, object_id=str(obj.pk), object_repr=str(obj)[:200], action_flag=CHANGE, change_message=f"Mobile requests: {action}" + (f" — {reason}" if (kind == "phone_change" and action == "reject") or action == "force_credit_wallet" else ""))
     return Response({"message": "Request addressed successfully."})
 
 

@@ -10,6 +10,7 @@ from .models import AmbassadorIntake
 BASE = "/api/ambassador/applications"
 
 COMPLETE = {
+    "follow_confirmed": True,
     "full_name": "Ada Lovelace", "age": "24", "phone": "+234 803 000 0000",
     "location": "Ikeja, Lagos", "occupation": "Working Professional",
     "has_account": "No", "has_saved": "No",

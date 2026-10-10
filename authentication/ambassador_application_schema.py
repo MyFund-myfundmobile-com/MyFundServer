@@ -4,6 +4,19 @@ def field(key, label, kind='text', required=True, **kwargs):
     return dict(key=key, label=label, type=kind, required=required, **kwargs)
 
 
+# MyFund's own accounts (same list as the app's influencer form,
+# GraduationBanner.js MYFUND_SOCIAL_LINKS). Both programmes share these links;
+# the web form shows a "Follow MyFund" button beside each link field.
+MYFUND_SOCIALS = {
+    'Instagram': 'https://instagram.com/myfundmobile1',
+    'TikTok': 'https://www.tiktok.com/@myfundmobile',
+    'YouTube': 'https://youtube.com/@myfundmobile',
+    'X': 'https://x.com/myfundmobile',
+    'LinkedIn': 'https://linkedin.com/company/myfundmobile',
+    'Facebook': 'https://facebook.com/myfundmobile',
+    'Threads': 'https://threads.net/@myfundmobile',
+}
+
 STEPS = [
     dict(title='About you', subtitle='The basics.', fields=[
         field('full_name', 'Full name', autocomplete='name', maxLength=120),
@@ -22,6 +35,13 @@ STEPS = [
         field('community_other', 'Tell us about your other community', required=False, when=['communities', 'Other'], maxLength=200),
         field('weekly_reach', 'How many people can you reach each week?', 'select', options=['Under 50', '50–100', '100–300', '300–1,000', 'Over 1,000']),
         field('social_link', 'Link to your most active social profile', 'url', required=False, maxLength=300, help='Helps us understand your audience. https:// link, e.g. your Instagram, LinkedIn or X profile.'),
+        field('platforms', 'Which social platforms are you active on?', 'multi', required=False,
+              options=list(MYFUND_SOCIALS), help='Select your active platforms to share your profile links and follow MyFund.'),
+        *[field(f'link_{name.lower()}', f'Your {name} link', 'url',
+                when=['platforms', name], maxLength=300, follow=url,
+                help='Paste your full https:// profile link.') for name, url in MYFUND_SOCIALS.items()],
+        field('follow_confirmed', 'I confirm I follow MyFund on all our social media platforms.', 'boolean',
+              follow_all=MYFUND_SOCIALS, help='Open each platform below and follow MyFund, then confirm here.'),
         field('has_promoted', 'Have you promoted or sold something before?', 'choice', options=['Yes', 'No']),
         field('promotion_experience', 'What did you promote and what happened?', 'textarea', required=False, when=['has_promoted', 'Yes'], maxLength=1500),
     ]),
@@ -43,19 +63,6 @@ STEPS = [
     ]),
 ]
 FIELDS = {f['key']: f for step in STEPS for f in step['fields']}
-
-# MyFund's own accounts (same list as the app's influencer form,
-# GraduationBanner.js MYFUND_SOCIAL_LINKS). Influencers must follow MyFund;
-# the web form shows a "Follow MyFund" button beside each link field.
-MYFUND_SOCIALS = {
-    'Instagram': 'https://instagram.com/myfundmobile1',
-    'TikTok': 'https://www.tiktok.com/@myfundmobile',
-    'YouTube': 'https://youtube.com/@myfundmobile',
-    'X': 'https://x.com/myfundmobile',
-    'LinkedIn': 'https://linkedin.com/company/myfundmobile',
-    'Facebook': 'https://facebook.com/myfundmobile',
-    'Threads': 'https://threads.net/@myfundmobile',
-}
 
 # Influencer programme (www.myfundmobile.com/influencer). Same five-step
 # shape as STEPS - the web form treats step 5 as the optional video - built
