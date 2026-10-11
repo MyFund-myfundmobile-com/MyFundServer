@@ -7792,6 +7792,19 @@ def get_past_top_savers(request, month, year):
 from .serializers import KYCUpdateSerializer
 
 
+def _shrink_id_image(raw, max_side=2000, quality=80):
+    """Downscale and re-encode an ID photo as JPEG (keeps it readable for
+    review, well under the 5MB upload limit)."""
+    from io import BytesIO
+    from PIL import Image, ImageOps
+    img = ImageOps.exif_transpose(Image.open(BytesIO(raw)))
+    img = img.convert("RGB")
+    img.thumbnail((max_side, max_side))
+    out = BytesIO()
+    img.save(out, format="JPEG", quality=quality, optimize=True)
+    return out.getvalue()
+
+
 class KYCUpdateView(generics.UpdateAPIView):
     serializer_class = KYCUpdateSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -7811,16 +7824,26 @@ class KYCUpdateView(generics.UpdateAPIView):
         # see CustomUser.id_upload's comment for the bug this replaces.
         uploaded_id = request.FILES.get("id_upload")
         if uploaded_id:
-            if uploaded_id.size > 5 * 1024 * 1024:
-                return Response(
-                    {"id_upload": ["Image too large. Max size is 5MB"]},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+            # Phone cameras often produce ID photos over 5MB, which used to
+            # be refused outright (users saw it as "the system keeps
+            # rejecting my ID"). Shrink/re-compress instead; only a file
+            # that isn't an image is refused.
+            uploaded_id.seek(0)
+            raw = uploaded_id.read()
+            shrunk_name = uploaded_id.name
+            if len(raw) > 5 * 1024 * 1024:
+                try:
+                    raw = _shrink_id_image(raw)
+                    shrunk_name = uploaded_id.name.rsplit(".", 1)[0] + ".jpg"
+                except Exception:
+                    return Response(
+                        {"id_upload": ["We couldn't read that image. Please upload a clear photo (JPG or PNG) of your ID."]},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
             try:
-                uploaded_id.seek(0)
-                encoded = base64.b64encode(uploaded_id.read()).decode("utf-8")
+                encoded = base64.b64encode(raw).decode("utf-8")
                 id_upload_url = upload_to_imagekit(
-                    encoded, user.id, uploaded_id.name, prefix="kyc"
+                    encoded, user.id, shrunk_name, prefix="kyc"
                 )
             except Exception as e:
                 logger.error(f"ImageKit KYC upload failed for user {user.id}: {str(e)}")
