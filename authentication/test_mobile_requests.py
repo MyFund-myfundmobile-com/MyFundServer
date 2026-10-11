@@ -153,6 +153,7 @@ class MobileRequestTests(TestCase):
     def test_force_credit_requires_reason_and_credits_once(self, metrics, push, email):
         from django.contrib.admin.models import LogEntry
         withdrawal = WithdrawalsRequestToAdmin.objects.create(user=self.owner, amount=100, total_amount=100, transaction_id="EARLY-TEST", withdrawal_type="scheduled", scheduled_processing_date=timezone.localdate() + timedelta(days=30))
+        debit = Transaction.objects.create(user=self.owner, transaction_id="EARLY-TEST", transaction_type="debit", status="pending", amount=100, scheduled_date=withdrawal.scheduled_processing_date)
         balance = self.owner.wallet
         self.assertEqual(self.action("withdrawal", withdrawal.pk, "force_credit_wallet").status_code, 400)
         self.assertEqual(self.action("withdrawal", withdrawal.pk, "force_credit_wallet", reason="Approved emergency release").status_code, 200)
@@ -163,3 +164,7 @@ class MobileRequestTests(TestCase):
         self.assertTrue(withdrawal.is_processed)
         self.assertEqual(withdrawal.status, "completed")
         self.assertTrue(LogEntry.objects.filter(object_id=str(withdrawal.pk), change_message__contains="Approved emergency release").exists())
+
+        debit.refresh_from_db()
+        self.assertEqual(debit.status, "confirmed")
+        self.assertTrue(debit.is_processed)

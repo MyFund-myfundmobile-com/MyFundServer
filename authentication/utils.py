@@ -1300,7 +1300,15 @@ def process_scheduled_withdrawal(withdrawal, triggered_by="celery"):
             pk=withdrawal.pk
         )
 
+        def complete_debit():
+            Transaction.objects.filter(
+                user_id=withdrawal.user_id, transaction_id=withdrawal.transaction_id,
+                transaction_type="debit",
+            ).update(status="confirmed", is_processed=True)
+
         if withdrawal.is_processed:
+            if withdrawal.status == "completed":
+                complete_debit()
             return "already_processed"
 
         user = CustomUser.objects.select_for_update().get(pk=withdrawal.user_id)
@@ -1318,6 +1326,7 @@ def process_scheduled_withdrawal(withdrawal, triggered_by="celery"):
             withdrawal.is_processed = True
             withdrawal.status = "completed"
             withdrawal.save(update_fields=["is_processed", "status"])
+            complete_debit()
             return "already_credited"
 
         previous_wallet = user.wallet or Decimal("0.00")
@@ -1354,11 +1363,7 @@ def process_scheduled_withdrawal(withdrawal, triggered_by="celery"):
         # management/commands/fix_scheduled_withdrawals.py had to be
         # written to hand-patch after the fact; closing it here means new
         # withdrawals won't need that patch going forward.
-        Transaction.objects.filter(
-            user=user,
-            transaction_id=withdrawal.transaction_id,
-            transaction_type="debit",
-        ).exclude(status="confirmed").update(status="confirmed")
+        complete_debit()
 
     # Same refresh every deposit-completion path already does - without
     # this, a withdrawal debits savings/investment but the ambassador
