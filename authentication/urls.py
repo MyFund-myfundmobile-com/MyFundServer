@@ -1,5 +1,6 @@
 from . import ambassador_application_views as applications
 from .graduation_views import graduation
+from .book_views import book_access, book_progress, book_read
 from django.urls import path, include
 from .request_views import requests_list, request_action, ambassador_export_link, ambassador_export
 from .foya import foya_today, foya_event, foya_admin, foya_admin_positions
@@ -98,6 +99,9 @@ urlpatterns = [
     path("influencer/applications/video/", applications.application_video, {"programme": "influencer"}),
 
     path("ambassador/graduation/", graduation),
+    path("books/<slug:slug>/access/", book_access),
+    path("books/<slug:slug>/progress/", book_progress),
+    path("books/<slug:slug>/read/<str:token>/", book_read),
     path("admin/requests/", requests_list, name="admin_requests"),
     path("admin/requests/ambassador/export-link/", ambassador_export_link, name="admin_ambassador_export_link"),
     path("admin/requests/ambassador/export/", ambassador_export, name="admin_ambassador_export"),

@@ -4263,6 +4263,8 @@ class InfluencerApplication(models.Model):
 from .ambassador_application_models import AmbassadorIntake, AmbassadorApplication, AmbassadorEmailChallenge
 # FOYA Global Honors 2026 voting campaign (Home banner + max 3 pushes).
 from .foya_models import FoyaCampaign, FoyaPush, FoyaEvent
+# In-app ambassador book reader progress.
+from .book_models import BookReadingProgress
 
 
 class AmbassadorPerformanceNotificationState(models.Model):
