@@ -106,3 +106,33 @@ class TopReferralsRoleTest(TestCase):
             self.assertEqual(response.data["period_label"], "Last 3 months")
             self.assertEqual(response.data["current_user"]["monthly_signups"], signups)
             self.assertEqual(response.data["current_user"]["monthly_confirmed"], confirmations)
+
+
+class PrivatePersonalityEndpointTest(TestCase):
+    def setUp(self):
+        from .models import AmbassadorCohort
+        cohort = AmbassadorCohort.objects.create(cohort_number=4)
+        self.owner = CustomUser.objects.create_user(email='profile-owner@example.com', phone_number='909000001', password='testpass123', is_ambassador=True, ambassador_cohort=cohort)
+        self.other = CustomUser.objects.create_user(email='profile-other@example.com', phone_number='909000002', password='testpass123', is_ambassador=True, ambassador_cohort=cohort, referral=self.owner)
+
+    def test_private_profile_is_only_returned_to_owner(self):
+        from .ambassador_personality import _RECORDS
+        record = dict(_RECORDS[0], user_id=self.owner.pk)
+        with patch('authentication.ambassador_personality._PROFILES', {self.owner.pk: record}):
+            for viewer in [self.owner, self.other]:
+                request = APIRequestFactory().get('/api/top-referrals/', {'user_id': self.owner.pk})
+                force_authenticate(request, user=viewer)
+                with patch.object(TopReferralsAPIView, 'send_rank_notification'):
+                    response = TopReferralsAPIView.as_view()(request)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.data['personality_profile_owner_id'], viewer.pk)
+                if viewer == self.owner:
+                    self.assertEqual(response.data['personality_profile']['type'], record['type'])
+                else:
+                    self.assertIsNone(response.data['personality_profile'])
+                    self.assertNotIn('personality_profile', response.data['current_user'])
+                    self.assertNotIn('Google AI Professional Certificate', str(response.data['top_referrers']))
+
+    def test_anonymous_access_is_denied(self):
+        response = TopReferralsAPIView.as_view()(APIRequestFactory().get('/api/top-referrals/'))
+        self.assertIn(response.status_code, [401, 403])

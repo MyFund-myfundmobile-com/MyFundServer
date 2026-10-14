@@ -14365,6 +14365,8 @@ class TopReferralsAPIView(APIView):
         my_signups = referrals.filter(signup_filter)
         my_confirmed = referrals.filter(confirmed_filter)
 
+        from .ambassador_personality import get_own_personality_profile, personality_test_pending
+
         current_user_stats = {
             "id": user.id,
             "first_name": user.first_name,
@@ -14391,6 +14393,9 @@ class TopReferralsAPIView(APIView):
                 "period": period,
                 "period_label": PERIOD_LABELS[period],
                 "current_user": current_user_stats,
+                "personality_profile": get_own_personality_profile(request.user),
+                "personality_profile_owner_id": request.user.pk,
+                "personality_test_pending": personality_test_pending(request.user),
             }
         )
 

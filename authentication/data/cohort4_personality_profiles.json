@@ -1,0 +1,208 @@
+[
+  {
+    "user_id": 460,
+    "source_name": "Durojaye Oluwafemi",
+    "type": "ENTJ-A",
+    "courses": [
+      "Google AI Professional Certificate",
+      "Google Prompting Essentials"
+    ],
+    "role": "Engagement (Webinars/Media): Webinar host and on-camera presenter",
+    "subtype_confirmed": true
+  },
+  {
+    "user_id": 389,
+    "source_name": "Ukanah Peter",
+    "type": "ENFJ-A",
+    "courses": [
+      "Google AI Professional Certificate",
+      "Google Digital Marketing & E-commerce"
+    ],
+    "role": "Engagement (Social & Content): Community and referral campaign lead",
+    "subtype_confirmed": true
+  },
+  {
+    "user_id": 3711,
+    "source_name": "Otum Onyinyechi",
+    "type": "ISTJ-A",
+    "courses": [
+      "Google AI Professional Certificate",
+      "Google Prompting Essentials"
+    ],
+    "role": "CX: Onboarding and first-deposit support",
+    "subtype_confirmed": true
+  },
+  {
+    "user_id": 655,
+    "source_name": "Olowookere Praise",
+    "type": "INFJ",
+    "courses": [
+      "Google AI Professional Certificate",
+      "Google Prompting Essentials"
+    ],
+    "role": "Engagement (Webinars/Media): Financial-education presenter",
+    "subtype_confirmed": false
+  },
+  {
+    "user_id": 2522,
+    "source_name": "Olusegun Boluwatife",
+    "type": "ENTJ-A",
+    "courses": [
+      "Google AI Professional Certificate",
+      "Google Project Management"
+    ],
+    "role": "Engagement (Webinars/Media): Campus engagement and events lead",
+    "subtype_confirmed": true
+  },
+  {
+    "user_id": 3959,
+    "source_name": "Anjolaoluwa Olabisi",
+    "type": "ENFP-T",
+    "courses": [
+      "Google AI Professional Certificate",
+      "Google Digital Marketing & E-commerce"
+    ],
+    "role": "Engagement (Social & Content): Social media and content creator",
+    "subtype_confirmed": true
+  },
+  {
+    "user_id": 3605,
+    "source_name": "Anuoluwapo Afolabi",
+    "type": "ENTJ-A",
+    "courses": [
+      "Google AI Professional Certificate",
+      "Google Project Management"
+    ],
+    "role": "Project & Property (Site): Site activities coordinator. Extra: intern/HR support",
+    "subtype_confirmed": true
+  },
+  {
+    "user_id": 308,
+    "source_name": "John Olawole",
+    "type": "INTJ-A",
+    "courses": [
+      "Google AI Professional Certificate",
+      "Google Project Management"
+    ],
+    "role": "Project & Property (Site): Site progress reporter and investor liaison",
+    "subtype_confirmed": true
+  },
+  {
+    "user_id": 990,
+    "source_name": "Adeogun Olutoyosi",
+    "type": "ISFJ-T",
+    "courses": [
+      "Google AI Professional Certificate",
+      "Google Prompting Essentials"
+    ],
+    "role": "Engagement (Webinars/Media): Webinar content and script writer",
+    "subtype_confirmed": true
+  },
+  {
+    "user_id": 3844,
+    "source_name": "Aladesuru Adewale",
+    "type": "ENTJ-A",
+    "courses": [
+      "Google AI Professional Certificate",
+      "Google Digital Marketing & E-commerce"
+    ],
+    "role": "Engagement (Webinars/Media): Brand and publicity lead. Extra: brand partnerships",
+    "subtype_confirmed": true
+  },
+  {
+    "user_id": 3972,
+    "source_name": "Angela Ibhawoh",
+    "type": "INTJ-T",
+    "courses": [
+      "Google AI Professional Certificate",
+      "Google UX Design"
+    ],
+    "role": "Tech (Development & AI): Product and UX analyst, AI-agent flow reviewer",
+    "subtype_confirmed": true
+  },
+  {
+    "user_id": 3977,
+    "source_name": "Mojola Ogundipe",
+    "type": "INTJ-A",
+    "courses": [
+      "Google AI Professional Certificate",
+      "Google Data Analytics"
+    ],
+    "role": "Tech (Development & AI): Data tracking and reporting analyst",
+    "subtype_confirmed": true
+  },
+  {
+    "user_id": 3968,
+    "source_name": "Taiwo Qaudri",
+    "type": "INTJ-T",
+    "courses": [
+      "Google AI Professional Certificate",
+      "Google Digital Marketing & E-commerce"
+    ],
+    "role": "Engagement (Social & Content): SME success-story writer. Extra: SME partnerships",
+    "subtype_confirmed": true
+  },
+  {
+    "user_id": 1108,
+    "source_name": "Abulu Judith",
+    "type": "INTP-A",
+    "courses": [
+      "Google AI Professional Certificate",
+      "Google Data Analytics"
+    ],
+    "role": "Tech (Development & AI): QA tester and data checker",
+    "subtype_confirmed": true
+  },
+  {
+    "user_id": 2072,
+    "source_name": "Eniola Omotayo",
+    "type": "ENFP-T",
+    "courses": [
+      "Google AI Professional Certificate",
+      "Google Prompting Essentials"
+    ],
+    "role": "Engagement (Webinars/Media): Presenter and webinar co-host",
+    "subtype_confirmed": true
+  },
+  {
+    "user_id": 3572,
+    "source_name": "Ajayi Priscilla",
+    "type": "INTP-T",
+    "courses": [
+      "Google AI Professional Certificate",
+      "Google Data Analytics"
+    ],
+    "role": "CX: Feedback and complaint analyst",
+    "subtype_confirmed": true
+  },
+  {
+    "user_id": 3967,
+    "source_name": "Adeyemi Oluwatosin",
+    "type": "INFJ-A",
+    "courses": [
+      "Google AI Professional Certificate",
+      "Google Prompting Essentials"
+    ],
+    "role": "CX: WhatsApp support agent and saver coach",
+    "subtype_confirmed": true
+  },
+  {
+    "user_id": 3976,
+    "source_name": "Oyewole Jesutofunmi",
+    "type": "ENFP-A",
+    "courses": [
+      "Google AI Professional Certificate",
+      "Google Digital Marketing & E-commerce"
+    ],
+    "role": "Engagement (Social & Content): Campus community builder, content assistant",
+    "subtype_confirmed": true
+  },
+  {
+    "user_id": 1443,
+    "source_name": "Christine Ahsan",
+    "type": "ENTJ-A",
+    "courses": [],
+    "role": "",
+    "subtype_confirmed": true
+  }
+]
