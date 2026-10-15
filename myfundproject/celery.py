@@ -148,6 +148,13 @@ app.conf.beat_schedule = {
         "task": "authentication.tasks.send_groupbuy_deadline_reminders_task",
         "schedule": crontab(hour=8, minute=0),
     },
+    # New users who haven't saved yet: day-2 / day-7 nudges at 10:00 WAT,
+    # ahead of the 12 noon daily-returns run.
+    "first-savings-reminders": {
+        "task": "authentication.tasks.send_first_savings_reminders_task",
+        "schedule": crontab(hour=9, minute=0),
+        "options": {"queue": "default"},
+    },
     # ROI & Payouts
     "calculate-daily-roi": {
         "task": "authentication.tasks.calculate_daily_roi_task",

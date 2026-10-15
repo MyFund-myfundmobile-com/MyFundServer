@@ -2552,3 +2552,12 @@ def send_due_foya_pushes_task():
 
 # Register scheduled ambassador performance notifications with Celery discovery.
 from .ambassador_performance_notifications import send_ambassador_performance_updates
+
+@shared_task(queue="default")
+def send_first_savings_reminders_task():
+    """Day-2 and day-7 first-QuickSave reminders for new users who haven't saved (see first_savings.py)."""
+    from .first_savings import send_first_savings_reminders
+
+    sent = send_first_savings_reminders()
+    logger.info(f"First-savings reminders sent: {sent}")
+    return sent
