@@ -15,27 +15,43 @@ from .utils import send_transactional_email, send_push_notification
 logger = logging.getLogger(__name__)
 
 
-def notification_copy(report, previous_rank, weekly, as_of):
+def notification_copy(report, previous_rank, weekly, as_of, first_name):
     rank, stats = report["rank"], report["month_summary"]
     cohort = report["cohort"]["cohort_number"]
     position, total = rank["position"], rank["total_ambassadors"]
     if weekly:
-        title = f"Your weekly Cohort {cohort} performance report"
-        movement = "Your weekly performance snapshot."
+        email_subject = f"Your weekly Cohort {cohort} performance"
+        intro = "Here is your weekly performance snapshot."
     else:
         direction = "improved" if position < previous_rank else "changed"
-        title = f"Cohort {cohort}: overall position {direction} to #{position}"
-        movement = f"Your overall cohort position moved from #{previous_rank} to #{position}."
-    message = (
-        f"{movement} Overall: #{position} of {total} in Cohort {cohort}, "
-        f"with {rank['lifetime_points']} points since the cohort started. "
-        f"{stats['month_label']} so far: {stats['signups']} sign-ups, "
-        f"{stats['confirmed']} confirmed referrals, {stats['attendance']} sessions, "
-        f"{stats['points']} points. Monthly position: #{stats['month_position']} of {total}. "
-        f"As of {as_of:%d %b %Y, %H:%M} WAT. "
-        "Live points are estimates until reports are approved. Positions can change."
+        email_subject = f"Cohort {cohort}: your position {direction} to #{position}"
+        intro = f"Your overall cohort position moved from #{previous_rank} to #{position}."
+
+    # Android may truncate long push bodies even when expanded. Keep this to
+    # the decision-making metrics only; the tap takes the member to the full,
+    # live breakdown in the app.
+    push_title = f"Cohort {cohort} update"
+    push_message = (
+        f"You’re #{position} of {total} with {stats['points']} points: "
+        f"{stats['signups']} sign-ups, {stats['confirmed']} confirmed referrals "
+        f"and {stats['attendance']} sessions. Keep going—tap to view your report."
     )
-    return title, message
+    email_html = f"""
+        <p>Hi {escape(first_name or 'there')},</p>
+        <p>{escape(intro)}</p>
+        <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="border-collapse:collapse;max-width:560px">
+          <tr><td style="padding:10px 0;border-bottom:1px solid #e5e7eb;color:#4b5563">Overall rank</td><td style="padding:10px 0;border-bottom:1px solid #e5e7eb;text-align:right"><strong>#{position} of {total}</strong></td></tr>
+          <tr><td style="padding:10px 0;border-bottom:1px solid #e5e7eb;color:#4b5563">{escape(stats['month_label'])} points</td><td style="padding:10px 0;border-bottom:1px solid #e5e7eb;text-align:right"><strong>{stats['points']}</strong></td></tr>
+          <tr><td style="padding:14px 0;border-bottom:1px solid #e5e7eb;color:#4c28bc"><strong>Confirmed referrals — key focus</strong></td><td style="padding:14px 0;border-bottom:1px solid #e5e7eb;text-align:right;color:#4c28bc"><strong>{stats['confirmed']}</strong></td></tr>
+          <tr><td style="padding:10px 0;border-bottom:1px solid #e5e7eb;color:#4b5563">Sign-ups</td><td style="padding:10px 0;border-bottom:1px solid #e5e7eb;text-align:right"><strong>{stats['signups']}</strong></td></tr>
+          <tr><td style="padding:10px 0;border-bottom:1px solid #e5e7eb;color:#4b5563">Sessions attended</td><td style="padding:10px 0;border-bottom:1px solid #e5e7eb;text-align:right"><strong>{stats['attendance']}</strong></td></tr>
+          <tr><td style="padding:10px 0;color:#4b5563">Monthly position</td><td style="padding:10px 0;text-align:right"><strong>#{stats['month_position']} of {total}</strong></td></tr>
+        </table>
+        <p style="margin-top:18px">Your lifetime points: <strong>{rank['lifetime_points']}</strong>.</p>
+        <p>Live points are estimates until reports are approved; positions can change.</p>
+        <p style="color:#6b7280;font-size:13px">As of {as_of:%d %b %Y, %H:%M} WAT</p>
+    """
+    return email_subject, push_title, push_message, email_html
 
 
 def notify_member(user, weekly, now):
@@ -59,20 +75,23 @@ def notify_member(user, weekly, now):
                 if previous is None:
                     state.channels[channel] = {**saved, "rank": position}
                 continue
-            title, message = notification_copy(report, previous, weekly_due, now)
+            email_subject, push_title, push_message, email_html = notification_copy(
+                report, previous, weekly_due, now, user.first_name
+            )
             try:
                 if channel == "email":
                     result = send_transactional_email(
-                        subject=title,
-                        message=f"Hi {escape(user.first_name)},<br><br>{escape(message)}",
+                        subject=email_subject,
+                        message=email_html,
                         recipient_list=[user.email],
                     )
                     success = bool(result and result.get("sent"))
                 else:
                     result = send_push_notification(
-                        user=user, title=title, message=message,
+                        user=user, title=push_title, message=push_message,
                         data={"type": "AmbassadorPerformance", "cohort": user.ambassador_cohort_id,
-                              "position": position, "as_of": now.isoformat()},
+                              "position": position, "as_of": now.isoformat(),
+                              "deep_link": {"screen": "AmbassadorPerformanceReportScreen"}},
                     )
                     # The helper also stores an in-app notification. With no
                     # registered device, don't recreate it on every sweep.

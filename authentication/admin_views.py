@@ -4617,6 +4617,7 @@ def brevo_daily_usage(request):
 from .models import OperatingExpense
 from .serializers import OperatingExpenseSerializer
 from .views import FINANCE_METRICS_ALLOWED_EMAILS
+from .payroll import create_draft_entries, send_pending_entries
 
 
 def _is_finance_allowed(user):
@@ -4685,6 +4686,189 @@ def operating_expenses_delete(request, expense_id):
 
     expense.delete()
     return Response({"success": True})
+
+
+# ============================================================================
+# EMPLOYEE PAYROLL (Finance tab, founders-only)
+# ============================================================================
+
+def _payroll_employee_data(employee):
+    return {
+        "id": employee.id,
+        "name": employee.name,
+        "email": employee.email,
+        "department": employee.department,
+        "monthly_amount": str(employee.monthly_amount),
+        "is_active": employee.is_active,
+    }
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def payroll_employees_list(request):
+    if not _is_finance_allowed(request.user):
+        return Response({"detail": "Permission denied"}, status=403)
+    employees = Employee.objects.filter(is_active=True).order_by("department", "name")
+    return Response({"data": [_payroll_employee_data(employee) for employee in employees]})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def payroll_employee_create(request):
+    if not _is_finance_allowed(request.user):
+        return Response({"detail": "Permission denied"}, status=403)
+
+    name = str(request.data.get("name", "")).strip()
+    email = str(request.data.get("email", "")).strip().lower()
+    department = str(request.data.get("department", "")).strip()
+    try:
+        monthly_amount = Decimal(str(request.data.get("monthly_amount", "")))
+    except Exception:
+        monthly_amount = Decimal("0")
+
+    valid_departments = {value for value, _label in Employee.DEPARTMENT_CHOICES}
+    if not name or not email or department not in valid_departments or monthly_amount <= 0:
+        return Response({"error": "Enter a name, valid department, email, and monthly allowance."}, status=400)
+    if Employee.objects.filter(email__iexact=email).exists():
+        return Response({"error": "An employee with this email already exists."}, status=400)
+
+    employee = Employee.objects.create(
+        name=name, email=email, department=department, monthly_amount=monthly_amount
+    )
+    return Response(_payroll_employee_data(employee), status=201)
+
+
+def _selected_payroll_employees(request):
+    employee_ids = request.data.get("employee_ids", [])
+    if not isinstance(employee_ids, list) or not employee_ids:
+        return None
+    employees = Employee.objects.filter(is_active=True, id__in=employee_ids)
+    # Do not silently turn a stale/forged selection into a partial payment.
+    return employees if employees.count() == len(set(employee_ids)) else None
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def payroll_draft_create(request):
+    if not _is_finance_allowed(request.user):
+        return Response({"detail": "Permission denied"}, status=403)
+    employees = _selected_payroll_employees(request)
+    if employees is None:
+        return Response({"error": "Select at least one active employee."}, status=400)
+    month_label = str(request.data.get("month_label", "")).strip() or timezone.now().strftime("%B %Y")
+    run = create_draft_entries(employees, month_label, executed_by=request.user.email)
+    entries = list(run.entries.all())
+    return Response({"run_id": run.id, "month_label": month_label, "draft_entries": len(entries)})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def payroll_pay(request):
+    if not _is_finance_allowed(request.user):
+        return Response({"detail": "Permission denied"}, status=403)
+    employees = _selected_payroll_employees(request)
+    if employees is None:
+        return Response({"error": "Select at least one active employee."}, status=400)
+    month_label = str(request.data.get("month_label", "")).strip() or timezone.now().strftime("%B %Y")
+    run = create_draft_entries(employees, month_label, executed_by=request.user.email)
+    results = send_pending_entries(run.entries.all(), test=False)
+    return Response({"run_id": run.id, "month_label": month_label, "results": results, "paid_entries": len(results)})
+
+
+# Ambassador stipends deliberately call the established Django-admin payment
+# routine below. That keeps wallet credits, Transaction records, email/push
+# notifications, and finance-metric accounting in one workflow.
+def _ambassador_report_data(request, report):
+    submitted_fields = (
+        "signups", "confirmed", "savings", "attendance", "others", "coursera",
+        "social_media", "abroad_confirmed", "events", "reshares",
+    )
+    values = {
+        field: {
+            "submitted": str(getattr(report, f"{field}_submitted")),
+            "approved": str(getattr(report, f"{field}_approved")),
+        }
+        for field in submitted_fields
+    }
+    evidence = {}
+    for field in ("coursera_certificate", "social_media_evidence", "abroad_signups_evidence", "events_evidence", "reshares_evidence"):
+        upload = getattr(report, field)
+        if upload:
+            evidence[field] = request.build_absolute_uri(upload.url)
+    return {
+        "id": report.id,
+        "month": report.month,
+        "name": report.user.get_full_name() or report.user.email,
+        "email": report.user.email,
+        "status": report.status,
+        "stipend_paid": report.stipend_paid,
+        "points": str(report.total_points_awarded),
+        "stipend_amount": str(report.stipend_amount),
+        "notes": report.notes or "",
+        "admin_note": report.admin_note or "",
+        "values": values,
+        "evidence": evidence,
+    }
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def ambassador_stipends_list(request):
+    if not _is_finance_allowed(request.user):
+        return Response({"detail": "Permission denied"}, status=403)
+    from .models import AmbassadorMonthlyReport
+    month = request.GET.get("month", "").strip()
+    reports = AmbassadorMonthlyReport.objects.select_related("user").all()
+    if month:
+        reports = reports.filter(month=month)
+    return Response({"data": [_ambassador_report_data(request, report) for report in reports[:200]]})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def ambassador_stipend_approve_and_pay(request, report_id):
+    if not _is_finance_allowed(request.user):
+        return Response({"detail": "Permission denied"}, status=403)
+    from django.contrib import admin as django_admin
+    from .admin import AmbassadorMonthlyReportAdmin
+    from .models import AmbassadorMonthlyReport
+    try:
+        report = AmbassadorMonthlyReport.objects.select_related("user").get(pk=report_id)
+    except AmbassadorMonthlyReport.DoesNotExist:
+        return Response({"error": "Report not found."}, status=404)
+    if report.stipend_paid or report.status == "approved":
+        return Response({"error": "This report has already been reviewed and processed."}, status=400)
+
+    approved_values = request.data.get("approved_values", {})
+    allowed = {
+        "signups", "confirmed", "savings", "attendance", "others", "coursera",
+        "social_media", "abroad_confirmed", "events", "reshares",
+    }
+    if not isinstance(approved_values, dict):
+        return Response({"error": "Approved values must be an object."}, status=400)
+    try:
+        for field, value in approved_values.items():
+            if field not in allowed:
+                continue
+            numeric = Decimal(str(value))
+            if numeric < 0:
+                raise ValueError
+            setattr(report, f"{field}_approved", numeric)
+    except Exception:
+        return Response({"error": "Approved values must be non-negative numbers."}, status=400)
+
+    report.admin_note = str(request.data.get("admin_note", report.admin_note or "")).strip()
+    report.status = "approved"
+    report.approved_by = request.user
+    report.approved_at = timezone.now()
+    report.recalculate_points()
+    report.save()
+
+    # This is the existing Koyeb/Django-admin routine: one wallet credit,
+    # one confirmed Transaction, and the existing email + push copy.
+    admin_workflow = AmbassadorMonthlyReportAdmin(AmbassadorMonthlyReport, django_admin.site)
+    credited, message = admin_workflow.credit_stipend_and_notify(report)
+    return Response({"credited": credited, "message": message, "report": _ambassador_report_data(request, report)})
 
 
 def _can_submit_department_report(user, department):

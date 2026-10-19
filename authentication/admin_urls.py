@@ -163,6 +163,12 @@ urlpatterns = [
         admin_views.operating_expenses_delete,
         name="admin_operating_expenses_delete",
     ),
+    path("payroll/employees", admin_views.payroll_employees_list, name="admin_payroll_employees"),
+    path("payroll/employees/create", admin_views.payroll_employee_create, name="admin_payroll_employee_create"),
+    path("payroll/drafts/create", admin_views.payroll_draft_create, name="admin_payroll_draft_create"),
+    path("payroll/pay", admin_views.payroll_pay, name="admin_payroll_pay"),
+    path("ambassador-stipends", admin_views.ambassador_stipends_list, name="admin_ambassador_stipends"),
+    path("ambassador-stipends/<int:report_id>/approve-pay", admin_views.ambassador_stipend_approve_and_pay, name="admin_ambassador_stipend_approve_pay"),
     # ========================================================================
     # ADMIN METRICS DASHBOARD (mobile app - 7-category overview)
     # ========================================================================

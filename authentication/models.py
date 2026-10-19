@@ -4160,6 +4160,7 @@ class Employee(models.Model):
     DEPARTMENT_CHOICES = [
         ("Tech", "Tech"),
         ("Engagement", "Engagement"),
+        ("Media and Communications", "Media and Communications"),
         ("CX", "CX"),
         ("Operations", "Operations"),
         ("Property", "Property"),
