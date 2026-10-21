@@ -1,0 +1,67 @@
+from datetime import timedelta
+from unittest.mock import patch
+
+from django.core.cache import cache
+from django.test import TestCase
+from django.utils import timezone
+from rest_framework.test import APIClient
+
+from authentication.models import CustomUser
+
+
+@patch("authentication.views.send_otp_sms", return_value=True, create=True)
+@patch("authentication.views.send_otp_email", return_value=True, create=True)
+@patch("authentication.views.send_otp_async", create=True)
+@patch("authentication.views.create_dedicated_account", create=True)
+@patch("authentication.views.create_paystack_customer", return_value=(False, "skipped"), create=True)
+class SignupPhoneTests(TestCase):
+    """A number held by a never-finished signup used to be refused forever,
+    and a duplicate typed as 0810... crashed with "Signup failed"."""
+
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+
+    def signup(self, phone="08106904663", email="new@example.com"):
+        cache.clear()  # the per-phone/IP throttle isn't what's under test
+        return self.client.post("/api/signup/", {
+            "email": email, "password": "Password123!", "first_name": "New", "last_name": "Saver",
+            "phone_number": phone, "how_did_you_hear": "OTHER",
+        }, format="json")
+
+    def holder(self, hours_old, **fields):
+        user = CustomUser.objects.create_user(
+            email=fields.pop("email", "old@example.com"), password="x",
+            phone_number="2348106904663", is_active=False, **fields)
+        CustomUser.objects.filter(pk=user.pk).update(date_joined=timezone.now() - timedelta(hours=hours_old))
+        return user
+
+    def test_abandoned_signup_frees_the_number(self, *_):
+        old = self.holder(hours_old=48)
+        response = self.signup()
+        self.assertEqual(response.status_code, 201, response.content)
+        old.refresh_from_db()
+        self.assertNotEqual(old.phone_number, "2348106904663")
+        self.assertTrue(old.is_deleted)
+        self.assertEqual(CustomUser.objects.get(email="new@example.com").phone_number, "2348106904663")
+
+    def test_same_person_can_resign_with_their_old_email(self, *_):
+        self.holder(hours_old=48, email="new@example.com")
+        self.assertEqual(self.signup().status_code, 201)
+
+    def test_recent_or_used_accounts_keep_their_number(self, *_):
+        self.holder(hours_old=2)  # may still be finishing signup
+        response = self.signup()
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("phone_number", response.json())
+
+    def test_duplicate_of_active_account_gets_clear_error_not_500(self, *_):
+        CustomUser.objects.create_user(email="active@example.com", password="x", phone_number="2348106904663")
+        response = self.signup(phone="08106904663")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("phone_number", response.json())
+
+    def test_foreign_number_with_country_code_is_accepted(self, *_):
+        response = self.signup(phone="+12025550123", email="abroad@example.com")
+        self.assertEqual(response.status_code, 201, response.content)
+        self.assertEqual(CustomUser.objects.get(email="abroad@example.com").phone_number, "12025550123")

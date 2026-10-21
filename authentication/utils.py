@@ -3220,3 +3220,41 @@ def send_groupbuy_deadline_reminders(dry_run=False):
         "total_notified": total_notified,
         "groups": notified_groups,
     }
+
+
+# --------------------------------------------------
+# ABANDONED SIGNUPS
+# --------------------------------------------------
+# Phone numbers and emails are unique, so a signup that was started but
+# never finished (no OTP confirmed, never logged in) used to lock that
+# number/email forever - the next attempt, often the same person, was
+# refused. Free them from accounts that are clearly abandoned.
+ABANDONED_SIGNUP_AGE = timedelta(hours=24)
+
+
+def release_abandoned_signup(phone_variants=(), email=None):
+    """Free a phone number/email held by an abandoned signup. Returns how many accounts were released."""
+    from django.db.models import Q
+    from .models import CustomUser, Transaction
+
+    match = Q()
+    phones = [p for p in phone_variants if p]
+    if phones:
+        match |= Q(phone_number__in=phones)
+    if email:
+        match |= Q(email__iexact=email.strip())
+    if not match:
+        return 0
+    released = 0
+    cutoff = timezone.now() - ABANDONED_SIGNUP_AGE
+    for user in CustomUser.objects.filter(match, is_active=False, last_login__isnull=True, is_staff=False, date_joined__lt=cutoff):
+        if any([user.savings, user.investment, user.wallet]) or Transaction.objects.filter(user=user).exists():
+            continue
+        old_phone, old_email = user.phone_number, user.email
+        user.phone_number = f"x{user.pk}"[:15]
+        user.email = f"released-{user.pk}@abandoned.invalid"
+        user.is_deleted = True
+        user.save(update_fields=["phone_number", "email", "is_deleted"])
+        logger.info(f"Released abandoned signup {user.pk} (phone {old_phone}, email {old_email}) for a new signup")
+        released += 1
+    return released

@@ -135,7 +135,21 @@ def signup(request):
     cache.set(phone_key, True, timeout=60)
 
     try:
-        serializer = SignupSerializer(data=request.data, context={"request": request})
+        from django.db import IntegrityError
+        from .utils import release_abandoned_signup
+
+        # Numbers are stored normalised (2348...), so check uniqueness on that
+        # form - the raw "0810..." used to slip past the serializer's check and
+        # then crash on save with a vague "Signup failed" error. Numbers/emails
+        # held by abandoned signups are freed first (see release_abandoned_signup).
+        raw_phone = str(phone_number).strip().replace(" ", "")
+        release_abandoned_signup(
+            phone_variants={validated_phone, raw_phone, f"+{validated_phone}"},
+            email=request.data.get("email"),
+        )
+        data = request.data.copy()
+        data["phone_number"] = validated_phone
+        serializer = SignupSerializer(data=data, context={"request": request})
 
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -143,7 +157,13 @@ def signup(request):
         # -----------------------
         # CREATE USER
         # -----------------------
-        user = serializer.save()
+        try:
+            user = serializer.save()
+        except IntegrityError:
+            return Response(
+                {"phone_number": ["This phone number is already registered."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         user.phone_number = validated_phone
         user.how_did_you_hear = serializer.validated_data.get(
