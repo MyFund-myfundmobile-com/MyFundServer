@@ -4617,7 +4617,7 @@ def brevo_daily_usage(request):
 from .models import OperatingExpense
 from .serializers import OperatingExpenseSerializer
 from .views import FINANCE_METRICS_ALLOWED_EMAILS
-from .payroll import create_draft_entries, send_pending_entries
+from .payroll import create_draft_entries, notify_employee_change, send_pending_entries
 
 
 def _is_finance_allowed(user):
@@ -4692,6 +4692,9 @@ def operating_expenses_delete(request, expense_id):
 # EMPLOYEE PAYROLL (Finance tab, founders-only)
 # ============================================================================
 
+from .models import PayrollEntry
+
+
 def _payroll_employee_data(employee):
     return {
         "id": employee.id,
@@ -4735,7 +4738,9 @@ def payroll_employee_create(request):
     employee = Employee.objects.create(
         name=name, email=email, department=department, monthly_amount=monthly_amount
     )
-    return Response(_payroll_employee_data(employee), status=201)
+    # Same welcome push + email as adding them in Django admin.
+    has_account = notify_employee_change(employee) is not False
+    return Response({**_payroll_employee_data(employee), "has_account": has_account}, status=201)
 
 
 def _selected_payroll_employees(request):
@@ -4770,9 +4775,81 @@ def payroll_pay(request):
     if employees is None:
         return Response({"error": "Select at least one active employee."}, status=400)
     month_label = str(request.data.get("month_label", "")).strip() or timezone.now().strftime("%B %Y")
+    # Draft anyone who isn't drafted yet, then pay every pending entry for the
+    # selected employees this month - including drafts made (and possibly
+    # edited) earlier, which create_draft_entries skips.
     run = create_draft_entries(employees, month_label, executed_by=request.user.email)
-    results = send_pending_entries(run.entries.all(), test=False)
-    return Response({"run_id": run.id, "month_label": month_label, "results": results, "paid_entries": len(results)})
+    pending = PayrollEntry.objects.filter(
+        employee__in=employees, description=f"{month_label} Allowance", status="pending"
+    )
+    results = send_pending_entries(pending, test=False)
+    paid = sum(1 for r in results if r.get("status") == "credited")
+    return Response({"run_id": run.id, "month_label": month_label, "results": results, "paid_entries": paid})
+
+
+def _payroll_draft_data(entry):
+    return {
+        "id": entry.id, "employee_id": entry.employee_id, "name": entry.name, "email": entry.email,
+        "department": entry.employee.department if entry.employee else "",
+        "amount": str(entry.amount), "description": entry.description,
+        "created_at": entry.created_at.isoformat(),
+    }
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def payroll_drafts_list(request):
+    """Pending (unpaid) payment drafts, editable before paying."""
+    if not _is_finance_allowed(request.user):
+        return Response({"detail": "Permission denied"}, status=403)
+    entries = PayrollEntry.objects.filter(status="pending").select_related("employee").order_by("-created_at")
+    return Response({"data": [_payroll_draft_data(entry) for entry in entries]})
+
+
+@api_view(["PATCH", "DELETE"])
+@permission_classes([IsAuthenticated])
+def payroll_draft_detail(request, entry_id):
+    """Edit a draft's amount/description, or remove it - pending drafts only."""
+    if not _is_finance_allowed(request.user):
+        return Response({"detail": "Permission denied"}, status=403)
+    entry = PayrollEntry.objects.filter(id=entry_id, status="pending").select_related("employee").first()
+    if entry is None:
+        return Response({"error": "This draft was already paid or removed."}, status=404)
+    if request.method == "DELETE":
+        entry.delete()
+        return Response(status=204)
+    if "amount" in request.data:
+        try:
+            amount = Decimal(str(request.data.get("amount")))
+        except Exception:
+            amount = Decimal("0")
+        if amount <= 0:
+            return Response({"error": "Enter an amount greater than zero."}, status=400)
+        entry.amount = amount
+    if "description" in request.data:
+        description = str(request.data.get("description") or "").strip()[:150]
+        if not description:
+            return Response({"error": "Enter a description."}, status=400)
+        entry.description = description
+    entry.save(update_fields=["amount", "description"])
+    return Response(_payroll_draft_data(entry))
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def payroll_drafts_pay(request):
+    """Pay selected pending drafts as they stand (after any edits)."""
+    if not _is_finance_allowed(request.user):
+        return Response({"detail": "Permission denied"}, status=403)
+    entry_ids = request.data.get("entry_ids", [])
+    if not isinstance(entry_ids, list) or not entry_ids:
+        return Response({"error": "Select at least one draft."}, status=400)
+    pending = PayrollEntry.objects.filter(id__in=entry_ids, status="pending")
+    if pending.count() != len(set(entry_ids)):
+        return Response({"error": "Some drafts were already paid or removed. Refresh and try again."}, status=409)
+    results = send_pending_entries(pending, test=False)
+    paid = sum(1 for r in results if r.get("status") == "credited")
+    return Response({"results": results, "paid_entries": paid})
 
 
 # Ambassador stipends deliberately call the established Django-admin payment

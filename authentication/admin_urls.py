@@ -167,6 +167,9 @@ urlpatterns = [
     path("payroll/employees/create", admin_views.payroll_employee_create, name="admin_payroll_employee_create"),
     path("payroll/drafts/create", admin_views.payroll_draft_create, name="admin_payroll_draft_create"),
     path("payroll/pay", admin_views.payroll_pay, name="admin_payroll_pay"),
+    path("payroll/drafts", admin_views.payroll_drafts_list, name="admin_payroll_drafts"),
+    path("payroll/drafts/pay", admin_views.payroll_drafts_pay, name="admin_payroll_drafts_pay"),
+    path("payroll/drafts/<int:entry_id>", admin_views.payroll_draft_detail, name="admin_payroll_draft_detail"),
     path("ambassador-stipends", admin_views.ambassador_stipends_list, name="admin_ambassador_stipends"),
     path("ambassador-stipends/<int:report_id>/approve-pay", admin_views.ambassador_stipend_approve_and_pay, name="admin_ambassador_stipend_approve_pay"),
     # ========================================================================

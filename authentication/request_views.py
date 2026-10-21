@@ -159,8 +159,36 @@ def request_counts():
     return counts
 
 
+def search_requests(qs, request_kind, term):
+    """Admin Requests search: name, email, phone, or transaction reference."""
+    term = (term or "").strip()
+    if not term:
+        return qs
+    words = term.split()
+    if request_kind == "kyc":
+        prefix = ""
+    elif request_kind in APPLICATION_KINDS:
+        match = Q(email__icontains=term) | Q(user__email__icontains=term)
+        for word in words:
+            match |= Q(user__first_name__icontains=word) | Q(user__last_name__icontains=word)
+        return qs.filter(match)
+    else:
+        prefix = "user__"
+    match = Q(**{f"{prefix}email__icontains": term}) | Q(**{f"{prefix}phone_number__icontains": term})
+    name = Q()
+    for word in words:  # "ada obi" matches first + last name
+        name &= Q(**{f"{prefix}first_name__icontains": word}) | Q(**{f"{prefix}last_name__icontains": word})
+    match |= name
+    if request_kind in {"quicksave", "quickinvest", "withdrawal"}:
+        match |= Q(transaction_id__icontains=term)
+    if request_kind == "phone_change":
+        match |= Q(new_phone__icontains=term) | Q(old_phone__icontains=term)
+    return qs.filter(match)
+
+
 def ambassador_list(request, scope, sort, offset, programme="ambassador"):
     qs = ambassador_queue(scope, programme).order_by("created_at" if sort == "oldest" else "-created_at")
+    qs = search_requests(qs, "ambassador", request.query_params.get("q"))
     everything = ambassador_queue("all", programme)
     return Response({
         "results": [serialize_ambassador(app) for app in qs[offset:offset + 20]],
@@ -187,8 +215,24 @@ def requests_list(request):
     sort = request.query_params.get("sort", "newest")
     if sort not in ["newest", "oldest", "amount_high", "amount_low"]:
         raise ValidationError("Invalid request sort.")
+    # Withdrawal filter (mobile admin Requests "Filter" menu): scheduled,
+    # immediate, or scheduled withdrawals due today/overdue. Any other
+    # request type has no withdrawal type, so it's excluded while set.
+    withdrawal_filter = request.query_params.get("withdrawal_filter", "")
+    if withdrawal_filter not in ["", "scheduled", "immediate", "due"]:
+        raise ValidationError("Invalid withdrawal filter.")
     if kind in APPLICATION_KINDS:
         return ambassador_list(request, scope, sort, offset, APPLICATION_KINDS[kind])
+
+    def filtered(qs, request_kind):
+        qs = search_requests(qs, request_kind, request.query_params.get("q"))
+        if not withdrawal_filter:
+            return qs
+        if request_kind != "withdrawal":
+            return qs.none()
+        if withdrawal_filter == "due":
+            return qs.filter(withdrawal_type="scheduled", scheduled_processing_date__lte=timezone.localdate())
+        return qs.filter(withdrawal_type=withdrawal_filter)
     def ordered(qs, request_kind):
         date_field = "updated_at" if request_kind == "kyc" else "created_at"
         if sort.startswith("amount") and request_kind not in {"kyc", "phone_change", "influencer"}:
@@ -202,6 +246,7 @@ def requests_list(request):
                 qs = model.objects.filter(Q(pk__in=queue(request_kind).values("pk")) | Q(pk__in=resolved_queue(request_kind).values("pk")))
             else:
                 qs = resolved_queue(request_kind) if scope == "resolved" else queue(request_kind)
+            qs = filtered(qs, request_kind)
             total += qs.count()
             qs = ordered(qs, request_kind)
             if request_kind != "kyc":
@@ -219,6 +264,7 @@ def requests_list(request):
         resolved_ids = resolved_queue(kind).values("pk")
         qs = MODELS[kind].objects.filter(Q(pk__in=pending_ids) | Q(pk__in=resolved_ids))
         qs = qs.order_by("-updated_at", "-pk") if kind == "kyc" else qs.select_related("user").order_by("-created_at", "-pk")
+    qs = filtered(qs, kind)
     if request.query_params.get("request_id"):
         qs = qs.filter(pk=request.query_params["request_id"])
     if request.query_params.get("transaction_id") and kind not in {"kyc", "phone_change", "influencer"}:

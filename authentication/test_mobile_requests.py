@@ -168,3 +168,29 @@ class MobileRequestTests(TestCase):
         debit.refresh_from_db()
         self.assertEqual(debit.status, "confirmed")
         self.assertTrue(debit.is_processed)
+
+    def test_withdrawal_filter(self):
+        today = timezone.localdate()
+        make = lambda ref, kind, days=None: WithdrawalsRequestToAdmin.objects.create(
+            user=self.owner, amount=100, total_amount=100, transaction_id=ref, withdrawal_type=kind,
+            scheduled_processing_date=today + timedelta(days=days) if days is not None else None)
+        make("SCHED-LATER", "scheduled", 5)
+        make("SCHED-DUE", "scheduled", 0)
+        make("INSTANT", "immediate")
+        refs = lambda **params: sorted(r["transaction_id"] for r in self.client.get(
+            "/api/admin/requests/", {"kind": "all", "scope": "all", **params}).data["results"] if r["kind"] == "withdrawal")
+        kinds = lambda **params: {r["kind"] for r in self.client.get("/api/admin/requests/", {"kind": "all", "scope": "all", **params}).data["results"]}
+        self.assertEqual(refs(withdrawal_filter="scheduled"), ["SCHED-DUE", "SCHED-LATER"])
+        self.assertEqual(refs(withdrawal_filter="due"), ["SCHED-DUE"])
+        self.assertEqual(refs(withdrawal_filter="immediate"), ["INSTANT"])
+        self.assertEqual(kinds(withdrawal_filter="scheduled"), {"withdrawal"})  # other request types excluded
+        self.assertIn("quicksave", kinds())
+        self.assertEqual(self.client.get("/api/admin/requests/", {"withdrawal_filter": "bogus"}).status_code, 400)
+
+    def test_search(self):
+        WithdrawalsRequestToAdmin.objects.create(user=self.owner, amount=100, total_amount=100, transaction_id="FINDME-123", withdrawal_type="immediate")
+        found = lambda **params: {(r["kind"], r.get("transaction_id")) for r in self.client.get("/api/admin/requests/", {"kind": "all", "scope": "all", **params}).data["results"]}
+        self.assertIn(("withdrawal", "FINDME-123"), found(q="findme"))
+        self.assertNotIn(("quicksave", "REQUEST-TEST"), found(q="findme"))
+        self.assertIn(("quicksave", "REQUEST-TEST"), found(q="owner@example"))
+        self.assertEqual(found(q="nobody-matches-this"), set())
