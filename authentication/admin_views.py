@@ -34,6 +34,8 @@ from .serializers import (
     CxWeeklyReportSerializer,
 )
 from .utils import (
+    ABROAD_PHONE_Q,
+    is_abroad_number,
     grant_user_ambassador_status,
     revoke_user_ambassador_status,
     grant_user_influencer_status,
@@ -2819,6 +2821,7 @@ def signup_segment_users(request):
                 "date_joined": u.date_joined,
                 "kyc_status": u.kyc_status,
                 "has_saved": u.id in activated_id_set,
+                "is_abroad": is_abroad_number(u.phone_number),
             }
             for u in users
         ]
@@ -2827,6 +2830,8 @@ def signup_segment_users(request):
             "segment": segment,
             "period": period_label,
             "total_count": total_count,
+            # Signed up with a non-Nigerian number (e.g. Nigerians abroad).
+            "abroad_count": users_qs.filter(ABROAD_PHONE_Q).count(),
             "truncated": total_count > SIGNUP_USER_LIST_CAP,
             "data": data,
         })

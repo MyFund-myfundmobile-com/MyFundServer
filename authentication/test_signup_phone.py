@@ -72,3 +72,15 @@ class SignupPhoneTests(TestCase):
         response = self.signup(phone="08033645283", email="dupe@example.com")
         self.assertEqual(response.status_code, 400)
         self.assertFalse(CustomUser.objects.filter(email="dupe@example.com").exists())
+
+
+class AbroadNumberTests(TestCase):
+    def test_detects_numbers_with_a_foreign_country_code(self):
+        from authentication.utils import ABROAD_PHONE_Q, is_abroad_number
+        for phone in ["12025550123", "+447911123456"]:
+            self.assertTrue(is_abroad_number(phone), phone)
+        for phone in ["2348106904663", "08106904663", "+2348106904663", "8033645283", "x4021", ""]:
+            self.assertFalse(is_abroad_number(phone), phone)
+        CustomUser.objects.create_user(email="uk@example.com", password="x", phone_number="447911123456")
+        CustomUser.objects.create_user(email="ng@example.com", password="x", phone_number="2348106904663")
+        self.assertEqual(list(CustomUser.objects.filter(ABROAD_PHONE_Q).values_list("email", flat=True)), ["uk@example.com"])

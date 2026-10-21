@@ -3258,3 +3258,19 @@ def release_abandoned_signup(phone_variants=(), email=None):
         logger.info(f"Released abandoned signup {user.pk} (phone {old_phone}, email {old_email}) for a new signup")
         released += 1
     return released
+
+
+# --------------------------------------------------
+# FOREIGN (NON-NIGERIAN) NUMBERS
+# --------------------------------------------------
+# A number saved with a non-234 country code (447..., 1202...). Older
+# 10-digit numbers saved without any code can't be told apart, so they
+# aren't counted.
+from django.db.models import Q as _Q
+
+ABROAD_PHONE_Q = _Q(phone_number__regex=r"^\+?[1-9][0-9]{10,14}$") & ~_Q(phone_number__regex=r"^\+?234")
+
+
+def is_abroad_number(phone):
+    digits = str(phone or "").strip().lstrip("+")
+    return digits.isdigit() and 11 <= len(digits) <= 15 and not digits.startswith(("234", "0"))
