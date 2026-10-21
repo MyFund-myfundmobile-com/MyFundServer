@@ -65,3 +65,10 @@ class SignupPhoneTests(TestCase):
         response = self.signup(phone="+12025550123", email="abroad@example.com")
         self.assertEqual(response.status_code, 201, response.content)
         self.assertEqual(CustomUser.objects.get(email="abroad@example.com").phone_number, "12025550123")
+
+    def test_number_stored_in_old_local_format_is_still_a_duplicate(self, *_):
+        # Older accounts store 0803..., new signups normalise to 234803...
+        CustomUser.objects.create_user(email="legacy@example.com", password="x", phone_number="08033645283")
+        response = self.signup(phone="08033645283", email="dupe@example.com")
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(CustomUser.objects.filter(email="dupe@example.com").exists())

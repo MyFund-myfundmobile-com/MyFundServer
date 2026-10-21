@@ -143,10 +143,20 @@ def signup(request):
         # then crash on save with a vague "Signup failed" error. Numbers/emails
         # held by abandoned signups are freed first (see release_abandoned_signup).
         raw_phone = str(phone_number).strip().replace(" ", "")
+        # Older accounts store numbers as typed (0803...), newer ones as
+        # 234803... - treat every form of the number as the same number.
+        phone_variants = {validated_phone, raw_phone, f"+{validated_phone}"}
+        if validated_phone.startswith("234"):
+            phone_variants.add("0" + validated_phone[3:])
         release_abandoned_signup(
-            phone_variants={validated_phone, raw_phone, f"+{validated_phone}"},
+            phone_variants=phone_variants,
             email=request.data.get("email"),
         )
+        if CustomUser.objects.filter(phone_number__in=phone_variants).exists():
+            return Response(
+                {"phone_number": ["This phone number is already registered."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         data = request.data.copy()
         data["phone_number"] = validated_phone
         serializer = SignupSerializer(data=data, context={"request": request})
