@@ -1073,6 +1073,38 @@ def confirm_otp(request):
 
                 growth_prefix = "📈 +" if growth_percentage >= 0 else "📉 "
 
+                # CONVERSION (signed up -> made a first deposit) this month,
+                # vs the same point last month: last month's signups up to
+                # this day, counting only deposits made by this time last
+                # month - a fair like-for-like comparison.
+                from dateutil.relativedelta import relativedelta
+                from .utils import points_change, signup_conversion
+
+                conversion_rate = (
+                    round(new_saved_count / month_signup_count * 100, 1)
+                    if month_signup_count else None
+                )
+                same_point_last_month = timezone.now() - relativedelta(months=1)
+                _, last_month_saved, last_conversion_rate = signup_conversion(
+                    CustomUser.objects.filter(
+                        date_joined__year=previous_year,
+                        date_joined__month=previous_month,
+                        date_joined__lt=same_point_last_month,
+                        is_active=True,
+                    ),
+                    saved_by=same_point_last_month,
+                )
+                conversion_change = points_change(conversion_rate, last_conversion_rate)
+                conversion_line = (
+                    f"Conversion: {conversion_rate}% "
+                    + (
+                        f"({'📈' if not conversion_change.startswith('-') else '📉'} "
+                        f"{conversion_change} vs {last_conversion_rate}% same point last month)"
+                        if conversion_change else ""
+                    )
+                    if conversion_rate is not None else "Conversion: —"
+                )
+
                 # -----------------------
                 # SEND ADMIN PUSHES
                 # -----------------------
@@ -1098,8 +1130,9 @@ def confirm_otp(request):
                                 f"{current_month_name}: {month_signup_count} users "
                                 f"(Saved: {new_saved_count} | "
                                 f"Not Saved: {new_not_saved_count})\n"
+                                f"{conversion_line}\n"
                                 f"Total Confirmed: {total_confirmed_users:,}\n"
-                                f"vs Last Month: "
+                                f"Signups vs Last Month: "
                                 f"{growth_prefix}{growth_percentage}%"
                             ),
                             data={
@@ -1112,6 +1145,8 @@ def confirm_otp(request):
                                 "month_new_not_saved": new_not_saved_count,
                                 "total_confirmed_users": total_confirmed_users,
                                 "growth_percentage": growth_percentage,
+                                "conversion_rate": conversion_rate,
+                                "last_month_conversion_rate": last_conversion_rate,
                                 "type": "admin_signup_alert",
                                 **dl.admin_new_user(u.phone_number, u.email),
                             },

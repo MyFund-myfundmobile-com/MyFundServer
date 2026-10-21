@@ -3274,3 +3274,35 @@ ABROAD_PHONE_Q = _Q(phone_number__regex=r"^\+?[1-9][0-9]{10,14}$") & ~_Q(phone_n
 def is_abroad_number(phone):
     digits = str(phone or "").strip().lstrip("+")
     return digits.isdigit() and 11 <= len(digits) <= 15 and not digits.startswith(("234", "0"))
+
+
+# --------------------------------------------------
+# SIGNUP CONVERSION (signups who made a first deposit)
+# --------------------------------------------------
+def signup_conversion(users_qs, saved_by=None):
+    """(signups, savers, rate %) for a set of signups. `saved_by` counts only
+    deposits made before that moment - so a past period can be compared "at
+    the same point" instead of after it has had extra weeks to convert.
+    Same "started saving" definition as the admin dashboard: a confirmed
+    credit into savings or investment."""
+    from .models import Transaction
+
+    deposits = Transaction.objects.filter(
+        user__in=users_qs,
+        credited_to__in=["SAVINGS", "INVESTMENT"],
+        transaction_type="credit",
+        status="confirmed",
+    )
+    if saved_by is not None:
+        deposits = deposits.filter(date__lt=saved_by)
+    total = users_qs.count()
+    saved = deposits.values("user").distinct().count()
+    return total, saved, (round(saved / total * 100, 1) if total else None)
+
+
+def points_change(current, previous):
+    """'+3.2 pts' / '-1.5 pts' between two percentages, or None."""
+    if current is None or previous is None:
+        return None
+    change = round(current - previous, 1)
+    return f"{'+' if change >= 0 else ''}{change} pts"

@@ -84,3 +84,22 @@ class AbroadNumberTests(TestCase):
         CustomUser.objects.create_user(email="uk@example.com", password="x", phone_number="447911123456")
         CustomUser.objects.create_user(email="ng@example.com", password="x", phone_number="2348106904663")
         self.assertEqual(list(CustomUser.objects.filter(ABROAD_PHONE_Q).values_list("email", flat=True)), ["uk@example.com"])
+
+
+class SignupConversionTests(TestCase):
+    def test_compares_at_the_same_point(self):
+        from authentication.models import Transaction
+        from authentication.utils import points_change, signup_conversion
+        now = timezone.now()
+        a = CustomUser.objects.create_user(email="a@example.com", password="x", phone_number="2348100000001")
+        b = CustomUser.objects.create_user(email="b@example.com", password="x", phone_number="2348100000002")
+        tx = Transaction.objects.create(user=a, transaction_type="credit", status="confirmed", amount=100,
+                                        credited_to="SAVINGS", transaction_id="CONV-1")
+        Transaction.objects.filter(pk=tx.pk).update(date=now)
+        users = CustomUser.objects.filter(pk__in=[a.pk, b.pk])
+        self.assertEqual(signup_conversion(users), (2, 1, 50.0))
+        # Only deposits made before the cutoff count.
+        self.assertEqual(signup_conversion(users, saved_by=now - timedelta(days=1)), (2, 0, 0.0))
+        self.assertEqual(points_change(16.4, 11.5), "+4.9 pts")
+        self.assertEqual(points_change(10, 12.5), "-2.5 pts")
+        self.assertIsNone(points_change(None, 5))

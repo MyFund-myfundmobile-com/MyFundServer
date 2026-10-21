@@ -36,6 +36,8 @@ from .serializers import (
 from .utils import (
     ABROAD_PHONE_Q,
     is_abroad_number,
+    points_change,
+    signup_conversion,
     grant_user_ambassador_status,
     revoke_user_ambassador_status,
     grant_user_influencer_status,
@@ -2703,11 +2705,39 @@ def signup_summary(request):
             else:
                 growth_rate = 100.0 if total_signups > 0 else 0.0
 
+        # Conversion (signups who started saving) vs the previous period
+        # "at the same point": e.g. this month so far vs the same days last
+        # month, counting only deposits made by the same point - otherwise
+        # last month's signups would look better just for having had longer.
+        conversion_rate = (
+            round(started_saving_count / total_signups * 100, 1) if total_signups else None
+        )
+        previous_conversion_rate = None
+        if range_key != "all":
+            if range_key in ("month", "today"):
+                shift = relativedelta(months=1) if range_key == "month" else relativedelta(days=1)
+                prev_start, prev_end = start - shift, now - shift
+            else:
+                shift = {
+                    "last_month": relativedelta(months=1),
+                    "3months": relativedelta(months=3),
+                    "6months": relativedelta(months=6),
+                    "1year": relativedelta(years=1),
+                }[range_key]
+                prev_start, prev_end = start - shift, start
+            _, _, previous_conversion_rate = signup_conversion(
+                base_qs.filter(date_joined__gte=prev_start, date_joined__lt=prev_end),
+                saved_by=now - shift,
+            )
+
         return Response({
             "range": range_key,
             "total_signups": total_signups,
             "started_saving_count": started_saving_count,
             "not_yet_saved_count": max(total_signups - started_saving_count, 0),
+            "conversion_rate": conversion_rate,
+            "previous_conversion_rate": previous_conversion_rate,
+            "conversion_change": points_change(conversion_rate, previous_conversion_rate),
             "growth_rate": (
                 f"{'+' if growth_rate >= 0 else ''}{round(growth_rate, 1)}%"
                 if growth_rate is not None
