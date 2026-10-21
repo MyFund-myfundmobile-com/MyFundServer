@@ -1159,7 +1159,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                 f"{december_note}"
                 f"\n\nThank you for using MyFund and referring others!"
                 f"\n\nKeep growing your funds.🥂"
-                f"\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+                f"\n\nMyFund\nSave, Co-own Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
             )
         else:
             december_note = (
@@ -1175,7 +1175,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                 f"{december_note}"
                 f"\n\nThank you for using MyFund!"
                 f"\n\nKeep growing your funds.🥂"
-                f"\n\nMyFund\nSave, Buy Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+                f"\n\nMyFund\nSave, Co-own Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
             )
 
         from authentication.utils import send_generic_email, send_transactional_email
