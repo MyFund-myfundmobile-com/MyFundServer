@@ -400,6 +400,19 @@ def format_date_joined(user_date_joined):
 # placeholder-substitution logic per-recipient, instead of duplicating it -
 # the two need to match exactly or a campaign's personalized email would
 # look subtly different from a small inline send of the same content.
+_BLOCK_HTML = re.compile(r"<(br|p|div|table|tr|ul|ol|li|h[1-6])\b", re.IGNORECASE)
+
+
+def plain_breaks_to_html(message):
+    """Templates render the message as HTML, which collapses plain "\\n"
+    breaks into one run-on paragraph. Keep them for messages written as
+    plain text; messages that already lay themselves out in HTML are left
+    alone."""
+    if "\n" not in message or _BLOCK_HTML.search(message):
+        return message
+    return message.strip().replace("\n", "<br>")
+
+
 def personalize_email_payload(
     email_addr, subject, message, extra_context=None, template="email/email.html"
 ):
@@ -475,6 +488,8 @@ def personalize_email_payload(
         for k, v in placeholders.items():
             p_subject = p_subject.replace(k, v)
             p_message = p_message.replace(k, v)
+
+        p_message = plain_breaks_to_html(p_message)
 
         context = {
             "subject": p_subject,

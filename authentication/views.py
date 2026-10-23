@@ -13774,11 +13774,12 @@ class TargetSavingsListCreate(ListCreateAPIView):
             subject = f"{instance.name} Target Savings is LIVE! 🚀"
 
             message = (
-                f"Hi {user.first_name},\n\n"
-                f'Your target savings plan "{instance.name}" has been successfully created.\n\n'
-                f"Initial Amount: ₦{amount:,.2f}\n"
-                f"Funding Frequency: {frequency.lower()}\n"
-                f"Progress: {progress_str}\n\n"
+                f"Hi {user.first_name},<br><br>"
+                f"Your Target Savings plan is live:<br><br>"
+                f'<span style="font-size:20px"><b>{instance.name}</b></span><br><br>'
+                f"Initial amount: <b>₦{amount:,.2f}</b><br>"
+                f"Funding frequency: <b>{frequency.lower()}</b><br>"
+                f"Progress: <b>{progress_str}</b><br><br>"
                 f"Consistency is key — you’re on the right path 💪"
             )
 

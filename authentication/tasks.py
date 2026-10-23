@@ -346,9 +346,9 @@ def retry_failed_deductions():
             subject = f"Autosave Retry for {target.name} Target Successful ✅"
             message = (
                 f"Hi {user.first_name},<br><br>"
-                f"We retried your Target Savings for '{target.name}' "
-                f"and successfully autosaved ₦{target.monthly_payment:,.2f} for it.<br><br>"
-                f"New balance: ₦{target.current_amount:,.2f}.\n\n "
+                f"We retried your AutoSave for <b>{target.name}</b> and it went through:<br><br>"
+                f'<span style="font-size:20px"><b>₦{target.monthly_payment:,.2f} saved</b></span><br><br>'
+                f"New balance in this plan: <b>₦{target.current_amount:,.2f}</b><br><br>"
                 "Keep going! You're doing great. 🚀"
             )
             send_generic_email(

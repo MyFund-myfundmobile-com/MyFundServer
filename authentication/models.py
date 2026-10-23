@@ -1140,42 +1140,43 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
 
         if is_referrer:
             ambassador_note = (
-                "\n\nP.S. As our valued Ambassador, you qualified for early referral rewards. Keep up the great work!"
+                "<br><br><b>P.S.</b> As our valued Ambassador, you qualified for early referral rewards. Keep up the great work!"
                 if user.is_ambassador
                 else ""
             )
 
             december_note = (
-                "\n\nP.S. For December Savings Challenge, for early referral rewards. Keep up the great work!"
+                "<br><br><b>P.S.</b> Thanks to the December Savings Challenge, you qualified for early referral rewards. Keep up the great work!"
                 if is_december_promo
                 else ""
             )
 
+            amount = 1000 if user.is_influencer else 500
             subject = f"Congrats!🎊🥂 Referral Reward for {self.first_name} Confirmed!"
             message = (
-                f"Congratulations {user.first_name},\n\n"
-                f"You have received a referral reward of ₦{1000 if user.is_influencer else 500:,.2f} in your wallet for referring {self.first_name}."
+                f"Congratulations {user.first_name}! 🎉<br><br>"
+                f"Your referral reward is confirmed:<br><br>"
+                f'<span style="font-size:20px"><b>₦{amount:,.2f} added to your wallet</b></span><br>'
+                f"for referring <b>{self.first_name}</b>."
                 f"{ambassador_note}"
                 f"{december_note}"
-                f"\n\nThank you for using MyFund and referring others!"
-                f"\n\nKeep growing your funds.🥂"
-                f"\n\nMyFund\nSave, Co-own Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+                f"<br><br>Thank you for using MyFund and referring others. Keep growing your funds. 🥂"
             )
         else:
             december_note = (
-                "\n\nP.S. For December Savings Challenge, for early referral rewards. Keep up the great work!"
+                "<br><br><b>P.S.</b> Thanks to the December Savings Challenge, you qualified for early referral rewards. Keep up the great work!"
                 if is_december_promo
                 else ""
             )
 
             subject = f"Congrats!🎊🥂 Referral Reward Confirmed!"
             message = (
-                f"Congratulations {self.first_name}, \n\n"
-                f"You have received a referral reward of ₦500.00 in your wallet thanks to your referral."
+                f"Congratulations {self.first_name}! 🎉<br><br>"
+                f"Your referral reward is confirmed:<br><br>"
+                f'<span style="font-size:20px"><b>₦500.00 added to your wallet</b></span><br>'
+                f"thanks to signing up with a referral."
                 f"{december_note}"
-                f"\n\nThank you for using MyFund!"
-                f"\n\nKeep growing your funds.🥂"
-                f"\n\nMyFund\nSave, Co-own Properties, Earn Rent\nwww.myfundmobile.com\n13, Gbajabiamila Street, Ayobo, Lagos, Nigeria."
+                f"<br><br>Thank you for using MyFund. Keep growing your funds. 🥂"
             )
 
         from authentication.utils import send_generic_email, send_transactional_email
@@ -2022,11 +2023,12 @@ class TargetSavings(models.Model):
                     try:
                         subject = f"AutoSave for {target.name} Successful! 🎉"
                         message = (
-                            f"Hi {user.first_name},\n\n"
-                            f"₦{amount:,.2f} has been successfully autosaved for your {target.name} Target Savings plan.\n\n"
-                            f"Your new balance in this plan is ₦{target.current_amount:,.2f}.\n\n"
-                            f"You're now {progress}% closer to your goal! 🚀\n\n"
-                            f"Next autosave: {target.next_deduction.strftime('%Y-%m-%d %H:%M') if target.next_deduction else 'scheduled soon'}"
+                            f"Hi {user.first_name},<br><br>"
+                            f"Your AutoSave for <b>{target.name}</b> was successful:<br><br>"
+                            f'<span style="font-size:20px"><b>₦{amount:,.2f} saved</b></span><br><br>'
+                            f"New balance in this plan: <b>₦{target.current_amount:,.2f}</b><br>"
+                            f"Progress: <b>{progress}%</b> of your goal 🚀<br>"
+                            f"Next AutoSave: <b>{target.next_deduction.strftime('%d %b %Y, %I:%M %p') if target.next_deduction else 'scheduled soon'}</b>"
                         )
                         send_transactional_email(
                             subject=subject,
