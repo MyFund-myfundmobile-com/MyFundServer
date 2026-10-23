@@ -2555,6 +2555,53 @@ from .models import (
 )
 
 
+def notify_ambassador_report_autosubmitted(report):
+    """Email + push so an ambassador knows the system filed their report
+    (manual submissions get the same via send_ambassador_report_notifications_task)."""
+    from datetime import datetime
+
+    user = report.user
+    month_label = datetime.strptime(report.month, "%Y-%m").strftime("%B %Y")
+    points = report.total_points_awarded
+    try:
+        send_transactional_email(
+            subject=f"Your {month_label} Ambassador Report Was Submitted for You 📋",
+            message=(
+                f"Hi {user.first_name},<br><br>"
+                f"You didn't submit your ambassador report for {month_label}, so we've submitted it "
+                f"for you using the figures MyFund already tracks:<br><br>"
+                f'<span style="font-size:20px"><b>{points:,.2f} points</b></span><br>'
+                f"(about <b>₦{report.stipend_amount:,.2f}</b> stipend, once approved)<br><br>"
+                f"Sign-ups: <b>{report.signups_approved}</b><br>"
+                f"Referrals' first deposits: <b>{report.first_deposits_approved}</b><br>"
+                f"Confirmed referrals: <b>{report.confirmed_approved}</b><br>"
+                f"Sessions attended: <b>{report.attendance_approved}</b><br><br>"
+                f"Coursera, social media, events and other activities need evidence, so they're "
+                f"counted as 0. If you did any of these in {month_label}, reply to this email with "
+                f"your evidence before the report is approved.<br><br>"
+                f"Thank you for representing MyFund! 💜"
+            ),
+            from_email="MyFund <info@myfundmobile.com>",
+            recipient_list=[user.email],
+        )
+    except Exception as e:
+        logger.warning(f"Auto-submitted report email failed for {user.email}: {e}")
+    try:
+        send_push_notification(
+            user=user,
+            title=f"{month_label} Ambassador Report Submitted 📋",
+            message=(
+                f"We submitted your {month_label} report for you: {points:,.2f} points so far. "
+                f"Did Coursera, social media or events? Reply to our email with evidence before it's approved."
+            ),
+            data={"report_id": report.id, "month": report.month, "status": report.status,
+                  "type": "AMBASSADOR_REPORT_AUTOSUBMITTED"},
+            notif_type="SYSTEM",
+        )
+    except Exception as e:
+        logger.warning(f"Auto-submitted report push failed for {user.email}: {e}")
+
+
 def autosubmit_missing_ambassador_reports_for_previous_month():
     """
     Auto-submit ambassador monthly reports for the PREVIOUS month
@@ -2648,6 +2695,9 @@ def autosubmit_missing_ambassador_reports_for_previous_month():
                 report.copy_submitted_to_approved_defaults()
                 report.recalculate_points()
                 report.save()
+                transaction.on_commit(
+                    lambda report=report: notify_ambassador_report_autosubmitted(report)
+                )
 
             created_count += 1
 

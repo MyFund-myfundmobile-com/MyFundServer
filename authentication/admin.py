@@ -2966,6 +2966,7 @@ class AmbassadorPointConfigAdmin(admin.ModelAdmin):
         "signup_points",
         "signup_points_cap",
         "confirmed_points",
+        "confirmed_hold_days",
         "first_deposit_points",
         "first_deposit_min_amount",
         "savings_points_per_10000",

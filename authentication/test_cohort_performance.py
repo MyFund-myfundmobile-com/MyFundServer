@@ -29,7 +29,7 @@ class CohortPerformanceTest(TestCase):
         # Old points from an earlier cohort must not count.
         old = (today.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
         AmbassadorMonthlyReport.objects.create(user=self.idle, month=old, total_points_awarded=Decimal("99"))
-        # This month: me has 2 sign-ups, one confirmed.
+        # This month: me has 2 sign-ups, one confirmed today (still inside its savings hold).
         mk("f1@example.com", referral=self.me)
         f2 = mk("f2@example.com", referral=self.me)
         CustomUser.objects.filter(pk=f2.pk).update(referral_reward_granted=True, referral_reward_confirmed_at=timezone.now())
@@ -40,13 +40,13 @@ class CohortPerformanceTest(TestCase):
         client.force_authenticate(self.me)
         data = client.get("/api/ambassador/performance-report/").data
         row = data["months"][-1]
-        self.assertEqual((row["signups"], row["confirmed"], row["estimated"]), (2, 1, True))
-        self.assertEqual(Decimal(row["points"]), Decimal("11.00"))  # 2 x 0.5 + 1 x 10
+        self.assertEqual((row["signups"], row["confirmed"], row["estimated"]), (2, 0, True))
+        self.assertEqual(Decimal(row["points"]), Decimal("1.00"))  # 2 x 0.5; the confirmation is on hold
         self.assertEqual(data["rank"]["total_ambassadors"], 3)      # all members, not just reporters
         self.assertEqual(data["rank"]["position"], 1)                # the 99 old points don't count
         s = data["month_summary"]
-        self.assertEqual((s["signups"], s["confirmed"], s["month_position"]), (2, 1, 1))
-        self.assertEqual(Decimal(s["stipend_estimate"]), Decimal("1100.00"))
+        self.assertEqual((s["signups"], s["confirmed"], s["confirmed_pending"], s["month_position"]), (2, 0, 1, 1))
+        self.assertEqual(Decimal(s["stipend_estimate"]), Decimal("100.00"))
         self.assertIsNone(data["certificate"])
         self.assertTrue(all(m["month"] >= self.this_key for m in data["months"]))
 
@@ -56,7 +56,7 @@ class CohortPerformanceTest(TestCase):
         members = [self.me, self.other, self.idle]
         config = AmbassadorPointConfig.get_active()
         expected = {u.id: _cohort_month_points(u, [self.this_key], config) for u in members}
-        with self.assertNumQueries(5):
+        with self.assertNumQueries(5):  # held confirmations: 1 query when none are due
             scores = _cohort_points_batch(members, [self.this_key], config)
         self.assertEqual({uid: values[self.this_key] for uid, values in scores.items()}, expected)
 
@@ -120,3 +120,74 @@ class FirstDepositPointsTest(TestCase):
         self.assertEqual(report.first_deposits_approved, 1)
         self.assertEqual(report.first_deposit_points_awarded, Decimal("10.00"))
         self.assertEqual(report.total_points_awarded, Decimal("10.50"))
+
+
+class HeldConfirmedReferralTest(TestCase):
+    """A confirmed referral earns the ambassador points only after its
+    savings stayed at ₦10,000+ at every daily snapshot for the hold."""
+
+    def setUp(self):
+        from datetime import datetime
+        n = iter(range(100))
+        self.mk = lambda email, **extra: CustomUser.objects.create_user(
+            email=email, password="x", first_name="A", last_name="B",
+            phone_number=f"0804400{next(n):04d}", **extra)
+        self.me = self.mk("amb@example.com", is_ambassador=True)
+        self.confirmed_at = timezone.make_aware(datetime(2026, 9, 10, 10, 0))
+        self.now = timezone.make_aware(datetime(2026, 10, 20, 9, 0))  # hold ended 10 Oct
+
+    def referral(self, email, confirmed_at=None):
+        r = self.mk(email, referral=self.me)
+        CustomUser.objects.filter(pk=r.pk).update(
+            referral_reward_granted=True, referral_reward_confirmed_at=confirmed_at or self.confirmed_at)
+        return r
+
+    def snapshots(self, user, savings="10000", skip=(), low=()):
+        from .models import DailyROIAccrual
+        for i in range(1, 31):
+            day = self.confirmed_at.date() + timedelta(days=i)
+            if i in skip:
+                continue
+            DailyROIAccrual.objects.create(user=user, date=day,
+                                           savings_balance=Decimal("4000" if i in low else savings))
+
+    def held(self, month="2026-10"):
+        from .models import held_confirmed_referral_counts
+        return held_confirmed_referral_counts([self.me.id], month, 30, now=self.now)
+
+    def test_counts_in_the_month_the_hold_ends_when_savings_stayed(self):
+        self.snapshots(self.referral("kept@example.com"))
+        self.assertEqual(self.held(), {self.me.id: 1})
+        self.assertEqual(self.held("2026-09"), {})  # not the month of confirmation
+
+    def test_dipping_below_the_threshold_never_counts(self):
+        self.snapshots(self.referral("dipped@example.com"), low=(12,))
+        self.assertEqual(self.held(), {})
+
+    def test_a_day_with_no_snapshot_while_the_job_ran_means_zero_balance(self):
+        withdrew = self.referral("withdrew@example.com")
+        self.snapshots(withdrew, skip=(20,))
+        self.snapshots(self.mk("someone@example.com"))  # the job did run that day
+        self.assertEqual(self.held(), {})
+
+    def test_still_inside_the_hold_is_pending_not_counted(self):
+        from .models import pending_confirmed_referral_counts
+        self.referral("new@example.com", confirmed_at=self.now - timedelta(days=5))
+        self.assertEqual(self.held(), {})
+        self.assertEqual(pending_confirmed_referral_counts([self.me.id], 30, now=self.now), {self.me.id: 1})
+
+
+class AutosubmitNotificationTest(TestCase):
+    def test_ambassador_gets_email_and_push_when_report_is_autosubmitted(self):
+        from .utils import autosubmit_missing_ambassador_reports_for_previous_month
+        amb = CustomUser.objects.create_user(email="amb@example.com", password="x", first_name="Eni",
+                                             last_name="B", phone_number="08045000001", is_ambassador=True)
+        with patch("authentication.utils.send_transactional_email") as email, \
+                patch("authentication.utils.send_push_notification") as push, \
+                self.captureOnCommitCallbacks(execute=True):
+            result = autosubmit_missing_ambassador_reports_for_previous_month()
+        self.assertEqual(result["created"], 1)
+        self.assertEqual(email.call_args.kwargs["recipient_list"], [amb.email])
+        self.assertIn("submitted it for you", email.call_args.kwargs["message"])
+        self.assertEqual(push.call_args.kwargs["user"], amb)
+        self.assertEqual(push.call_args.kwargs["data"]["type"], "AMBASSADOR_REPORT_AUTOSUBMITTED")
