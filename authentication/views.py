@@ -14846,6 +14846,7 @@ class AmbassadorPerformanceReportView(APIView):
                     # Confirmed but still inside the savings hold - points come when it ends.
                     "confirmed_pending": pending_confirmed_referral_counts(
                         [user.id], config.confirmed_hold_days).get(user.id, 0),
+                    "confirmed_hold_days": config.confirmed_hold_days,
                     "points": str(pts),
                     "stipend_estimate": str((pts * Decimal("100")).quantize(Decimal("0.01"))),
                     "estimated": report is None,

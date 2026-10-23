@@ -46,6 +46,7 @@ class CohortPerformanceTest(TestCase):
         self.assertEqual(data["rank"]["position"], 1)                # the 99 old points don't count
         s = data["month_summary"]
         self.assertEqual((s["signups"], s["confirmed"], s["confirmed_pending"], s["month_position"]), (2, 0, 1, 1))
+        self.assertEqual(s["confirmed_hold_days"], 30)
         self.assertEqual(Decimal(s["stipend_estimate"]), Decimal("100.00"))
         self.assertIsNone(data["certificate"])
         self.assertTrue(all(m["month"] >= self.this_key for m in data["months"]))
