@@ -915,6 +915,8 @@ def calculate_daily_roi(user, date=None):
         date=date,
         savings_balance=user.savings,
         investment_balance=user.investment,
+        target_savings_balance=user.target_savings.filter(is_cancelled=False)
+        .aggregate(total=Sum("current_amount"))["total"] or 0,
         savings_roi=roi_data["savings_roi"],
         investment_roi=roi_data["investment_roi"],
         total_roi=roi_data["total_roi"],

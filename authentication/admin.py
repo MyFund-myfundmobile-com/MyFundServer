@@ -2996,6 +2996,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
         "submitted_at",
         "approved_at",
         "formatted_month",
+        "referral_flags",
     )
 
     list_filter = (
@@ -3142,6 +3143,42 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
 
     formatted_month.short_description = "Month"
     formatted_month.admin_order_field = "month"
+
+    def referral_flags(self, obj):
+        """Signs of padded referrals worth a look before approving: sign-ups
+        sharing a surname (with the ambassador or each other), and confirmed
+        referrals sitting just at the ₦10,000 line."""
+        from collections import Counter
+        from datetime import timedelta
+        from .models import AMBASSADOR_REFERRAL_SAVINGS_THRESHOLD
+
+        start = timezone.make_aware(datetime.strptime(obj.month, "%Y-%m"))
+        end = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+        referrals = CustomUser.objects.filter(referral=obj.user)
+        surnames = [
+            (name or "").strip().lower()
+            for name in referrals.filter(date_joined__gte=start, date_joined__lt=end)
+            .values_list("last_name", flat=True)
+        ]
+        counts = Counter(n for n in surnames if n)
+        own = (obj.user.last_name or "").strip().lower()
+        same_surname = sum(1 for n in surnames if n and (counts[n] > 1 or n == own))
+        threshold = AMBASSADOR_REFERRAL_SAVINGS_THRESHOLD
+        at_threshold = referrals.filter(
+            referral_reward_granted=True,
+            referral_reward_confirmed_at__gte=start - timedelta(days=90),
+            referral_reward_confirmed_at__lt=end,
+            savings__gte=threshold,
+            savings__lt=threshold + 1000,
+        ).count()
+        flags = []
+        if same_surname:
+            flags.append(f"{same_surname} share a surname")
+        if at_threshold:
+            flags.append(f"{at_threshold} confirmed at just ₦10k")
+        return "⚠️ " + " · ".join(flags) if flags else "—"
+
+    referral_flags.short_description = "Gaming flags"
 
     def user_first_name(self, obj):
         return obj.user.first_name or obj.user.email

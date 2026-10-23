@@ -142,13 +142,13 @@ class HeldConfirmedReferralTest(TestCase):
             referral_reward_granted=True, referral_reward_confirmed_at=confirmed_at or self.confirmed_at)
         return r
 
-    def snapshots(self, user, savings="10000", skip=(), low=()):
+    def snapshots(self, user, savings="10000", skip=(), low=(), target="0"):
         from .models import DailyROIAccrual
         for i in range(1, 31):
             day = self.confirmed_at.date() + timedelta(days=i)
             if i in skip:
                 continue
-            DailyROIAccrual.objects.create(user=user, date=day,
+            DailyROIAccrual.objects.create(user=user, date=day, target_savings_balance=Decimal(target),
                                            savings_balance=Decimal("4000" if i in low else savings))
 
     def held(self, month="2026-10"):
@@ -163,6 +163,10 @@ class HeldConfirmedReferralTest(TestCase):
     def test_dipping_below_the_threshold_never_counts(self):
         self.snapshots(self.referral("dipped@example.com"), low=(12,))
         self.assertEqual(self.held(), {})
+
+    def test_money_moved_into_target_savings_still_counts(self):
+        self.snapshots(self.referral("goal@example.com"), low=(12,), target="6000")  # 4,000 + 6,000
+        self.assertEqual(self.held(), {self.me.id: 1})
 
     def test_a_day_with_no_snapshot_while_the_job_ran_means_zero_balance(self):
         withdrew = self.referral("withdrew@example.com")
@@ -191,3 +195,36 @@ class AutosubmitNotificationTest(TestCase):
         self.assertIn("submitted it for you", email.call_args.kwargs["message"])
         self.assertEqual(push.call_args.kwargs["user"], amb)
         self.assertEqual(push.call_args.kwargs["data"]["type"], "AMBASSADOR_REPORT_AUTOSUBMITTED")
+
+
+class DailySnapshotTargetSavingsTest(TestCase):
+    def test_target_savings_only_user_gets_a_snapshot_with_its_balance(self):
+        from .models import DailyROIAccrual, TargetSavings
+        from .tasks import calculate_daily_roi_task
+        u = CustomUser.objects.create_user(email="goal@example.com", password="x", first_name="G",
+                                           last_name="B", phone_number="08046000001")
+        TargetSavings.objects.create(user=u, name="Rent", target_amount=Decimal("50000"),
+                                     current_amount=Decimal("12000"), end_date=date.today() + timedelta(days=90))
+        with patch("authentication.tasks.send_batch_roi_notifications", return_value={"sent": 0, "failed": 0}):
+            calculate_daily_roi_task()
+        row = DailyROIAccrual.objects.get(user=u)
+        self.assertEqual((row.savings_balance, row.target_savings_balance), (Decimal("0"), Decimal("12000")))
+
+
+class ReferralFlagsAdminTest(TestCase):
+    def test_flags_shared_surnames_and_confirmations_at_the_threshold(self):
+        from django.contrib.admin.sites import site
+        n = iter(range(100))
+        mk = lambda email, last, **extra: CustomUser.objects.create_user(
+            email=email, password="x", first_name="A", last_name=last,
+            phone_number=f"0804700{next(n):04d}", **extra)
+        amb = mk("amb@example.com", "Ibhawoh", is_ambassador=True)
+        mk("a@example.com", "Ibhawoh", referral=amb)
+        mk("b@example.com", "Okafor", referral=amb)
+        mk("c@example.com", "Okafor", referral=amb)
+        d = mk("d@example.com", "Bello", referral=amb)
+        CustomUser.objects.filter(pk=d.pk).update(savings=Decimal("10000"), referral_reward_granted=True,
+                                                  referral_reward_confirmed_at=timezone.now())
+        report = AmbassadorMonthlyReport.objects.create(user=amb, month=timezone.localdate().strftime("%Y-%m"))
+        flags = site._registry[AmbassadorMonthlyReport].referral_flags(report)
+        self.assertEqual(flags, "⚠️ 3 share a surname · 1 confirmed at just ₦10k")

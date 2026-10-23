@@ -1389,6 +1389,9 @@ class DailyROIAccrual(models.Model):
     date = models.DateField()
     savings_balance = models.DecimalField(max_digits=11, decimal_places=2, default=0)
     investment_balance = models.DecimalField(max_digits=11, decimal_places=2, default=0)
+    # Not earning here, but still saved - the ambassador savings hold
+    # (held_confirmed_referral_counts) counts it.
+    target_savings_balance = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     savings_roi = models.DecimalField(max_digits=11, decimal_places=2, default=0)
     investment_roi = models.DecimalField(max_digits=11, decimal_places=2, default=0)
     total_roi = models.DecimalField(max_digits=11, decimal_places=2, default=0)
@@ -3857,8 +3860,8 @@ AMBASSADOR_REFERRAL_SAVINGS_THRESHOLD = Decimal("10000")
 def held_confirmed_referral_counts(ambassador_ids, month_key, hold_days, now=None):
     """{ambassador_id: confirmed referrals whose hold ended in month_key}.
 
-    A confirmed referral only counts once its savings + investment stayed at
-    AMBASSADOR_REFERRAL_SAVINGS_THRESHOLD or more at every daily 12 noon
+    A confirmed referral only counts once its savings + investment + Target
+    Savings stayed at AMBASSADOR_REFERRAL_SAVINGS_THRESHOLD or more at every daily 12 noon
     snapshot (DailyROIAccrual) for hold_days after confirmation - so money
     deposited to get confirmed and then withdrawn never earns the points. It
     counts in the month the hold ends; one that dips below never counts. A
@@ -3884,10 +3887,10 @@ def held_confirmed_referral_counts(ambassador_ids, month_key, hold_days, now=Non
     snapshot_days = set(DailyROIAccrual.objects.filter(date__range=[first_day, last_day])
                         .values_list("date", flat=True).distinct())
     balances = {}
-    for user_id, day, savings, investment in DailyROIAccrual.objects.filter(
+    for user_id, day, savings, investment, target in DailyROIAccrual.objects.filter(
         user_id__in=[r[0] for r in referrals], date__range=[first_day, last_day],
-    ).values_list("user_id", "date", "savings_balance", "investment_balance"):
-        balances[(user_id, day)] = savings + investment
+    ).values_list("user_id", "date", "savings_balance", "investment_balance", "target_savings_balance"):
+        balances[(user_id, day)] = savings + investment + target
 
     counts = {}
     for user_id, ambassador_id, confirmed_at in referrals:

@@ -401,7 +401,11 @@ def calculate_daily_roi_task():
             is_active=True,
             is_banned=False,
         )
-        .filter(Q(savings__gt=0) | Q(investment__gt=0))
+        .filter(Q(savings__gt=0) | Q(investment__gt=0)
+                # Snapshot-only for them (no ROI on Target Savings) - the
+                # ambassador savings hold reads these rows.
+                | Q(id__in=TargetSavings.objects.filter(current_amount__gt=0, is_cancelled=False)
+                    .values("user_id")))
         .values_list("id", "first_name", "expo_push_tokens")
     )
 
