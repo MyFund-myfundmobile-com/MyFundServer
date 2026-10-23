@@ -56,6 +56,67 @@ class CohortPerformanceTest(TestCase):
         members = [self.me, self.other, self.idle]
         config = AmbassadorPointConfig.get_active()
         expected = {u.id: _cohort_month_points(u, [self.this_key], config) for u in members}
-        with self.assertNumQueries(4):
+        with self.assertNumQueries(5):
             scores = _cohort_points_batch(members, [self.this_key], config)
         self.assertEqual({uid: values[self.this_key] for uid, values in scores.items()}, expected)
+
+
+class FirstDepositPointsTest(TestCase):
+    """A referral's first deposit of at least the configured minimum earns
+    the ambassador first_deposit_points once, in the month it happened."""
+
+    def setUp(self):
+        from .models import AmbassadorPointConfig, Transaction
+        self.Transaction = Transaction
+        self.config = AmbassadorPointConfig.get_active()  # defaults: 10 points, ₦2,000
+        self.this_key = timezone.localdate().strftime("%Y-%m")
+        n = iter(range(100))
+        self.mk = lambda email, **extra: CustomUser.objects.create_user(
+            email=email, password="x", first_name="A", last_name="B",
+            phone_number=f"0804200{next(n):04d}", **extra)
+        self.me = self.mk("amb@example.com", is_ambassador=True)
+
+    def deposit(self, user, amount, when=None, status="confirmed", description="QuickSave (Card)"):
+        t = self.Transaction.objects.create(user=user, amount=Decimal(amount), transaction_type="credit",
+                                            status=status, description=description)
+        if when:
+            self.Transaction.objects.filter(pk=t.pk).update(date=when)
+
+    def test_counts_each_referral_once_at_the_minimum(self):
+        from .models import first_deposit_referral_counts
+        a = self.mk("a@example.com", referral=self.me)
+        b = self.mk("b@example.com", referral=self.me)
+        c = self.mk("c@example.com", referral=self.me)
+        self.deposit(a, "2000")
+        self.deposit(a, "5000")                        # second deposit: no extra count
+        self.deposit(b, "1999.99")                     # below the minimum
+        self.deposit(c, "3000", status="pending")      # not confirmed
+        self.deposit(self.mk("x@example.com"), "9000")  # not this ambassador's referral
+        counts = first_deposit_referral_counts([self.me.id], self.this_key, Decimal("2000"))
+        self.assertEqual(counts, {self.me.id: 1})
+
+    def test_earlier_qualifying_deposit_is_not_counted_again(self):
+        from .models import first_deposit_referral_counts
+        a = self.mk("a@example.com", referral=self.me)
+        last_month = timezone.now().replace(day=1) - timedelta(days=1)
+        self.deposit(a, "2500", when=last_month)
+        self.deposit(a, "2500")
+        self.assertEqual(first_deposit_referral_counts([self.me.id], self.this_key, Decimal("2000")), {})
+        self.assertEqual(first_deposit_referral_counts(
+            [self.me.id], last_month.strftime("%Y-%m"), Decimal("2000")), {self.me.id: 1})
+
+    def test_live_points_and_report_include_first_deposits(self):
+        from .views import _live_ambassador_month
+        a = self.mk("a@example.com", referral=self.me)
+        self.deposit(a, "7000")
+        signups, confirmed, attendance, points, first_deposits = _live_ambassador_month(
+            self.me, self.this_key, self.config)
+        self.assertEqual((signups, first_deposits), (1, 1))
+        self.assertEqual(points, Decimal("10.50"))  # 1 x 0.5 sign-up + 1 x 10 first deposit
+
+        report = AmbassadorMonthlyReport(user=self.me, month=self.this_key, signups_submitted=1)
+        report.copy_submitted_to_approved_defaults()
+        report.recalculate_points()
+        self.assertEqual(report.first_deposits_approved, 1)
+        self.assertEqual(report.first_deposit_points_awarded, Decimal("10.00"))
+        self.assertEqual(report.total_points_awarded, Decimal("10.50"))

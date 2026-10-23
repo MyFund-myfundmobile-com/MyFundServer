@@ -14571,7 +14571,7 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import AmbassadorMonthlyReport, AmbassadorPointConfig
+from .models import AmbassadorMonthlyReport, AmbassadorPointConfig, first_deposit_referral_counts
 from .serializers import AmbassadorMonthlyReportSerializer
 from .tasks import send_ambassador_report_notifications_task
 
@@ -14647,7 +14647,8 @@ def _live_ambassador_month(user, key, config):
     """Live figures for a month with no monthly report yet - sign-ups and
     confirmed referrals from the referral records, attendance from session
     submissions - with points estimated by the same AmbassadorPointConfig
-    rules (savings/content points only come with the approved report)."""
+    rules (savings/content points only come with the approved report).
+    Returns (signups, confirmed, attendance, points, first_deposits)."""
     start = timezone.make_aware(datetime.strptime(key, "%Y-%m"))
     end = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
     referrals = CustomUser.objects.filter(referral=user)
@@ -14658,10 +14659,13 @@ def _live_ambassador_month(user, key, config):
         referral_reward_confirmed_at__lt=end,
     ).count()
     attendance = AmbassadorAttendanceSubmission.objects.filter(user=user, month=key).count()
+    first_deposits = first_deposit_referral_counts(
+        [user.id], key, config.first_deposit_min_amount).get(user.id, 0)
     signup_pts = min(Decimal(signups) * config.signup_points, config.signup_points_cap)
     points = (signup_pts + Decimal(confirmed) * config.confirmed_points
+              + Decimal(first_deposits) * config.first_deposit_points
               + Decimal(attendance) * config.attendance_points).quantize(Decimal("0.01"))
-    return signups, confirmed, attendance, points
+    return signups, confirmed, attendance, points, first_deposits
 
 
 def _cohort_month_points(user, month_keys, config):
@@ -14692,9 +14696,11 @@ def _cohort_points_batch(members, month_keys, config):
                          .values("referral_id").annotate(n=Count("id")).values_list("referral_id", "n"))
         attendance = dict(AmbassadorAttendanceSubmission.objects.filter(user_id__in=ids, month=key)
                           .values("user_id").annotate(n=Count("id")).values_list("user_id", "n"))
+        first_deposits = first_deposit_referral_counts(ids, key, config.first_deposit_min_amount)
         for uid in ids:
             live = (min(Decimal(signups.get(uid, 0)) * config.signup_points, config.signup_points_cap)
                     + Decimal(confirmed.get(uid, 0)) * config.confirmed_points
+                    + Decimal(first_deposits.get(uid, 0)) * config.first_deposit_points
                     + Decimal(attendance.get(uid, 0)) * config.attendance_points).quantize(Decimal("0.01"))
             scores[uid][key] = reports.get((uid, key), live)
     return scores
@@ -14774,6 +14780,7 @@ class AmbassadorPerformanceReportView(APIView):
                 "signups": r.signups_approved if r else (live[0] if live else 0),
                 "confirmed": r.confirmed_approved if r else (live[1] if live else 0),
                 "attendance": r.attendance_approved if r else (live[2] if live else 0),
+                "first_deposits": r.first_deposits_approved if r else (live[4] if live else 0),
                 "points": str(pts),
                 # True: live estimate until the monthly report is approved.
                 "estimated": bool(live),
@@ -14829,7 +14836,7 @@ class AmbassadorPerformanceReportView(APIView):
                     "lifetime_points": str(cohort_points[user.id]),
                 }
                 month_ranked = sorted(this_month_points, key=lambda uid: this_month_points[uid], reverse=True)
-                signups, confirmed, attendance, live_pts = _live_ambassador_month(user, this_key, config)
+                signups, confirmed, attendance, live_pts, first_deposits = _live_ambassador_month(user, this_key, config)
                 report = AmbassadorMonthlyReport.objects.filter(user=user, month=this_key).first()
                 pts = report.total_points_awarded if report else live_pts
                 month_summary = {
@@ -14837,6 +14844,7 @@ class AmbassadorPerformanceReportView(APIView):
                     "signups": report.signups_approved if report else signups,
                     "confirmed": report.confirmed_approved if report else confirmed,
                     "attendance": report.attendance_approved if report else attendance,
+                    "first_deposits": report.first_deposits_approved if report else first_deposits,
                     "points": str(pts),
                     "stipend_estimate": str((pts * Decimal("100")).quantize(Decimal("0.01"))),
                     "estimated": report is None,

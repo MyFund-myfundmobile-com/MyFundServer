@@ -2966,6 +2966,8 @@ class AmbassadorPointConfigAdmin(admin.ModelAdmin):
         "signup_points",
         "signup_points_cap",
         "confirmed_points",
+        "first_deposit_points",
+        "first_deposit_min_amount",
         "savings_points_per_10000",
         "savings_points_cap",
         "reshares_points",
@@ -3025,6 +3027,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
         "events_points_awarded",
         "reshares_points_awarded",
         "others_points_awarded",
+        "first_deposit_points_awarded",
         "total_points_awarded",
         "stipend_amount",
     )
@@ -3089,6 +3092,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
                     "abroad_confirmed_approved",
                     "events_approved",
                     "reshares_approved",
+                    "first_deposits_approved",
                 )
             },
         ),
@@ -3106,6 +3110,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
                     "events_points_awarded",
                     "reshares_points_awarded",
                     "others_points_awarded",
+                    "first_deposit_points_awarded",
                     "total_points_awarded",
                 )
             },

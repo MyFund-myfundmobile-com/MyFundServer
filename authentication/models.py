@@ -3756,6 +3756,16 @@ class AmbassadorPointConfig(models.Model):
         max_digits=6, decimal_places=2, default=Decimal("10.00")
     )
 
+    # Bridges the gap between a bare sign-up and a confirmed referral: once
+    # per referral, in the month of their first deposit of at least
+    # first_deposit_min_amount.
+    first_deposit_points = models.DecimalField(
+        max_digits=6, decimal_places=2, default=Decimal("10.00")
+    )
+    first_deposit_min_amount = models.DecimalField(
+        max_digits=12, decimal_places=2, default=Decimal("2000.00")
+    )
+
     savings_points_per_10000 = models.DecimalField(
         max_digits=6, decimal_places=2, default=Decimal("0.40")
     )
@@ -3801,6 +3811,37 @@ class AmbassadorPointConfig(models.Model):
         if config:
             return config
         return cls.objects.create()
+
+
+def first_deposit_referral_counts(ambassador_ids, month_key, min_amount):
+    """{ambassador_id: number of their referrals whose first confirmed deposit
+    of at least min_amount was made in month_key (YYYY-MM)}. Each referral
+    counts once ever - in the month that deposit happened."""
+    from datetime import datetime, timedelta
+    from django.db.models import Min
+    from .first_savings import DEPOSIT_PREFIXES
+
+    start = timezone.make_aware(datetime.strptime(month_key, "%Y-%m"))
+    end = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+    by_description = Q()
+    for prefix in DEPOSIT_PREFIXES:
+        by_description |= Q(description__startswith=prefix)
+    first_deposits = (
+        Transaction.objects.filter(
+            user__referral_id__in=ambassador_ids,
+            transaction_type="credit",
+            status="confirmed",
+            amount__gte=min_amount,
+        )
+        .filter(by_description | Q(credited_to__in=["SAVINGS", "INVESTMENT"]))
+        .values("user_id", "user__referral_id")
+        .annotate(first=Min("date"))
+        .filter(first__gte=start, first__lt=end)
+    )
+    counts = {}
+    for row in first_deposits:
+        counts[row["user__referral_id"]] = counts.get(row["user__referral_id"], 0) + 1
+    return counts
 
 
 class AmbassadorMonthlyReport(models.Model):
@@ -3866,6 +3907,9 @@ class AmbassadorMonthlyReport(models.Model):
     abroad_confirmed_approved = models.PositiveIntegerField(default=0)
     events_approved = models.PositiveIntegerField(default=0)
     reshares_approved = models.PositiveIntegerField(default=0)
+    # Measured by the system (see first_deposit_referral_counts), not
+    # submitted by the ambassador.
+    first_deposits_approved = models.PositiveIntegerField(default=0)
 
     # points breakdown
     signup_points_awarded = models.DecimalField(
@@ -3896,6 +3940,9 @@ class AmbassadorMonthlyReport(models.Model):
         max_digits=8, decimal_places=2, default=Decimal("0.00")
     )
     others_points_awarded = models.DecimalField(
+        max_digits=8, decimal_places=2, default=Decimal("0.00")
+    )
+    first_deposit_points_awarded = models.DecimalField(
         max_digits=8, decimal_places=2, default=Decimal("0.00")
     )
     total_points_awarded = models.DecimalField(
@@ -3986,10 +4033,15 @@ class AmbassadorMonthlyReport(models.Model):
         self.events_points_awarded = events_points
         self.reshares_points_awarded = reshares_points
         self.others_points_awarded = others_points
+        first_deposit_points = Decimal(str(self.first_deposits_approved or 0)) * Decimal(
+            str(config.first_deposit_points or 0)
+        )
+        self.first_deposit_points_awarded = first_deposit_points
 
         self.total_points_awarded = (
             signup_points
             + confirmed_points
+            + first_deposit_points
             + savings_points
             + attendance_points
             + coursera_points
@@ -4016,6 +4068,10 @@ class AmbassadorMonthlyReport(models.Model):
         self.abroad_confirmed_approved = self.abroad_confirmed_submitted
         self.events_approved = self.events_submitted
         self.reshares_approved = self.reshares_submitted
+        config = AmbassadorPointConfig.get_active()
+        self.first_deposits_approved = first_deposit_referral_counts(
+            [self.user_id], self.month, config.first_deposit_min_amount
+        ).get(self.user_id, 0)
 
 
 class AmbassadorAttendanceSubmission(models.Model):
