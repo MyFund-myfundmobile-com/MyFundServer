@@ -115,6 +115,10 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     profile_picture = models.CharField(max_length=1000, null=True, blank=True)
     is_confirmed = models.BooleanField(default=False)
     referral_reward_confirmed_at = models.DateTimeField(null=True, blank=True)
+    # Set when this referral's savings dropped below the ambassador
+    # threshold during the confirmation hold - their ambassador loses the
+    # confirmed points (see mark_broken_referral_holds).
+    referral_hold_broken_at = models.DateTimeField(null=True, blank=True)
     is_subscribed = models.BooleanField(default=True)
     # Set the first time a campaign's Brevo delivery report (see
     # get_email_campaign_report) shows a hard bounce for this address -
@@ -1390,7 +1394,7 @@ class DailyROIAccrual(models.Model):
     savings_balance = models.DecimalField(max_digits=11, decimal_places=2, default=0)
     investment_balance = models.DecimalField(max_digits=11, decimal_places=2, default=0)
     # Not earning here, but still saved - the ambassador savings hold
-    # (held_confirmed_referral_counts) counts it.
+    # (mark_broken_referral_holds) counts it.
     target_savings_balance = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     savings_roi = models.DecimalField(max_digits=11, decimal_places=2, default=0)
     investment_roi = models.DecimalField(max_digits=11, decimal_places=2, default=0)
@@ -3760,8 +3764,8 @@ class AmbassadorPointConfig(models.Model):
     confirmed_points = models.DecimalField(
         max_digits=6, decimal_places=2, default=Decimal("10.00")
     )
-    # Confirmed referrals only earn points once their savings have stayed
-    # put this long (see held_confirmed_referral_counts).
+    # A confirmed referral's points are taken back if their savings drop
+    # below the threshold within this many days (see mark_broken_referral_holds).
     confirmed_hold_days = models.PositiveIntegerField(default=30)
 
     # Bridges the gap between a bare sign-up and a confirmed referral: once
@@ -3857,61 +3861,61 @@ def first_deposit_referral_counts(ambassador_ids, month_key, min_amount):
 AMBASSADOR_REFERRAL_SAVINGS_THRESHOLD = Decimal("10000")
 
 
-def held_confirmed_referral_counts(ambassador_ids, month_key, hold_days, now=None):
-    """{ambassador_id: confirmed referrals whose hold ended in month_key}.
-
-    A confirmed referral only counts once its savings + investment + Target
-    Savings stayed at AMBASSADOR_REFERRAL_SAVINGS_THRESHOLD or more at every daily 12 noon
-    snapshot (DailyROIAccrual) for hold_days after confirmation - so money
-    deposited to get confirmed and then withdrawn never earns the points. It
-    counts in the month the hold ends; one that dips below never counts. A
-    day the snapshot job ran with no row for the referral means their
-    balance was zero."""
+def confirmed_referral_counts(ambassador_ids, month_key):
+    """{ambassador_id: referrals confirmed in month_key that are still
+    standing}. Points show as soon as a referral is confirmed;
+    mark_broken_referral_holds takes them back if the referral then pulls
+    their savings below AMBASSADOR_REFERRAL_SAVINGS_THRESHOLD within the hold."""
     from datetime import datetime, timedelta
-
-    now = now or timezone.now()
-    hold = timedelta(days=hold_days)
-    start = timezone.make_aware(datetime.strptime(month_key, "%Y-%m"))
-    end = min((start.replace(day=28) + timedelta(days=4)).replace(day=1), now)
-    referrals = list(CustomUser.objects.filter(
-        referral_id__in=ambassador_ids,
-        referral_reward_granted=True,
-        referral_reward_confirmed_at__gte=start - hold,
-        referral_reward_confirmed_at__lt=end - hold,
-    ).values_list("id", "referral_id", "referral_reward_confirmed_at"))
-    if not referrals:
-        return {}
-
-    first_day = min(c for _, _, c in referrals).date() + timedelta(days=1)
-    last_day = max(c for _, _, c in referrals).date() + timedelta(days=hold_days)
-    snapshot_days = set(DailyROIAccrual.objects.filter(date__range=[first_day, last_day])
-                        .values_list("date", flat=True).distinct())
-    balances = {}
-    for user_id, day, savings, investment, target in DailyROIAccrual.objects.filter(
-        user_id__in=[r[0] for r in referrals], date__range=[first_day, last_day],
-    ).values_list("user_id", "date", "savings_balance", "investment_balance", "target_savings_balance"):
-        balances[(user_id, day)] = savings + investment + target
-
-    counts = {}
-    for user_id, ambassador_id, confirmed_at in referrals:
-        days = [d for d in snapshot_days
-                if confirmed_at.date() < d <= confirmed_at.date() + timedelta(days=hold_days)]
-        if all(balances.get((user_id, d), 0) >= AMBASSADOR_REFERRAL_SAVINGS_THRESHOLD for d in days):
-            counts[ambassador_id] = counts.get(ambassador_id, 0) + 1
-    return counts
-
-
-def pending_confirmed_referral_counts(ambassador_ids, hold_days, now=None):
-    """{ambassador_id: confirmed referrals still inside their hold}."""
-    from datetime import timedelta
     from django.db.models import Count
 
-    now = now or timezone.now()
+    start = timezone.make_aware(datetime.strptime(month_key, "%Y-%m"))
+    end = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
     return dict(CustomUser.objects.filter(
         referral_id__in=ambassador_ids,
         referral_reward_granted=True,
-        referral_reward_confirmed_at__gt=now - timedelta(days=hold_days),
+        referral_reward_confirmed_at__gte=start,
+        referral_reward_confirmed_at__lt=end,
+        referral_hold_broken_at__isnull=True,
     ).values("referral_id").annotate(n=Count("id")).values_list("referral_id", "n"))
+
+
+def mark_broken_referral_holds(hold_days, now=None):
+    """Run daily after the 12 noon balance snapshot (DailyROIAccrual): marks
+    ambassadors' confirmed referrals whose savings + investment + Target
+    Savings fell below AMBASSADOR_REFERRAL_SAVINGS_THRESHOLD within
+    hold_days of confirmation - so money deposited to get confirmed and then
+    withdrawn doesn't earn the points. A day the snapshot job ran with no
+    row for the referral means their balance was zero. Returns the newly
+    marked referrals."""
+    from datetime import timedelta
+
+    now = now or timezone.now()
+    referrals = list(CustomUser.objects.filter(
+        referral__is_ambassador=True,
+        referral_reward_granted=True,
+        referral_reward_confirmed_at__gt=now - timedelta(days=hold_days),
+        referral_hold_broken_at__isnull=True,
+    ).values_list("id", "referral_reward_confirmed_at"))
+    if not referrals:
+        return []
+
+    first_day = min(c for _, c in referrals).date() + timedelta(days=1)
+    snapshot_days = set(DailyROIAccrual.objects.filter(date__range=[first_day, now.date()])
+                        .values_list("date", flat=True).distinct())
+    balances = {}
+    for user_id, day, savings, investment, target in DailyROIAccrual.objects.filter(
+        user_id__in=[r[0] for r in referrals], date__range=[first_day, now.date()],
+    ).values_list("user_id", "date", "savings_balance", "investment_balance", "target_savings_balance"):
+        balances[(user_id, day)] = savings + investment + target
+
+    broken = [
+        user_id for user_id, confirmed_at in referrals
+        if any(balances.get((user_id, d), 0) < AMBASSADOR_REFERRAL_SAVINGS_THRESHOLD
+               for d in snapshot_days if d > confirmed_at.date())
+    ]
+    CustomUser.objects.filter(id__in=broken).update(referral_hold_broken_at=now)
+    return list(CustomUser.objects.filter(id__in=broken).select_related("referral"))
 
 
 class AmbassadorMonthlyReport(models.Model):
@@ -4139,10 +4143,10 @@ class AmbassadorMonthlyReport(models.Model):
         self.events_approved = self.events_submitted
         self.reshares_approved = self.reshares_submitted
         config = AmbassadorPointConfig.get_active()
-        # Measured, not taken from the submission: a confirmed referral
-        # only counts once it has held its savings (anti-gaming).
-        self.confirmed_approved = held_confirmed_referral_counts(
-            [self.user_id], self.month, config.confirmed_hold_days
+        # Measured, not taken from the submission: a confirmed referral who
+        # pulled their savings out during the hold doesn't count (anti-gaming).
+        self.confirmed_approved = confirmed_referral_counts(
+            [self.user_id], self.month
         ).get(self.user_id, 0)
         self.first_deposits_approved = first_deposit_referral_counts(
             [self.user_id], self.month, config.first_deposit_min_amount

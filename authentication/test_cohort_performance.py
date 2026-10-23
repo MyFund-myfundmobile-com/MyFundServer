@@ -29,7 +29,7 @@ class CohortPerformanceTest(TestCase):
         # Old points from an earlier cohort must not count.
         old = (today.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
         AmbassadorMonthlyReport.objects.create(user=self.idle, month=old, total_points_awarded=Decimal("99"))
-        # This month: me has 2 sign-ups, one confirmed today (still inside its savings hold).
+        # This month: me has 2 sign-ups, one confirmed.
         mk("f1@example.com", referral=self.me)
         f2 = mk("f2@example.com", referral=self.me)
         CustomUser.objects.filter(pk=f2.pk).update(referral_reward_granted=True, referral_reward_confirmed_at=timezone.now())
@@ -40,14 +40,13 @@ class CohortPerformanceTest(TestCase):
         client.force_authenticate(self.me)
         data = client.get("/api/ambassador/performance-report/").data
         row = data["months"][-1]
-        self.assertEqual((row["signups"], row["confirmed"], row["estimated"]), (2, 0, True))
-        self.assertEqual(Decimal(row["points"]), Decimal("1.00"))  # 2 x 0.5; the confirmation is on hold
+        self.assertEqual((row["signups"], row["confirmed"], row["estimated"]), (2, 1, True))
+        self.assertEqual(Decimal(row["points"]), Decimal("11.00"))  # 2 x 0.5 + 1 x 10
         self.assertEqual(data["rank"]["total_ambassadors"], 3)      # all members, not just reporters
         self.assertEqual(data["rank"]["position"], 1)                # the 99 old points don't count
         s = data["month_summary"]
-        self.assertEqual((s["signups"], s["confirmed"], s["confirmed_pending"], s["month_position"]), (2, 0, 1, 1))
-        self.assertEqual(s["confirmed_hold_days"], 30)
-        self.assertEqual(Decimal(s["stipend_estimate"]), Decimal("100.00"))
+        self.assertEqual((s["signups"], s["confirmed"], s["month_position"]), (2, 1, 1))
+        self.assertEqual(Decimal(s["stipend_estimate"]), Decimal("1100.00"))
         self.assertIsNone(data["certificate"])
         self.assertTrue(all(m["month"] >= self.this_key for m in data["months"]))
 
@@ -57,7 +56,7 @@ class CohortPerformanceTest(TestCase):
         members = [self.me, self.other, self.idle]
         config = AmbassadorPointConfig.get_active()
         expected = {u.id: _cohort_month_points(u, [self.this_key], config) for u in members}
-        with self.assertNumQueries(5):  # held confirmations: 1 query when none are due
+        with self.assertNumQueries(5):
             scores = _cohort_points_batch(members, [self.this_key], config)
         self.assertEqual({uid: values[self.this_key] for uid, values in scores.items()}, expected)
 
@@ -123,9 +122,9 @@ class FirstDepositPointsTest(TestCase):
         self.assertEqual(report.total_points_awarded, Decimal("10.50"))
 
 
-class HeldConfirmedReferralTest(TestCase):
-    """A confirmed referral earns the ambassador points only after its
-    savings stayed at ₦10,000+ at every daily snapshot for the hold."""
+class ConfirmedReferralHoldTest(TestCase):
+    """Confirmed-referral points show straight away and come off if the
+    referral's savings drop below ₦10,000 within the hold."""
 
     def setUp(self):
         from datetime import datetime
@@ -134,52 +133,66 @@ class HeldConfirmedReferralTest(TestCase):
             email=email, password="x", first_name="A", last_name="B",
             phone_number=f"0804400{next(n):04d}", **extra)
         self.me = self.mk("amb@example.com", is_ambassador=True)
-        self.confirmed_at = timezone.make_aware(datetime(2026, 9, 10, 10, 0))
-        self.now = timezone.make_aware(datetime(2026, 10, 20, 9, 0))  # hold ended 10 Oct
+        self.confirmed_at = timezone.make_aware(datetime(2026, 10, 10, 10, 0))
+        self.now = timezone.make_aware(datetime(2026, 10, 25, 13, 0))  # inside the 30-day hold
 
-    def referral(self, email, confirmed_at=None):
+    def referral(self, email):
         r = self.mk(email, referral=self.me)
         CustomUser.objects.filter(pk=r.pk).update(
-            referral_reward_granted=True, referral_reward_confirmed_at=confirmed_at or self.confirmed_at)
+            referral_reward_granted=True, referral_reward_confirmed_at=self.confirmed_at)
         return r
 
-    def snapshots(self, user, savings="10000", skip=(), low=(), target="0"):
+    def snapshots(self, user, days=15, savings="10000", skip=(), low=(), target="0"):
         from .models import DailyROIAccrual
-        for i in range(1, 31):
-            day = self.confirmed_at.date() + timedelta(days=i)
+        for i in range(1, days + 1):
             if i in skip:
                 continue
-            DailyROIAccrual.objects.create(user=user, date=day, target_savings_balance=Decimal(target),
+            DailyROIAccrual.objects.create(user=user, date=self.confirmed_at.date() + timedelta(days=i),
+                                           target_savings_balance=Decimal(target),
                                            savings_balance=Decimal("4000" if i in low else savings))
 
-    def held(self, month="2026-10"):
-        from .models import held_confirmed_referral_counts
-        return held_confirmed_referral_counts([self.me.id], month, 30, now=self.now)
+    def check(self):
+        from .utils import check_ambassador_referral_holds
+        with patch("authentication.utils.send_transactional_email") as email, \
+                patch("authentication.utils.send_push_notification") as push:
+            marked = check_ambassador_referral_holds(now=self.now)
+        return marked, email, push
 
-    def test_counts_in_the_month_the_hold_ends_when_savings_stayed(self):
+    def counted(self):
+        from .models import confirmed_referral_counts
+        return confirmed_referral_counts([self.me.id], "2026-10")
+
+    def test_counts_as_soon_as_confirmed(self):
         self.snapshots(self.referral("kept@example.com"))
-        self.assertEqual(self.held(), {self.me.id: 1})
-        self.assertEqual(self.held("2026-09"), {})  # not the month of confirmation
+        self.assertEqual(self.check()[0], 0)
+        self.assertEqual(self.counted(), {self.me.id: 1})
 
-    def test_dipping_below_the_threshold_never_counts(self):
+    def test_dropping_below_during_the_hold_removes_it_and_tells_the_ambassador(self):
         self.snapshots(self.referral("dipped@example.com"), low=(12,))
-        self.assertEqual(self.held(), {})
+        marked, email, push = self.check()
+        self.assertEqual(marked, 1)
+        self.assertEqual(self.counted(), {})
+        self.assertEqual(email.call_args.kwargs["recipient_list"], [self.me.email])
+        self.assertIn("Points Removed", email.call_args.kwargs["subject"])
+        self.assertEqual(push.call_args.kwargs["data"]["type"], "AMBASSADOR_REFERRAL_HOLD_BROKEN")
+        self.assertEqual(self.check()[0], 0)  # told once
 
     def test_money_moved_into_target_savings_still_counts(self):
         self.snapshots(self.referral("goal@example.com"), low=(12,), target="6000")  # 4,000 + 6,000
-        self.assertEqual(self.held(), {self.me.id: 1})
+        self.assertEqual(self.check()[0], 0)
+        self.assertEqual(self.counted(), {self.me.id: 1})
 
     def test_a_day_with_no_snapshot_while_the_job_ran_means_zero_balance(self):
-        withdrew = self.referral("withdrew@example.com")
-        self.snapshots(withdrew, skip=(20,))
+        self.snapshots(self.referral("withdrew@example.com"), skip=(8,))
         self.snapshots(self.mk("someone@example.com"))  # the job did run that day
-        self.assertEqual(self.held(), {})
+        self.assertEqual(self.check()[0], 1)
 
-    def test_still_inside_the_hold_is_pending_not_counted(self):
-        from .models import pending_confirmed_referral_counts
-        self.referral("new@example.com", confirmed_at=self.now - timedelta(days=5))
-        self.assertEqual(self.held(), {})
-        self.assertEqual(pending_confirmed_referral_counts([self.me.id], 30, now=self.now), {self.me.id: 1})
+    def test_after_the_hold_withdrawals_no_longer_remove_points(self):
+        r = self.referral("later@example.com")
+        self.snapshots(r, days=40, low=(35,))
+        self.now = self.confirmed_at + timedelta(days=41)
+        self.assertEqual(self.check()[0], 0)
+        self.assertEqual(self.counted(), {self.me.id: 1})
 
 
 class AutosubmitNotificationTest(TestCase):
@@ -229,3 +242,13 @@ class ReferralFlagsAdminTest(TestCase):
         report = AmbassadorMonthlyReport.objects.create(user=amb, month=timezone.localdate().strftime("%Y-%m"))
         flags = site._registry[AmbassadorMonthlyReport].referral_flags(report)
         self.assertEqual(flags, "⚠️ 3 share a surname · 1 confirmed at just ₦10k")
+
+    def test_flags_a_surname_inside_a_double_surname(self):
+        from django.contrib.admin.sites import site
+        amb = CustomUser.objects.create_user(email="eni@example.com", password="x", first_name="Eni",
+                                             last_name="OmotayoAjadi", phone_number="08048000001",
+                                             is_ambassador=True)
+        CustomUser.objects.create_user(email="stella@example.com", password="x", first_name="Stella",
+                                       last_name="Ajadi", phone_number="08048000002", referral=amb)
+        report = AmbassadorMonthlyReport.objects.create(user=amb, month=timezone.localdate().strftime("%Y-%m"))
+        self.assertEqual(site._registry[AmbassadorMonthlyReport].referral_flags(report), "⚠️ 1 share a surname")

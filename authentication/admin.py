@@ -3146,11 +3146,13 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
 
     def referral_flags(self, obj):
         """Signs of padded referrals worth a look before approving: sign-ups
-        sharing a surname (with the ambassador or each other), and confirmed
-        referrals sitting just at the ₦10,000 line."""
+        sharing a surname (with the ambassador - also as part of a double
+        surname - or each other), confirmed referrals sitting just at the
+        ₦10,000 line, ones whose points were removed for withdrawing during
+        the hold, and ones who withdrew soon after it ended."""
         from collections import Counter
         from datetime import timedelta
-        from .models import AMBASSADOR_REFERRAL_SAVINGS_THRESHOLD
+        from .models import AMBASSADOR_REFERRAL_SAVINGS_THRESHOLD, AmbassadorPointConfig
 
         start = timezone.make_aware(datetime.strptime(obj.month, "%Y-%m"))
         end = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
@@ -3162,7 +3164,10 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
         ]
         counts = Counter(n for n in surnames if n)
         own = (obj.user.last_name or "").strip().lower()
-        same_surname = sum(1 for n in surnames if n and (counts[n] > 1 or n == own))
+        same_surname = sum(
+            1 for n in surnames
+            if n and (counts[n] > 1 or (len(n) >= 3 and own and (n in own or own in n)))
+        )
         threshold = AMBASSADOR_REFERRAL_SAVINGS_THRESHOLD
         at_threshold = referrals.filter(
             referral_reward_granted=True,
@@ -3171,7 +3176,23 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
             savings__gte=threshold,
             savings__lt=threshold + 1000,
         ).count()
+        hold = timedelta(days=AmbassadorPointConfig.get_active().confirmed_hold_days)
+        confirmed = referrals.filter(
+            referral_reward_granted=True,
+            referral_reward_confirmed_at__gte=start - timedelta(days=90),
+            referral_reward_confirmed_at__lt=end,
+        )
+        removed = confirmed.filter(referral_hold_broken_at__isnull=False).count()
+        withdrew_after = sum(
+            1 for c in confirmed.filter(referral_hold_broken_at__isnull=True,
+                                        referral_reward_confirmed_at__lte=timezone.now() - hold)
+            if (c.savings or 0) + (c.investment or 0) < threshold
+        )
         flags = []
+        if removed:
+            flags.append(f"{removed} withdrew during the hold (points removed)")
+        if withdrew_after:
+            flags.append(f"{withdrew_after} withdrew soon after the hold")
         if same_surname:
             flags.append(f"{same_surname} share a surname")
         if at_threshold:
@@ -3415,7 +3436,13 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
 
     @admin.action(description="✅ Approve selected reports")
     def approve_reports(self, request, queryset):
+        from .models import confirmed_referral_counts
+
         for report in queryset:
+            # Never pay for a confirmation whose referral has since pulled
+            # their savings out during the hold.
+            standing = confirmed_referral_counts([report.user_id], report.month).get(report.user_id, 0)
+            report.confirmed_approved = min(report.confirmed_approved, standing)
             report.status = "approved"
             report.approved_by = request.user
             report.approved_at = timezone.now()

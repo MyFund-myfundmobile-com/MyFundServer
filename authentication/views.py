@@ -14574,7 +14574,7 @@ from rest_framework.views import APIView
 
 from .models import (
     AmbassadorMonthlyReport, AmbassadorPointConfig, first_deposit_referral_counts,
-    held_confirmed_referral_counts, pending_confirmed_referral_counts,
+    confirmed_referral_counts,
 )
 from .serializers import AmbassadorMonthlyReportSerializer
 from .tasks import send_ambassador_report_notifications_task
@@ -14657,7 +14657,7 @@ def _live_ambassador_month(user, key, config):
     end = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
     referrals = CustomUser.objects.filter(referral=user)
     signups = referrals.filter(date_joined__gte=start, date_joined__lt=end).count()
-    confirmed = held_confirmed_referral_counts([user.id], key, config.confirmed_hold_days).get(user.id, 0)
+    confirmed = confirmed_referral_counts([user.id], key).get(user.id, 0)
     attendance = AmbassadorAttendanceSubmission.objects.filter(user=user, month=key).count()
     first_deposits = first_deposit_referral_counts(
         [user.id], key, config.first_deposit_min_amount).get(user.id, 0)
@@ -14691,7 +14691,7 @@ def _cohort_points_batch(members, month_keys, config):
         referrals = CustomUser.objects.filter(referral_id__in=ids)
         signups = dict(referrals.filter(date_joined__gte=start, date_joined__lt=end)
                        .values("referral_id").annotate(n=Count("id")).values_list("referral_id", "n"))
-        confirmed = held_confirmed_referral_counts(ids, key, config.confirmed_hold_days)
+        confirmed = confirmed_referral_counts(ids, key)
         attendance = dict(AmbassadorAttendanceSubmission.objects.filter(user_id__in=ids, month=key)
                           .values("user_id").annotate(n=Count("id")).values_list("user_id", "n"))
         first_deposits = first_deposit_referral_counts(ids, key, config.first_deposit_min_amount)
@@ -14843,10 +14843,6 @@ class AmbassadorPerformanceReportView(APIView):
                     "confirmed": report.confirmed_approved if report else confirmed,
                     "attendance": report.attendance_approved if report else attendance,
                     "first_deposits": report.first_deposits_approved if report else first_deposits,
-                    # Confirmed but still inside the savings hold - points come when it ends.
-                    "confirmed_pending": pending_confirmed_referral_counts(
-                        [user.id], config.confirmed_hold_days).get(user.id, 0),
-                    "confirmed_hold_days": config.confirmed_hold_days,
                     "points": str(pts),
                     "stipend_estimate": str((pts * Decimal("100")).quantize(Decimal("0.01"))),
                     "estimated": report is None,

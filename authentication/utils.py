@@ -2557,6 +2557,53 @@ from .models import (
 )
 
 
+def check_ambassador_referral_holds(now=None):
+    """Marks confirmed referrals who dropped below ₦10,000 during the hold
+    (their ambassador loses the confirmed points) and tells each ambassador
+    why. Runs after the daily 12 noon snapshot."""
+    from .models import AmbassadorPointConfig, mark_broken_referral_holds
+
+    config = AmbassadorPointConfig.get_active()
+    broken = mark_broken_referral_holds(config.confirmed_hold_days, now=now)
+    for referral in broken:
+        ambassador = referral.referral
+        month_label = referral.referral_reward_confirmed_at.strftime("%B %Y")
+        points = config.confirmed_points
+        try:
+            send_transactional_email(
+                subject=f"{points:,.0f} Points Removed: {referral.first_name}'s Savings Dropped",
+                message=(
+                    f"Hi {ambassador.first_name},<br><br>"
+                    f"Your referral <b>{referral.first_name}</b> was confirmed in {month_label}, but their "
+                    f"savings dropped below ₦10,000 within {config.confirmed_hold_days} days, so the "
+                    f"confirmed-referral points come off:<br><br>"
+                    f'<span style="font-size:20px"><b>−{points:,.0f} points ({month_label})</b></span><br><br>'
+                    f"Confirmed points count when a referral keeps ₦10,000 or more saved for "
+                    f"{config.confirmed_hold_days} days. Encourage {referral.first_name} to keep saving - "
+                    f"your sign-up and first-deposit points for them stay.<br><br>"
+                    f"Keep up the great work! 💜"
+                ),
+                from_email="MyFund <info@myfundmobile.com>",
+                recipient_list=[ambassador.email],
+            )
+        except Exception as e:
+            logger.warning(f"Hold-broken email failed for {ambassador.email}: {e}")
+        try:
+            send_push_notification(
+                user=ambassador,
+                title=f"−{points:,.0f} points: {referral.first_name}'s savings dropped",
+                message=(
+                    f"{referral.first_name} dropped below ₦10,000 within {config.confirmed_hold_days} days "
+                    f"of being confirmed, so the {points:,.0f} confirmed points were removed from {month_label}."
+                ),
+                data={"type": "AMBASSADOR_REFERRAL_HOLD_BROKEN", "referral_id": referral.id},
+                notif_type="SYSTEM",
+            )
+        except Exception as e:
+            logger.warning(f"Hold-broken push failed for {ambassador.email}: {e}")
+    return len(broken)
+
+
 def notify_ambassador_report_autosubmitted(report):
     """Email + push so an ambassador knows the system filed their report
     (manual submissions get the same via send_ambassador_report_notifications_task)."""

@@ -493,6 +493,14 @@ def calculate_daily_roi_task():
             f"Sent: {batch_result['sent']}, Failed: {batch_result['failed']}"
         )
 
+    # Today's snapshots are in - take back confirmed-referral points from
+    # referrals who pulled their savings out during the hold.
+    try:
+        from .utils import check_ambassador_referral_holds
+        check_ambassador_referral_holds()
+    except Exception as e:
+        logger.error(f"Ambassador referral hold check failed: {e}")
+
     logger.info(
         f"✅ Daily ROI task complete. Processed: {processed_count}, "
         f"Skipped: {skipped_count}, Errors: {error_count}"
