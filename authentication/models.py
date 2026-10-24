@@ -4165,7 +4165,8 @@ class AmbassadorAttendanceSubmission(models.Model):
     recommendation = models.TextField()
 
     month = models.CharField(max_length=7, db_index=True)  # YYYY-MM
-    week_key = models.CharField(max_length=20, db_index=True)  # e.g. 2026-W13
+    # Saturday date that starts the ambassador meeting week, e.g. 2026-10-24.
+    week_key = models.CharField(max_length=20, db_index=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
 

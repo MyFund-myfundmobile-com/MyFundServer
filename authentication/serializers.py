@@ -1371,7 +1371,7 @@ class AmbassadorMonthlyReportSerializer(serializers.ModelSerializer):
 from django.utils import timezone
 from .models import AmbassadorAttendanceSubmission, CustomUser
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from rest_framework import serializers
 from .models import AmbassadorAttendanceSubmission, CustomUser
 
@@ -1381,6 +1381,20 @@ class AmbassadorAttendanceSubmissionSerializer(serializers.Serializer):
     attendance_date = serializers.DateField(input_formats=["%Y-%m-%d"])
     takeaway = serializers.CharField()
     recommendation = serializers.CharField()
+
+    @staticmethod
+    def _meeting_week_start(attendance_date):
+        """Return the Saturday that starts this ambassador-meeting week.
+
+        Ambassador meetings are held on Saturdays, so an attendance week
+        runs from Saturday through Friday.  Using calendar weeks (Sunday
+        through Saturday) previously made a report submitted earlier in
+        the week block attendance for that Saturday's new meeting.
+        """
+        saturday = 5  # date.weekday(): Monday is 0, Saturday is 5.
+        return attendance_date - timedelta(
+            days=(attendance_date.weekday() - saturday) % 7
+        )
 
     def validate_email(self, value):
         email = value.strip().lower()
@@ -1400,11 +1414,14 @@ class AmbassadorAttendanceSubmissionSerializer(serializers.Serializer):
         attendance_date = attrs["attendance_date"]
 
         month = attendance_date.strftime("%Y-%m")
-        week_key = attendance_date.strftime("%Y-W%U")
+        week_start = self._meeting_week_start(attendance_date)
+        week_end = week_start + timedelta(days=7)
+        week_key = week_start.isoformat()
 
         already_submitted = AmbassadorAttendanceSubmission.objects.filter(
             user=user,
-            week_key=week_key,
+            attendance_date__gte=week_start,
+            attendance_date__lt=week_end,
         ).exists()
 
         if already_submitted:
