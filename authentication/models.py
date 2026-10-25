@@ -3515,7 +3515,22 @@ class AdminNotifyRecipient(models.Model):
         return f"{self.label or self.email} ({self.email})"
 
 
-class CxWeeklyReport(models.Model):
+class RecommendationReviewMixin(models.Model):
+    """When an admin marks a submitted recommendation as resolved (see
+    admin_views.resolve_recommendation) - shared by every report that
+    carries one: CX/Engagement/Media weekly reports and ambassadors'
+    attendance feedback. Resolved == recommendation_resolved_at is set."""
+
+    recommendation_resolved_at = models.DateTimeField(null=True, blank=True)
+    recommendation_resolved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
+    )
+
+    class Meta:
+        abstract = True
+
+
+class CxWeeklyReport(RecommendationReviewMixin):
     """
     A CX team member's weekly report + improvement recommendation,
     submitted from their restricted admin dashboard (see the mobile app's
@@ -3533,7 +3548,8 @@ class CxWeeklyReport(models.Model):
     """
 
     department = models.CharField(
-        max_length=20, choices=[("CX", "CX"), ("Engagement", "Engagement")],
+        max_length=20,
+        choices=[("CX", "CX"), ("Engagement", "Engagement"), ("Media", "Media and Communications")],
         default="CX", db_index=True,
     )
 
@@ -4153,7 +4169,7 @@ class AmbassadorMonthlyReport(models.Model):
         ).get(self.user_id, 0)
 
 
-class AmbassadorAttendanceSubmission(models.Model):
+class AmbassadorAttendanceSubmission(RecommendationReviewMixin):
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,

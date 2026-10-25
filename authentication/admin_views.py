@@ -4983,14 +4983,24 @@ def ambassador_stipend_approve_and_pay(request, report_id):
     return Response({"credited": credited, "message": message, "report": _ambassador_report_data(request, report)})
 
 
+# A report's `department` code -> the payroll Employee.department whose
+# active members may submit it ("Media" fits CxWeeklyReport's 20-char field).
+REPORT_EMPLOYEE_DEPARTMENTS = {
+    "Engagement": "Engagement",
+    "Media": "Media and Communications",
+}
+
+
 def _can_submit_department_report(user, department):
     if department == "CX":
         return True  # Preserve the existing CX staff permission.
-    if department != "Engagement":
+    if department not in REPORT_EMPLOYEE_DEPARTMENTS:
         return False
     from .models import Employee
     return _is_finance_allowed(user) or Employee.objects.filter(
-        email__iexact=user.email, department="Engagement", is_active=True,
+        email__iexact=user.email,
+        department=REPORT_EMPLOYEE_DEPARTMENTS[department],
+        is_active=True,
     ).exists()
 
 
@@ -5134,10 +5144,89 @@ def list_ambassador_attendance_feedback(request):
             "email": r.email,
             "takeaway": r.takeaway,
             "recommendation": r.recommendation,
+            "recommendation_resolved_at": r.recommendation_resolved_at,
             "created_at": r.created_at,
         }
         for r in rows
     ])
+
+
+def _reviewable_recommendation(request, kind, pk):
+    """(row, None) if this user may act on that report's recommendation,
+    else (None, error Response). kind "team" is a CX/Engagement/Media
+    weekly report - founders, the same people who can list them; kind
+    "ambassador" is attendance feedback - the Ambassadors Report list."""
+    from .models import AmbassadorAttendanceSubmission, CxWeeklyReport
+
+    if kind == "team":
+        allowed, model = _is_finance_allowed(request.user), CxWeeklyReport
+    elif kind == "ambassador":
+        allowed = (request.user.email or "").lower() in AMBASSADOR_REPORT_EMAILS
+        model = AmbassadorAttendanceSubmission
+    else:
+        return None, Response({"detail": "Not found"}, status=404)
+    if not allowed:
+        return None, Response({"detail": "Permission denied"}, status=403)
+    row = model.objects.filter(pk=pk).first()
+    if row is None or not row.recommendation:
+        return None, Response({"detail": "No recommendation to act on."}, status=404)
+    return row, None
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def resolve_recommendation(request, kind, pk):
+    """
+    POST /api/admin/recommendations/<team|ambassador>/<id>/resolve/
+    Marks a submitted recommendation resolved and pushes a thank-you to
+    whoever gave it, so they know it was considered and acted on.
+    """
+    row, error = _reviewable_recommendation(request, kind, pk)
+    if error:
+        return error
+    if row.recommendation_resolved_at:
+        return Response({"recommendation_resolved_at": row.recommendation_resolved_at})
+
+    row.recommendation_resolved_at = timezone.now()
+    row.recommendation_resolved_by = request.user
+    row.save(update_fields=["recommendation_resolved_at", "recommendation_resolved_by"])
+
+    giver = row.user if kind == "ambassador" else row.submitted_by
+    if giver:
+        snippet = row.recommendation.strip()
+        snippet = snippet if len(snippet) <= 90 else f"{snippet[:87]}..."
+        try:
+            from .utils import send_push_notification
+            send_push_notification(
+                giver,
+                "✅ Your recommendation was resolved",
+                f"Thank you, {giver.first_name or 'there'}! Your recommendation \"{snippet}\" "
+                "was reviewed and acted on. Keep the ideas coming 💜",
+                data={"type": "RECOMMENDATION_RESOLVED", "kind": kind, "id": str(row.pk)},
+                notif_type="SYSTEM",
+            )
+        except Exception as e:
+            logger.warning(f"Recommendation-resolved push failed: {e}")
+
+    return Response({"recommendation_resolved_at": row.recommendation_resolved_at})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def delete_recommendation(request, kind, pk):
+    """
+    POST /api/admin/recommendations/<team|ambassador>/<id>/delete/
+    Removes just the recommendation text - the report itself (and an
+    ambassador's attendance and its point) stays. No push.
+    """
+    row, error = _reviewable_recommendation(request, kind, pk)
+    if error:
+        return error
+    row.recommendation = ""
+    row.recommendation_resolved_at = None
+    row.recommendation_resolved_by = None
+    row.save(update_fields=["recommendation", "recommendation_resolved_at", "recommendation_resolved_by"])
+    return Response(status=204)
 
 
 @api_view(['GET'])

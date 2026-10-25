@@ -394,6 +394,7 @@ class CxWeeklyReportSerializer(serializers.ModelSerializer):
             "created_at",
             "submitted_by_name",
             "submitted_by_email",
+            "recommendation_resolved_at",
         ]
 
     def get_submitted_by_name(self, obj):
