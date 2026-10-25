@@ -1396,6 +1396,18 @@ class AmbassadorAttendanceSubmissionSerializer(serializers.Serializer):
             days=(attendance_date.weekday() - saturday) % 7
         )
 
+    def validate_attendance_date(self, value):
+        # Meetings are on Saturdays, and attendance can't be logged ahead
+        # (someone once pre-submitted months of future Saturdays). The
+        # web form only offers past Saturdays; this holds it server-side.
+        from django.utils import timezone
+
+        if value.weekday() != 5:
+            raise serializers.ValidationError("Attendance can only be submitted for a Saturday meeting.")
+        if value > timezone.localdate():
+            raise serializers.ValidationError("You can't submit attendance for a future meeting.")
+        return value
+
     def validate_email(self, value):
         email = value.strip().lower()
 

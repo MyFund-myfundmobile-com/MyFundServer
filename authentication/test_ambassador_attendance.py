@@ -1,6 +1,7 @@
-from datetime import date
+from datetime import date, timedelta
 
 from django.test import TestCase
+from django.utils import timezone
 
 from authentication.models import AmbassadorAttendanceSubmission, CustomUser
 from authentication.serializers import AmbassadorAttendanceSubmissionSerializer
@@ -47,19 +48,37 @@ class AmbassadorAttendanceWeekTests(TestCase):
         self.assertEqual(submission.week_key, "2026-10-24")
 
     def test_second_submission_in_same_saturday_to_friday_week_is_rejected(self):
+        # A legacy mid-week report (Monday 19 Oct) already covers the week
+        # that started Saturday 17 Oct.
         AmbassadorAttendanceSubmission.objects.create(
             user=self.user,
             email=self.user.email,
-            attendance_date=date(2026, 10, 24),
-            takeaway="Saturday report",
+            attendance_date=date(2026, 10, 19),
+            takeaway="Monday report",
             recommendation="None",
             month="2026-10",
-            week_key="2026-10-24",
+            week_key="2026-10-17",
         )
 
         serializer = AmbassadorAttendanceSubmissionSerializer(
-            data=self.payload(date(2026, 10, 30))
+            data=self.payload(date(2026, 10, 17))
         )
 
         self.assertFalse(serializer.is_valid())
         self.assertIn("message", serializer.errors)
+
+    def test_only_saturdays_are_accepted(self):
+        serializer = AmbassadorAttendanceSubmissionSerializer(
+            data=self.payload(date(2026, 10, 21))  # a Wednesday
+        )
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("attendance_date", serializer.errors)
+
+    def test_future_saturdays_are_rejected(self):
+        today = timezone.localdate()
+        next_saturday = today + timedelta(days=(5 - today.weekday()) % 7 or 7)
+        serializer = AmbassadorAttendanceSubmissionSerializer(
+            data=self.payload(next_saturday)
+        )
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("attendance_date", serializer.errors)
