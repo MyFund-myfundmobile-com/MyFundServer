@@ -36,9 +36,12 @@ class RecommendationReviewTests(TestCase):
         client.force_authenticate(user)
         return client.post(url)
 
+    @patch("authentication.utils.send_transactional_email")
     @patch("authentication.utils.send_push_notification")
-    def test_resolving_a_team_recommendation_pushes_a_thank_you(self, push):
+    def test_resolving_a_team_recommendation_pushes_and_emails_a_thank_you(self, push, email):
         res = self.post(self.founder, f"/api/admin/recommendations/team/{self.report.pk}/resolve/")
+        self.assertEqual(email.call_args.kwargs["recipient_list"], [self.cx.email])
+        self.assertIn("Add live chat", email.call_args.kwargs["message"])
         self.assertEqual(res.status_code, 200)
         self.report.refresh_from_db()
         self.assertIsNotNone(self.report.recommendation_resolved_at)
@@ -46,8 +49,9 @@ class RecommendationReviewTests(TestCase):
         self.assertEqual(push.call_args.args[0], self.cx)
         self.assertIn("Add live chat", push.call_args.args[2])
 
+    @patch("authentication.utils.send_transactional_email")
     @patch("authentication.utils.send_push_notification")
-    def test_ambassador_feedback_is_resolved_by_the_report_viewers(self, push):
+    def test_ambassador_feedback_is_resolved_by_the_report_viewers(self, push, email):
         res = self.post(self.lioness, f"/api/admin/recommendations/ambassador/{self.attendance.pk}/resolve/")
         self.assertEqual(res.status_code, 200)
         self.assertEqual(push.call_args.args[0], self.attendance.user)

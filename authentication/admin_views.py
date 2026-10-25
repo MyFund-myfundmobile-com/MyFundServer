@@ -5193,6 +5193,7 @@ def resolve_recommendation(request, kind, pk):
 
     giver = row.user if kind == "ambassador" else row.submitted_by
     if giver:
+        first_name = giver.first_name or "there"
         snippet = row.recommendation.strip()
         snippet = snippet if len(snippet) <= 90 else f"{snippet[:87]}..."
         try:
@@ -5200,13 +5201,29 @@ def resolve_recommendation(request, kind, pk):
             send_push_notification(
                 giver,
                 "✅ Your recommendation was resolved",
-                f"Thank you, {giver.first_name or 'there'}! Your recommendation \"{snippet}\" "
+                f"Thank you, {first_name}! Your recommendation \"{snippet}\" "
                 "was reviewed and acted on. Keep the ideas coming 💜",
                 data={"type": "RECOMMENDATION_RESOLVED", "kind": kind, "id": str(row.pk)},
                 notif_type="SYSTEM",
             )
         except Exception as e:
             logger.warning(f"Recommendation-resolved push failed: {e}")
+        try:
+            from django.utils.html import escape
+            from .utils import send_transactional_email
+            send_transactional_email(
+                subject="✅ Your recommendation was resolved",
+                message=(
+                    f"Hi {escape(first_name)},<br><br>"
+                    "Thank you for your recommendation. We reviewed it and acted on it:<br><br>"
+                    f"<b>\"{escape(row.recommendation.strip())}\"</b><br><br>"
+                    "Ideas like yours help us make MyFund better. Please keep them coming! 💜"
+                ),
+                recipient_list=[giver.email],
+                from_email="MyFund <info@myfundmobile.com>",
+            )
+        except Exception as e:
+            logger.warning(f"Recommendation-resolved email failed: {e}")
 
     return Response({"recommendation_resolved_at": row.recommendation_resolved_at})
 
