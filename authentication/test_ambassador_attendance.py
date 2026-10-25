@@ -82,3 +82,25 @@ class AmbassadorAttendanceWeekTests(TestCase):
         )
         self.assertFalse(serializer.is_valid())
         self.assertIn("attendance_date", serializer.errors)
+
+
+class AttendanceSubmitResponseTests(TestCase):
+    def test_response_reports_points_earned_and_month_total(self):
+        from decimal import Decimal
+        from rest_framework.test import APIClient
+        from authentication.models import AmbassadorPointConfig
+
+        user = CustomUser.objects.create_user(
+            email="amb2@example.com", password="Secret#123", first_name="Eni",
+            last_name="A", phone_number="08030000002", is_ambassador=True,
+        )
+        config = AmbassadorPointConfig.get_active()
+        res = APIClient().post("/api/attendance/submit/", {
+            "email": user.email, "attendance_date": "2026-10-24",
+            "takeaway": "Great session.", "recommendation": "More Q&A.",
+        }, format="json")
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertEqual(res.data["first_name"], "Eni")
+        self.assertEqual(Decimal(res.data["points_for_this_attendance"]), config.attendance_points)
+        self.assertEqual(res.data["month_label"], "October 2026")
+        self.assertEqual(Decimal(res.data["month_points"]), config.attendance_points)  # their only activity

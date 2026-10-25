@@ -14969,11 +14969,23 @@ def submit_ambassador_attendance(request):
         month=current_month_key,
     ).count()
 
+    # The same figures the Performance page shows: the approved report's
+    # total if that month has one, otherwise the live estimate.
+    config = AmbassadorPointConfig.get_active()
+    report = AmbassadorMonthlyReport.objects.filter(user=submission.user, month=current_month_key).first()
+    month_points = (
+        report.total_points_awarded if report
+        else _live_ambassador_month(submission.user, current_month_key, config)[3]
+    )
+
     return Response(
         {
             "message": f"Attendance recorded successfully for {current_month}.",
+            "first_name": submission.user.first_name,
             "attendance_count_this_month": monthly_count,
-            "points_for_this_attendance": 0.5,
+            "points_for_this_attendance": str(config.attendance_points),
+            "month_label": current_month,
+            "month_points": str(month_points),
             "attendance_date": submission.attendance_date.strftime("%Y-%m-%d"),
             "weekly_submission_saved": True,
         },
