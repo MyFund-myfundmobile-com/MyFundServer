@@ -5094,6 +5094,52 @@ def list_cx_weekly_reports(request, department="CX"):
     return Response(CxWeeklyReportSerializer(reports, many=True).data)
 
 
+# Who can read ambassadors' meeting feedback. Its own list - deliberately
+# not is_staff - so the meeting host (Lioness) can read it without full
+# admin access. Keep in sync with the app's adminAccess.js
+# canViewAmbassadorReport, which is only the UI gate; this is the real one.
+AMBASSADOR_REPORT_EMAILS = {
+    "tolulopeahmed@gmail.com",
+    "company@myfundmobile.com",
+    "lioness@myfundmobile.com",
+}
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def list_ambassador_attendance_feedback(request):
+    """
+    GET /api/admin/ambassadors/attendance-feedback/
+    The takeaway + recommendation each ambassador leaves with their weekly
+    meeting attendance, newest meeting first (last ~12 weeks). Future-dated
+    rows (pre-submitted before attendance was locked to the current week)
+    are left out.
+    """
+    if (request.user.email or "").lower() not in AMBASSADOR_REPORT_EMAILS:
+        return Response({"detail": "Permission denied"}, status=403)
+
+    from .models import AmbassadorAttendanceSubmission
+
+    today = timezone.localdate()
+    rows = (
+        AmbassadorAttendanceSubmission.objects.select_related("user")
+        .filter(attendance_date__lte=today, attendance_date__gte=today - timedelta(weeks=12))
+        .order_by("-attendance_date", "created_at")[:500]
+    )
+    return Response([
+        {
+            "id": r.id,
+            "attendance_date": r.attendance_date,
+            "name": f"{r.user.first_name} {r.user.last_name}".strip() or r.email,
+            "email": r.email,
+            "takeaway": r.takeaway,
+            "recommendation": r.recommendation,
+            "created_at": r.created_at,
+        }
+        for r in rows
+    ])
+
+
 @api_view(['GET'])
 @permission_classes([IsAdminUser])
 def my_cx_weekly_reports(request, department="CX"):

@@ -324,6 +324,8 @@ urlpatterns = [
          {"department": "Engagement"}, name="admin_submit_engagement_weekly_report"),
     path("engagement/weekly-reports/mine/", admin_views.my_cx_weekly_reports,
          {"department": "Engagement"}, name="admin_my_engagement_weekly_reports"),
+    path("ambassadors/attendance-feedback/", admin_views.list_ambassador_attendance_feedback,
+         name="ambassador_attendance_feedback"),
     path("engagement/weekly-reports/", admin_views.list_cx_weekly_reports,
          {"department": "Engagement"}, name="admin_list_engagement_weekly_reports"),
 ]

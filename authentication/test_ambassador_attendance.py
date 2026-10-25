@@ -111,3 +111,36 @@ class AttendanceSubmitResponseTests(TestCase):
         self.assertEqual(Decimal(res.data["points_for_this_attendance"]), config.attendance_points)
         self.assertEqual(res.data["month_label"], saturday.strftime("%B %Y"))
         self.assertEqual(Decimal(res.data["month_points"]), config.attendance_points)  # their only activity
+
+
+class AmbassadorFeedbackReportTests(TestCase):
+    URL = "/api/admin/ambassadors/attendance-feedback/"
+
+    def setUp(self):
+        n = iter(range(100))
+        mk = lambda email, **extra: CustomUser.objects.create_user(
+            email=email, password="Secret#123", first_name="A", last_name="B",
+            phone_number=f"0803100{next(n):04d}", **extra)
+        self.lioness = mk("lioness@myfundmobile.com")  # not staff
+        self.staff = mk("someadmin@example.com", is_staff=True)
+        amb = mk("amb@example.com", is_ambassador=True)
+        saturday = this_weeks_saturday()
+        for d, text in ((saturday, "Loved the session"), (saturday + timedelta(days=7), "pre-submitted")):
+            AmbassadorAttendanceSubmission.objects.create(
+                user=amb, email=amb.email, attendance_date=d, takeaway=text,
+                recommendation="More Q&A", month=d.strftime("%Y-%m"), week_key=d.isoformat())
+
+    def get(self, user):
+        from rest_framework.test import APIClient
+        client = APIClient()
+        client.force_authenticate(user)
+        return client.get(self.URL)
+
+    def test_listed_user_sees_feedback_without_future_rows(self):
+        res = self.get(self.lioness)
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual([r["takeaway"] for r in res.data], ["Loved the session"])
+        self.assertEqual(res.data[0]["recommendation"], "More Q&A")
+
+    def test_other_users_even_staff_are_refused(self):
+        self.assertEqual(self.get(self.staff).status_code, 403)
