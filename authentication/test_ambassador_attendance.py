@@ -1,10 +1,16 @@
-from datetime import date, timedelta
+from datetime import timedelta
 
 from django.test import TestCase
 from django.utils import timezone
 
 from authentication.models import AmbassadorAttendanceSubmission, CustomUser
 from authentication.serializers import AmbassadorAttendanceSubmissionSerializer
+
+
+def this_weeks_saturday():
+    """The meeting whose week is open now (Saturday through Friday)."""
+    today = timezone.localdate()
+    return today - timedelta(days=(today.weekday() - 5) % 7)
 
 
 class AmbassadorAttendanceWeekTests(TestCase):
@@ -17,6 +23,7 @@ class AmbassadorAttendanceWeekTests(TestCase):
             phone_number="08030000001",
             is_ambassador=True,
         )
+        self.saturday = this_weeks_saturday()
 
     def payload(self, attendance_date):
         return {
@@ -26,62 +33,61 @@ class AmbassadorAttendanceWeekTests(TestCase):
             "recommendation": "Keep the weekly meetings going.",
         }
 
-    def test_saturday_starts_a_new_ambassador_attendance_week(self):
-        # This legacy Sunday-to-Saturday key represents a Monday report.
-        # It must not prevent attendance for the following Saturday meeting.
+    def test_this_weeks_meeting_is_accepted_after_last_weeks_report(self):
+        # A legacy mid-week report from the previous week must not block
+        # this Saturday's meeting.
         AmbassadorAttendanceSubmission.objects.create(
             user=self.user,
             email=self.user.email,
-            attendance_date=date(2026, 10, 19),
+            attendance_date=self.saturday - timedelta(days=5),
             takeaway="Monday report",
             recommendation="None",
             month="2026-10",
-            week_key="2026-W42",
+            week_key="legacy",
         )
 
-        serializer = AmbassadorAttendanceSubmissionSerializer(
-            data=self.payload(date(2026, 10, 24))
-        )
+        serializer = AmbassadorAttendanceSubmissionSerializer(data=self.payload(self.saturday))
 
         self.assertTrue(serializer.is_valid(), serializer.errors)
         submission = serializer.save()
-        self.assertEqual(submission.week_key, "2026-10-24")
+        self.assertEqual(submission.week_key, self.saturday.isoformat())
 
-    def test_second_submission_in_same_saturday_to_friday_week_is_rejected(self):
-        # A legacy mid-week report (Monday 19 Oct) already covers the week
-        # that started Saturday 17 Oct.
+    def test_second_submission_for_the_same_week_is_rejected(self):
         AmbassadorAttendanceSubmission.objects.create(
             user=self.user,
             email=self.user.email,
-            attendance_date=date(2026, 10, 19),
-            takeaway="Monday report",
+            attendance_date=self.saturday,
+            takeaway="Saturday report",
             recommendation="None",
-            month="2026-10",
-            week_key="2026-10-17",
+            month=self.saturday.strftime("%Y-%m"),
+            week_key=self.saturday.isoformat(),
         )
 
-        serializer = AmbassadorAttendanceSubmissionSerializer(
-            data=self.payload(date(2026, 10, 17))
-        )
+        serializer = AmbassadorAttendanceSubmissionSerializer(data=self.payload(self.saturday))
 
         self.assertFalse(serializer.is_valid())
         self.assertIn("message", serializer.errors)
 
     def test_only_saturdays_are_accepted(self):
         serializer = AmbassadorAttendanceSubmissionSerializer(
-            data=self.payload(date(2026, 10, 21))  # a Wednesday
+            data=self.payload(self.saturday - timedelta(days=3))  # a Wednesday
         )
         self.assertFalse(serializer.is_valid())
         self.assertIn("attendance_date", serializer.errors)
 
     def test_future_saturdays_are_rejected(self):
-        today = timezone.localdate()
-        next_saturday = today + timedelta(days=(5 - today.weekday()) % 7 or 7)
         serializer = AmbassadorAttendanceSubmissionSerializer(
-            data=self.payload(next_saturday)
+            data=self.payload(self.saturday + timedelta(days=7))
         )
         self.assertFalse(serializer.is_valid())
         self.assertIn("attendance_date", serializer.errors)
+
+    def test_a_missed_past_week_cannot_be_backfilled(self):
+        serializer = AmbassadorAttendanceSubmissionSerializer(
+            data=self.payload(self.saturday - timedelta(days=7))
+        )
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("closed", str(serializer.errors["attendance_date"]))
 
 
 class AttendanceSubmitResponseTests(TestCase):
@@ -95,12 +101,13 @@ class AttendanceSubmitResponseTests(TestCase):
             last_name="A", phone_number="08030000002", is_ambassador=True,
         )
         config = AmbassadorPointConfig.get_active()
+        saturday = this_weeks_saturday()
         res = APIClient().post("/api/attendance/submit/", {
-            "email": user.email, "attendance_date": "2026-10-24",
+            "email": user.email, "attendance_date": saturday.isoformat(),
             "takeaway": "Great session.", "recommendation": "More Q&A.",
         }, format="json")
         self.assertEqual(res.status_code, 201, res.data)
         self.assertEqual(res.data["first_name"], "Eni")
         self.assertEqual(Decimal(res.data["points_for_this_attendance"]), config.attendance_points)
-        self.assertEqual(res.data["month_label"], "October 2026")
+        self.assertEqual(res.data["month_label"], saturday.strftime("%B %Y"))
         self.assertEqual(Decimal(res.data["month_points"]), config.attendance_points)  # their only activity
