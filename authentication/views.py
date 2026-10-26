@@ -377,6 +377,7 @@ def google_auth_signin(request):
         # regardless of which login method got them here. Google having
         # verified the email doesn't skip phone verification - that's a
         # separate ownership proof, not redundant with email.
+        send_login_otp(user)
         return Response(
             {
                 "status": "inactive",
@@ -634,6 +635,7 @@ def apple_auth_signin(request):
         )
 
     if not user.is_active:
+        send_login_otp(user)
         return Response(
             {
                 "status": "inactive",
@@ -1391,6 +1393,21 @@ def send_otp_for_user(user, send_sms=False):
     return True
 
 
+def send_login_otp(user):
+    """A login that hits a not-yet-verified account takes the app to the
+    code screen, which tells them a new code was sent - so send one (email
+    + SMS), unless one already went out within resend_otp's 60s cooldown.
+    Without this, someone who left the confirmation screen waited for a
+    code that never came."""
+    last_sent = getattr(user, "last_otp_sent_at", None)
+    if last_sent and timezone.now() - last_sent < timedelta(seconds=60):
+        return
+    try:
+        send_otp_for_user(user=user, send_sms=True)
+    except Exception as e:
+        logger.exception(f"Error sending login OTP to {user.email}: {e}")
+
+
 @api_view(["POST"])
 @csrf_exempt
 @permission_classes([AllowAny])
@@ -1816,6 +1833,7 @@ class CustomObtainAuthToken(ObtainAuthToken):
                     )
 
                 # For regular users, send OTP
+                send_login_otp(user)
                 return Response(
                     {
                         "status": "inactive",
