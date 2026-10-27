@@ -102,6 +102,14 @@ from decimal import Decimal
 from django.core.exceptions import ValidationError
 
 
+# Titles a referral reward row has had over time. 2025 signups were created
+# as "Referral Reward . . ." - without it here those rows weren't found, so
+# their referrals could never be confirmed however much the referred user
+# saved. A row found by any of these is renamed "Referral Reward" when it's
+# confirmed (see _confirm_referral_rewards_locked).
+REFERRAL_REWARD_DESCRIPTIONS = ["Referral Reward", "Referral Reward (Pending)", "Referral Reward . . ."]
+
+
 class CustomUser(AbstractBaseUser, PermissionsMixin):
     first_name = models.CharField(max_length=30)
     last_name = models.CharField(max_length=30)
@@ -814,7 +822,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
         # Prevent duplicates
         if Transaction.objects.filter(
             user=self, referral_email__iexact=self.referral.email,
-            description__in=["Referral Reward", "Referral Reward (Pending)"]
+            description__in=REFERRAL_REWARD_DESCRIPTIONS
         ).exists():
             logger.info(f"Pending referral reward already exists for {self.email}")
             return
@@ -965,7 +973,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
                 for recipient, counterpart in ((self, self.referral), (self.referral, self)):
                     rows = list(Transaction.objects.select_for_update().filter(
                         user=recipient, referral_email__iexact=counterpart.email,
-                        description__in=["Referral Reward", "Referral Reward (Pending)"],
+                        description__in=REFERRAL_REWARD_DESCRIPTIONS,
                     ))
                     if len(rows) > 1 or any(
                         row.status not in ("pending", "confirmed") or row.amount <= 0
