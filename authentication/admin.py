@@ -3620,7 +3620,30 @@ class EmployeeAdmin(admin.ModelAdmin):
         "create_draft_payroll",
         "quick_test_payroll",
         "quick_live_payroll",
+        "deactivate_and_notify",
     ]
+
+    @admin.action(description="🚫 Set as INACTIVE (notify by email + push)")
+    def deactivate_and_notify(self, request, queryset):
+        """Same as unticking 'Is active' on each employee - removes them from
+        payroll and sends the role-ended email + push (notify_employee_change)."""
+        notified, no_account, skipped = [], [], 0
+        for employee in queryset:
+            if not employee.is_active:
+                skipped += 1
+                continue
+            employee.is_active = False
+            employee.save(update_fields=["is_active"])
+            if notify_employee_change(employee, old_status=True) is False:
+                no_account.append(employee.email)
+            else:
+                notified.append(employee.name)
+        if notified:
+            self.message_user(request, f"Set inactive and notified: {', '.join(notified)}.", level=messages.SUCCESS)
+        if no_account:
+            self.message_user(request, f"Set inactive, but no MyFund account to notify for: {', '.join(no_account)}.", level=messages.WARNING)
+        if skipped:
+            self.message_user(request, f"{skipped} already inactive - left unchanged.", level=messages.INFO)
 
     def total_paid_display(self, obj):
 

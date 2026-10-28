@@ -245,15 +245,15 @@ def notify_employee_change(employee, old_status=None, old_department=None, old_a
 
     elif status_changed and not employee.is_active:
 
-        title = "MyFund Team Access Update"
+        title = "Update on your MyFund team role"
 
         message = (
-            "Hi {first_name}, "
-            "your MyFund employee access has been updated. "
-            "Thank you for your contributions and support."
+            "Hi {first_name}, your role on the MyFund {department} team has ended "
+            "and you've been removed from team payroll. Thank you for your contributions. "
+            "If you think this is an error, please reply to our email or reach out to Dr. Tee."
         )
 
-        email_subject = "MyFund Employee Access Update"
+        email_subject = "Update on your role with the MyFund {department} team"
 
         email_message = """
     <p>
@@ -261,20 +261,23 @@ def notify_employee_change(employee, old_status=None, old_department=None, old_a
     </p>
 
     <p>
-    Your MyFund employee access has been updated.
+    Thank you for your time and contributions to the MyFund {department} team.
+    This is to let you know that your role on the team has now ended, and you
+    have been removed from the MyFund team payroll.
     </p>
 
     <p>
-    Your team access has been deactivated.
+    Your personal MyFund account is not affected - you can keep saving and
+    using the app as usual.
     </p>
 
     <p>
-    Thank you for your contributions, dedication, and support during your time
-    with MyFund.
+    <strong>If you believe this is an error</strong>, or you would like to
+    discuss it, please reply to this email or reach out to Dr. Tee directly.
     </p>
 
     <p>
-    We appreciate the impact you have made.
+    We appreciate the impact you have made and wish you all the best.
     </p>
 
     <p>
