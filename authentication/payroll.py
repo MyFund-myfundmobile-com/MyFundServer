@@ -250,7 +250,7 @@ def notify_employee_change(employee, old_status=None, old_department=None, old_a
         message = (
             "Hi {first_name}, your role on the MyFund {department} team has ended "
             "and you've been removed from team payroll. Thank you for your contributions. "
-            "If you think this is an error, please reply to our email or reach out to Dr. Tee."
+            "If you think this is an error, please email company@myfundmobile.com."
         )
 
         email_subject = "Update on your role with the MyFund {department} team"
@@ -273,7 +273,8 @@ def notify_employee_change(employee, old_status=None, old_department=None, old_a
 
     <p>
     <strong>If you believe this is an error</strong>, or you would like to
-    discuss it, please reply to this email or reach out to Dr. Tee directly.
+    discuss it, please email
+    <a href="mailto:company@myfundmobile.com">company@myfundmobile.com</a>.
     </p>
 
     <p>
