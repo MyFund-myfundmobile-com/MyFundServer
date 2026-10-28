@@ -198,8 +198,10 @@ class ConfirmedReferralHoldTest(TestCase):
 class AutosubmitNotificationTest(TestCase):
     def test_ambassador_gets_email_and_push_when_report_is_autosubmitted(self):
         from .utils import autosubmit_missing_ambassador_reports_for_previous_month
+        cohort = AmbassadorCohort.objects.create(cohort_number=4, status="active")
         amb = CustomUser.objects.create_user(email="amb@example.com", password="x", first_name="Eni",
-                                             last_name="B", phone_number="08045000001", is_ambassador=True)
+                                             last_name="B", phone_number="08045000001", is_ambassador=True,
+                                             ambassador_cohort=cohort)
         with patch("authentication.utils.send_transactional_email") as email, \
                 patch("authentication.utils.send_push_notification") as push, \
                 self.captureOnCommitCallbacks(execute=True):

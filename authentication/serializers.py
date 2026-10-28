@@ -1344,6 +1344,18 @@ class AmbassadorMonthlyReportSerializer(serializers.ModelSerializer):
                 "Only ambassadors or influencers can submit reports."
             )
 
+        # Graduated cohorts stop reporting; only the active cohort does.
+        cohort = getattr(user, "ambassador_cohort", None)
+        if user.is_ambassador and not user.is_influencer and (
+            cohort is None or cohort.status != "active"
+        ):
+            raise serializers.ValidationError(
+                {
+                    "message": "Monthly reports are now only for ambassadors in the current cohort. "
+                    "Your cohort has graduated - thank you for everything you did as an ambassador! 💜"
+                }
+            )
+
         already_exists = AmbassadorMonthlyReport.objects.filter(
             user=user,
             month=month,

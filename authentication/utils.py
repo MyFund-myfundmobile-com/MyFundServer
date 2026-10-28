@@ -2724,9 +2724,11 @@ def autosubmit_missing_ambassador_reports_for_previous_month():
     year = previous_month_start.year
     month = previous_month_start.month
 
+    # Only the active cohort reports - graduated cohorts are skipped.
     ambassadors = CustomUser.objects.filter(
         is_ambassador=True,
         is_active=True,
+        ambassador_cohort__status="active",
     )
 
     created_count = 0
