@@ -10,6 +10,7 @@ most two reminder pushes - day 2 and day 7 - which stop once they save.
 from datetime import timedelta
 from zoneinfo import ZoneInfo
 
+from django.core.cache import cache
 from django.db.models import Q
 from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
@@ -22,6 +23,8 @@ WAT = ZoneInfo("Africa/Lagos")
 NEW_USER_DAYS = 30
 REMINDER_DAYS = (2, 7)
 PUSH_TYPE = "FIRST_SAVINGS_NUDGE"
+# What the nudge asks for - the app's QuickSave minimum.
+FIRST_SAVE_AMOUNT = 500
 DEPOSIT_PREFIXES = ("QuickSave", "AutoSave", "QuickInvest", "AutoInvest", "Target Savings Deposit")
 
 
@@ -38,6 +41,21 @@ def has_ever_saved(user):
     # A balance alone isn't enough to rule someone in - someone who saved and
     # withdrew everything has still saved before.
     return bool(user.savings or user.investment) or _deposits(user).filter(status="confirmed").exists()
+
+
+def savers_this_week():
+    """Distinct people with a confirmed deposit in the last 7 days - real
+    social proof for the nudge. Cached for an hour; it's the same for everyone."""
+    def count():
+        by_description = Q()
+        for prefix in DEPOSIT_PREFIXES:
+            by_description |= Q(description__startswith=prefix)
+        return Transaction.objects.filter(
+            transaction_type="credit", status="confirmed",
+            date__gte=timezone.now() - timedelta(days=7),
+        ).filter(by_description | Q(credited_to__in=["SAVINGS", "INVESTMENT"])
+                 ).values("user_id").distinct().count()
+    return cache.get_or_set("first-savings:savers-this-week", count, 60 * 60)
 
 
 def first_savings_status(user, now=None):
@@ -57,7 +75,10 @@ def first_savings_status(user, now=None):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def first_savings_status_view(request):
-    return Response(first_savings_status(request.user))
+    status = first_savings_status(request.user)
+    if status["eligible"]:
+        status["savers_this_week"] = savers_this_week()
+    return Response(status)
 
 
 def send_first_savings_reminders(now=None):
@@ -80,18 +101,22 @@ def send_first_savings_reminders(now=None):
             continue
         if PushNotifications.objects.filter(user=user, data__type=PUSH_TYPE, data__step=step).exists():
             continue
+        # In Dr. Tee's voice, like the in-app nudge.
         title, message = (
-            ("Ready for your first QuickSave?",
-             "Hi {first_name}, you can start with any amount. Save before 12 noon and you'll see your first returns today.")
+            ("Hi {first_name}, it's Dr. Tee 👋",
+             f"Your first ₦{FIRST_SAVE_AMOUNT:,} can start earning 13% a year today. "
+             "Save before 12 noon and watch it grow from today. 💜")
             if step == REMINDER_DAYS[0] else
-            ("Your money could be growing daily",
-             "Hi {first_name}, once you save, MyFund shows what your money earns every day at 12 noon. Start with any amount.")
+            ("{first_name}, your money could be growing daily",
+             "It's Dr. Tee. ₦50,000 saved on MyFund earns about ₦6,500 in a year, added every day. "
+             f"Start with ₦{FIRST_SAVE_AMOUNT:,} today. 💜")
         )
         send_push_notification(
             user=user, title=title, message=message, notif_type="SYSTEM",
             data={"type": PUSH_TYPE, "step": step, "category": "USER_SAVINGS",
                   "deep_link": {"screen": "MainTab", "screen_params": {
-                      "screen": "Save", "params": {"quickSaveModalVisible": True}}}},
+                      "screen": "Save", "params": {"quickSaveModalVisible": True,
+                                                   "quickSaveAmount": FIRST_SAVE_AMOUNT}}}},
         )
         sent += 1
     return sent

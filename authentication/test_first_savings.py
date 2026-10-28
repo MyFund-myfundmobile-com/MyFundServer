@@ -1,6 +1,7 @@
 from datetime import timedelta
 from unittest.mock import patch
 
+from django.core.cache import cache
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -37,6 +38,23 @@ class FirstSavingsTests(TestCase):
         client.force_authenticate(self.make_user(6, 1))
         self.assertTrue(client.get('/api/first-savings/status/').json()['eligible'])
         self.assertIn(APIClient().get('/api/first-savings/status/').status_code, [401, 403])
+
+    def test_endpoint_includes_savers_this_week(self):
+        cache.clear()
+        for n in (20, 21):
+            self.deposit(self.make_user(n, 40), n)
+        self.deposit(self.make_user(22, 40), 22, status='pending')
+        client = APIClient()
+        client.force_authenticate(self.make_user(23, 1))
+        self.assertEqual(client.get('/api/first-savings/status/').json()['savers_this_week'], 2)
+
+    def test_reminder_taps_open_quicksave_with_500(self):
+        self.make_user(30, 2)
+        with patch('authentication.utils.send_push_notification') as push:
+            send_first_savings_reminders()
+        call = push.call_args.kwargs
+        self.assertIn("Dr. Tee", call['title'])
+        self.assertEqual(call['data']['deep_link']['screen_params']['params']['quickSaveAmount'], 500)
 
     def test_reminders_only_on_day_2_and_7_once(self):
         targets = [self.make_user(10, 2), self.make_user(11, 7)]
