@@ -1352,7 +1352,10 @@ class AmbassadorMonthlyReportSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {
                     "message": "Monthly reports are now only for ambassadors in the current cohort. "
-                    "Your cohort has graduated - thank you for everything you did as an ambassador! 💜"
+                    "Your cohort has graduated - thank you for everything you did as an ambassador! 💜\n\n"
+                    "Want to keep earning with MyFund? Apply for the MyFund Influencer Programme at "
+                    "www.myfundmobile.com/influencer",
+                    "apply_url": "https://www.myfundmobile.com/influencer",
                 }
             )
 

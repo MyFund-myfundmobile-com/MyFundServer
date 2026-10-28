@@ -108,6 +108,8 @@ urlpatterns = [
     path("admin/requests/ambassador/export-link/", ambassador_export_link, name="admin_ambassador_export_link"),
     path("admin/requests/ambassador/export/", ambassador_export, name="admin_ambassador_export"),
     path("admin/requests/<str:kind>/<int:pk>/action/", request_action, name="admin_request_action"),
+    # Website applications (Influencer Portal) have UUID ids.
+    path("admin/requests/<str:kind>/<uuid:pk>/action/", request_action, name="admin_request_action_uuid"),
     # Authentication APIs
     path("signup/", views.signup, name="signup"),
     path("confirm-otp/", views.confirm_otp, name="confirm-otp"),

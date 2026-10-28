@@ -1,4 +1,5 @@
 """Founder-only approval queue; reuse the same operations as Django admin."""
+import logging
 from django.contrib import admin
 from decimal import Decimal
 from django.contrib.admin.models import LogEntry, CHANGE
@@ -14,6 +15,8 @@ from rest_framework.exceptions import ValidationError
 from .models import CustomUser, BankTransferRequest, InvestTransferRequest, WithdrawalsRequestToAdmin, Transaction, PhoneChangeRequest
 from .models import InfluencerApplication
 from .utils import approve_quicksave_credit, approve_quickinvest_credit, process_scheduled_withdrawal
+
+logger = logging.getLogger(__name__)
 
 REQUEST_APPROVERS = {"tolulopeahmed@gmail.com", "janet.adegbenro@gmail.com", "company@myfundmobile.com"}
 
@@ -148,8 +151,77 @@ def serialize_ambassador(app):
         "location": app.answers.get("location") or "", "is_member": bool(app.user_id),
         "intake": app.intake.title, "video": app.answers.get("video_link") or ("Uploaded video" if app.video_path else ""),
         "responses": [{"label": label_, "value": value} for label_, value in ambassador_responses(app)],
-        "status": status, "status_label": label, "actions": [],
+        "status": status, "status_label": label,
+        # Influencer Portal applications are decided here; ambassador
+        # selection still happens separately.
+        "actions": ["approve", "reject"] if app.intake.programme == "influencer" and app.status == "submitted" else [],
     }
+
+
+def decide_influencer_application(app, action, reason):
+    """Approve (switch on influencer access) or reject a submitted Influencer
+    Portal application, then tell the applicant by push and email."""
+    from .utils import send_push_notification, send_transactional_email
+
+    if app.status != "submitted" or action not in ("approve", "reject"):
+        raise ValidationError("This application is not awaiting that action.")
+    if action == "reject" and not reason:
+        raise ValidationError("Enter a rejection reason.")
+    user = app.user or CustomUser.objects.filter(email__iexact=app.email, is_deleted=False).first()
+    if action == "approve" and not user:
+        raise ValidationError(
+            f"No MyFund account uses {app.email}. Ask them to sign up with that email first, then approve.")
+
+    app.status = "accepted" if action == "approve" else "rejected"
+    app.save(update_fields=["status"])
+    if action == "approve":
+        user.is_influencer = True
+        user.save(update_fields=["is_influencer"])
+        if not app.user_id:
+            app.user = user
+            app.save(update_fields=["user"])
+
+    name = (user.first_name if user else "") or str(app.answers.get("full_name") or "").split(" ")[0] or "there"
+    if action == "approve":
+        subject = "Welcome to the MyFund Influencer Programme! 🎉"
+        message = (
+            f"Hi {name},<br><br>"
+            "Congratulations! Your application to the <b>MyFund Influencer Programme</b> has been <b>approved</b>.<br><br>"
+            "Your <b>Influencer Portal</b> is now active. Log in to the MyFund app to see your referral link, "
+            "track your sign-ups and savers, and submit your monthly report.<br><br>"
+            "We can't wait to see what you create. Welcome aboard! 💜"
+        )
+        push_title, push_message = (
+            "You're a MyFund Influencer! 🎉",
+            f"Congratulations {name}, your application was approved. Open the app to access your Influencer Portal.",
+        )
+    else:
+        subject = "Your MyFund Influencer Programme application"
+        message = (
+            f"Hi {name},<br><br>"
+            "Thank you for applying to the MyFund Influencer Programme. After reviewing your application, "
+            "we're not able to offer you a place at this time.<br><br>"
+            f"<b>Feedback:</b> {reason}<br><br>"
+            "You're welcome to apply again in future. Thank you for being part of MyFund! 💜"
+        )
+        push_title, push_message = (
+            "Update on your Influencer application",
+            "We've reviewed your MyFund Influencer Programme application. Check your email for details.",
+        )
+
+    def notify():
+        try:
+            send_transactional_email(subject=subject, message=message, recipient_list=[app.email],
+                                     from_email="MyFund <info@myfundmobile.com>")
+        except Exception:
+            logger.exception("Influencer decision email failed for %s", app.email)
+        if user:
+            try:
+                send_push_notification(user=user, title=push_title, message=push_message, notif_type="SYSTEM",
+                                       data={"type": "INFLUENCER_APPLICATION", "status": app.status})
+            except Exception:
+                logger.exception("Influencer decision push failed for %s", app.email)
+    transaction.on_commit(notify)
 
 
 def request_counts():
@@ -285,6 +357,13 @@ class ActionMessages:
 @api_view(["POST"])
 @permission_classes([CanApproveRequests])
 def request_action(request, kind, pk):
+    if kind == "influencer_portal":
+        from .models import AmbassadorApplication
+        with transaction.atomic():
+            app = get_object_or_404(AmbassadorApplication.objects.select_for_update(of=("self",)).select_related("user", "intake"),
+                                    pk=pk, intake__programme="influencer")
+            decide_influencer_application(app, request.data.get("action"), str(request.data.get("reason", "")).strip())
+        return Response(serialize_ambassador(app))
     if kind not in MODELS:
         raise ValidationError("Invalid request type.")
     action = request.data.get("action")
