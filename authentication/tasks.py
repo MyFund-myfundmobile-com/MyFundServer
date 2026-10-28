@@ -501,6 +501,13 @@ def calculate_daily_roi_task():
     except Exception as e:
         logger.error(f"Ambassador referral hold check failed: {e}")
 
+    # Referrals that have saved enough but never got confirmed.
+    try:
+        from .utils import check_stuck_referrals
+        check_stuck_referrals()
+    except Exception as e:
+        logger.error(f"Stuck referral check failed: {e}")
+
     logger.info(
         f"✅ Daily ROI task complete. Processed: {processed_count}, "
         f"Skipped: {skipped_count}, Errors: {error_count}"

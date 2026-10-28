@@ -2604,6 +2604,59 @@ def check_ambassador_referral_holds(now=None):
     return len(broken)
 
 
+def check_stuck_referrals():
+    """Daily safety net for referrals that have saved enough but were never
+    confirmed (confirmation only runs on a deposit, and gives up silently on
+    duplicate or missing reward records). Confirms the ones that can be,
+    and emails the founder the ones that need a human. Returns
+    (confirmed, stuck)."""
+    from django.db.models import Q
+    from .models import AMBASSADOR_REFERRAL_SAVINGS_THRESHOLD, CustomUser
+
+    candidates = CustomUser.objects.filter(
+        referral__isnull=False, referral_reward_granted=False, is_deleted=False,
+    ).filter(
+        Q(investment__gte=100000) | Q(savings__gte=20000)
+        | Q(savings__gte=AMBASSADOR_REFERRAL_SAVINGS_THRESHOLD)
+        & (Q(referral__is_ambassador=True) | Q(referral__is_influencer=True))
+    ).select_related("referral")
+
+    confirmed, stuck = [], []
+    for user in candidates:
+        try:
+            user.confirm_referral_rewards(is_referrer=True)
+            user.refresh_from_db(fields=["referral_reward_granted"])
+        except Exception as e:
+            logger.error(f"Stuck-referral confirmation failed for user {user.pk}: {e}")
+        (confirmed if user.referral_reward_granted else stuck).append(user)
+
+    if stuck:
+        rows = "".join(
+            f"<li><b>{u.first_name} {u.last_name}</b> ({u.email}), referred by "
+            f"{u.referral.first_name} {u.referral.last_name} ({u.referral.email}): "
+            f"savings ₦{u.savings:,.0f}, investment ₦{u.investment:,.0f}</li>"
+            for u in stuck
+        )
+        try:
+            send_transactional_email(
+                subject=f"{len(stuck)} referral(s) need a manual check",
+                message=(
+                    "These referrals have saved enough to be confirmed, but their reward "
+                    "records are duplicated or missing, so the system didn't pay them out "
+                    f"automatically:<br><ul>{rows}</ul>"
+                    "Please check their Referral Reward transactions in admin and confirm them "
+                    "by hand. This email repeats daily until they're resolved."
+                ),
+                from_email="MyFund <info@myfundmobile.com>",
+                recipient_list=[ALWAYS_ADMIN_NOTIFY_EMAIL],
+            )
+        except Exception as e:
+            logger.warning(f"Stuck-referral email failed: {e}")
+    if confirmed or stuck:
+        logger.info(f"Stuck referrals: {len(confirmed)} confirmed, {len(stuck)} need a manual check")
+    return confirmed, stuck
+
+
 def notify_ambassador_report_autosubmitted(report):
     """Email + push so an ambassador knows the system filed their report
     (manual submissions get the same via send_ambassador_report_notifications_task)."""

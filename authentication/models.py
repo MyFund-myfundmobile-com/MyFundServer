@@ -3849,10 +3849,20 @@ class AmbassadorPointConfig(models.Model):
         return cls.objects.create()
 
 
+def _referred_since_ambassador(prefix=""):
+    """Referrals who signed up on or after their ambassador's cohort start -
+    people referred before someone became an ambassador don't earn
+    ambassador points. No cohort start date on record means no cut-off."""
+    start = f"{prefix}referral__ambassador_cohort__start_date"
+    return Q(**{f"{start}__isnull": True}) | Q(
+        **{f"{prefix}date_joined__date__gte": F(start)})
+
+
 def first_deposit_referral_counts(ambassador_ids, month_key, min_amount):
     """{ambassador_id: number of their referrals whose first confirmed deposit
     of at least min_amount was made in month_key (YYYY-MM)}. Each referral
-    counts once ever - in the month that deposit happened."""
+    counts once ever - in the month that deposit happened - and only if
+    they were referred since the ambassador joined."""
     from datetime import datetime, timedelta
     from django.db.models import Min
     from .first_savings import DEPOSIT_PREFIXES
@@ -3869,6 +3879,7 @@ def first_deposit_referral_counts(ambassador_ids, month_key, min_amount):
             status="confirmed",
             amount__gte=min_amount,
         )
+        .filter(_referred_since_ambassador("user__"))
         .filter(by_description | Q(credited_to__in=["SAVINGS", "INVESTMENT"]))
         .values("user_id", "user__referral_id")
         .annotate(first=Min("date"))
@@ -3889,7 +3900,8 @@ def confirmed_referral_counts(ambassador_ids, month_key):
     """{ambassador_id: referrals confirmed in month_key that are still
     standing}. Points show as soon as a referral is confirmed;
     mark_broken_referral_holds takes them back if the referral then pulls
-    their savings below AMBASSADOR_REFERRAL_SAVINGS_THRESHOLD within the hold."""
+    their savings below AMBASSADOR_REFERRAL_SAVINGS_THRESHOLD within the hold.
+    Referrals from before the ambassador joined don't count."""
     from datetime import datetime, timedelta
     from django.db.models import Count
 
@@ -3901,7 +3913,7 @@ def confirmed_referral_counts(ambassador_ids, month_key):
         referral_reward_confirmed_at__gte=start,
         referral_reward_confirmed_at__lt=end,
         referral_hold_broken_at__isnull=True,
-    ).values("referral_id").annotate(n=Count("id")).values_list("referral_id", "n"))
+    ).filter(_referred_since_ambassador()).values("referral_id").annotate(n=Count("id")).values_list("referral_id", "n"))
 
 
 def mark_broken_referral_holds(hold_days, now=None):
