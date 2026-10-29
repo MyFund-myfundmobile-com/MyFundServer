@@ -2449,6 +2449,14 @@ def get_user_profile(request):
             "bankRecords": BankAccountSerializer(bank_accounts, many=True).data,
         }
 
+        # Which staff team (if any) this person is on - the app uses it to
+        # show the right admin view and weekly report form, so a new team
+        # member needs only their Employee row + is_staff, no app release.
+        from .models import Employee
+        employee = Employee.objects.filter(email__iexact=user.email, is_active=True).first()
+        profile_data["staff_team"] = (
+            {"department": employee.department, "is_staff": user.is_staff} if employee else None
+        )
         return Response(profile_data, status=status.HTTP_200_OK)
 
     except Exception as e:

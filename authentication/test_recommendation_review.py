@@ -93,3 +93,39 @@ class MediaReportTests(TestCase):
         client.force_authenticate(founder)
         self.assertEqual(len(client.get("/api/admin/media/weekly-reports/").data), 1)
         self.assertEqual(len(client.get("/api/admin/engagement/weekly-reports/").data), 0)
+
+
+class PropertyReportTests(TestCase):
+    def setUp(self):
+        n = iter(range(100))
+        self.mk = lambda email, **extra: CustomUser.objects.create_user(
+            email=email, password="x", first_name="Tim", last_name="O",
+            phone_number=f"0803400{next(n):04d}", **extra)
+
+    def test_property_team_submits_and_others_cannot(self):
+        timothy = self.mk("property@example.com", is_staff=True)
+        Employee.objects.create(name="Timothy", email=timothy.email, monthly_amount=0,
+                                department="Property", is_active=True)
+        outsider = self.mk("other@example.com", is_staff=True)
+        client = APIClient()
+        client.force_authenticate(timothy)
+        with patch("authentication.admin_views.send_admin_push_notification", create=True):
+            res = client.post("/api/admin/property/weekly-reports/create/", {
+                "report": "2 site visits", "recommendation": "Fence the plot", "week_start": "2026-10-19",
+            }, format="json")
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertEqual(res.data["department"], "Property")
+        client.force_authenticate(outsider)
+        self.assertEqual(client.get("/api/admin/property/weekly-reports/mine/").status_code, 403)
+
+    def test_profile_says_which_staff_team(self):
+        timothy = self.mk("property@example.com", is_staff=True)
+        Employee.objects.create(name="Timothy", email=timothy.email, monthly_amount=0,
+                                department="Property", is_active=True)
+        member = self.mk("member@example.com")
+        client = APIClient()
+        client.force_authenticate(timothy)
+        self.assertEqual(client.get("/api/get-user-profile/").data["staff_team"],
+                         {"department": "Property", "is_staff": True})
+        client.force_authenticate(member)
+        self.assertIsNone(client.get("/api/get-user-profile/").data["staff_team"])

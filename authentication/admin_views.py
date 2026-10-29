@@ -4999,6 +4999,7 @@ def ambassador_stipend_approve_and_pay(request, report_id):
 REPORT_EMPLOYEE_DEPARTMENTS = {
     "Engagement": "Engagement",
     "Media": "Media and Communications",
+    "Property": "Property",
 }
 
 

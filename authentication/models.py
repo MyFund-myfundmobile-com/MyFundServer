@@ -3596,7 +3596,8 @@ class CxWeeklyReport(RecommendationReviewMixin):
 
     department = models.CharField(
         max_length=20,
-        choices=[("CX", "CX"), ("Engagement", "Engagement"), ("Media", "Media and Communications")],
+        choices=[("CX", "CX"), ("Engagement", "Engagement"), ("Media", "Media and Communications"),
+                 ("Property", "Property and Projects")],
         default="CX", db_index=True,
     )
 

@@ -338,4 +338,10 @@ urlpatterns = [
          {"department": "Media"}, name="admin_list_media_weekly_reports"),
     path("engagement/weekly-reports/", admin_views.list_cx_weekly_reports,
          {"department": "Engagement"}, name="admin_list_engagement_weekly_reports"),
+    path("property/weekly-reports/create/", admin_views.submit_cx_weekly_report,
+         {"department": "Property"}, name="admin_submit_property_weekly_report"),
+    path("property/weekly-reports/mine/", admin_views.my_cx_weekly_reports,
+         {"department": "Property"}, name="admin_my_property_weekly_reports"),
+    path("property/weekly-reports/", admin_views.list_cx_weekly_reports,
+         {"department": "Property"}, name="admin_list_property_weekly_reports"),
 ]
