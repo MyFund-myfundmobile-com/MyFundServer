@@ -60,6 +60,22 @@ class AmbassadorApplicationFlowTest(TestCase):
         self.assertEqual(res.status_code, 200, res.data)
         self.assertNotEqual(res.data["application"]["status"], "draft")
 
+    def test_non_member_submit_has_no_profile_so_web_asks_them_to_sign_up(self, _):
+        auth, app = self.start()
+        res = self.save(auth, app, COMPLETE)
+        res = self.client.post(f"{BASE}/submit/", {"revision": res.data["application"]["revision"], "confirmed": True}, format="json", HTTP_AUTHORIZATION=auth)
+        self.assertIsNone(res.data["application"]["profile"])
+
+    def test_account_made_after_starting_is_linked_on_submit(self, _):
+        from .models import AmbassadorApplication, CustomUser
+        auth, app = self.start()
+        res = self.save(auth, app, COMPLETE)
+        user = CustomUser.objects.create_user(email="ada@example.com", password="x", first_name="Ada",
+                                              last_name="L", phone_number="08035551234")
+        res = self.client.post(f"{BASE}/submit/", {"revision": res.data["application"]["revision"], "confirmed": True}, format="json", HTTP_AUTHORIZATION=auth)
+        self.assertEqual(res.data["application"]["profile"]["first_name"], "Ada")
+        self.assertEqual(AmbassadorApplication.objects.get(pk=app["id"]).user, user)
+
     def test_submit_rejects_under_18_and_non_https_social_link(self, _):
         # Drafts deliberately keep half-typed answers (autosave); the strict
         # checks run on submit.

@@ -162,10 +162,13 @@ def video_url(app):
 
 
 def serialize(app):
+    # Fall back to an account with this email made after they started, so
+    # the "submitted" screen only asks real non-members to sign up.
+    user = app.user or _member(app.email)
     return dict(id=str(app.pk), email=app.email, answers=app.answers, status=app.status, step=app.step,
                 progress=app.progress, revision=app.revision, reminder_consent=app.reminder_consent,
                 updated_at=app.updated_at.isoformat(), submitted_at=app.submitted_at,
-                profile=profile_for(app.user), intake=intake_data(app.intake),
+                profile=profile_for(user), intake=intake_data(app.intake),
                 video={'name': app.video_name, 'url': video_url(app)} if app.video_path else None)
 
 
@@ -382,6 +385,8 @@ def application_submit(request, programme='ambassador'):
             return Response({'error': 'Please check the highlighted answers.', 'fields': errors}, status=400)
         app.status = 'submitted'
         app.submitted_at = timezone.now()
+        if not app.user_id:
+            app.user = _member(app.email)  # Signed up after they started.
         app.progress = 100
         app.revision += 1
         app.save()
