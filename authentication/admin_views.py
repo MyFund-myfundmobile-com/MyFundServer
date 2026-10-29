@@ -1475,8 +1475,16 @@ def update_user_status(request, user_id):
                 update_fields.append('is_active')
             user.save(update_fields=update_fields)
         else:
+            was_active = user.is_active
             setattr(user, field, value)
             user.save(update_fields=[field])
+            # Switched on (e.g. they never got through their signup OTP):
+            # tell them they can log in now. Not for banned accounts.
+            if field == 'is_active' and value and not was_active and not user.is_banned:
+                from .ambassador_application_views import _run_in_background
+                from .utils import send_account_activated_email
+
+                db_transaction.on_commit(lambda: _run_in_background(lambda: send_account_activated_email(user)))
 
         return Response({
             "id": user.id,

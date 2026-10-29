@@ -2383,6 +2383,60 @@ def send_ambassador_status_notification(user, became_ambassador=True):
         logger.error(f"Ambassador notification error for {user.email}: {e}")
 
 
+def send_account_activated_email(user):
+    """
+    Email (no push - they've never logged in, so there's no push token)
+    when an admin switches an inactive account on, e.g. someone who never
+    managed to enter their signup OTP. Worded for that and for plain
+    reactivations alike, since nothing on the account tells them apart
+    (last_login isn't maintained). Google/Apple-only accounts are told to
+    use that button; everyone else gets the Forgot Password route.
+    """
+    from .views import social_login_provider
+    from .models import UserPassword
+
+    has_password = bool(user.password_record_id) or UserPassword.objects.filter(user=user).exists()
+    button = (
+        '<a href="{url}" style="display:inline-block;padding:12px 22px;border-radius:10px;'
+        'background:#4C28BC;color:#ffffff;text-decoration:none;font-weight:bold">{label}</a>'
+    )
+    if has_password:
+        how = (
+            "Log in with your email or phone number and your password.<br><br>"
+            "<b>Forgot your password?</b> Tap <b>Forgot Password?</b> on the login screen "
+            "and we'll send you a code to set a new one."
+        )
+    else:
+        name = {"google": "Google", "apple": "Apple"}.get(social_login_provider(user), "Google or Apple")
+        how = (
+            f"You signed up with {name}, so just open the MyFund app and tap "
+            f"<b>Continue with {name}</b> - no password needed."
+        )
+
+    message = (
+        f"Hi {user.first_name},<br><br>"
+        f"Good news - your MyFund account (<b>{user.email}</b>) is now active. "
+        "You don't need a verification code any more.<br><br>"
+        f"{how}<br><br>"
+        + button.format(url="https://www.myfundmobile.com/login", label="Log in to MyFund")
+        + "<br><br>"
+        "Don't have the app? Get it on "
+        '<a href="https://play.google.com/store/apps/details?id=com.tolulopeahmed.MyFundMobile">Google Play</a> or the '
+        '<a href="https://apps.apple.com/ng/app/myfund-save-co-own-properties/id6747445574">App Store</a>.<br><br>'
+        "If you need any help, just reply to this email.<br><br>"
+        "MyFund Team"
+    )
+    try:
+        send_transactional_email(
+            subject="Your MyFund account is now active ✅",
+            message=message,
+            from_email="MyFund <info@myfundmobile.com>",
+            recipient_list=[user.email],
+        )
+    except Exception as e:
+        logger.error(f"Account activated email failed for {user.email}: {e}")
+
+
 def send_influencer_status_notification(user, became_influencer=True):
     """
     Send push notification + email when influencer status changes - same
