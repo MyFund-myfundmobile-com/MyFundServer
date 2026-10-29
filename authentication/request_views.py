@@ -158,7 +158,16 @@ def serialize_ambassador(app):
         "actions": (["approve", "reject"] if app.status == "submitted" else []) if app.intake.programme == "influencer"
         else (["label", "send"] if app.status in ("submitted", "shortlisted") else []),
         **(ambassador_review(app) if app.intake.programme == "ambassador" else {}),
+        **(draft_reminder(app) if app.status == "draft" else {}),
     }
+
+
+def draft_reminder(app):
+    from .ambassador_decisions import reminder_block
+    return {"reminder": {
+        "blocked": reminder_block(app), "count": app.reminder_count,
+        "last_at": app.last_reminded_at, "consented": app.reminder_consent,
+    }}
 
 
 def ambassador_review(app):
@@ -377,6 +386,13 @@ class ActionMessages:
 @api_view(["POST"])
 @permission_classes([CanApproveRequests])
 def request_action(request, kind, pk):
+    if kind in APPLICATION_KINDS and request.data.get("action") == "remind":
+        from .ambassador_decisions import send_draft_reminder
+        from .models import AmbassadorApplication
+        app = get_object_or_404(AmbassadorApplication.objects.select_related("user", "intake"),
+                                pk=pk, intake__programme=APPLICATION_KINDS[kind])
+        send_draft_reminder(app)
+        return Response(serialize_ambassador(app))
     if kind == "influencer_portal":
         from .models import AmbassadorApplication
         with transaction.atomic():

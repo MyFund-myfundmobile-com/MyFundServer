@@ -117,3 +117,36 @@ class DecisionTests(TestCase):
         self.act(action="send", label="maybe")
         email.assert_called_once()
         push.assert_not_called()
+
+
+@patch("authentication.utils.send_transactional_email", return_value={"sent": 1})
+class DraftReminderTests(TestCase):
+    def setUp(self):
+        now = timezone.now()
+        self.admin = CustomUser.objects.create_user(email="tolulopeahmed@gmail.com", password="x", first_name="T",
+                                                    last_name="A", phone_number="08039990001", is_staff=True)
+        self.intake = AmbassadorIntake.objects.create(programme="ambassador", slug="c4r", title="Cohort 4",
+                                                      opens_at=now - timedelta(days=1), closes_at=now + timedelta(days=30))
+        self.app = AmbassadorApplication.objects.create(intake=self.intake, email="d@example.com", status="draft",
+                                                        progress=40, reminder_consent=True, answers={"full_name": "Dayo K"})
+        AmbassadorApplication.objects.filter(pk=self.app.pk).update(updated_at=now - timedelta(days=2))
+        self.client = APIClient()
+        self.client.force_authenticate(self.admin)
+
+    def remind(self):
+        return self.client.post(f"/api/admin/requests/ambassador/{self.app.pk}/action/", {"action": "remind"}, format="json")
+
+    def test_sends_once_then_waits_48h(self, email):
+        res = self.remind()
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertIn("40% done", email.call_args.args[1])
+        self.assertEqual(res.data["reminder"]["count"], 1)
+        self.assertEqual(self.remind().status_code, 400)
+        self.assertEqual(email.call_count, 1)
+
+    def test_list_says_why_it_cannot_be_sent(self, email):
+        AmbassadorApplication.objects.filter(pk=self.app.pk).update(reminder_consent=False)
+        res = self.client.get("/api/admin/requests/?kind=ambassador&scope=all")
+        self.assertIn("didn't ask for reminders", res.data["results"][0]["reminder"]["blocked"])
+        self.assertEqual(self.remind().status_code, 400)
+        email.assert_not_called()

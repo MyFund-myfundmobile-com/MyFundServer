@@ -249,3 +249,58 @@ def send_decision(app):
 
     from .ambassador_application_views import _run_in_background
     transaction.on_commit(lambda: _run_in_background(notify))
+
+
+# ---- Reminders for unfinished (draft) applications --------------------------
+REMIND_IDLE = 24   # hours since they last saved: don't nudge someone mid-way
+REMIND_GAP = 48    # hours between reminders
+
+
+def reminder_block(app, now=None):
+    """Why a draft can't be reminded right now, or "" if it can."""
+    from datetime import timedelta
+    from django.utils import timezone
+
+    now = now or timezone.now()
+    if app.status != "draft":
+        return "Already submitted."
+    if not app.reminder_consent:
+        return "They didn't ask for reminders when they started."
+    if not app.intake.is_open:
+        return "Applications for this intake are closed."
+    if app.updated_at >= now - timedelta(hours=REMIND_IDLE):
+        return "They worked on it in the last 24 hours."
+    if app.last_reminded_at and app.last_reminded_at > now - timedelta(hours=REMIND_GAP):
+        return "A reminder went out in the last 48 hours."
+    return ""
+
+
+def send_draft_reminder(app):
+    """Email an unfinished applicant to finish. Raises ValidationError when
+    not allowed; records the reminder only once it's actually sent."""
+    from django.utils import timezone
+
+    from .utils import send_transactional_email
+
+    blocked = reminder_block(app)
+    if blocked:
+        raise ValidationError(blocked)
+    programme = app.intake.programme
+    first_name = _text(app.answers, "full_name").split(" ")[0] or "there"
+    url = f"https://www.myfundmobile.com/{programme}"
+    html = (
+        f"Hi {first_name},<br><br>"
+        f"We noticed you started your <b>MyFund {programme.title()}</b> application but haven't submitted it yet"
+        f" (it's {app.progress}% done).<br><br>"
+        "It only takes a few minutes to finish. Use the same email, enter the code we send you, and you'll "
+        "pick up exactly where you stopped.<br><br>"
+        "If you've run into any issues, just reply to this email and we'll help.<br><br>"
+        + _button(url, "Finish and Submit My Application") + "<br><br>— <b>MyFund</b>"
+    )
+    result = send_transactional_email(
+        f"Your MyFund {programme.title()} application isn't submitted yet", html, [app.email], from_email=FROM)
+    if not result or not result.get("sent"):
+        raise ValidationError("The email couldn't be sent. Please try again shortly.")
+    # Not applicant activity, so updated_at (their last save) stays as it was.
+    type(app).objects.filter(pk=app.pk).update(last_reminded_at=timezone.now(), reminder_count=app.reminder_count + 1)
+    app.refresh_from_db()
