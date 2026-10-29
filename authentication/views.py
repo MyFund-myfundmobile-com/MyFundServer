@@ -14922,6 +14922,21 @@ class AmbassadorPerformanceReportView(APIView):
         else:
             rank_sentence = ""
 
+        # Used by Refer & Earn's pending-referral follow-up copy. Keep these
+        # figures server-derived: admins can change AmbassadorPointConfig
+        # without the mobile app promising an outdated hard-coded value.
+        follow_up_points = None
+        if cohort and month_summary:
+            current_points = Decimal(month_summary["points"])
+            follow_up_points = {
+                "confirmed_referral_points": str(config.confirmed_points),
+                "current_month_points": str(current_points),
+                "projected_month_points": str(
+                    (current_points + config.confirmed_points).quantize(Decimal("0.01"))
+                ),
+                "month_label": month_summary["month_label"],
+            }
+
         # Certificate: only surfaced once the cohort's own send_forth_date
         # has passed - before that this screen still has a countdown to
         # show, and an early-uploaded certificate shouldn't jump the gun.
@@ -14960,6 +14975,7 @@ class AmbassadorPerformanceReportView(APIView):
             "analysis": trend_sentence + rank_sentence,
             "certificate": certificate_data,
             "month_summary": month_summary,
+            "follow_up_points": follow_up_points,
         })
 
 
