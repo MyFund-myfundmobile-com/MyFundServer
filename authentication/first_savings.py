@@ -13,11 +13,12 @@ from zoneinfo import ZoneInfo
 from django.core.cache import cache
 from django.db.models import Q
 from django.utils import timezone
+from rest_framework import status as http_status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from .models import CustomUser, PushNotifications, Transaction
+from .models import CustomUser, FirstSaveGuide, PushNotifications, Transaction
 
 WAT = ZoneInfo("Africa/Lagos")
 NEW_USER_DAYS = 30
@@ -25,6 +26,8 @@ REMINDER_DAYS = (2, 7)
 PUSH_TYPE = "FIRST_SAVINGS_NUDGE"
 # What the nudge asks for - the app's QuickSave minimum.
 FIRST_SAVE_AMOUNT = 500
+# The Home spotlight on QuickSave stops after this many closes.
+MAX_GUIDE_DISMISSALS = 3
 DEPOSIT_PREFIXES = ("QuickSave", "AutoSave", "QuickInvest", "AutoInvest", "Target Savings Deposit")
 
 
@@ -72,13 +75,54 @@ def first_savings_status(user, now=None):
     }
 
 
+def show_first_save_guide(user, now=None):
+    """Anyone who has never saved, regardless of when they joined: at most
+    once a Lagos day, never while a first deposit is confirming, and not
+    after MAX_GUIDE_DISMISSALS closes."""
+    now = now or timezone.now()
+    guide = FirstSaveGuide.objects.filter(user=user).first()
+    if guide and guide.dismissals >= MAX_GUIDE_DISMISSALS:
+        return False
+    if guide and guide.last_shown_at and guide.last_shown_at.astimezone(WAT).date() == now.astimezone(WAT).date():
+        return False
+    if has_ever_saved(user):
+        return False
+    return not _deposits(user).filter(status="pending", date__gte=now - timedelta(days=3)).exists()
+
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def first_savings_status_view(request):
     status = first_savings_status(request.user)
     if status["eligible"]:
         status["savers_this_week"] = savers_this_week()
+    status["show_guide"] = show_first_save_guide(request.user)
     return Response(status)
+
+
+GUIDE_EVENTS = ("shown", "dismiss", "tap")
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def first_save_guide_event(request):
+    """shown: counts a display. dismiss / tap: the guide was closed (Not now,
+    Done, or tapping through to QuickSave) - each counts toward the limit, so
+    someone who taps through but doesn't save sees it at most 3 times too."""
+    event = request.data.get("event")
+    if event not in GUIDE_EVENTS:
+        return Response({"detail": "Unknown event."}, status=http_status.HTTP_400_BAD_REQUEST)
+    guide, _ = FirstSaveGuide.objects.get_or_create(user=request.user)
+    now = timezone.now()
+    if event == "shown":
+        guide.times_shown += 1
+        guide.last_shown_at = now
+    else:
+        guide.dismissals = min(guide.dismissals + 1, MAX_GUIDE_DISMISSALS)
+        if event == "tap":
+            guide.tapped_at = now
+    guide.save()
+    return Response({"dismissals": guide.dismissals, "times_shown": guide.times_shown})
 
 
 def send_first_savings_reminders(now=None):

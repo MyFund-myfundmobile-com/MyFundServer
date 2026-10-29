@@ -68,3 +68,43 @@ class FirstSavingsTests(TestCase):
         # Already sent - a second run the same day sends nothing.
         send_first_savings_reminders()
         self.assertEqual(send_first_savings_reminders(), 0)
+
+
+class FirstSaveGuideTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.user = CustomUser.objects.create_user(email="guide@example.com", password="x", first_name="G", last_name="U", phone_number="08035550001")
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+
+    def show_guide(self):
+        return self.client.get("/api/first-savings/status/").data["show_guide"]
+
+    def event(self, name):
+        return self.client.post("/api/first-savings/guide/", {"event": name}, format="json")
+
+    def test_once_a_day_and_stops_after_three_closes(self):
+        from authentication.models import FirstSaveGuide
+
+        for close in ("dismiss", "tap", "dismiss"):
+            self.assertTrue(self.show_guide())
+            self.event("shown")
+            self.assertFalse(self.show_guide())  # already shown today
+            self.event(close)
+            FirstSaveGuide.objects.filter(user=self.user).update(last_shown_at=timezone.now() - timedelta(days=1))
+        self.assertFalse(self.show_guide())
+        guide = FirstSaveGuide.objects.get(user=self.user)
+        self.assertEqual((guide.times_shown, guide.dismissals), (3, 3))
+        self.assertIsNotNone(guide.tapped_at)
+
+    def test_never_shown_once_they_have_saved(self):
+        CustomUser.objects.filter(pk=self.user.pk).update(savings=500)
+        self.user.refresh_from_db()
+        self.assertFalse(self.show_guide())
+
+    def test_older_never_savers_still_see_it(self):
+        CustomUser.objects.filter(pk=self.user.pk).update(date_joined=timezone.now() - timedelta(days=200))
+        self.assertTrue(self.show_guide())
+
+    def test_rejects_unknown_event(self):
+        self.assertEqual(self.event("explode").status_code, 400)

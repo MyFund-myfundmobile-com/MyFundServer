@@ -2907,6 +2907,23 @@ class Property(models.Model):
         return self.name
 
 
+class FirstSaveGuide(models.Model):
+    """The Home spotlight that points never-saved users at QuickSave
+    (first_savings.py). Shown at most once a day; stops for good after
+    MAX_GUIDE_DISMISSALS closes or once they save."""
+
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="first_save_guide")
+    dismissals = models.PositiveSmallIntegerField(default=0)
+    times_shown = models.PositiveSmallIntegerField(default=0)
+    last_shown_at = models.DateTimeField(null=True, blank=True)
+    # When they tapped through to QuickSave from the guide.
+    tapped_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.user.email}: shown {self.times_shown}, dismissed {self.dismissals}"
+
+
 class GroupBuyInterest(models.Model):
     """A user registering interest in a property that can't be bought yet
     (units_available == 0), so the team can gauge demand before reopening

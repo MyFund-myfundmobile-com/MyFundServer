@@ -2351,7 +2351,14 @@ class PropertyAdmin(admin.ModelAdmin):
     ]  # Make the units_available field editable in the list view
 
 
-from .models import GroupBuyInterest
+from .models import FirstSaveGuide, GroupBuyInterest
+
+
+@admin.register(FirstSaveGuide)
+class FirstSaveGuideAdmin(admin.ModelAdmin):
+    list_display = ["user", "times_shown", "dismissals", "last_shown_at", "tapped_at"]
+    search_fields = ["user__email"]
+    raw_id_fields = ["user"]
 
 
 @admin.register(GroupBuyInterest)
