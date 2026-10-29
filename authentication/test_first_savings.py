@@ -48,13 +48,13 @@ class FirstSavingsTests(TestCase):
         client.force_authenticate(self.make_user(23, 1))
         self.assertEqual(client.get('/api/first-savings/status/').json()['savers_this_week'], 2)
 
-    def test_reminder_taps_open_quicksave_with_500(self):
+    def test_reminder_taps_open_quicksave_with_first_save_amount(self):
         self.make_user(30, 2)
         with patch('authentication.utils.send_push_notification') as push:
             send_first_savings_reminders()
         call = push.call_args.kwargs
         self.assertIn("Dr. Tee", call['title'])
-        self.assertEqual(call['data']['deep_link']['screen_params']['params']['quickSaveAmount'], 500)
+        self.assertEqual(call['data']['deep_link']['screen_params']['params']['quickSaveAmount'], 1000)
 
     def test_reminders_only_on_day_2_and_7_once(self):
         targets = [self.make_user(10, 2), self.make_user(11, 7)]

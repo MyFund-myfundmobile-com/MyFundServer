@@ -25,7 +25,7 @@ NEW_USER_DAYS = 30
 REMINDER_DAYS = (2, 7)
 PUSH_TYPE = "FIRST_SAVINGS_NUDGE"
 # What the nudge asks for - the app's QuickSave minimum.
-FIRST_SAVE_AMOUNT = 500
+FIRST_SAVE_AMOUNT = 1000
 # The Home spotlight on QuickSave stops after this many closes.
 MAX_GUIDE_DISMISSALS = 3
 DEPOSIT_PREFIXES = ("QuickSave", "AutoSave", "QuickInvest", "AutoInvest", "Target Savings Deposit")
