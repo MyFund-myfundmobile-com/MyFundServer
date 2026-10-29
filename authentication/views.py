@@ -1753,6 +1753,18 @@ logger = logging.getLogger(__name__)
 User = get_user_model()
 
 
+def social_login_provider(user):
+    """Best guess at how a password-less account signs in. The provider
+    isn't stored, so: Apple's private-relay email, or Google's avatar URL
+    (google_complete_signup saves it); None when it can't tell."""
+    email = (user.email or "").lower()
+    if email.endswith("@privaterelay.appleid.com"):
+        return "apple"
+    if "googleusercontent.com" in str(user.profile_picture or ""):
+        return "google"
+    return None
+
+
 class CustomObtainAuthToken(ObtainAuthToken):
     def post(self, request, *args, **kwargs):
         try:
@@ -1776,6 +1788,23 @@ class CustomObtainAuthToken(ObtainAuthToken):
                         "suggestion": "signup",
                     },
                     status=status.HTTP_404_NOT_FOUND,
+                )
+
+            # 🔑 Signed up with Google/Apple and never set a password: say
+            # so, so the app can offer that button instead of "wrong password".
+            # (Passwords live in UserPassword - CustomUser.password is None,
+            # so has_usable_password() can't tell.)
+            if not user.password_record_id and not UserPassword.objects.filter(user=user).exists():
+                provider = social_login_provider(user)
+                name = {"google": "Google", "apple": "Apple"}.get(provider, "Google or Apple")
+                return Response(
+                    {
+                        "status": "social_account",
+                        "provider": provider,
+                        "message": f"This account uses {name} sign-in. Continue with {name} to log in.",
+                        "suggestion": "social_login",
+                    },
+                    status=status.HTTP_401_UNAUTHORIZED,
                 )
 
             # ❌ Wrong password
