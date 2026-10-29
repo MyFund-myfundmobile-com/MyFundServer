@@ -57,3 +57,15 @@ class GroupBuyInterestTest(TestCase):
         data = self.client.get("/api/admin/groupbuy-interests/").data
         self.assertEqual(data["properties"][0]["total"], 1)
         self.assertEqual(data["results"][0]["interests"], ["Co-own a share"])
+
+
+class WaitlistMetricTest(TestCase):
+    def test_groupbuy_metrics_include_waitlist_count(self):
+        user = mk("w@example.com", "08031110010")
+        prop = Property.objects.create(name="P", description="d", price=1, rent_reward=1, units_available=0)
+        GroupBuyInterest.objects.create(user=user, property=prop, interests=["co_own"])
+        client = APIClient()
+        client.force_authenticate(mk("s@example.com", "08031110011", is_staff=True))
+        res = client.get("/api/admin/multipliers/groupbuys")
+        self.assertEqual(res.status_code, 200, res.content[:300])
+        self.assertEqual(res.data["waitlist_count"], 1)

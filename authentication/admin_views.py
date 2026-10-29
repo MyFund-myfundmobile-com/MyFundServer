@@ -2135,7 +2135,7 @@ import uuid
 from decimal import InvalidOperation
 from datetime import datetime as dt
 from django.db import transaction as db_transaction, IntegrityError
-from .models import Group, GroupOwnership, GroupIncomeEvent, GroupIncomeDistribution
+from .models import Group, GroupBuyInterest, GroupOwnership, GroupIncomeEvent, GroupIncomeDistribution
 from .utils import create_transaction, split_amount_by_percentage
 from .serializers import GroupIncomeEventSerializer
 
@@ -2291,7 +2291,8 @@ def groupbuy_metrics(request):
     GET /api/admin/multipliers/groupbuys
     Returns active vs failed groupbuys
     """
-    cache_key = "multipliers:groupbuys"
+    # v2: adds waitlist_count, so older cached payloads aren't served.
+    cache_key = "multipliers:groupbuys:v2"
     cached_data = cache.get(cache_key)
     
     if cached_data:
@@ -2328,6 +2329,8 @@ def groupbuy_metrics(request):
             "total_raised": float(groupbuy_stats["total_raised"]),
             "total_goal_amount": float(groupbuy_stats["total_goal"]),
             "total_income_distributed": float(total_income_distributed),
+            # People on the Register Interest waitlist (groupbuy_interest.py).
+            "waitlist_count": GroupBuyInterest.objects.count(),
         }
 
         cache.set(cache_key, response_data, 900)
