@@ -410,6 +410,21 @@ class KYCUpdateSerializer(serializers.ModelSerializer):
     # ImageField override is needed here; the auto-generated CharField
     # just carries that string straight through.
 
+    def validate_date_of_birth(self, value):
+        # DRF doesn't run CustomUser.clean(), so the same rules are
+        # enforced here - an impossible date used to save silently.
+        from datetime import date
+
+        today = date.today()
+        if value > today:
+            raise serializers.ValidationError("Birth date cannot be in the future.")
+        if value <= date(1900, 1, 1):
+            raise serializers.ValidationError("Please enter your real date of birth.")
+        age = today.year - value.year - ((today.month, today.day) < (value.month, value.day))
+        if age < 13:
+            raise serializers.ValidationError("You must be at least 13 years old.")
+        return value
+
     def validate(self, attrs):
         profile_picture = attrs.get(
             "profile_picture", getattr(self.instance, "profile_picture", None)

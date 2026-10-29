@@ -7931,7 +7931,7 @@ class KYCUpdateView(generics.UpdateAPIView):
             except Exception as e:
                 logger.error(f"ImageKit KYC upload failed for user {user.id}: {str(e)}")
                 return Response(
-                    {"id_upload": [f"Upload failed: {str(e)}"]},
+                    {"id_upload": ["We couldn't save your ID photo just now. Please try again in a few minutes."]},
                     status=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 )
             data = data.copy()
