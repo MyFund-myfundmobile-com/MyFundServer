@@ -2907,6 +2907,28 @@ class Property(models.Model):
         return self.name
 
 
+class GroupBuyInterest(models.Model):
+    """A user registering interest in a property that can't be bought yet
+    (units_available == 0), so the team can gauge demand before reopening
+    it. One row per user per property; re-registering updates it."""
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="groupbuy_interests")
+    property = models.ForeignKey(Property, on_delete=models.CASCADE, related_name="interests")
+    # Keys from groupbuy_interest.INTEREST_CHOICES / BUDGET_CHOICES.
+    interests = models.JSONField(default=list, blank=True)
+    budget = models.CharField(max_length=30, blank=True)
+    note = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ("user", "property")
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.user.email} → {self.property.name}"
+
+
 class AlertMessage(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     text = models.TextField()

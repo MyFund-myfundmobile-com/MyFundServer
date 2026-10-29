@@ -2351,6 +2351,17 @@ class PropertyAdmin(admin.ModelAdmin):
     ]  # Make the units_available field editable in the list view
 
 
+from .models import GroupBuyInterest
+
+
+@admin.register(GroupBuyInterest)
+class GroupBuyInterestAdmin(admin.ModelAdmin):
+    list_display = ["user", "property", "interests", "budget", "created_at"]
+    list_filter = ["property", "budget"]
+    search_fields = ["user__email", "user__first_name", "user__last_name"]
+    raw_id_fields = ["user"]
+
+
 from django.db.models import F, Count, Q
 import csv
 from django.http import HttpResponse

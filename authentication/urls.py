@@ -2,6 +2,7 @@ from . import ambassador_application_views as applications
 from .graduation_views import graduation
 from .book_views import book_access, book_progress, book_read
 from .first_savings import first_savings_status_view
+from .groupbuy_interest import admin_groupbuy_interests, my_groupbuy_interests, register_groupbuy_interest
 from django.urls import path, include
 from .request_views import requests_list, request_action, ambassador_export_link, ambassador_export
 from .foya import foya_today, foya_event, foya_admin, foya_admin_positions
@@ -104,6 +105,9 @@ urlpatterns = [
     path("books/<slug:slug>/progress/", book_progress),
     path("books/<slug:slug>/read/<str:token>/", book_read),
     path("first-savings/status/", first_savings_status_view),
+    path("groupbuy-interest/", my_groupbuy_interests),
+    path("groupbuy-interest/<int:property_id>/", register_groupbuy_interest),
+    path("admin/groupbuy-interests/", admin_groupbuy_interests),
     path("admin/requests/", requests_list, name="admin_requests"),
     path("admin/requests/ambassador/export-link/", ambassador_export_link, name="admin_ambassador_export_link"),
     path("admin/requests/ambassador/export/", ambassador_export, name="admin_ambassador_export"),
