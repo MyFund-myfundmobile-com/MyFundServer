@@ -152,9 +152,22 @@ def serialize_ambassador(app):
         "intake": app.intake.title, "video": app.answers.get("video_link") or ("Uploaded video" if app.video_path else ""),
         "responses": [{"label": label_, "value": value} for label_, value in ambassador_responses(app)],
         "status": status, "status_label": label,
-        # Influencer Portal applications are decided here; ambassador
-        # selection still happens separately.
-        "actions": ["approve", "reject"] if app.intake.programme == "influencer" and app.status == "submitted" else [],
+        # Influencer Portal applications are approved/rejected; ambassador
+        # ones are sorted Qualified / Maybe / Unqualified, then sent
+        # (ambassador_decisions.py).
+        "actions": (["approve", "reject"] if app.status == "submitted" else []) if app.intake.programme == "influencer"
+        else (["label", "send"] if app.status in ("submitted", "shortlisted") else []),
+        **(ambassador_review(app) if app.intake.programme == "ambassador" else {}),
+    }
+
+
+def ambassador_review(app):
+    from .ambassador_decisions import suggestion_for
+    if app.status == "draft":
+        return {}
+    return {
+        "review_label": app.review_label, "decision_sent_label": app.decision_sent_label,
+        "decision_sent_at": app.decision_sent_at, "suggestion": suggestion_for(app),
     }
 
 
@@ -262,8 +275,15 @@ def ambassador_list(request, scope, sort, offset, programme="ambassador"):
     qs = ambassador_queue(scope, programme).order_by("created_at" if sort == "oldest" else "-created_at")
     qs = search_requests(qs, "ambassador", request.query_params.get("q"))
     everything = ambassador_queue("all", programme)
+    if sort == "score" and programme == "ambassador":
+        # Best match first (the persona score); a cohort's applications fit
+        # comfortably in memory.
+        from .ambassador_decisions import suggestion_for
+        page = sorted(qs, key=lambda app: -suggestion_for(app)["score"])[offset:offset + 20]
+    else:
+        page = qs[offset:offset + 20]
     return Response({
-        "results": [serialize_ambassador(app) for app in qs[offset:offset + 20]],
+        "results": [serialize_ambassador(app) for app in page],
         "count": qs.count(),
         "counts": request_counts(),
         "summary": {"started": everything.count(), "completed": everything.filter(submitted_at__isnull=False).count(),
@@ -285,7 +305,7 @@ def requests_list(request):
     if scope not in ["all", "pending", "resolved"]:
         raise ValidationError("Invalid request scope.")
     sort = request.query_params.get("sort", "newest")
-    if sort not in ["newest", "oldest", "amount_high", "amount_low"]:
+    if sort not in ["newest", "oldest", "amount_high", "amount_low", "score"]:
         raise ValidationError("Invalid request sort.")
     # Withdrawal filter (mobile admin Requests "Filter" menu): scheduled,
     # immediate, or scheduled withdrawals due today/overdue. Any other
@@ -363,6 +383,20 @@ def request_action(request, kind, pk):
             app = get_object_or_404(AmbassadorApplication.objects.select_for_update(of=("self",)).select_related("user", "intake"),
                                     pk=pk, intake__programme="influencer")
             decide_influencer_application(app, request.data.get("action"), str(request.data.get("reason", "")).strip())
+        return Response(serialize_ambassador(app))
+    if kind == "ambassador":
+        from .ambassador_decisions import send_decision, set_label
+        from .models import AmbassadorApplication
+        with transaction.atomic():
+            app = get_object_or_404(AmbassadorApplication.objects.select_for_update(of=("self",)).select_related("user", "intake"),
+                                    pk=pk, intake__programme="ambassador")
+            action = request.data.get("action")
+            if action not in ("label", "send"):
+                raise ValidationError("Choose label or send.")
+            if request.data.get("label") or action == "label":
+                set_label(app, request.data.get("label"))
+            if action == "send":
+                send_decision(app)
         return Response(serialize_ambassador(app))
     if kind not in MODELS:
         raise ValidationError("Invalid request type.")

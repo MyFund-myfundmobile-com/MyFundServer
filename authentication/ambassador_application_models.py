@@ -15,6 +15,10 @@ class AmbassadorIntake(models.Model):
     opens_at = models.DateTimeField()
     closes_at = models.DateTimeField()
     active = models.BooleanField(default=True)
+    # Used in the "Qualified" decision email (ambassador_decisions.py).
+    group_link = models.URLField(blank=True, max_length=500, help_text="WhatsApp group link for selected ambassadors.")
+    onboarding_note = models.CharField(blank=True, max_length=300,
+                                       help_text='e.g. "Onboarding is this Saturday at 5pm on Google Meet."')
 
     @property
     def is_open(self):
@@ -46,6 +50,11 @@ class AmbassadorApplication(models.Model):
     last_reminded_at = models.DateTimeField(null=True, blank=True)
     reminder_count = models.PositiveIntegerField(default=0)
     review_notes = models.TextField(blank=True)
+    # Admin's Qualified / Maybe / Unqualified sort; changeable until sent.
+    REVIEW_LABELS = [('qualified', 'Qualified'), ('maybe', 'Maybe'), ('unqualified', 'Unqualified')]
+    review_label = models.CharField(max_length=20, choices=REVIEW_LABELS, blank=True, db_index=True)
+    decision_sent_label = models.CharField(max_length=20, choices=REVIEW_LABELS, blank=True)
+    decision_sent_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=['intake', 'email'], name='unique_ambassador_intake_email')]

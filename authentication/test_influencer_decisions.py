@@ -70,10 +70,10 @@ class InfluencerDecisionTests(TestCase):
         self.assertIn("sign up", str(res.data))
         email.assert_not_called()
 
-    def test_ambassador_applications_stay_read_only(self, _email, _push):
+    def test_ambassador_applications_are_sorted_not_approved(self, _email, _push):
         intake = AmbassadorIntake.objects.create(
             programme="ambassador", slug="amb", title="Ambassadors",
             opens_at=timezone.now(), closes_at=timezone.now() + timedelta(days=1))
         AmbassadorApplication.objects.create(intake=intake, email="x@example.com", status="submitted")
         res = self.client.get("/api/admin/requests/?kind=ambassador")
-        self.assertEqual(res.data["results"][0]["actions"], [])
+        self.assertEqual(res.data["results"][0]["actions"], ["label", "send"])
