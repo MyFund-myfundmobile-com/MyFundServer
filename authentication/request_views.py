@@ -86,6 +86,8 @@ def serialize(obj, kind, request):
                     delivery_cost_acknowledged=obj.delivery_cost_acknowledged, responses=responses,
                     video=bool(obj.video_path), video_url=private_url(obj.video_path), photo_url=private_url(obj.photo_path),
                     reminder_count=obj.reminder_count, last_reminded_at=obj.last_reminded_at,
+                    wants_live_interview=answers.get("live_interview") == "Yes",
+                    live_interview_contact=answers.get("live_interview_contact", ""),
                     status=obj.status, status_label=dict(TopSaverRecognition.STATUS).get(obj.status, obj.status.title()),
                     actions=(["remind", "invite_video", "close"] if obj.status in {"invited", "started"}
                              else ["invite_video", "close"] if obj.status == "submitted" else []))

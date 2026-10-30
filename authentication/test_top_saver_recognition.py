@@ -45,6 +45,8 @@ class MonthlyTaskTests(Base):
         self.assertFalse(TopSaverRecognition.objects.filter(user=fourth).exists())
         tap = [c for c in push.call_args_list if c.args[0] == first][0].kwargs["data"]["deep_link"]["url"]
         self.assertIn("www.myfundmobile.com/topsaver?token=", tap)
+        first_push = [c for c in push.call_args_list if c.args[0] == first][0].kwargs["message"]
+        self.assertTrue(first_push.endswith("Tap to view the details."))
 
         email.reset_mock()
         reward_top_savers_of_month()  # retry: no duplicates for the Top 3
@@ -63,7 +65,26 @@ class InterviewTests(Base):
 
     def test_form_has_the_google_form_questions(self, _push):
         keys = [q["key"] for q in self.client.get(self.url).data["questions"]]
-        self.assertEqual(keys, ["motivation", "challenges", "word_for_others", "live_interview", "rating"])
+        self.assertEqual(keys, ["motivation", "challenges", "word_for_others", "live_interview", "live_interview_contact", "rating"])
+
+    def test_yes_to_live_interview_alerts_cx_with_contact(self, push):
+        cx = self.mk("cx@example.com", is_staff=True)
+        Employee.objects.create(name="CX", email=cx.email, monthly_amount=0, department="CX", is_active=True)
+        media = self.mk("media@example.com", is_staff=True)
+        Employee.objects.create(name="M", email=media.email, monthly_amount=0, department="Media and Communications", is_active=True)
+        TopSaverRecognition.objects.filter(pk=self.rec.pk).update(status="started", first_time_winner=False)
+        answers = {"motivation": "x", "challenges": "none", "word_for_others": "start", "live_interview": "Yes",
+                   "live_interview_contact": "0803 111 2222, evenings", "rating": 5}
+        with self.captureOnCommitCallbacks(execute=True):
+            res = self.client.post(self.url, {"answers": answers}, format="json")
+        self.assertEqual(res.status_code, 200, res.data)
+        live = [c for c in push.call_args_list if c.kwargs.get("title") == "📞 Top Saver wants a live interview"]
+        self.assertEqual({c.args[0] for c in live}, {cx})
+        self.assertIn("0803 111 2222", live[0].kwargs["message"])
+
+    def test_contact_dropped_unless_yes(self, _push):
+        res = self.client.patch(self.url, {"answers": {"live_interview": "No", "live_interview_contact": "0803"}}, format="json")
+        self.assertNotIn("live_interview_contact", res.data["recognition"]["answers"])
 
     def test_first_save_alerts_team_once_and_submit_needs_tshirt_details(self, push):
         exec_ = self.mk("company@myfundmobile.com", is_staff=True)

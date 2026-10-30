@@ -38,6 +38,11 @@ QUESTIONS = [
      "help": "Be as brief but as detailed as possible."},
     {"key": "live_interview", "type": "choice", "required": True, "options": ["Yes", "No", "Maybe later"],
      "label": "Would you be interested in a further live interview about your financial progress to help others?"},
+    # Only asked when they say Yes; CX uses it to set the interview up.
+    {"key": "live_interview_contact", "type": "textarea", "required": False, "maxLength": 300,
+     "when": ["live_interview", "Yes"],
+     "label": "Great! What's the best WhatsApp number and time for our team to reach you?",
+     "help": "e.g. 0803 000 0000, weekdays after 5pm"},
     {"key": "rating", "type": "rating", "required": True, "max": 5,
      "label": "On a scale of 1 to 5, how would you rate your MyFund experience?",
      "help": "Based on your general experience (mobile app, customer service, etc.)"},
@@ -117,6 +122,8 @@ def _clean_answers(answers):
                 return None
             value = value.strip()
         clean[key] = value
+    if clean.get("live_interview") != "Yes":
+        clean.pop("live_interview_contact", None)  # Only asked after a Yes.
     return clean
 
 
@@ -126,6 +133,33 @@ def _team_recipients():
                  .values_list("email", flat=True))
     emails.update({"tolulopeahmed@gmail.com", "janet.adegbenro@gmail.com", "company@myfundmobile.com"})
     return CustomUser.objects.filter(is_active=True, email__in={e.lower() for e in emails if e} | emails)
+
+
+def _cx_and_execs():
+    emails = set(Employee.objects.filter(is_active=True, department="CX").values_list("email", flat=True))
+    emails.update({"tolulopeahmed@gmail.com", "janet.adegbenro@gmail.com", "company@myfundmobile.com"})
+    return CustomUser.objects.filter(is_active=True, email__in={e.lower() for e in emails if e} | emails)
+
+
+def notify_live_interview(recognition):
+    """They said Yes to a live interview: CX follows up to set it up."""
+    from .request_views import REQUEST_APPROVERS
+    who = recognition.user.full_name or recognition.user.email
+    contact = (recognition.answers or {}).get("live_interview_contact") or recognition.user.phone_number or recognition.user.email
+    for admin in _cx_and_execs():
+        screen_params = ({"screen": "AdminRequestsTab", "params": {"kind": "top_saver"}}
+                         if admin.email.lower() in REQUEST_APPROVERS else None)
+        try:
+            send_push_notification(
+                admin,
+                title="📞 Top Saver wants a live interview",
+                message=f"{who} (#{recognition.rank}, {month_name(recognition)}) said yes to a live interview. Reach them: {contact}",
+                data={"type": "TOP_SAVER_LIVE_INTERVIEW", "recognition_id": recognition.pk,
+                      "deep_link": {"screen": "Admin", "screen_params": screen_params}},
+                notif_type="ADMIN_ALERT",
+            )
+        except Exception:
+            logger.exception("Live interview alert failed for %s", admin.email)
 
 
 def notify_started(recognition):
@@ -195,6 +229,9 @@ def top_saver_interview(request):
                 return Response({"error": "Please complete: " + "; ".join(missing)}, status=400)
             recognition.status = "submitted"
             recognition.submitted_at = timezone.now()
+            if answers.get("live_interview") == "Yes":
+                from .ambassador_application_views import _run_in_background
+                transaction.on_commit(lambda: _run_in_background(lambda: notify_live_interview(recognition)))
         recognition.save()
         if was_invited:
             # First save (the page autosaves as they type): tell the team.
@@ -302,7 +339,7 @@ def send_recognition(recognition):
             "<br><br>Keep growing your funds. 💜<br><br>— <b>MyFund</b>"
         )
         push_title = f"🏆 You're a Top Saver for {month}!"
-        push_body = f"Congrats {first}! You finished #{recognition.rank} and earned a free MyFund T-shirt. Tap to claim it."
+        push_body = f"Congrats {first}! You finished #{recognition.rank} and earned a free MyFund T-shirt. Tap to view the details."
     else:
         subject = f"🏆 You're a Top Saver again, {first}!"
         html = (
@@ -314,7 +351,7 @@ def send_recognition(recognition):
             "<br><br>Keep growing your funds. 💜<br><br>— <b>MyFund</b>"
         )
         push_title = f"🏆 Top Saver again for {month}!"
-        push_body = f"Congrats {first}! You finished #{recognition.rank} again. Tap to share your story."
+        push_body = f"Congrats {first}! You finished #{recognition.rank} again. Tap to view the details."
 
     send_push_notification(user, title=push_title, message=push_body, notif_type="SYSTEM",
                            data={"type": "TOP_SAVER_RECOGNITION", "recognition_id": recognition.pk,
