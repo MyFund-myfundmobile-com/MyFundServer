@@ -1,4 +1,4 @@
-"""Hosted, signed-link Top Saver interview (www.myfundmobile.com/topsaver).
+"""Hosted, signed-link Top Saver interview (www.myfundmobile.com/topsaver/interview).
 
 Replaces the Google Form. The link is tied to one recognition record rather
 than a login, so winners can open it from the email on any device, while
@@ -55,7 +55,7 @@ def recognition_token(recognition):
 
 
 def interview_link(recognition):
-    return f"https://www.myfundmobile.com/topsaver?token={recognition_token(recognition)}"
+    return f"https://www.myfundmobile.com/topsaver/interview?token={recognition_token(recognition)}"
 
 
 def _recognition(token):
