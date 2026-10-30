@@ -864,121 +864,56 @@ def distribute_groupbuy_income_notifications(event_id, send_email=False):
 # ✅ tasks.py
 from celery import shared_task
 from django.utils import timezone
-from .models import CustomUser, TopSaverHistory
+from .models import CustomUser, TopSaverHistory, TopSaverRecognition
 from .utils import send_push_notification, send_generic_email, send_transactional_email
 import datetime
 import logging
 
 logger = logging.getLogger(__name__)
 
-GOOGLE_FORM_TEMPLATE = (
-    "https://docs.google.com/forms/d/e/1FAIpQLSfHbVd5EtzSyJskgdvCRfGfYrdGaTw3RwCvnkk7pjl6LvS59A/"
-    "viewform?usp=pp_url&entry.1884265043={name}&entry.390969690={email}"
-)
-
-
 @shared_task
 def reward_top_savers_of_month():
+    """1st of the month: Top 3 get the Top Saver recognition (free T-shirt +
+    interview the first time, interview after), ranks 4-10 a well-done.
+
+    The leaderboard (TopSaverHistory) keeps updating for its month in UTC,
+    so beat runs this at 00:10 UTC on the 1st, once that month is final.
+    """
+    from datetime import date
+
+    from .top_saver_views import is_first_time_winner, send_recognition, send_top_ten_encouragement
+
     now = timezone.now()
     prev_month = 12 if now.month == 1 else now.month - 1
     year = now.year - 1 if now.month == 1 else now.year
-    prev_month_name = datetime.date(year, prev_month, 1).strftime("%B")
+    # (This module rebinds `datetime` to the class further up, so `datetime.date` breaks here.)
+    prev_month_name = date(year, prev_month, 1).strftime("%B")
 
-    top_savers = TopSaverHistory.objects.filter(month=prev_month, year=year).order_by(
-        "rank"
-    )[:10]
+    entries = TopSaverHistory.objects.select_related("user").filter(month=prev_month, year=year, rank__lte=10).order_by("rank")
+    if not entries.exists():
+        logger.warning("[TOP_SAVER_TASK] No top savers found for %s %s", prev_month_name, year)
+        return f"No top savers for {prev_month_name} {year}"
 
-    if not top_savers.exists():
-        msg = f"[TOP_SAVER_TASK] No top savers found for {prev_month_name} {year}"
-        logger.info(msg)
-        return msg
-
-    for entry in top_savers:
+    for entry in entries:
         user = entry.user
-        rank = entry.rank
-        pre_filled_link = GOOGLE_FORM_TEMPLATE.format(
-            name=f"{user.first_name} {user.last_name}", email=user.email
-        )
-
+        if not user:
+            continue
         try:
-            if rank <= 3:
-                has_been_top3_before = (
-                    TopSaverHistory.objects.filter(user=user, rank__lte=3)
-                    .exclude(id=entry.id)
-                    .exists()
-                )
-
-                send_push_notification(
-                    user,
-                    title=f"🎉 You're the #{rank} Top Saver for {prev_month_name}!",
-                    message=(
-                        f"🎉 Congrats {user.first_name}! You're one of the Top Savers for the month of {prev_month_name} and we'd like to hear from you. "
-                        "Kindly check your email for details. Well done!"
-                    ),
-                    data={"type": "TOP_SAVER_CONGRATS", "rank": rank},
-                )
-
-                if not has_been_top3_before:
-                    email_message = f"""
-                    Hi {user.first_name},<br><br>
-                    🎉 Congratulations! You are the <b>#{rank}</b> Top Savers for <b>{prev_month_name}</b>!<br><br>
-                    You’ve officially qualified for a <b>MyFund Branded T-Shirt</b> 👕 as a first-time Top Saver!<br><br>
-                    Please fill out this form so we can send your T-Shirt and get your quick feedback:<br>
-                    <a href="{pre_filled_link}">MyFund Top Saver Form</a><br><br>
-                    — The MyFund Team
-                    """
-                else:
-                    email_message = f"""
-                    Hi {user.first_name},<br><br>
-                    🎉 Congratulations! You are the <b>#{rank}</b> Top Savers for <b>{prev_month_name}</b>!<br><br>
-                    Thank you for your consistency — we’d love your quick feedback to help us improve. Kindly fill this form:<br>
-                    <a href="{pre_filled_link}"><b>MyFund Top Saver Feedback Form</b></a><br><br>
-                    — The MyFund Team
-                    """
-
-                send_generic_email(
-                    subject=f"🏆 Congrats! You are the #{rank} Top Saver for {prev_month_name}!",
-                    message=email_message,
-                    from_email="MyFund <info@myfundmobile.com>",
-                    recipient_list=[user.email],
-                )
-                logger.info(
-                    f"[TOP_SAVER_TASK] Email sent to {user.email} for rank {rank}"
-                )
-
-            else:
-                send_push_notification(
-                    user,
-                    title=f"You're the #{rank} Top Saver for {prev_month_name}! 🚀",
-                    message=(
-                        f"Congrats {user.first_name}! You're the #{rank} Top Saver for {prev_month_name}! Keep growing your funds to earn more rewards as one of the top savers for this month. "
-                        f"Well done!"
-                    ),
-                    data={"type": "TOP_SAVER_ENCOURAGE", "rank": rank},
-                )
-
-                email_message = f"""
-                Hi {user.first_name},<br><br>
-                You are the <b>#{rank}</b> Top Saver for <b>{prev_month_name}</b>!<br>
-                Keep growing your funds to earn more rewards as one of the top savers for this month.<br><br>
-                Well done! <br><br>
-                — The MyFund Team
-                """
-
-                send_generic_email(
-                    subject=f"You're the #{rank} Top Saver for {prev_month_name}! 🚀",
-                    message=email_message,
-                    from_email="MyFund <info@myfundmobile.com>",
-                    recipient_list=[user.email],
-                )
-                logger.info(
-                    f"[TOP_SAVER_TASK] Encouragement email sent to {user.email} (rank {rank})"
-                )
-
+            if entry.rank > 3:
+                send_top_ten_encouragement(user, entry.rank, prev_month_name)
+                continue
+            recognition, created = TopSaverRecognition.objects.get_or_create(
+                user=user, month=prev_month, year=year,
+                defaults={"rank": entry.rank, "first_time_winner": is_first_time_winner(user, prev_month, year)},
+            )
+            if not created:
+                continue  # Idempotent: a retry never sends twice.
+            send_recognition(recognition)
+            logger.info("[TOP_SAVER_TASK] Recognition sent to %s (#%s)", user.email, entry.rank)
         except Exception as e:
             logger.error(f"[TOP_SAVER_TASK][ERROR] Failed for {user.email}: {e}")
 
-    return f"Top Saver notifications for {prev_month_name} {year} sent successfully."
+    return f"Top Saver recognitions for {prev_month_name} {year} sent."
 
 
 @shared_task

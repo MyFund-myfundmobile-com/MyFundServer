@@ -169,7 +169,9 @@ app.conf.beat_schedule = {
     # Top Saver Rewards
     "reward-top-savers-monthly": {
         "task": "authentication.tasks.reward_top_savers_of_month",
-        "schedule": crontab(hour=23, minute=10, day_of_month="27-30"),
+        # 00:10 UTC on the 1st: the leaderboard is per UTC month, so the
+        # previous month is final by then (01:10 WAT).
+        "schedule": crontab(hour=0, minute=10, day_of_month=1),
     },
     # Birthday Greetings
     "send-birthday-greetings-daily": {

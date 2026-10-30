@@ -14,6 +14,7 @@ from .models import (
     WithdrawalsRequestToAdmin,
     TargetSavings,
     TopSaverHistory,
+    TopSaverRecognition,
     DailyROIAccrual,
     ROITransaction,
     FinanceMetricSnapshot,
@@ -73,10 +74,6 @@ from .utils import (
 from decimal import Decimal
 from django.utils.html import format_html
 
-GOOGLE_FORM_TEMPLATE = (
-    "https://docs.google.com/forms/d/e/1FAIpQLSfHbVd5EtzSyJskgdvCRfGfYrdGaTw3RwCvnkk7pjl6LvS59A/"
-    "viewform?usp=pp_url&entry.1884265043={name}&entry.390969690={email}"
-)
 
 
 @admin.action(description="Say Hello")
@@ -1138,75 +1135,25 @@ class CustomUserAdmin(UserAdmin):
 
     @admin.action(description="🏆 Test Top Saver Notification (No Credit)")
     def test_top_saver_reward(self, request, queryset):
+        """Sends the real Top Saver push + email (as #1 for last month) to the
+        selected accounts, creating their recognition so the /topsaver form
+        and Admin Requests can be tried end to end. Use your own account."""
         from django.utils import timezone
-        from .utils import send_push_notification, send_generic_email
-        import datetime, logging
-
-        logger = logging.getLogger(__name__)
+        from .top_saver_views import is_first_time_winner, send_recognition
 
         now = timezone.now()
-        prev_month = now.month - 1 or 12
-        year = now.year if now.month > 1 else now.year - 1
-        prev_month_name = datetime.date(year, prev_month, 1).strftime("%B")
-
+        prev_month = 12 if now.month == 1 else now.month - 1
+        year = now.year - 1 if now.month == 1 else now.year
         for user in queryset:
             try:
-                logger.info(f"[TEST_TOP_SAVER] Processing user: {user.email}")
-
-                pre_filled_link = GOOGLE_FORM_TEMPLATE.format(
-                    name=f"{user.first_name} {user.last_name}", email=user.email
+                recognition, _ = TopSaverRecognition.objects.get_or_create(
+                    user=user, month=prev_month, year=year,
+                    defaults={"rank": 1, "first_time_winner": is_first_time_winner(user, prev_month, year)},
                 )
-
-                has_been_top3_before = TopSaverHistory.objects.filter(
-                    user=user, rank__lte=3
-                ).exists()
-
-                send_push_notification(
-                    user,
-                    title=f"🎉 Test Top Saver Notification!",
-                    message=(
-                        f"Congrats {user.first_name}! You made the Top 3 for {prev_month_name} (test). "
-                        "Check your email for the simulated feedback form."
-                    ),
-                    data={"type": "TOP_SAVER_TEST"},
-                )
-
-                if not has_been_top3_before:
-                    email_message = f"""
-                    Hi {user.first_name or user.email},<br><br>
-                    🎉 This is a <b>test</b> Top Saver Notification for <b>{prev_month_name}</b>.<br><br>
-                    You’ve qualified for a <b>MyFund Branded T-Shirt</b> 👕 as a first-time Top Saver!<br><br>
-                    Please fill this test form so we can record your details:<br><br>
-                    <a href="{pre_filled_link}"><b>MyFund Top Saver Form (Test)</b></a><br><br>
-                    — The MyFund Team
-                    """
-                else:
-                    email_message = f"""
-                    Hi {user.first_name or user.email},<br><br>
-                    🎉 This is a <b>test</b> Top Saver Notification for <b>{prev_month_name}</b>.<br><br>
-                    You’ve made the Top 3 again — great consistency!<br>
-                    Please complete the feedback form:<br>
-                    <a href="{pre_filled_link}">MyFund Feedback Form (Test)</a><br><br>
-                    — The MyFund Team
-                    """
-
-                logger.info(f"[TEST_TOP_SAVER] Sending email to {user.email}")
-
-                send_generic_email(
-                    subject=f"[TEST] Top Saver Notification - {prev_month_name}",
-                    message=email_message,
-                    from_email="MyFund <info@myfundmobile.com>",
-                    recipient_list=[user.email],
-                )
-
-                logger.info(f"[TEST_TOP_SAVER] Email sent to {user.email}")
-                self.message_user(request, f"✅ Test notification sent to {user.email}")
-
+                send_recognition(recognition)
+                self.message_user(request, f"✅ Test Top Saver message sent to {user.email}")
             except Exception as e:
-                logger.error(
-                    f"[TEST_TOP_SAVER] Error for {user.email}: {str(e)}", exc_info=True
-                )
-                self.message_user(request, f"❌ Error for {user.email}: {str(e)}")
+                self.message_user(request, f"❌ Error for {user.email}: {e}", level=messages.ERROR)
 
     @admin.action(description="Notify users with outdated app versions")
     def notify_outdated_users(self, request, queryset):
@@ -2497,6 +2444,14 @@ class TopSaverHistoryAdmin(admin.ModelAdmin):
 
 
 admin.site.register(TopSaverHistory, TopSaverHistoryAdmin)
+
+
+@admin.register(TopSaverRecognition)
+class TopSaverRecognitionAdmin(admin.ModelAdmin):
+    list_display = ("user", "month", "year", "rank", "first_time_winner", "status", "shirt_size", "submitted_at")
+    list_filter = ("status", "first_time_winner", "year", "month")
+    search_fields = ("user__email", "user__first_name", "user__last_name", "delivery_phone")
+    readonly_fields = ("invited_at", "started_at", "submitted_at", "created_at", "updated_at")
 
 
 from django.contrib import admin

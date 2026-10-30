@@ -1439,6 +1439,57 @@ class TopSaverHistory(models.Model):
         unique_together = ("month", "year", "rank")
 
 
+class TopSaverRecognition(models.Model):
+    """A private, month-specific record for a Top 3 winner's recognition.
+
+    ``TopSaverHistory`` is the live/final leaderboard snapshot.  This model
+    deliberately keeps fulfilment and interview data separate from it, so a
+    winner is congratulated only once for their first Top 3 finish while each
+    month's result remains auditable.
+    """
+
+    STATUS = [
+        ("invited", "Invited"),
+        ("started", "Interview started"),
+        ("submitted", "Interview submitted"),
+        ("closed", "Closed"),
+    ]
+    SHIRT_SIZES = [(size, size) for size in ("XS", "S", "M", "L", "XL", "2XL", "3XL")]
+
+    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE, related_name="top_saver_recognitions")
+    month = models.PositiveSmallIntegerField()
+    year = models.PositiveSmallIntegerField()
+    rank = models.PositiveSmallIntegerField()
+    first_time_winner = models.BooleanField(default=True)
+    status = models.CharField(max_length=12, choices=STATUS, default="invited", db_index=True)
+    shirt_size = models.CharField(max_length=4, choices=SHIRT_SIZES, blank=True)
+    delivery_address = models.TextField(blank=True)
+    delivery_phone = models.CharField(max_length=30, blank=True)
+    delivery_cost_acknowledged = models.BooleanField(default=False)
+    answers = models.JSONField(default=dict, blank=True)
+    video_file_id = models.CharField(max_length=255, blank=True)
+    video_path = models.CharField(max_length=500, blank=True)
+    video_name = models.CharField(max_length=255, blank=True)
+    # Optional photo for publishing their story (their MyFund profile
+    # picture is used when they don't upload one).
+    photo_file_id = models.CharField(max_length=255, blank=True)
+    photo_path = models.CharField(max_length=500, blank=True)
+    invited_at = models.DateTimeField(default=timezone.now)
+    started_at = models.DateTimeField(null=True, blank=True)
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    last_reminded_at = models.DateTimeField(null=True, blank=True)
+    reminder_count = models.PositiveSmallIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["user", "month", "year"], name="unique_top_saver_recognition_month")]
+        ordering = ["-year", "-month", "rank"]
+
+    def __str__(self):
+        return f"Top Saver #{self.rank}: {self.user.full_name} ({self.month}/{self.year})"
+
+
 class PasswordReset(models.Model):
     user = models.ForeignKey(CustomUser, on_delete=models.CASCADE)
     otp = models.CharField(max_length=6)
