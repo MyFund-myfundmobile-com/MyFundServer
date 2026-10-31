@@ -4659,6 +4659,23 @@ def autosave(request):
     )
 
 
+def _paystack_subscription_still_active(autosave, headers):
+    """True unless Paystack says the subscription is no longer active (or
+    doesn't exist). Unknown (network error) counts as active, to be safe."""
+    ref = autosave.paystack_sub_code or autosave.paystack_sub_id
+    if not ref:
+        return False
+    try:
+        res = requests.get(f"https://api.paystack.co/subscription/{ref}", headers=headers, timeout=20)
+    except requests.RequestException:
+        return True
+    if res.status_code == 404:
+        return False
+    if not res.ok:
+        return True
+    return (res.json().get("data") or {}).get("status") == "active"
+
+
 def deactivate_autosave_for_user(user, frequency):
     """Shared by the user-facing endpoint below and AutoSaveAdmin's staff
     action - lets support deactivate a stuck user's AutoSave (cancelling
@@ -4671,11 +4688,11 @@ def deactivate_autosave_for_user(user, frequency):
     beyond clearing the flag) the same way the view already handled
     inline.
     """
-    active_autosaves = AutoSave.objects.filter(
-        user=user,
-        frequency=frequency,
-        active=True,
-    )
+    # Frequency is optional: with none (the app's status check can come
+    # back without one), turn off every active AutoSave.
+    active_autosaves = AutoSave.objects.filter(user=user, active=True)
+    if frequency:
+        active_autosaves = active_autosaves.filter(frequency__iexact=frequency)
 
     if not active_autosaves.exists():
         user.autosave_enabled = False
@@ -4701,7 +4718,14 @@ def deactivate_autosave_for_user(user, frequency):
                 headers=headers,
                 timeout=30,
             )
-            deactivate_response.raise_for_status()
+            if not deactivate_response.ok:
+                # Paystack refuses to disable a subscription that's already
+                # cancelled/expired - which used to leave the user stuck
+                # "on" forever. Only stop if it's genuinely still active.
+                if _paystack_subscription_still_active(autosave, headers):
+                    deactivate_response.raise_for_status()
+                logger.info("AutoSave %s: Paystack subscription already inactive (%s); turning off locally",
+                            autosave.pk, deactivate_response.status_code)
 
         # Whether or not Paystack details exist, make sure record is no longer active
         autosave.active = False
@@ -4749,15 +4773,7 @@ def deactivate_autosave_for_user(user, frequency):
 @permission_classes([IsAuthenticated])
 def deactivate_autosave(request):
     user = request.user
-    frequency = request.data.get("frequency")
-
-    if not frequency:
-        return Response(
-            {
-                "error": "Frequency Missing: Please provide the frequency of the autosave."
-            },
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+    frequency = request.data.get("frequency") or ""
 
     try:
         result = deactivate_autosave_for_user(user, frequency)
@@ -4772,9 +4788,10 @@ def deactivate_autosave(request):
         )
 
     except requests.RequestException as e:
+        logger.error("AutoSave deactivation failed on Paystack for %s: %s", user.email, e)
         return Response(
-            {"error": f"Failed to deactivate subscription on Paystack: {str(e)}"},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            {"error": "We couldn't stop your AutoSave with our payment provider just now. Please try again in a few minutes, or contact support."},
+            status=status.HTTP_502_BAD_GATEWAY,
         )
     except Exception as e:
         return Response(
@@ -4791,7 +4808,9 @@ def get_autosave_status(request):
 
     # Retrieve the user's active auto-save settings
     try:
-        autosave = AutoSave.objects.get(user=user, active=True)
+        autosave = AutoSave.objects.filter(user=user, active=True).order_by("-pk").first()
+        if autosave is None:
+            raise AutoSave.DoesNotExist
         autoSaveSettings = {
             "active": autosave_enabled,
             "amount": autosave.amount,
@@ -4815,8 +4834,9 @@ def get_autosave_status(request):
             autosave_enabled = (
                 True if autoSaveSettings["subscription_status"] == "active" else False
             )
-        else:
-            autoSaveSettings = {"active": False, "amount": 0, "frequency": ""}
+        # If Paystack can't be reached, keep showing the saved AutoSave (with
+        # its frequency) instead of blanking it - a blank one left users with
+        # an AutoSave they could see but not turn off.
 
     except AutoSave.DoesNotExist:
         autoSaveSettings = {"active": False, "amount": 0, "frequency": ""}
