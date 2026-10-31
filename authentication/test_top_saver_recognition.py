@@ -37,14 +37,14 @@ class MonthlyTaskTests(Base):
         reward_top_savers_of_month()
         sent = {c.kwargs["recipient_list"][0]: c.kwargs for c in email.call_args_list}
         self.assertIn("free MyFund T-shirt", sent["first@example.com"]["message"])
-        self.assertIn("/topsaver?token=", sent["first@example.com"]["message"])
+        self.assertIn("/topsaver/interview?token=", sent["first@example.com"]["message"])
         self.assertNotIn("T-shirt", sent["repeat@example.com"]["message"])
         self.assertIn("#4", sent["fourth@example.com"]["subject"])
         self.assertTrue(TopSaverRecognition.objects.get(user=first).first_time_winner)
         self.assertFalse(TopSaverRecognition.objects.get(user=repeat).first_time_winner)
         self.assertFalse(TopSaverRecognition.objects.filter(user=fourth).exists())
         tap = [c for c in push.call_args_list if c.args[0] == first][0].kwargs["data"]["deep_link"]["url"]
-        self.assertIn("www.myfundmobile.com/topsaver?token=", tap)
+        self.assertIn("www.myfundmobile.com/topsaver/interview?token=", tap)
         first_push = [c for c in push.call_args_list if c.args[0] == first][0].kwargs["message"]
         self.assertTrue(first_push.endswith("Tap to view the details."))
 
@@ -65,7 +65,7 @@ class InterviewTests(Base):
 
     def test_form_has_the_google_form_questions(self, _push):
         keys = [q["key"] for q in self.client.get(self.url).data["questions"]]
-        self.assertEqual(keys, ["motivation", "challenges", "word_for_others", "live_interview", "live_interview_contact", "rating"])
+        self.assertEqual(keys, ["motivation", "challenges", "word_for_others", "live_interview", "live_interview_contact", "rating", "feature_consent"])
 
     def test_yes_to_live_interview_alerts_cx_with_contact(self, push):
         cx = self.mk("cx@example.com", is_staff=True)
@@ -148,3 +148,55 @@ class AdminRequestTests(Base):
         self.assertEqual(self.act("invite_video").status_code, 200)
         self.assertIn("video interview", email.call_args.kwargs["message"])
         self.assertEqual(self.act("remind").status_code, 400)
+
+
+@patch("authentication.ambassador_application_views._run_in_background", run_now)
+@patch("authentication.utils.send_transactional_email", return_value={"sent": 1})
+class ClaimAndStoriesTests(Base):
+    def setUp(self):
+        super().setUp()
+        from django.core.cache import cache
+        cache.clear()
+        self.past = self.mk("past@example.com")
+        TopSaverHistory.objects.create(user=self.past, month=3, year=2026, rank=2, total_savings=1)
+        self.client = APIClient()
+
+    def claim_token(self, email):
+        import re
+        self.client.post("/api/top-saver/claim/", {"email": "past@example.com"}, format="json")
+        html = email.call_args.kwargs["message"]
+        return re.search(r"topsaver/start\?token=([^\"]+)", html).group(1)
+
+    def test_same_reply_for_anyone_and_email_only_for_past_top_savers(self, email):
+        nobody = self.client.post("/api/top-saver/claim/", {"email": "nobody@example.com"}, format="json")
+        past = self.client.post("/api/top-saver/claim/", {"email": "PAST@example.com"}, format="json")
+        self.assertEqual(nobody.data, past.data)
+        self.assertEqual([c.kwargs["recipient_list"] for c in email.call_args_list], [["past@example.com"]])
+
+    def test_pick_month_opens_interview_only_no_tshirt(self, email):
+        import re
+        self.client.post("/api/top-saver/claim/", {"email": "past@example.com"}, format="json")
+        token = re.search(r"topsaver/start\?token=([^\"]+)", email.call_args.kwargs["message"]).group(1)
+        months = self.client.get(f"/api/top-saver/claim/start/?token={token}").data["months"]
+        self.assertEqual([(m["month"], m["year"], m["rank"]) for m in months], [(3, 2026, 2)])
+        self.assertEqual(self.client.post(f"/api/top-saver/claim/start/?token={token}", {"month": 4, "year": 2026}, format="json").status_code, 400)
+        res = self.client.post(f"/api/top-saver/claim/start/?token={token}", {"month": 3, "year": 2026}, format="json")
+        self.assertEqual(res.status_code, 200)
+        rec = TopSaverRecognition.objects.get(user=self.past)
+        self.assertFalse(rec.first_time_winner)
+        form = self.client.get(f"/api/top-saver/interview/?token={res.data['token']}")
+        self.assertFalse(form.data["recognition"]["first_time_winner"])
+
+    def test_bad_claim_token(self, _email):
+        self.assertEqual(self.client.get("/api/top-saver/claim/start/?token=nope").status_code, 404)
+
+    def test_stories_only_with_consent_and_no_contact_details(self, _email):
+        other = self.mk("other@example.com")
+        TopSaverRecognition.objects.create(user=self.past, month=3, year=2026, rank=2, status="submitted",
+                                           answers={"word_for_others": "Start small.", "feature_consent": True})
+        TopSaverRecognition.objects.create(user=other, month=3, year=2026, rank=1, status="submitted",
+                                           answers={"word_for_others": "Private.", "feature_consent": False})
+        data = self.client.get("/api/top-saver/stories/").data
+        self.assertEqual([s["quote"] for s in data["stories"]], ["Start small."])
+        self.assertNotIn("email", str(data))
+        self.assertEqual(data["recent_winners"][0]["month"], "March 2026")

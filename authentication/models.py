@@ -3166,6 +3166,11 @@ class EmailTemplate(models.Model):
     # How many recipients that send targeted - null for drafts (was_sent
     # False), always set alongside was_sent=True.
     recipient_count = models.IntegerField(null=True, blank=True)
+    # Frozen, de-duplicated recipient snapshot for an individual/admin send.
+    # This makes a sent message reusable from Mobile Admin without relying on
+    # a provider event log that may eventually expire. Empty for old sends and
+    # manually saved drafts created before this field was introduced.
+    recipient_emails = models.JSONField(default=list, blank=True)
 
     def __str__(self):
         return self.title

@@ -46,6 +46,10 @@ QUESTIONS = [
     {"key": "rating", "type": "rating", "required": True, "max": 5,
      "label": "On a scale of 1 to 5, how would you rate your MyFund experience?",
      "help": "Based on your general experience (mobile app, customer service, etc.)"},
+    # Permission to show their story on www.myfundmobile.com/topsaver and
+    # social media. Nothing is featured without it.
+    {"key": "feature_consent", "type": "boolean", "required": False,
+     "label": "MyFund can feature my story, first name and photo on its website and social media."},
 ]
 QUESTION_KEYS = {q["key"]: q for q in QUESTIONS}
 
@@ -107,7 +111,10 @@ def _clean_answers(answers):
             return None
         if value in (None, ""):
             continue
-        if question["type"] == "rating":
+        if question["type"] == "boolean":
+            if not isinstance(value, bool):
+                return None
+        elif question["type"] == "rating":
             try:
                 value = int(value)
             except (TypeError, ValueError):
@@ -430,3 +437,155 @@ def top_saver_follow_up(recognition, action):
                 "send the call link. Prefer to record yourself? Add a short video in your Top Saver form instead."
                 "<br><br>" + _button(link, "Open My Top Saver Form") + "<br><br>— <b>MyFund</b>")
     send_transactional_email(subject=subject, message=html, recipient_list=[recognition.user.email], from_email=FROM)
+
+
+# ---- Past Top Savers claiming their interview (from the landing page) -------
+# Anyone who was ever Top 3 can share their story later: they enter their
+# email, we email a private link (proves it's their inbox), they pick the
+# month. Interview only - the free T-shirt stays with the monthly email for
+# new first-time winners.
+CLAIM_SALT = "myfund.top-saver.claim.v1"
+CLAIM_MAX_AGE = 60 * 60 * 48
+
+
+def _eligible_months(user):
+    """Top 3 months this person can still tell their story for, newest first."""
+    from .models import TopSaverHistory
+    done = {(r.month, r.year) for r in TopSaverRecognition.objects.filter(user=user, status__in=["submitted", "closed"])}
+    rows = TopSaverHistory.objects.filter(user=user, rank__lte=3).order_by("-year", "-month")
+    now = timezone.now()
+    months = []
+    for row in rows:
+        if (row.month, row.year) in done or (row.month, row.year) == (now.month, now.year):
+            continue  # Already told, or the month isn't over yet.
+        months.append({"month": row.month, "year": row.year, "rank": row.rank,
+                       "label": datetime.date(row.year, row.month, 1).strftime("%B %Y")})
+    return months
+
+
+@api_view(["POST"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def top_saver_claim(request):
+    """POST {email}: email a private link if they were ever a Top Saver.
+    Same reply either way, so this can't be used to look people up."""
+    from .ambassador_application_views import _over_limit, _run_in_background
+    from .utils import send_transactional_email
+
+    email = str(request.data.get("email") or "").strip().lower()
+    reply = Response({"message": "If that email belongs to a past MyFund Top Saver, we've sent you a link to share your story."})
+    if "@" not in email or len(email) > 254:
+        return Response({"error": "Enter the email on your MyFund account."}, status=400)
+    ip = request.META.get("REMOTE_ADDR", "")
+    if _over_limit(f"topsaver_claim_ip:{ip}", 10) or _over_limit(f"topsaver_claim_email:{email}", 3):
+        return reply
+    user = CustomUser.objects.filter(email__iexact=email, is_deleted=False, is_active=True).first()
+    if not user or not _eligible_months(user):
+        return reply
+    link = ("https://www.myfundmobile.com/topsaver/start?token="
+            + signing.dumps({"user": user.pk}, salt=CLAIM_SALT))
+    first = user.first_name or "there"
+    html = (f"Hi {first},<br><br>Thank you for being one of MyFund's Top Savers. 🏆<br><br>"
+            "Here's your private link to share your Top Saver story. Choose the month you were a Top Saver "
+            "and answer a few quick questions. It takes about 3 minutes.<br><br>"
+            + _button(link, "Share My Top Saver Story")
+            + "<br><br>This link works for 48 hours. If you didn't ask for it, you can ignore this email."
+              "<br><br>— <b>MyFund</b>")
+
+    def send():
+        try:
+            send_transactional_email(subject="Your MyFund Top Saver story link 🏆", message=html,
+                                     recipient_list=[user.email], from_email=FROM)
+        except Exception:
+            logger.exception("Top Saver claim email failed for %s", user.email)
+    _run_in_background(send)
+    return reply
+
+
+def _claim_user(token):
+    try:
+        value = signing.loads(token, salt=CLAIM_SALT, max_age=CLAIM_MAX_AGE)
+        return CustomUser.objects.get(pk=value["user"], is_deleted=False)
+    except (signing.BadSignature, signing.SignatureExpired, CustomUser.DoesNotExist, KeyError, TypeError):
+        return None
+
+
+@api_view(["GET", "POST"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def top_saver_claim_start(request):
+    """GET ?token: their eligible months. POST {month, year}: open (or
+    reuse) that month's interview and return its form token."""
+    user = _claim_user(request.query_params.get("token", ""))
+    if not user:
+        return Response({"error": "This link is invalid or has expired. Request a new one on the Top Saver page."}, status=404)
+    months = _eligible_months(user)
+    if request.method == "GET":
+        return Response({"first_name": user.first_name or "", "months": months})
+    try:
+        month, year = int(request.data.get("month")), int(request.data.get("year"))
+    except (TypeError, ValueError):
+        return Response({"error": "Choose a month."}, status=400)
+    match = next((m for m in months if (m["month"], m["year"]) == (month, year)), None)
+    if not match:
+        return Response({"error": "Choose one of the months you were a Top Saver."}, status=400)
+    recognition, _ = TopSaverRecognition.objects.get_or_create(
+        user=user, month=month, year=year,
+        # Claimed later from the landing page: interview only, no T-shirt.
+        defaults={"rank": match["rank"], "first_time_winner": False},
+    )
+    return Response({"token": recognition_token(recognition)})
+
+
+# ---- Public stories for the landing page ------------------------------------
+def _public_name(user):
+    last = (user.last_name or "").strip()
+    return f"{(user.first_name or '').strip()} {last[:1] + '.' if last else ''}".strip() or "A MyFund saver"
+
+
+@api_view(["GET"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def top_saver_stories(request):
+    """Featured stories (only with feature_consent) and recent Top 3 winners
+    as first name + initial. Cached briefly; no contact details."""
+    from django.core.cache import cache
+    from .models import TopSaverHistory
+
+    cached = cache.get("topsaver:stories:v1")
+    if cached:
+        return Response(cached)
+    stories = []
+    rows = (TopSaverRecognition.objects.select_related("user").filter(status__in=["submitted", "closed"])
+            .order_by("-year", "-month", "rank"))
+    for rec in rows:
+        answers = rec.answers or {}
+        quote = str(answers.get("word_for_others") or "").strip()
+        if answers.get("feature_consent") is not True or not quote:
+            continue
+        photo = str(rec.user.profile_picture or "").strip()
+        if rec.photo_path:
+            photo = private_url(rec.photo_path) or photo
+        stories.append({
+            "name": _public_name(rec.user), "rank": rec.rank, "month": month_name(rec), "year": rec.year,
+            "quote": quote[:400], "motivation": str(answers.get("motivation") or "")[:300],
+            "photo": photo if photo.startswith("http") else None,
+        })
+        if len(stories) >= 12:
+            break
+    winners = []
+    seen = set()
+    for row in TopSaverHistory.objects.select_related("user").filter(rank__lte=3).order_by("-year", "-month", "rank"):
+        now = timezone.now()
+        if (row.month, row.year) == (now.month, now.year):
+            continue  # This month's board is still live.
+        key = (row.month, row.year)
+        if len(seen) >= 3 and key not in seen:
+            break
+        seen.add(key)
+        winners.append({"name": _public_name(row.user), "rank": row.rank,
+                        "month": datetime.date(row.year, row.month, 1).strftime("%B %Y")})
+    data = {"stories": stories, "recent_winners": winners,
+            "total_top_savers": TopSaverHistory.objects.filter(rank__lte=3).values("user").distinct().count()}
+    cache.set("topsaver:stories:v1", data, 600)
+    return Response(data)

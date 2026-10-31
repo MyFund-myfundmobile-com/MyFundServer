@@ -901,6 +901,7 @@ class EmailTemplateSerializer(serializers.ModelSerializer):
             "last_update",
             "was_sent",
             "recipient_count",
+            "recipient_emails",
         ]
 
     def get_design(self, obj):

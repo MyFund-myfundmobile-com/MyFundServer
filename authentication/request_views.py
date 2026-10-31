@@ -394,6 +394,42 @@ def requests_list(request):
     return Response({"results": [serialize(obj, kind, request) for obj in qs[offset:offset + 20]], "count": qs.count(), "counts": request_counts()})
 
 
+@api_view(["POST"])
+@permission_classes([CanApproveRequests])
+def remind_application_drafts(request, programme):
+    """Send one controlled reminder to every eligible unfinished intake draft.
+
+    Eligibility remains in ambassador_decisions.reminder_block so the bulk and
+    one-person actions can never drift apart.  The response explicitly says
+    how many were skipped rather than pretending every draft was emailed.
+    """
+    if programme not in ("ambassador", "influencer"):
+        raise ValidationError("Invalid application programme.")
+    from .models import AmbassadorApplication
+    from .ambassador_decisions import reminder_block, send_draft_reminder
+
+    drafts = list(AmbassadorApplication.objects.select_related("intake", "user").filter(
+        intake__programme=programme, status="draft"
+    ).order_by("created_at"))
+    sent = failed = 0
+    skipped = []
+    for app in drafts:
+        block = reminder_block(app)
+        if block:
+            skipped.append({"email": app.email, "reason": block})
+            continue
+        try:
+            send_draft_reminder(app)
+            sent += 1
+        except Exception:
+            logger.exception("Bulk %s application reminder failed for %s", programme, app.email)
+            failed += 1
+    return Response({
+        "programme": programme, "drafts": len(drafts), "sent": sent,
+        "skipped": len(skipped), "failed": failed,
+    })
+
+
 class ActionMessages:
     """Collect ModelAdmin messages without requiring browser sessions."""
     def add(self, *args, **kwargs):

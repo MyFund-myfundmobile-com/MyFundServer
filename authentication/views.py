@@ -10981,7 +10981,7 @@ def send_email(request):
 
             if failed > 0:
                 logger.warning(f"⚠️ Partial email send: {sent} sent, {failed} failed")
-                finalize_email_template(pending_template, len(cleaned_recipients))
+                finalize_email_template(pending_template, len(cleaned_recipients), cleaned_recipients)
                 return Response(
                     {
                         "status": "partial",
@@ -10999,7 +10999,7 @@ def send_email(request):
                 )
 
             logger.info(f"Email accepted for sending by Brevo: {sent}")
-            finalize_email_template(pending_template, len(cleaned_recipients))
+            finalize_email_template(pending_template, len(cleaned_recipients), cleaned_recipients)
             return Response(
                 {
                     "status": "success",
@@ -11017,7 +11017,7 @@ def send_email(request):
             logger.info(f"📦 Email queued to Celery: {result['total']} recipients")
             # Queued payloads retain this template's tracking tag. Reports
             # become available after the worker sends and Brevo processes it.
-            finalize_email_template(pending_template, result["total"])
+            finalize_email_template(pending_template, result["total"], cleaned_recipients)
             return Response(
                 {
                     "status": "queued",
@@ -11134,7 +11134,7 @@ def create_pending_email_template(subject, html):
         return None
 
 
-def finalize_email_template(template_obj, recipient_count):
+def finalize_email_template(template_obj, recipient_count, recipient_emails=None):
     """
     recipient_count is the size of the audience that send targeted (not
     a live delivered-so-far tally, which would go stale as e.g. a
@@ -11146,7 +11146,13 @@ def finalize_email_template(template_obj, recipient_count):
     try:
         template_obj.was_sent = True
         template_obj.recipient_count = recipient_count
-        template_obj.save(update_fields=["was_sent", "recipient_count"])
+        if recipient_emails is not None:
+            # Do not retain duplicates or empty strings, and never let caller
+            # casing make the same inbox look like two people.
+            template_obj.recipient_emails = list(dict.fromkeys(
+                str(email).strip().lower() for email in recipient_emails if str(email).strip()
+            ))
+        template_obj.save(update_fields=["was_sent", "recipient_count", "recipient_emails"])
     except Exception as e:
         logger.error(f"finalize_email_template failed for template {template_obj.id}: {e}")
 

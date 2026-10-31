@@ -277,6 +277,11 @@ urlpatterns = [
         name="admin_get_email_template_report",
     ),
     path(
+        "email-templates/<int:template_id>/recipients/",
+        admin_views.get_email_template_recipients,
+        name="admin_get_email_template_recipients",
+    ),
+    path(
         "email-campaigns/<int:campaign_id>/send-next-batch/",
         admin_views.send_next_email_campaign_batch,
         name="admin_send_next_email_campaign_batch",

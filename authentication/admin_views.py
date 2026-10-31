@@ -4291,6 +4291,52 @@ def get_email_template_report(request, template_id):
         return Response({"error": str(e)}, status=500)
 
 
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def get_email_template_recipients(request, template_id):
+    """Return a reusable recipient list for a sent individual email.
+
+    New sends use EmailTemplate.recipient_emails, a permanent frozen
+    snapshot.  Older rows predate that field, so we recover their addresses
+    from Brevo's tag-scoped request events where possible.  This is admin
+    only: addresses are never exposed in the ordinary template list.
+    """
+    from .views import email_template_brevo_tag
+    try:
+        template = EmailTemplate.objects.get(pk=template_id)
+    except EmailTemplate.DoesNotExist:
+        return Response({"error": "Email not found."}, status=404)
+    if not template.was_sent:
+        return Response({"error": "Only sent emails have recipients."}, status=400)
+    stored = [str(email).strip().lower() for email in (template.recipient_emails or []) if str(email).strip()]
+    if stored:
+        return Response({"template_id": template.id, "recipients": list(dict.fromkeys(stored)), "source": "saved"})
+    try:
+        import json
+        import sib_api_v3_sdk
+        from .services.brevo_service import get_brevo_client
+        api = sib_api_v3_sdk.TransactionalEmailsApi(get_brevo_client())
+        tag = email_template_brevo_tag(template.id)
+        recipients = []
+        # The provider caps each page at 500.  Paging is deliberately used
+        # even though simple mobile sends are usually far smaller.
+        for offset in range(0, 5000, 500):
+            report = api.get_email_event_report(
+                start_date=template.last_update.date().isoformat(),
+                end_date=timezone.now().date().isoformat(),
+                tags=json.dumps([tag]), event="requests", limit=500, offset=offset,
+            )
+            events = report.events or []
+            recipients.extend(e.email.strip().lower() for e in events if getattr(e, "email", None))
+            if len(events) < 500:
+                break
+        recipients = list(dict.fromkeys(recipients))
+        return Response({"template_id": template.id, "recipients": recipients, "source": "delivery_log"})
+    except Exception as e:
+        logger.exception("Could not load recipients for email template %s", template_id)
+        return Response({"error": "Recipient history could not be loaded. Please try again."}, status=502)
+
+
 @api_view(['POST'])
 @permission_classes([IsAdminUser])
 def send_next_email_campaign_batch(request, campaign_id):

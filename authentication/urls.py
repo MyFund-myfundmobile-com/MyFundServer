@@ -4,8 +4,8 @@ from .book_views import book_access, book_progress, book_read
 from .first_savings import first_save_guide_event, first_savings_status_view
 from .groupbuy_interest import admin_groupbuy_interests, my_groupbuy_interests, register_groupbuy_interest
 from django.urls import path, include
-from .request_views import requests_list, request_action, ambassador_export_link, ambassador_export
-from .top_saver_views import top_saver_interview, top_saver_video
+from .request_views import requests_list, request_action, ambassador_export_link, ambassador_export, remind_application_drafts
+from .top_saver_views import top_saver_interview, top_saver_video, top_saver_claim, top_saver_claim_start, top_saver_stories
 from .foya import foya_today, foya_event, foya_admin, foya_admin_positions
 from . import views
 from django.conf import settings
@@ -112,9 +112,13 @@ urlpatterns = [
     path("admin/groupbuy-interests/", admin_groupbuy_interests),
     path("top-saver/interview/", top_saver_interview, name="top_saver_interview"),
     path("top-saver/interview/video/", top_saver_video, name="top_saver_interview_video"),
+    path("top-saver/claim/", top_saver_claim, name="top_saver_claim"),
+    path("top-saver/claim/start/", top_saver_claim_start, name="top_saver_claim_start"),
+    path("top-saver/stories/", top_saver_stories, name="top_saver_stories"),
     path("admin/requests/", requests_list, name="admin_requests"),
     path("admin/requests/ambassador/export-link/", ambassador_export_link, name="admin_ambassador_export_link"),
     path("admin/requests/ambassador/export/", ambassador_export, name="admin_ambassador_export"),
+    path("admin/requests/applications/<str:programme>/remind/", remind_application_drafts, name="admin_application_drafts_remind"),
     path("admin/requests/<str:kind>/<int:pk>/action/", request_action, name="admin_request_action"),
     # Website applications (Influencer Portal) have UUID ids.
     path("admin/requests/<str:kind>/<uuid:pk>/action/", request_action, name="admin_request_action_uuid"),
