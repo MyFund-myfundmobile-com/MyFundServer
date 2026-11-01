@@ -3345,6 +3345,11 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
         # CASE 1: ZERO PERFORMANCE
         # -----------------------------
         if stipend_amount <= 0:
+            # Reviewed and confirmed at ₦0 - settled, so mark it paid; a
+            # second approve then skips it instead of messaging them again.
+            report.stipend_paid = True
+            report.save(update_fields=["stipend_paid"])
+
             send_transactional_email(
                 subject="Ambassador Report Reviewed",
                 message=(
@@ -3367,7 +3372,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
                 notif_type="SYSTEM",
             )
 
-            return False, "No stipend — encouragement sent."
+            return True, "No stipend — encouragement sent."
 
         # -----------------------------
         # CASE 2: LOW PERFORMANCE (< ₦1000)
@@ -3528,7 +3533,14 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
     def approve_reports(self, request, queryset):
         from .models import confirmed_referral_counts
 
+        skipped = 0
         for report in queryset:
+            # Already settled (paid, or confirmed at ₦0): leave it exactly
+            # as it is, so re-running approve never pays or messages twice.
+            if report.stipend_paid:
+                skipped += 1
+                continue
+
             # Never pay for a confirmation whose referral has since pulled
             # their savings out during the hold.
             standing = confirmed_referral_counts([report.user_id], report.month).get(report.user_id, 0)
@@ -3539,10 +3551,10 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
             report.recalculate_points()
             report.save()
 
-            if not report.stipend_paid:
-                self.credit_stipend_and_notify(report)
+            self.credit_stipend_and_notify(report)
 
-        self.message_user(request, "Approved.", level=messages.SUCCESS)
+        note = f" {skipped} already paid, left as they were." if skipped else ""
+        self.message_user(request, f"Approved.{note}", level=messages.SUCCESS)
 
     @admin.action(description="❌ Reject selected reports")
     def reject_reports(self, request, queryset):

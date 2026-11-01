@@ -1,4 +1,5 @@
 from decimal import Decimal
+from unittest.mock import patch
 
 from django.test import TestCase
 from django.utils import timezone
@@ -83,3 +84,40 @@ class ReportPayoutListTests(TestCase):
         self.assertEqual(admin.rank(rows[0]), "1st")
         self.assertEqual(admin.month_rank(rows[0]), "2nd")  # Cohort 3's 50 points still outranks
         self.assertEqual(self.client.get(f"{URL}{report.pk}/change/").status_code, 200)
+
+
+@patch("authentication.admin.send_push_notification")
+@patch("authentication.admin.send_transactional_email")
+class ApprovePayoutTests(TestCase):
+    def setUp(self):
+        self.admin = CustomUser.objects.create_user(
+            email="boss@example.com", password="x", phone_number="08039000900", is_staff=True, is_superuser=True)
+        self.client.force_login(self.admin)
+        self.reports = {}
+        for i, (name, signups) in enumerate([("zero", 0), ("paid", 3)]):
+            user = CustomUser.objects.create_user(
+                email=f"{name}@x.com", password="x", first_name=name, phone_number=f"0803900{i:04d}",
+                is_ambassador=True, wallet=Decimal("0"))
+            report = AmbassadorMonthlyReport(user=user, month="2026-10", signups_submitted=signups)
+            report.copy_submitted_to_approved_defaults()
+            report.recalculate_points()
+            report.save()
+            self.reports[name] = report
+
+    def approve_all(self):
+        return self.client.post(URL, {"action": "approve_reports",
+                                      "_selected_action": [r.pk for r in self.reports.values()]})
+
+    def test_zero_is_marked_paid_and_rerun_sends_nothing_twice(self, email, push):
+        self.approve_all()
+        zero, paid = (AmbassadorMonthlyReport.objects.get(pk=r.pk) for r in self.reports.values())
+        self.assertEqual((zero.status, zero.stipend_paid), ("approved", True))
+        self.assertEqual(zero.user.wallet, Decimal("0"))
+        self.assertTrue(paid.stipend_paid)
+        self.assertEqual(paid.user.wallet, paid.stipend_amount)
+        sent = (email.call_count, push.call_count)
+        self.assertEqual(sent, (2, 2))
+
+        self.approve_all()
+        self.assertEqual((email.call_count, push.call_count), sent)
+        self.assertEqual(CustomUser.objects.get(pk=paid.user_id).wallet, paid.stipend_amount)
