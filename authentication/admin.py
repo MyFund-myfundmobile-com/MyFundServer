@@ -2988,12 +2988,12 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
         "user_first_name",
         "points",
         "rank",
+        "referral_flags",
         "stipend_amount",
         "status",
         "stipend_paid",
         "submitted_at",
         "approved_at",
-        "referral_flags",
     )
     list_select_related = ("user", "user__ambassador_cohort")
 
@@ -3253,7 +3253,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
             obj,
         )
 
-    rank.short_description = "Rank in cohort"
+    rank.short_description = "Cohort Rank"
     rank.admin_order_field = "-total_points_awarded"
 
     def changelist_view(self, request, extra_context=None):
