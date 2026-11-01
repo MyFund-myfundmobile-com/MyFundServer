@@ -2986,7 +2986,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
         "user_phone",
         "month_rank",
         "user_first_name",
-        "total_points_awarded",
+        "points",
         "rank",
         "stipend_amount",
         "status",
@@ -3229,6 +3229,12 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
             suffix = {1: "st", 2: "nd", 3: "rd"}.get(position % 10, "th")
 
         return f"{position}{suffix}"
+
+    def points(self, obj):
+        return obj.total_points_awarded
+
+    points.short_description = "Points"
+    points.admin_order_field = "total_points_awarded"
 
     def month_rank(self, obj):
         # Position among every ambassador's report for that month.
