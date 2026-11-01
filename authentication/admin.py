@@ -3235,6 +3235,16 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
     rank.admin_order_field = "-total_points_awarded"
 
     def changelist_view(self, request, extra_context=None):
+        # Old bookmarks/links still carry the removed submission-date bar's
+        # params (submitted_at__year/month/day), which keep filtering by
+        # submission date invisibly - drop them.
+        stale = [k for k in request.GET if k.startswith("submitted_at__")]
+        if stale:
+            params = request.GET.copy()
+            for k in stale:
+                params.pop(k)
+            return HttpResponseRedirect(f"{request.path}?{params.urlencode()}")
+
         # With a month and cohort picked, flag ambassadors in that cohort
         # who have no report for the month, so nobody is missed at payout.
         month = request.GET.get("month")

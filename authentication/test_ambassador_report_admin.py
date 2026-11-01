@@ -40,6 +40,13 @@ class ReportPayoutListTests(TestCase):
         warnings = [str(m) for m in res.context["messages"]]
         self.assertTrue(any("silent" in w and "1 ambassador" in w for w in warnings), warnings)
 
+    def test_leftover_submission_date_params_are_dropped(self):
+        res = self.client.get(URL, {"month": self.month, "submitted_at__year": "2026",
+                                    "submitted_at__month": "10"})
+        self.assertEqual(res.status_code, 302)
+        self.assertNotIn("submitted_at", res["Location"])
+        self.assertIn(f"month={self.month}", res["Location"])
+
     def test_last_month_is_the_first_month_choice(self):
         res = self.client.get(URL)
         self.assertEqual(res.status_code, 200)
