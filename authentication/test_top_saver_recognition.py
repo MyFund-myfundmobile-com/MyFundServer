@@ -200,3 +200,14 @@ class ClaimAndStoriesTests(Base):
         self.assertEqual([s["quote"] for s in data["stories"]], ["Start small."])
         self.assertNotIn("email", str(data))
         self.assertEqual(data["recent_winners"][0]["month"], "March 2026")
+
+    def test_winners_carry_photo_and_skip_deleted_users(self, _email):
+        from django.core.cache import cache
+        cache.clear()
+        self.past.profile_picture = "/profile_pictures/p.jpg"
+        self.past.save(update_fields=["profile_picture"])
+        TopSaverHistory.objects.filter(month=4, year=2026).delete()
+        TopSaverHistory.objects.create(month=4, year=2026, user=self.past, total_savings=1, rank=1)
+        TopSaverHistory.objects.create(month=4, year=2026, user=None, total_savings=1, rank=2)
+        winners = [w for w in self.client.get("/api/top-saver/stories/").data["recent_winners"] if w["month"] == "April 2026"]
+        self.assertEqual([(w["rank"], w["photo"]) for w in winners], [(1, "https://ik.imagekit.io/myfundmobile/profile_pictures/p.jpg")])

@@ -538,6 +538,24 @@ def top_saver_claim_start(request):
 
 
 # ---- Public stories for the landing page ------------------------------------
+def _public_photo(raw):
+    """A profile_picture as a usable URL - same rules as the app's
+    utils/imageUtils.js: stored paths live on ImageKit, old Koyeb-hosted
+    files are gone."""
+    raw = str(raw or "").strip()
+    if raw.lower() in ("", "nan", "none", "null", "undefined") or "koyeb.app" in raw:
+        return None
+    if raw.startswith(("http://", "https://")):
+        return raw
+    if raw.startswith("/"):
+        return f"https://ik.imagekit.io/myfundmobile{raw}"
+    if "/" not in raw:
+        return f"https://ik.imagekit.io/myfundmobile/profile_pictures/{raw}"
+    if raw.startswith("profile_pictures/"):
+        return f"https://ik.imagekit.io/myfundmobile/{raw}"
+    return None
+
+
 def _public_name(user):
     last = (user.last_name or "").strip()
     return f"{(user.first_name or '').strip()} {last[:1] + '.' if last else ''}".strip() or "A MyFund saver"
@@ -552,7 +570,7 @@ def top_saver_stories(request):
     from django.core.cache import cache
     from .models import TopSaverHistory
 
-    cached = cache.get("topsaver:stories:v1")
+    cached = cache.get("topsaver:stories:v3")
     if cached:
         return Response(cached)
     stories = []
@@ -563,7 +581,7 @@ def top_saver_stories(request):
         quote = str(answers.get("word_for_others") or "").strip()
         if answers.get("feature_consent") is not True or not quote:
             continue
-        photo = str(rec.user.profile_picture or "").strip()
+        photo = _public_photo(rec.user.profile_picture) or ""
         if rec.photo_path:
             photo = private_url(rec.photo_path) or photo
         stories.append({
@@ -575,17 +593,20 @@ def top_saver_stories(request):
             break
     winners = []
     seen = set()
-    for row in TopSaverHistory.objects.select_related("user").filter(rank__lte=3).order_by("-year", "-month", "rank"):
-        now = timezone.now()
+    now = timezone.now()
+    for row in TopSaverHistory.objects.select_related("user").filter(rank__lte=3, user__isnull=False).order_by(
+            "-year", "-month", "rank"):
         if (row.month, row.year) == (now.month, now.year):
             continue  # This month's board is still live.
         key = (row.month, row.year)
         if len(seen) >= 3 and key not in seen:
             break
         seen.add(key)
+        # Same profile photo the in-app Top Savers board already shows.
         winners.append({"name": _public_name(row.user), "rank": row.rank,
-                        "month": datetime.date(row.year, row.month, 1).strftime("%B %Y")})
+                        "month": datetime.date(row.year, row.month, 1).strftime("%B %Y"),
+                        "photo": _public_photo(row.user.profile_picture)})
     data = {"stories": stories, "recent_winners": winners,
             "total_top_savers": TopSaverHistory.objects.filter(rank__lte=3).values("user").distinct().count()}
-    cache.set("topsaver:stories:v1", data, 600)
+    cache.set("topsaver:stories:v3", data, 600)
     return Response(data)
