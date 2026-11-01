@@ -10,6 +10,7 @@ import logging
 import secrets
 
 from django.core import signing
+from django.utils.html import escape
 from django.db import transaction
 from django.utils import timezone
 from rest_framework.decorators import api_view, authentication_classes, parser_classes, permission_classes
@@ -27,6 +28,9 @@ TOKEN_MAX_AGE = 60 * 60 * 24 * 120
 # The questions from the Top Saver Google Form, in its order. Name and email
 # come from their MyFund account, so they aren't asked again.
 CALENDLY_INTERVIEW_URL = "https://calendly.com/myfundmobile/myfund-top-saver-live-interview"
+# Janet ("Lioness") runs the live interviews: she's named to the winner and
+# gets the alert as the owner; the rest of CX/execs get a heads-up.
+INTERVIEW_HOST_EMAIL = "janet.adegbenro@gmail.com"
 
 QUESTIONS = [
     {"key": "motivation", "type": "textarea", "required": True, "maxLength": 1500,
@@ -47,7 +51,7 @@ QUESTIONS = [
     {"key": "live_interview_contact", "type": "schedule", "required": False, "maxLength": 300,
      "when": ["live_interview", "Yes"], "url": CALENDLY_INTERVIEW_URL,
      "label": "Great! Pick a time for your 30-minute live interview.",
-     "help": "Weekdays 9am-7pm or Saturdays 9am-4pm. We'll call you on the number you enter."},
+     "help": "Weekdays 9am-7pm or Saturdays 9am-4pm. Janet from MyFund will call you on the number you enter."},
     {"key": "rating", "type": "rating", "required": True, "max": 5,
      "label": "On a scale of 1 to 5, how would you rate your MyFund experience?",
      "help": "Based on your general experience (mobile app, customer service, etc.)"},
@@ -154,26 +158,47 @@ def _cx_and_execs():
 
 
 def notify_live_interview(recognition):
-    """They said Yes to a live interview: CX follows up to set it up."""
+    """They said Yes to a live interview. Janet (Lioness) owns it: push +
+    email with how to reach them. CX and execs get a heads-up push."""
     from .request_views import REQUEST_APPROVERS
-    who = recognition.user.full_name or recognition.user.email
-    contact = (recognition.answers or {}).get("live_interview_contact") or recognition.user.phone_number or recognition.user.email
-    if contact.startswith("Booked on Calendly"):
-        contact = "booked a slot on MyFund's Calendly (see the calendar for time and number)"
+    from .utils import send_transactional_email
+    user = recognition.user
+    who = user.full_name or user.email
+    answer = (recognition.answers or {}).get("live_interview_contact") or ""
+    booked = answer.startswith("Booked on Calendly")
+    contact = ("booked a slot on MyFund's Calendly (see the calendar for time and number)" if booked
+               else answer or user.phone_number or user.email)
     for admin in _cx_and_execs():
+        is_host = admin.email.lower() == INTERVIEW_HOST_EMAIL
         screen_params = ({"screen": "AdminRequestsTab", "params": {"kind": "top_saver"}}
                          if admin.email.lower() in REQUEST_APPROVERS else None)
         try:
             send_push_notification(
                 admin,
-                title="📞 Top Saver wants a live interview",
-                message=f"{who} (#{recognition.rank}, {month_name(recognition)}) said yes to a live interview. Reach them: {contact}",
+                title="🦁 Lioness, you've got a Top Saver interview" if is_host else "📞 Top Saver live interview",
+                message=(f"{who} (#{recognition.rank}, {month_name(recognition)}) said yes to a live interview. "
+                         + (f"They {contact}." if booked else f"Reach them: {contact}")
+                         + ("" if is_host else " Janet (Lioness) is on it.")),
                 data={"type": "TOP_SAVER_LIVE_INTERVIEW", "recognition_id": recognition.pk,
                       "deep_link": {"screen": "Admin", "screen_params": screen_params}},
                 notif_type="ADMIN_ALERT",
             )
         except Exception:
             logger.exception("Live interview alert failed for %s", admin.email)
+    when = ("They booked a time on MyFund's Calendly. Check the Calendly calendar or booking email for the time "
+            "and the number to call." if booked else f"They asked to be reached on: <b>{escape(contact)}</b>")
+    try:
+        send_transactional_email(
+            subject=f"🦁 Top Saver live interview: {who}",
+            message=(f"Hi Lioness,<br><br><b>{escape(who)}</b> (#{recognition.rank} Top Saver, {month_name(recognition)}) "
+                     f"said yes to a live interview about their financial progress.<br><br>{when}<br><br>"
+                     f"Phone on their MyFund account: {escape(user.phone_number or 'not set')}<br>"
+                     f"Email: {escape(user.email)}<br><br>"
+                     "Their full answers are in the MyFund app: Admin → Requests → Top Saver."),
+            recipient_list=[INTERVIEW_HOST_EMAIL], from_email=FROM,
+        )
+    except Exception:
+        logger.exception("Live interview email to host failed")
 
 
 def notify_started(recognition):

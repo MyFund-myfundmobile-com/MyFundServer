@@ -67,7 +67,9 @@ class InterviewTests(Base):
         keys = [q["key"] for q in self.client.get(self.url).data["questions"]]
         self.assertEqual(keys, ["motivation", "challenges", "word_for_others", "live_interview", "live_interview_contact", "rating", "feature_consent"])
 
-    def test_yes_to_live_interview_alerts_cx_with_contact(self, push):
+    @patch("authentication.utils.send_transactional_email", return_value={"sent": 1})
+    def test_yes_to_live_interview_alerts_cx_with_contact(self, email, push):
+        janet = self.mk("janet.adegbenro@gmail.com", is_staff=True)
         cx = self.mk("cx@example.com", is_staff=True)
         Employee.objects.create(name="CX", email=cx.email, monthly_amount=0, department="CX", is_active=True)
         media = self.mk("media@example.com", is_staff=True)
@@ -78,9 +80,14 @@ class InterviewTests(Base):
         with self.captureOnCommitCallbacks(execute=True):
             res = self.client.post(self.url, {"answers": answers}, format="json")
         self.assertEqual(res.status_code, 200, res.data)
-        live = [c for c in push.call_args_list if c.kwargs.get("title") == "📞 Top Saver wants a live interview"]
-        self.assertEqual({c.args[0] for c in live}, {cx})
-        self.assertIn("0803 111 2222", live[0].kwargs["message"])
+        live = {c.args[0]: c.kwargs for c in push.call_args_list if c.kwargs.get("data", {}).get("type") == "TOP_SAVER_LIVE_INTERVIEW"}
+        self.assertEqual(set(live), {cx, janet})
+        self.assertIn("Lioness", live[janet]["title"])
+        self.assertIn("0803 111 2222", live[cx]["message"])
+        self.assertIn("Janet (Lioness) is on it", live[cx]["message"])
+        host_mail = [c.kwargs for c in email.call_args_list if c.kwargs["recipient_list"] == ["janet.adegbenro@gmail.com"]]
+        self.assertEqual(len(host_mail), 1)
+        self.assertIn("0803 111 2222", host_mail[0]["message"])
 
     def test_contact_dropped_unless_yes(self, _push):
         res = self.client.patch(self.url, {"answers": {"live_interview": "No", "live_interview_contact": "0803"}}, format="json")
