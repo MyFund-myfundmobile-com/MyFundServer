@@ -2883,7 +2883,7 @@ from decimal import Decimal
 from django.contrib import admin, messages
 from django.db import transaction as db_transaction
 from django.utils import timezone
-from datetime import datetime
+from datetime import datetime, timedelta
 from .models import (
     AmbassadorPointConfig,
     AmbassadorMonthlyReport,
@@ -2954,32 +2954,57 @@ class AmbassadorPointConfigAdmin(admin.ModelAdmin):
         super().save_model(request, obj, form, change)
 
 
+class ReportMonthFilter(admin.SimpleListFilter):
+    """The month a report is FOR, newest first, with last month on top -
+    reports auto-submitted on the 1st belong to the month before, so
+    filtering by submission date leaves them out of a payout."""
+
+    title = "report month"
+    parameter_name = "month"
+
+    def lookups(self, request, model_admin):
+        last = (timezone.localdate().replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
+        months = sorted(
+            set(model_admin.model.objects.values_list("month", flat=True)), reverse=True
+        )
+        label = lambda m: datetime.strptime(m, "%Y-%m").strftime("%b %Y")
+        return [(last, f"Last month ({label(last)})")] + [
+            (m, label(m)) for m in months if m != last
+        ]
+
+    def queryset(self, request, queryset):
+        return queryset.filter(month=self.value()) if self.value() else queryset
+
+
 @admin.register(AmbassadorMonthlyReport)
 class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
     list_display = (
         "id",
+        "formatted_month",
+        "cohort",
+        "rank",
+        "user_first_name",
         "user_email",
         "user_phone",
-        "user_first_name",
-        "rank",
         "total_points_awarded",
-        "status",
         "stipend_amount",
+        "status",
         "stipend_paid",
         "submitted_at",
         "approved_at",
-        "formatted_month",
         "referral_flags",
     )
+    list_select_related = ("user", "user__ambassador_cohort")
 
     list_filter = (
-        "month",
+        ReportMonthFilter,
+        ("user__ambassador_cohort", admin.RelatedOnlyFieldListFilter),
         "status",
         "stipend_paid",
     )
 
-    date_hierarchy = "submitted_at"
-    ordering = ("-month", "-submitted_at")
+    # Payout order: newest month, then most points first.
+    ordering = ("-month", "-total_points_awarded", "submitted_at")
 
     search_fields = (
         "user__email",
@@ -3180,10 +3205,17 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
     user_first_name.short_description = "Name"
     user_first_name.admin_order_field = "user__first_name"
 
+    def cohort(self, obj):
+        return obj.user.ambassador_cohort or "-"
+
+    cohort.admin_order_field = "user__ambassador_cohort__cohort_number"
+
     def rank(self, obj):
-        queryset = AmbassadorMonthlyReport.objects.filter(month=obj.month).order_by(
-            "-stipend_amount", "-total_points_awarded", "submitted_at"
-        )
+        # Position within the ambassador's own cohort for that month.
+        queryset = AmbassadorMonthlyReport.objects.filter(
+            month=obj.month,
+            user__ambassador_cohort_id=obj.user.ambassador_cohort_id,
+        ).order_by("-stipend_amount", "-total_points_awarded", "submitted_at")
 
         ids = list(queryset.values_list("id", flat=True))
 
@@ -3199,8 +3231,28 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
 
         return f"{position}{suffix}"
 
-    rank.short_description = "Rank"
-    rank.admin_order_field = "stipend_amount"
+    rank.short_description = "Rank in cohort"
+    rank.admin_order_field = "-total_points_awarded"
+
+    def changelist_view(self, request, extra_context=None):
+        # With a month and cohort picked, flag ambassadors in that cohort
+        # who have no report for the month, so nobody is missed at payout.
+        month = request.GET.get("month")
+        cohort_id = request.GET.get("user__ambassador_cohort__id__exact")
+        if month and cohort_id:
+            missing = CustomUser.objects.filter(
+                ambassador_cohort_id=cohort_id, is_ambassador=True
+            ).exclude(ambassador_reports__month=month)
+            names = [u.first_name or u.email for u in missing[:20]]
+            if names:
+                more = missing.count() - len(names)
+                self.message_user(
+                    request,
+                    f"{missing.count()} ambassador(s) in this cohort have no {month} report: "
+                    + ", ".join(names) + (f" and {more} more" if more > 0 else ""),
+                    level=messages.WARNING,
+                )
+        return super().changelist_view(request, extra_context)
 
     def user_email(self, obj):
         return obj.user.email
