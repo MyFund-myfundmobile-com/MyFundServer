@@ -86,6 +86,17 @@ class ReportPayoutListTests(TestCase):
         self.assertEqual(self.client.get(f"{URL}{report.pk}/change/").status_code, 200)
 
 
+class RunNow:
+    """Stands in for threading.Thread so the queued sends run inline."""
+
+    def __init__(self, target, daemon=None):
+        self.target = target
+
+    def start(self):
+        self.target()
+
+
+@patch("authentication.admin.threading.Thread", RunNow)
 @patch("authentication.admin.send_push_notification")
 @patch("authentication.admin.send_transactional_email")
 class ApprovePayoutTests(TestCase):
@@ -121,3 +132,16 @@ class ApprovePayoutTests(TestCase):
         self.approve_all()
         self.assertEqual((email.call_count, push.call_count), sent)
         self.assertEqual(CustomUser.objects.get(pk=paid.user_id).wallet, paid.stipend_amount)
+
+    def test_wallets_are_credited_before_any_message_is_sent(self, email, push):
+        order = []
+        email.side_effect = lambda **kw: order.append(("email", AmbassadorMonthlyReport.objects.filter(
+            stipend_paid=True).count()))
+        self.approve_all()
+        # Both reports were settled before the first email went out.
+        self.assertEqual(order, [("email", 2), ("email", 2)])
+
+    def test_a_failed_send_does_not_stop_the_rest(self, email, push):
+        email.side_effect = [RuntimeError("Resend down"), None]
+        self.approve_all()
+        self.assertEqual(push.call_count, 2)

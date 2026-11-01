@@ -2891,6 +2891,7 @@ from .models import (
     AmbassadorCertificate,
     Transaction,
 )
+import threading
 from .utils import send_push_notification, send_generic_email, send_transactional_email
 
 
@@ -3331,7 +3332,15 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
     user_phone.short_description = "Phone"
     user_phone.admin_order_field = "user__phone_number"
 
-    def credit_stipend_and_notify(self, report):
+    def credit_stipend_and_notify(self, report, outbox=None):
+        # With an outbox, the email + push are queued there for the caller
+        # to send after the request; without one they go out right away.
+        def queue(send, **kwargs):
+            if outbox is None:
+                send(**kwargs)
+            else:
+                outbox.append(lambda: send(**kwargs))
+
         user = report.user
         stipend_amount = Decimal(report.stipend_amount or 0)
 
@@ -3350,7 +3359,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
             report.stipend_paid = True
             report.save(update_fields=["stipend_paid"])
 
-            send_transactional_email(
+            queue(send_transactional_email, 
                 subject="Ambassador Report Reviewed",
                 message=(
                     f"Hi {user.first_name},<br><br>"
@@ -3364,7 +3373,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
                 recipient_list=[user.email],
             )
 
-            send_push_notification(
+            queue(send_push_notification, 
                 user=user,
                 title="Ambassador Report Reviewed",
                 message="No activity recorded this month. You can bounce back next month 💪",
@@ -3398,7 +3407,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
                 report.stipend_paid = True
                 report.save(update_fields=["stipend_paid"])
 
-            send_transactional_email(
+            queue(send_transactional_email, 
                 subject="Ambassador Stipend Credited",
                 message=(
                     f"Hi {user.first_name},<br><br>"
@@ -3411,7 +3420,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
                 recipient_list=[user.email],
             )
 
-            send_push_notification(
+            queue(send_push_notification, 
                 user=user,
                 title=f"{formatted_month} Stipend Credited ✅",
                 message=(
@@ -3450,7 +3459,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
             report.stipend_paid = True
             report.save(update_fields=["stipend_paid"])
 
-        send_transactional_email(
+        queue(send_transactional_email, 
             subject=f"{formatted_month} Stipend Credited ✅",
             message=(
                 f"Hi {user.first_name},<br><br>"
@@ -3464,7 +3473,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
             recipient_list=[user.email],
         )
 
-        send_push_notification(
+        queue(send_push_notification, 
             user=user,
             title=f"{formatted_month} Stipend Credited ✅",
             message=(
@@ -3533,7 +3542,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
     def approve_reports(self, request, queryset):
         from .models import confirmed_referral_counts
 
-        skipped = 0
+        skipped, outbox = 0, []
         for report in queryset:
             # Already settled (paid, or confirmed at ₦0): leave it exactly
             # as it is, so re-running approve never pays or messages twice.
@@ -3551,10 +3560,24 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
             report.recalculate_points()
             report.save()
 
-            self.credit_stipend_and_notify(report)
+            self.credit_stipend_and_notify(report, outbox)
+
+        # Wallets are credited above; the emails and pushes (~1-2s each) go
+        # out after the response, so approving a whole cohort can't time out.
+        def send_all():
+            for send in outbox:
+                try:
+                    send()
+                except Exception:
+                    logger.exception("Ambassador stipend notification failed")
+
+        threading.Thread(target=send_all, daemon=True).start()
 
         note = f" {skipped} already paid, left as they were." if skipped else ""
-        self.message_user(request, f"Approved.{note}", level=messages.SUCCESS)
+        self.message_user(
+            request, f"Approved and paid.{note} Emails and pushes are going out now.",
+            level=messages.SUCCESS,
+        )
 
     @admin.action(description="❌ Reject selected reports")
     def reject_reports(self, request, queryset):
