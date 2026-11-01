@@ -67,40 +67,61 @@ class InterviewTests(Base):
         keys = [q["key"] for q in self.client.get(self.url).data["questions"]]
         self.assertEqual(keys, ["motivation", "challenges", "word_for_others", "live_interview", "live_interview_contact", "rating", "feature_consent"])
 
-    @patch("authentication.utils.send_transactional_email", return_value={"sent": 1})
-    def test_yes_to_live_interview_alerts_cx_with_contact(self, email, push):
+    def _team(self):
+        me = self.mk("tolulopeahmed@gmail.com", is_staff=True)
         janet = self.mk("janet.adegbenro@gmail.com", is_staff=True)
         cx = self.mk("cx@example.com", is_staff=True)
         Employee.objects.create(name="CX", email=cx.email, monthly_amount=0, department="CX", is_active=True)
+        eng = self.mk("eng@example.com", is_staff=True)
+        Employee.objects.create(name="E", email=eng.email, monthly_amount=0, department="Engagement", is_active=True)
         media = self.mk("media@example.com", is_staff=True)
         Employee.objects.create(name="M", email=media.email, monthly_amount=0, department="Media and Communications", is_active=True)
+        return {me, janet, cx, eng}
+
+    @patch("authentication.utils.send_transactional_email", return_value={"sent": 1})
+    def test_yes_without_booking_alerts_team_with_contact(self, email, push):
+        team = self._team()
         TopSaverRecognition.objects.filter(pk=self.rec.pk).update(status="started", first_time_winner=False)
         answers = {"motivation": "x", "challenges": "none", "word_for_others": "start", "live_interview": "Yes",
                    "live_interview_contact": "0803 111 2222, evenings", "rating": 5}
         with self.captureOnCommitCallbacks(execute=True):
             res = self.client.post(self.url, {"answers": answers}, format="json")
         self.assertEqual(res.status_code, 200, res.data)
-        live = {c.args[0]: c.kwargs for c in push.call_args_list if c.kwargs.get("data", {}).get("type") == "TOP_SAVER_LIVE_INTERVIEW"}
-        self.assertEqual(set(live), {cx, janet})
-        self.assertIn("Lioness", live[janet]["title"])
-        self.assertIn("0803 111 2222", live[cx]["message"])
-        self.assertIn("Janet (Lioness) is on it", live[cx]["message"])
-        host_mail = [c.kwargs for c in email.call_args_list if c.kwargs["recipient_list"] == ["janet.adegbenro@gmail.com"]]
-        self.assertEqual(len(host_mail), 1)
-        self.assertIn("0803 111 2222", host_mail[0]["message"])
+        live = [c for c in push.call_args_list if c.kwargs["data"]["type"] == "TOP_SAVER_LIVE_INTERVIEW"]
+        self.assertEqual({c.args[0] for c in live}, team)
+        self.assertEqual({c.kwargs["recipient_list"][0] for c in email.call_args_list}, {u.email for u in team})
+        self.assertIn("0803 111 2222", email.call_args_list[0].kwargs["message"])
+
+    @patch("authentication.utils.send_transactional_email", return_value={"sent": 1})
+    def test_calendly_booking_alerts_team_once_and_not_again_on_submit(self, email, push):
+        team = self._team()
+        TopSaverRecognition.objects.filter(pk=self.rec.pk).update(status="started", first_time_winner=False)
+        booked = {"live_interview": "Yes", "live_interview_contact": "Booked on Calendly: https://api.calendly.com/scheduled_events/x"}
+        for _ in range(2):  # autosave repeats - one alert
+            with self.captureOnCommitCallbacks(execute=True):
+                self.client.patch(self.url, {"answers": booked}, format="json")
+        kinds = [c.kwargs["data"]["type"] for c in push.call_args_list]
+        self.assertEqual(kinds.count("TOP_SAVER_INTERVIEW_BOOKED"), len(team))
+        self.assertEqual({c.kwargs["recipient_list"][0] for c in email.call_args_list}, {u.email for u in team})
+        push.reset_mock()
+        with self.captureOnCommitCallbacks(execute=True):
+            res = self.client.post(self.url, {"answers": {**booked, "motivation": "x", "challenges": "none",
+                                                           "word_for_others": "start", "rating": 5}}, format="json")
+        self.assertEqual(res.status_code, 200, res.data)
+        push.assert_not_called()
 
     def test_contact_dropped_unless_yes(self, _push):
         res = self.client.patch(self.url, {"answers": {"live_interview": "No", "live_interview_contact": "0803"}}, format="json")
         self.assertNotIn("live_interview_contact", res.data["recognition"]["answers"])
 
-    def test_first_save_alerts_team_once_and_submit_needs_tshirt_details(self, push):
-        exec_ = self.mk("company@myfundmobile.com", is_staff=True)
-        cx = self.mk("cx@example.com", is_staff=True)
-        Employee.objects.create(name="CX", email=cx.email, monthly_amount=0, department="CX", is_active=True)
+    @patch("authentication.utils.send_transactional_email", return_value={"sent": 1})
+    def test_first_save_alerts_team_once_and_submit_needs_tshirt_details(self, email, push):
+        team = self._team()
         with self.captureOnCommitCallbacks(execute=True):
             self.client.patch(self.url, {"answers": {"motivation": "My sister"}}, format="json")
         alerted = {c.args[0] for c in push.call_args_list}
-        self.assertEqual(alerted, {exec_, cx})
+        self.assertEqual(alerted, team)
+        self.assertEqual({c.kwargs["recipient_list"][0] for c in email.call_args_list}, {u.email for u in team})
         push.reset_mock()
         with self.captureOnCommitCallbacks(execute=True):
             self.client.patch(self.url, {"answers": {"motivation": "My sister and friends"}}, format="json")

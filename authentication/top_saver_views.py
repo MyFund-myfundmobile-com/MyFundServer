@@ -28,9 +28,8 @@ TOKEN_MAX_AGE = 60 * 60 * 24 * 120
 # The questions from the Top Saver Google Form, in its order. Name and email
 # come from their MyFund account, so they aren't asked again.
 CALENDLY_INTERVIEW_URL = "https://calendly.com/myfundmobile/myfund-top-saver-live-interview"
-# Janet ("Lioness") runs the live interviews: she's named to the winner and
-# gets the alert as the owner; the rest of CX/execs get a heads-up.
-INTERVIEW_HOST_EMAIL = "janet.adegbenro@gmail.com"
+# Whoever's free from the interview team takes the call at the booked time
+# (bookings land in the Google Calendar connected to that Calendly account).
 
 QUESTIONS = [
     {"key": "motivation", "type": "textarea", "required": True, "maxLength": 1500,
@@ -51,7 +50,7 @@ QUESTIONS = [
     {"key": "live_interview_contact", "type": "schedule", "required": False, "maxLength": 300,
      "when": ["live_interview", "Yes"], "url": CALENDLY_INTERVIEW_URL,
      "label": "Great! Pick a time for your 30-minute live interview.",
-     "help": "Weekdays 9am-7pm or Saturdays 9am-4pm. Janet from MyFund will call you on the number you enter."},
+     "help": "Weekdays 9am-7pm or Saturdays 9am-4pm. Someone from the MyFund team will call you on the number you enter."},
     {"key": "rating", "type": "rating", "required": True, "max": 5,
      "label": "On a scale of 1 to 5, how would you rate your MyFund experience?",
      "help": "Based on your general experience (mobile app, customer service, etc.)"},
@@ -143,82 +142,72 @@ def _clean_answers(answers):
     return clean
 
 
-def _team_recipients():
-    """Admin execs plus everyone active in Engagement, Media & Comms and CX."""
-    emails = set(Employee.objects.filter(is_active=True, department__in=["Engagement", "Media and Communications", "CX"])
+def _is_booked(answers):
+    return str((answers or {}).get("live_interview_contact") or "").startswith("Booked on Calendly")
+
+
+def _interview_team():
+    """Who hears about Top Saver interviews: Tolulope, Janet, and everyone
+    active in Engagement and CX - any of them can take the call."""
+    emails = set(Employee.objects.filter(is_active=True, department__in=["Engagement", "CX"])
                  .values_list("email", flat=True))
-    emails.update({"tolulopeahmed@gmail.com", "janet.adegbenro@gmail.com", "company@myfundmobile.com"})
+    emails.update({"tolulopeahmed@gmail.com", "janet.adegbenro@gmail.com"})
     return CustomUser.objects.filter(is_active=True, email__in={e.lower() for e in emails if e} | emails)
 
 
-def _cx_and_execs():
-    emails = set(Employee.objects.filter(is_active=True, department="CX").values_list("email", flat=True))
-    emails.update({"tolulopeahmed@gmail.com", "janet.adegbenro@gmail.com", "company@myfundmobile.com"})
-    return CustomUser.objects.filter(is_active=True, email__in={e.lower() for e in emails if e} | emails)
-
-
-def notify_live_interview(recognition):
-    """They said Yes to a live interview. Janet (Lioness) owns it: push +
-    email with how to reach them. CX and execs get a heads-up push."""
+def _alert_interview_team(recognition, kind, title, line, details=""):
+    """Push + email to the interview team about one winner's form."""
     from .request_views import REQUEST_APPROVERS
     from .utils import send_transactional_email
     user = recognition.user
     who = user.full_name or user.email
-    answer = (recognition.answers or {}).get("live_interview_contact") or ""
-    booked = answer.startswith("Booked on Calendly")
-    contact = ("booked a slot on MyFund's Calendly (see the calendar for time and number)" if booked
-               else answer or user.phone_number or user.email)
-    for admin in _cx_and_execs():
-        is_host = admin.email.lower() == INTERVIEW_HOST_EMAIL
-        screen_params = ({"screen": "AdminRequestsTab", "params": {"kind": "top_saver"}}
-                         if admin.email.lower() in REQUEST_APPROVERS else None)
-        try:
-            send_push_notification(
-                admin,
-                title="🦁 Lioness, you've got a Top Saver interview" if is_host else "📞 Top Saver live interview",
-                message=(f"{who} (#{recognition.rank}, {month_name(recognition)}) said yes to a live interview. "
-                         + (f"They {contact}." if booked else f"Reach them: {contact}")
-                         + ("" if is_host else " Janet (Lioness) is on it.")),
-                data={"type": "TOP_SAVER_LIVE_INTERVIEW", "recognition_id": recognition.pk,
-                      "deep_link": {"screen": "Admin", "screen_params": screen_params}},
-                notif_type="ADMIN_ALERT",
-            )
-        except Exception:
-            logger.exception("Live interview alert failed for %s", admin.email)
-    when = ("They booked a time on MyFund's Calendly. Check the Calendly calendar or booking email for the time "
-            "and the number to call." if booked else f"They asked to be reached on: <b>{escape(contact)}</b>")
-    try:
-        send_transactional_email(
-            subject=f"🦁 Top Saver live interview: {who}",
-            message=(f"Hi Lioness,<br><br><b>{escape(who)}</b> (#{recognition.rank} Top Saver, {month_name(recognition)}) "
-                     f"said yes to a live interview about their financial progress.<br><br>{when}<br><br>"
-                     f"Phone on their MyFund account: {escape(user.phone_number or 'not set')}<br>"
-                     f"Email: {escape(user.email)}<br><br>"
-                     "Their full answers are in the MyFund app: Admin → Requests → Top Saver."),
-            recipient_list=[INTERVIEW_HOST_EMAIL], from_email=FROM,
-        )
-    except Exception:
-        logger.exception("Live interview email to host failed")
-
-
-def notify_started(recognition):
-    from .request_views import REQUEST_APPROVERS
-    who = recognition.user.full_name or recognition.user.email
-    for admin in _team_recipients():
+    summary = f"{who} (#{recognition.rank} Top Saver, {month_name(recognition)}) {line}"
+    html = (f"Hi team,<br><br><b>{escape(who)}</b> (#{recognition.rank} Top Saver, {month_name(recognition)}) "
+            f"{escape(line)}<br><br>{details}"
+            f"Phone on their MyFund account: {escape(user.phone_number or 'not set')}<br>"
+            f"Email: {escape(user.email)}<br><br>"
+            "Their answers are in the MyFund app: Admin → Requests → Top Saver.")
+    for admin in _interview_team():
         # Requests is approvers-only in the app; everyone else lands on Admin.
         screen_params = ({"screen": "AdminRequestsTab", "params": {"kind": "top_saver"}}
                          if admin.email.lower() in REQUEST_APPROVERS else None)
         try:
             send_push_notification(
-                admin,
-                title="🏆 Top Saver interview started",
-                message=f"{who} (#{recognition.rank}, {month_name(recognition)}) has started their Top Saver interview.",
-                data={"type": "TOP_SAVER_INTERVIEW_STARTED", "recognition_id": recognition.pk,
+                admin, title=title, message=summary, notif_type="ADMIN_ALERT",
+                data={"type": kind, "recognition_id": recognition.pk,
                       "deep_link": {"screen": "Admin", "screen_params": screen_params}},
-                notif_type="ADMIN_ALERT",
             )
         except Exception:
-            logger.exception("Top Saver start alert failed for %s", admin.email)
+            logger.exception("Top Saver %s push failed for %s", kind, admin.email)
+        try:
+            send_transactional_email(subject=f"{title}: {who}", message=html, recipient_list=[admin.email], from_email=FROM)
+        except Exception:
+            logger.exception("Top Saver %s email failed for %s", kind, admin.email)
+
+
+def notify_started(recognition):
+    _alert_interview_team(recognition, "TOP_SAVER_INTERVIEW_STARTED", "🏆 Top Saver interview started",
+                          "has started their Top Saver interview form.")
+
+
+def notify_interview_booked(recognition):
+    """They picked a slot on Calendly - told straight away, not on submit."""
+    _alert_interview_team(
+        recognition, "TOP_SAVER_INTERVIEW_BOOKED", "📅 Top Saver live interview booked",
+        "has booked a 30-minute live interview on Calendly.",
+        "The time and the number to call are in the MyFund Google Calendar and on "
+        '<a href="https://calendly.com/app/scheduled_events/user/me">Calendly → Meetings</a>. '
+        "Whoever's free takes the call; reschedule from Calendly if no one can make it.<br><br>")
+
+
+def notify_live_interview(recognition):
+    """Submitted with Yes but didn't book on Calendly (typed a number/time
+    instead, or nothing) - someone needs to reach out to set it up."""
+    contact = (recognition.answers or {}).get("live_interview_contact") or ""
+    _alert_interview_team(
+        recognition, "TOP_SAVER_LIVE_INTERVIEW", "📞 Top Saver wants a live interview",
+        "said yes to a live interview but didn't book a slot.",
+        (f"They asked to be reached on: <b>{escape(contact)}</b><br><br>" if contact else ""))
 
 
 @api_view(["GET", "PATCH", "POST"])
@@ -244,6 +233,7 @@ def top_saver_interview(request):
     with transaction.atomic():
         recognition = TopSaverRecognition.objects.select_for_update().select_related("user").get(pk=recognition.pk)
         was_invited = recognition.status == "invited"
+        was_booked = _is_booked(recognition.answers)
         if recognition.first_time_winner:
             recognition.shirt_size = size
             recognition.delivery_address = str(data.get("delivery_address", recognition.delivery_address) or "").strip()[:1000]
@@ -268,10 +258,13 @@ def top_saver_interview(request):
                 return Response({"error": "Please complete: " + "; ".join(missing)}, status=400)
             recognition.status = "submitted"
             recognition.submitted_at = timezone.now()
-            if answers.get("live_interview") == "Yes":
+            if answers.get("live_interview") == "Yes" and not _is_booked(answers):
                 from .ambassador_application_views import _run_in_background
                 transaction.on_commit(lambda: _run_in_background(lambda: notify_live_interview(recognition)))
         recognition.save()
+        if _is_booked(answers) and not was_booked:
+            from .ambassador_application_views import _run_in_background
+            transaction.on_commit(lambda: _run_in_background(lambda: notify_interview_booked(recognition)))
         if was_invited:
             # First save (the page autosaves as they type): tell the team.
             from .ambassador_application_views import _run_in_background
