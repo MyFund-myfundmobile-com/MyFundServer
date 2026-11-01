@@ -26,6 +26,8 @@ TOKEN_MAX_AGE = 60 * 60 * 24 * 120
 
 # The questions from the Top Saver Google Form, in its order. Name and email
 # come from their MyFund account, so they aren't asked again.
+CALENDLY_INTERVIEW_URL = "https://calendly.com/myfundmobile/myfund-top-saver-live-interview"
+
 QUESTIONS = [
     {"key": "motivation", "type": "textarea", "required": True, "maxLength": 1500,
      "label": "What or who motivated you to start saving/investing with MyFund?",
@@ -38,11 +40,14 @@ QUESTIONS = [
      "help": "Be as brief but as detailed as possible."},
     {"key": "live_interview", "type": "choice", "required": True, "options": ["Yes", "No", "Maybe later"],
      "label": "Would you be interested in a further live interview about your financial progress to help others?"},
-    # Only asked when they say Yes; CX uses it to set the interview up.
-    {"key": "live_interview_contact", "type": "textarea", "required": False, "maxLength": 300,
-     "when": ["live_interview", "Yes"],
-     "label": "Great! What's the best WhatsApp number and time for our team to reach you?",
-     "help": "e.g. 0803 000 0000, weekdays after 5pm"},
+    # Only asked when they say Yes. The form shows MyFund's Calendly to book
+    # the interview (it collects their phone number); on booking it stores
+    # "Booked on Calendly: <event link>". Free text - WhatsApp number and a
+    # good time - is the fallback if the calendar won't load.
+    {"key": "live_interview_contact", "type": "schedule", "required": False, "maxLength": 300,
+     "when": ["live_interview", "Yes"], "url": CALENDLY_INTERVIEW_URL,
+     "label": "Great! Pick a time for your 30-minute live interview.",
+     "help": "Weekdays 9am-7pm or Saturdays 9am-4pm. We'll call you on the number you enter."},
     {"key": "rating", "type": "rating", "required": True, "max": 5,
      "label": "On a scale of 1 to 5, how would you rate your MyFund experience?",
      "help": "Based on your general experience (mobile app, customer service, etc.)"},
@@ -153,6 +158,8 @@ def notify_live_interview(recognition):
     from .request_views import REQUEST_APPROVERS
     who = recognition.user.full_name or recognition.user.email
     contact = (recognition.answers or {}).get("live_interview_contact") or recognition.user.phone_number or recognition.user.email
+    if contact.startswith("Booked on Calendly"):
+        contact = "booked a slot on MyFund's Calendly (see the calendar for time and number)"
     for admin in _cx_and_execs():
         screen_params = ({"screen": "AdminRequestsTab", "params": {"kind": "top_saver"}}
                          if admin.email.lower() in REQUEST_APPROVERS else None)
