@@ -2982,11 +2982,12 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
         "id",
         "formatted_month",
         "cohort",
-        "rank",
-        "user_first_name",
         "user_email",
         "user_phone",
+        "month_rank",
+        "user_first_name",
         "total_points_awarded",
+        "rank",
         "stipend_amount",
         "status",
         "stipend_paid",
@@ -3206,19 +3207,17 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
     user_first_name.admin_order_field = "user__first_name"
 
     def cohort(self, obj):
-        return obj.user.ambassador_cohort or "-"
+        c = obj.user.ambassador_cohort
+        return (c.name or c.cohort_number) if c else "-"
 
     cohort.admin_order_field = "user__ambassador_cohort__cohort_number"
 
-    def rank(self, obj):
-        # Position within the ambassador's own cohort for that month.
-        queryset = AmbassadorMonthlyReport.objects.filter(
-            month=obj.month,
-            user__ambassador_cohort_id=obj.user.ambassador_cohort_id,
-        ).order_by("-stipend_amount", "-total_points_awarded", "submitted_at")
-
-        ids = list(queryset.values_list("id", flat=True))
-
+    @staticmethod
+    def _position(queryset, obj):
+        ids = list(
+            queryset.order_by("-stipend_amount", "-total_points_awarded", "submitted_at")
+            .values_list("id", flat=True)
+        )
         try:
             position = ids.index(obj.id) + 1
         except ValueError:
@@ -3230,6 +3229,23 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
             suffix = {1: "st", 2: "nd", 3: "rd"}.get(position % 10, "th")
 
         return f"{position}{suffix}"
+
+    def month_rank(self, obj):
+        # Position among every ambassador's report for that month.
+        return self._position(AmbassadorMonthlyReport.objects.filter(month=obj.month), obj)
+
+    month_rank.short_description = "Rank (month)"
+    month_rank.admin_order_field = "-total_points_awarded"
+
+    def rank(self, obj):
+        # Position within the ambassador's own cohort for that month.
+        return self._position(
+            AmbassadorMonthlyReport.objects.filter(
+                month=obj.month,
+                user__ambassador_cohort_id=obj.user.ambassador_cohort_id,
+            ),
+            obj,
+        )
 
     rank.short_description = "Rank in cohort"
     rank.admin_order_field = "-total_points_awarded"

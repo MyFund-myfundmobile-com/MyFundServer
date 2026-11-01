@@ -37,6 +37,8 @@ class ReportPayoutListTests(TestCase):
         self.assertEqual([r.user.email for r in rows], ["top@x.com", "low@x.com"])
         admin = res.context["cl"].model_admin
         self.assertEqual([admin.rank(r) for r in rows], ["1st", "2nd"])
+        self.assertEqual([admin.month_rank(r) for r in rows], ["2nd", "3rd"])
+        self.assertEqual(admin.cohort(rows[0]), 4)
         warnings = [str(m) for m in res.context["messages"]]
         self.assertTrue(any("silent" in w and "1 ambassador" in w for w in warnings), warnings)
 
