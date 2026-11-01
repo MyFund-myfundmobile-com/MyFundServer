@@ -53,3 +53,19 @@ class ReportPayoutListTests(TestCase):
         res = self.client.get(URL)
         self.assertEqual(res.status_code, 200)
         self.assertContains(res, "Last month (")
+
+    def test_ties_list_in_rank_order_when_sorted_by_points(self):
+        # Equal points with stipends a few kobo apart, plus an extra sort on
+        # name left over from an earlier click: the list still follows rank.
+        for i, (name, stipend) in enumerate([("Zed", "600.00"), ("Amy", "600.50"), ("Bo", "599.00")]):
+            user = CustomUser.objects.create_user(
+                email=f"tie{i}@x.com", password="x", first_name=name, phone_number=f"0803911{i:04d}",
+                is_ambassador=True, ambassador_cohort=self.c4)
+            AmbassadorMonthlyReport.objects.create(
+                user=user, month=self.month, total_points_awarded=Decimal("6"), stipend_amount=Decimal(stipend))
+        res = self.client.get(URL, {"month": self.month, "user__ambassador_cohort__id__exact": self.c4.pk,
+                                    "o": "-8.7"})  # Points (after the checkbox) high-low, then Name
+        rows = list(res.context["cl"].result_list)
+        admin = res.context["cl"].model_admin
+        self.assertEqual([r.user.first_name for r in rows], ["top", "Zed", "Amy", "Bo", "low"])
+        self.assertEqual([admin.rank(r) for r in rows], ["1st", "2nd", "3rd", "4th", "5th"])

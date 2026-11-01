@@ -2884,6 +2884,7 @@ from django.contrib import admin, messages
 from django.db import transaction as db_transaction
 from django.utils import timezone
 from datetime import datetime, timedelta
+from django.contrib.admin.views.main import ChangeList
 from .models import (
     AmbassadorPointConfig,
     AmbassadorMonthlyReport,
@@ -2976,6 +2977,20 @@ class ReportMonthFilter(admin.SimpleListFilter):
         return queryset.filter(month=self.value()) if self.value() else queryset
 
 
+# Ranks go by points; ties go to the earlier submission, then the lower ID.
+# Sorting the list by points (highest first) uses exactly this order, so the
+# list always reads 1st, 2nd, 3rd... down the rank columns.
+REPORT_RANK_ORDER = ("-total_points_awarded", "submitted_at", "id")
+
+
+class ReportChangeList(ChangeList):
+    def get_ordering(self, request, queryset):
+        ordering = super().get_ordering(request, queryset)
+        if ordering and ordering[0] == "-total_points_awarded":
+            return list(REPORT_RANK_ORDER)
+        return ordering
+
+
 @admin.register(AmbassadorMonthlyReport)
 class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
     list_display = (
@@ -2997,6 +3012,9 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
     )
     list_select_related = ("user", "user__ambassador_cohort")
 
+    def get_changelist(self, request, **kwargs):
+        return ReportChangeList
+
     list_filter = (
         ReportMonthFilter,
         ("user__ambassador_cohort", admin.RelatedOnlyFieldListFilter),
@@ -3005,7 +3023,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
     )
 
     # Payout order: newest month, then most points first.
-    ordering = ("-month", "-total_points_awarded", "submitted_at")
+    ordering = ("-month", "-total_points_awarded", "submitted_at", "id")
 
     search_fields = (
         "user__email",
@@ -3215,7 +3233,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
     @staticmethod
     def _position(queryset, obj):
         ids = list(
-            queryset.order_by("-stipend_amount", "-total_points_awarded", "submitted_at")
+            queryset.order_by(*REPORT_RANK_ORDER)
             .values_list("id", flat=True)
         )
         try:
