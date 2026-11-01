@@ -4607,8 +4607,7 @@ def autosave(request):
     message = (
         f"Hi {user.first_name},<br><br>"
         f"Your AutoSave has been activated. You are now saving ₦{amount:,} {frequency}.<br><br>"
-        f"Payment Method: {card.card_brand.upper()} •••• {card.card_last4_digits}<br>"
-        f"Bank: {card.bank_name}<br><br>"
+        f"Card: {_card_label(card)}<br><br>"
         f"Keep growing your funds.🥂"
     )
     from_email = "MyFund <info@myfundmobile.com>"
@@ -4629,7 +4628,7 @@ def autosave(request):
     send_push_notification(
         user=user,
         title="AutoSave Activated! ✅",
-        message=f"Well done {user.first_name}! You're now saving ₦{amount:,} {frequency} using your {card.card_brand.upper()} card. Keep growing your funds.",
+        message=f"Well done {user.first_name}! You're now saving ₦{amount:,} {frequency} with your {_card_label(card)}. Keep growing your funds.",
         data={
             "amount": str(amount),
             "frequency": frequency,
@@ -4676,6 +4675,21 @@ def _paystack_subscription_still_active(autosave, headers):
     return (res.json().get("data") or {}).get("status") == "active"
 
 
+def _card_label(card):
+    """'Providus Bank Mastercard •••• 5173' for AutoSave messages, so the
+    user can tell which of their cards is being charged - not just
+    'MASTERCARD'. Leaves out whatever Paystack didn't give us."""
+    if not card:
+        return "your card"
+    brand = (card.card_brand or "").strip()
+    brand = {"mastercard": "Mastercard", "visa": "Visa", "verve": "Verve"}.get(brand.lower(), brand.title())
+    parts = [p for p in [(card.bank_name or "").strip(), brand or "card"] if p]
+    label = " ".join(parts)
+    if card.card_last4_digits:
+        label += f" •••• {card.card_last4_digits}"
+    return label
+
+
 def deactivate_autosave_for_user(user, frequency):
     """Shared by the user-facing endpoint below and AutoSaveAdmin's staff
     action - lets support deactivate a stuck user's AutoSave (cancelling
@@ -4698,6 +4712,10 @@ def deactivate_autosave_for_user(user, frequency):
         user.autosave_enabled = False
         user.save(update_fields=["autosave_enabled"])
         return "no_active"
+
+    first = active_autosaves.select_related("card").first()
+    card_text = f" on your {_card_label(first.card)}" if first.card_id else ""
+    frequency = (frequency or first.frequency or "").lower()
 
     headers = {
         "Authorization": f"Bearer {paystack_secret_key}",
@@ -4744,7 +4762,7 @@ def deactivate_autosave_for_user(user, frequency):
     subject = "AutoSave Deactivated!"
     message = (
         f"Hi {user.first_name},<br><br>"
-        f"Your {frequency} AutoSave has been deactivated successfully."
+        f"Your {frequency} AutoSave{card_text} has been deactivated successfully. No more automatic charges will be made."
         f"<br><br>Keep growing your funds.🥂"
     )
     send_transactional_email(
@@ -4761,7 +4779,7 @@ def deactivate_autosave_for_user(user, frequency):
     send_push_notification(
         user=user,
         title="AutoSave Deactivated",
-        message=f"Your {frequency} AutoSave has been deactivated successfully.",
+        message=f"Your {frequency} AutoSave{card_text} has been turned off. No more automatic charges.",
         data={"frequency": frequency, "type": "AutoSave", "status": "deactivated"},
         notif_type="SYSTEM",
     )
@@ -5280,8 +5298,7 @@ def autoinvest(request):
     message = (
         f"Hi {user.first_name},<br><br>"
         f"Your AutoInvest has been activated. You are now investing ₦{amount:,} {frequency}.<br><br>"
-        f"Payment Method: {card.card_brand.upper()} •••• {card.card_last4_digits}<br>"
-        f"Bank: {card.bank_name}<br><br>"
+        f"Card: {_card_label(card)}<br><br>"
         f"Keep growing your funds.🥂"
     )
     from_email = "MyFund <info@myfundmobile.com>"
@@ -5299,7 +5316,7 @@ def autoinvest(request):
         send_push_notification(
             user=user,
             title="AutoInvest Activated! 🎉",
-            message=f"Well done {user.first_name}! You're now investing ₦{amount:,} {frequency} using your {card.card_brand.upper()} card. Keep growing your funds.",
+            message=f"Well done {user.first_name}! You're now investing ₦{amount:,} {frequency} with your {_card_label(card)}. Keep growing your funds.",
             data={
                 "amount": str(amount),
                 "frequency": frequency,

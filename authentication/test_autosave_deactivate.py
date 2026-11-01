@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 from django.test import TestCase
 from rest_framework.test import APIClient
 
-from authentication.models import AutoSave, CustomUser
+from authentication.models import AutoSave, Card, CustomUser
 
 
 def resp(status, data=None):
@@ -64,3 +64,24 @@ class DeactivateAutoSaveTests(TestCase):
         res = self.client.get("/api/get-autosave-settings/")
         self.assertEqual(res.status_code, 200)
         self.assertIn(res.data["autoSaveSettings"]["frequency"], ("daily", "weekly"))
+
+    @patch("authentication.views.requests.post", return_value=resp(200))
+    def test_turn_off_message_names_the_card(self, _post, _email, push):
+        self.auto.card = Card.objects.create(user=self.user, authorization_code="AUTH_x", bank_name="Providus Bank",
+                                             card_brand="mastercard", card_last4_digits="5173")
+        self.auto.save(update_fields=["card"])
+        self.off(frequency="")
+        message = push.call_args.kwargs["message"]
+        self.assertIn("daily AutoSave on your Providus Bank Mastercard •••• 5173", message)
+
+
+class CardLabelTests(TestCase):
+    def test_label(self):
+        from authentication.views import _card_label
+        user = CustomUser.objects.create_user(email="c@example.com", password="x", first_name="C", last_name="L",
+                                              phone_number="08036660002")
+        self.assertEqual(_card_label(Card(user=user, bank_name="Providus Bank", card_brand="mastercard",
+                                          card_last4_digits="5173")), "Providus Bank Mastercard •••• 5173")
+        self.assertEqual(_card_label(Card(user=user, card_brand="visa ")), "Visa")
+        self.assertEqual(_card_label(Card(user=user, card_last4_digits="1234")), "card •••• 1234")
+        self.assertEqual(_card_label(None), "your card")
