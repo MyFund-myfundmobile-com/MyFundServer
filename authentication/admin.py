@@ -2982,6 +2982,14 @@ class ReportMonthFilter(admin.SimpleListFilter):
 # list always reads 1st, 2nd, 3rd... down the rank columns.
 REPORT_RANK_ORDER = ("-total_points_awarded", "submitted_at", "id")
 
+# Internal accounts kept off the report list and out of the ranks - the
+# list is screenshotted for ambassadors. Their status is left alone.
+HIDDEN_REPORT_EMAILS = ["company@myfundmobile.com"]
+
+
+def visible_reports():
+    return AmbassadorMonthlyReport.objects.exclude(user__email__in=HIDDEN_REPORT_EMAILS)
+
 
 class ReportChangeList(ChangeList):
     def get_ordering(self, request, queryset):
@@ -3014,6 +3022,13 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
 
     def get_changelist(self, request, **kwargs):
         return ReportChangeList
+
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+        # Only the list hides them; their reports still open by direct link.
+        if request.resolver_match and request.resolver_match.url_name.endswith("_changelist"):
+            qs = qs.exclude(user__email__in=HIDDEN_REPORT_EMAILS)
+        return qs
 
     list_filter = (
         ReportMonthFilter,
@@ -3256,7 +3271,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
 
     def month_rank(self, obj):
         # Position among every ambassador's report for that month.
-        return self._position(AmbassadorMonthlyReport.objects.filter(month=obj.month), obj)
+        return self._position(visible_reports().filter(month=obj.month), obj)
 
     month_rank.short_description = "Rank (month)"
     month_rank.admin_order_field = "-total_points_awarded"
@@ -3264,7 +3279,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
     def rank(self, obj):
         # Position within the ambassador's own cohort for that month.
         return self._position(
-            AmbassadorMonthlyReport.objects.filter(
+            visible_reports().filter(
                 month=obj.month,
                 user__ambassador_cohort_id=obj.user.ambassador_cohort_id,
             ),
@@ -3292,7 +3307,7 @@ class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
         if month and cohort_id:
             missing = CustomUser.objects.filter(
                 ambassador_cohort_id=cohort_id, is_ambassador=True
-            ).exclude(ambassador_reports__month=month)
+            ).exclude(ambassador_reports__month=month).exclude(email__in=HIDDEN_REPORT_EMAILS)
             names = [u.first_name or u.email for u in missing[:20]]
             if names:
                 more = missing.count() - len(names)

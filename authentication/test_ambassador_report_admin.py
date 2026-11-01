@@ -69,3 +69,17 @@ class ReportPayoutListTests(TestCase):
         admin = res.context["cl"].model_admin
         self.assertEqual([r.user.first_name for r in rows], ["top", "Zed", "Amy", "Bo", "low"])
         self.assertEqual([admin.rank(r) for r in rows], ["1st", "2nd", "3rd", "4th", "5th"])
+
+    def test_company_account_is_hidden_and_not_ranked(self):
+        company = CustomUser.objects.create_user(
+            email="company@myfundmobile.com", password="x", first_name="Christine", phone_number="08039119999",
+            is_ambassador=True, ambassador_cohort=self.c4)
+        report = AmbassadorMonthlyReport.objects.create(
+            user=company, month=self.month, total_points_awarded=Decimal("99"), stipend_amount=Decimal("9900"))
+        res = self.client.get(URL, {"month": self.month, "user__ambassador_cohort__id__exact": self.c4.pk})
+        rows = list(res.context["cl"].result_list)
+        admin = res.context["cl"].model_admin
+        self.assertNotIn("company@myfundmobile.com", [r.user.email for r in rows])
+        self.assertEqual(admin.rank(rows[0]), "1st")
+        self.assertEqual(admin.month_rank(rows[0]), "2nd")  # Cohort 3's 50 points still outranks
+        self.assertEqual(self.client.get(f"{URL}{report.pk}/change/").status_code, 200)
