@@ -166,7 +166,7 @@ def personalization(user, interview):
                       + signing.dumps({"user": user.pk}, salt=CLAIM_SALT))
 
     highlights = []
-    if interview.streak_months:
+    if interview.streak_months >= 2:  # one month isn't a streak yet
         highlights.append({"icon": "flame", "text": f"{interview.streak_months} months in a row of growing your savings"})
     if dividends > 0:
         highlights.append({"icon": "coins", "text": f"{_naira(dividends)} earned in MyFund dividends so far"})

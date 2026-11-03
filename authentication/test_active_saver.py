@@ -163,3 +163,9 @@ class ActiveSaverTests(TestCase):
         email.assert_not_called()
         push.assert_not_called()
         self.assertEqual(APIClient().get(f"{URL}?token={token}").data["interview"]["first_name"], "Femi")
+
+    def test_one_month_is_not_shown_as_a_streak(self, push, email):
+        saver = self.user("gbenga@x.com")
+        interview = ActiveSaverInterview.objects.create(user=saver, month=self.month, year=self.year, streak_months=1)
+        texts = [h["text"] for h in APIClient().get(f"{URL}?token={views._token(interview)}").data["interview"]["highlights"]]
+        self.assertFalse([t for t in texts if "in a row" in t])
