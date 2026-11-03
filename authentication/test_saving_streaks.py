@@ -52,4 +52,20 @@ class SavingStreakTests(TestCase):
         client = APIClient()
         self.assertEqual(client.get("/api/saving-streak/").status_code, 401)
         client.force_authenticate(saver)
-        self.assertEqual(client.get("/api/saving-streak/").data["streak_months"], 2)
+        data = client.get("/api/saving-streak/").data
+        self.assertEqual(data["streak_months"], 2)
+        states = [m["state"] for m in data["months"]]
+        # Joined this month in the test, so only this month and the 3 ahead show.
+        self.assertEqual(states, ["current", "future", "future", "future"])
+
+    def test_calendar_states(self):
+        from datetime import timedelta
+        from authentication.active_saver_views import saving_calendar
+        saver = self.user("cal@x.com")
+        CustomUser.objects.filter(pk=saver.pk).update(date_joined=self.now - timedelta(days=150))
+        saver.refresh_from_db()
+        for back in (0, 1, 3):
+            self.saved(saver, back)
+        states = [m["state"] for m in saving_calendar(saver, self.now)]
+        self.assertEqual(states[-4:], ["current_saved", "future", "future", "future"])
+        self.assertEqual(states[-6:-4], ["missed", "saved"])  # 2 months ago missed, last month saved

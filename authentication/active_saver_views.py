@@ -772,8 +772,34 @@ def saving_summaries(user_ids, now=None):
     return result
 
 
+PAST_MONTHS = 11   # months shown before the current one (from when they joined)
+FUTURE_MONTHS = 3  # greyed-out months after it
+
+
+def saving_calendar(user, now=None):
+    """Month by month for the Top Savers streak strip, oldest first:
+    saved / missed for finished months, current_saved / current (not yet)
+    for this month, future after it. Starts at the month they joined."""
+    now = now or timezone.now()
+    current = _month_index(now.month, now.year)
+    joined = _month_index(user.date_joined.month, user.date_joined.year)
+    saved = {_month_index(m, y) for m, y in TopSaverHistory.objects.filter(user=user).values_list("month", "year")}
+    months = []
+    for index in range(max(joined, current - PAST_MONTHS), current + FUTURE_MONTHS + 1):
+        m, y = index % 12 + 1, index // 12
+        if index < current:
+            state = "saved" if index in saved else "missed"
+        elif index == current:
+            state = "current_saved" if index in saved else "current"
+        else:
+            state = "future"
+        months.append({"key": f"{y}-{m:02d}", "label": datetime.date(y, m, 1).strftime("%b"),
+                       "year": y, "state": state})
+    return months
+
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def my_saving_streak(request):
-    """The Top Savers screen's streak chip: this saver's own summary."""
-    return Response(saving_summaries([request.user.pk])[request.user.pk])
+    """The Top Savers streak strip: this saver's own summary + months."""
+    return Response({**saving_summaries([request.user.pk])[request.user.pk], "months": saving_calendar(request.user)})
