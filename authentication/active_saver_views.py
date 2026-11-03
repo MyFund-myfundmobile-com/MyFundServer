@@ -23,7 +23,7 @@ from django.utils import timezone
 from django.utils.html import escape
 from rest_framework.decorators import api_view, authentication_classes, parser_classes, permission_classes
 from rest_framework.parsers import MultiPartParser
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
 from .models import ActiveSaverInterview, CustomUser, Employee, TargetSavings, TopSaverHistory, Transaction
@@ -479,12 +479,22 @@ def invite_now(user):
     return interview
 
 
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def active_saver_mine(request):
+    """www.myfundmobile.com/interview once they've logged in there: their
+    own story form's token, straight away - nothing is emailed."""
+    interview, _ = open_for(request.user)
+    return Response({"token": _token(interview)})
+
+
 @api_view(["POST"])
 @authentication_classes([])
 @permission_classes([AllowAny])
 def active_saver_request(request):
-    """www.myfundmobile.com/interview: POST {email} - any MyFund saver can
-    ask for their own story form; it's emailed to them (proves the inbox
+    """www.myfundmobile.com/interview, for anyone who can't log in there
+    (e.g. signed up with Google): POST {email} - their own story form is
+    emailed to them (proves the inbox
     is theirs, since the form shows their balances). Same reply either way,
     so it can't be used to look people up."""
     from .ambassador_application_views import _over_limit, _run_in_background

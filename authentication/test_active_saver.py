@@ -150,3 +150,16 @@ class ActiveSaverTests(TestCase):
         self.board(saver, 2, rank=40)
         views.invite_now(saver)
         self.assertIn("2 months in a row", email.call_args.kwargs["subject"])
+
+    def test_logged_in_saver_goes_straight_to_their_form(self, push, email):
+        saver = self.user("femi@x.com")
+        client = APIClient()
+        self.assertEqual(client.get("/api/active-saver/mine/").status_code, 401)
+        client.force_authenticate(saver)
+        token = client.get("/api/active-saver/mine/").data["token"]
+        self.assertEqual(client.get("/api/active-saver/mine/").data["token"], token)  # same form each time
+        interview = ActiveSaverInterview.objects.get(user=saver)
+        self.assertEqual(token, views._token(interview))
+        email.assert_not_called()
+        push.assert_not_called()
+        self.assertEqual(APIClient().get(f"{URL}?token={token}").data["interview"]["first_name"], "Femi")
