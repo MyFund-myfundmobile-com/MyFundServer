@@ -442,7 +442,7 @@ def send_invite(interview):
         push_title = f"💜 {streak} months in a row, {first}!"
         push_body = "You've kept growing your savings. We'd love to hear your story. Tap to share it."
     else:
-        # Sent by hand (or asked for at /interview) without a streak yet.
+        # Sent by hand (or asked for at /saverstory) without a streak yet.
         subject = f"💜 {first}, we'd love to hear your MyFund story"
         opener = f"Thank you for saving with MyFund. {details['cheer']}<br><br>"
         push_title = f"💜 We'd love to hear your story, {first}!"
@@ -463,7 +463,7 @@ def send_invite(interview):
 
 def open_for(user):
     """This month's interview for ``user`` (created if new), for invites
-    sent by hand or asked for at /interview. Reuses one already open."""
+    sent by hand or asked for at /saverstory. Reuses one already open."""
     month, year = previous_month()
     interview, created = ActiveSaverInterview.objects.get_or_create(
         user=user, month=month, year=year,
@@ -482,7 +482,7 @@ def invite_now(user):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def active_saver_mine(request):
-    """www.myfundmobile.com/interview once they've logged in there: their
+    """www.myfundmobile.com/saverstory once they've logged in there: their
     own story form's token, straight away - nothing is emailed."""
     interview, _ = open_for(request.user)
     return Response({"token": _token(interview)})
@@ -492,7 +492,7 @@ def active_saver_mine(request):
 @authentication_classes([])
 @permission_classes([AllowAny])
 def active_saver_request(request):
-    """www.myfundmobile.com/interview, for anyone who can't log in there
+    """www.myfundmobile.com/saverstory, for anyone who can't log in there
     (e.g. signed up with Google): POST {email} - their own story form is
     emailed to them (proves the inbox
     is theirs, since the form shows their balances). Same reply either way,
