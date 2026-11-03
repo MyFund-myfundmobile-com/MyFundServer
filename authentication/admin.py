@@ -15,6 +15,7 @@ from .models import (
     TargetSavings,
     TopSaverHistory,
     TopSaverRecognition,
+    ActiveSaverInterview,
     DailyROIAccrual,
     ROITransaction,
     FinanceMetricSnapshot,
@@ -2451,6 +2452,14 @@ class TopSaverRecognitionAdmin(admin.ModelAdmin):
     list_display = ("user", "month", "year", "rank", "first_time_winner", "status", "shirt_size", "submitted_at")
     list_filter = ("status", "first_time_winner", "year", "month")
     search_fields = ("user__email", "user__first_name", "user__last_name", "delivery_phone")
+    readonly_fields = ("invited_at", "started_at", "submitted_at", "created_at", "updated_at")
+
+
+@admin.register(ActiveSaverInterview)
+class ActiveSaverInterviewAdmin(admin.ModelAdmin):
+    list_display = ("user", "month", "year", "streak_months", "rank", "status", "reminder_count", "submitted_at")
+    list_filter = ("status", "year", "month")
+    search_fields = ("user__email", "user__first_name", "user__last_name")
     readonly_fields = ("invited_at", "started_at", "submitted_at", "created_at", "updated_at")
 
 

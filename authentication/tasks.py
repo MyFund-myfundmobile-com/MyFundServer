@@ -917,6 +917,19 @@ def reward_top_savers_of_month():
 
 
 @shared_task
+def invite_active_savers_of_month():
+    """1st of the month, after the Top Savers: invite consistent savers
+    outside the Top 3 to share their story (active_saver_views.candidates
+    says who). Idempotent - nobody is invited twice for a month."""
+    from .active_saver_views import invite_month, previous_month
+
+    month, year = previous_month()
+    sent = invite_month(month, year)
+    logger.info("[ACTIVE_SAVER_TASK] %s invites sent for %s/%s", sent, month, year)
+    return f"{sent} Active Saver invites sent for {month}/{year}"
+
+
+@shared_task
 def send_birthday_greetings():
     """Send birthday emails and push notifications to users celebrating today"""
     from django.utils import timezone

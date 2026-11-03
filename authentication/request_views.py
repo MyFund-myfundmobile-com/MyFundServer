@@ -13,7 +13,7 @@ from rest_framework.permissions import AllowAny, BasePermission
 from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError
 from .models import CustomUser, BankTransferRequest, InvestTransferRequest, WithdrawalsRequestToAdmin, Transaction, PhoneChangeRequest
-from .models import InfluencerApplication, TopSaverRecognition
+from .models import ActiveSaverInterview, InfluencerApplication, TopSaverRecognition
 from .utils import approve_quicksave_credit, approve_quickinvest_credit, process_scheduled_withdrawal
 
 logger = logging.getLogger(__name__)
@@ -27,12 +27,12 @@ class CanApproveRequests(BasePermission):
         return bool(user.is_authenticated and user.is_active and user.is_staff and user.email.lower() in REQUEST_APPROVERS)
 
 
-MODELS = {"influencer": InfluencerApplication,"top_saver": TopSaverRecognition, "phone_change": PhoneChangeRequest, "quicksave": BankTransferRequest, "quickinvest": InvestTransferRequest, "kyc": CustomUser, "withdrawal": WithdrawalsRequestToAdmin}
+MODELS = {"influencer": InfluencerApplication,"top_saver": TopSaverRecognition, "active_saver": ActiveSaverInterview, "phone_change": PhoneChangeRequest, "quicksave": BankTransferRequest, "quickinvest": InvestTransferRequest, "kyc": CustomUser, "withdrawal": WithdrawalsRequestToAdmin}
 
 
 def queue(kind):
-    if kind == "top_saver":
-        return TopSaverRecognition.objects.select_related("user").filter(status__in=["started", "invited"]).order_by("-updated_at")
+    if kind in ("top_saver", "active_saver"):
+        return MODELS[kind].objects.select_related("user").filter(status__in=["started", "invited"]).order_by("-updated_at")
     if kind == "influencer":
         return InfluencerApplication.objects.select_related("user").filter(status="pending").order_by("-created_at")
     if kind == "phone_change":
@@ -48,8 +48,8 @@ def queue(kind):
 
 
 def resolved_queue(kind):
-    if kind == "top_saver":
-        return TopSaverRecognition.objects.select_related("user").filter(status__in=["submitted", "closed"]).order_by("-updated_at")
+    if kind in ("top_saver", "active_saver"):
+        return MODELS[kind].objects.select_related("user").filter(status__in=["submitted", "closed"]).order_by("-updated_at")
     if kind == "influencer":
         return InfluencerApplication.objects.select_related("user").exclude(status="pending").order_by("-created_at")
     if kind == "phone_change":
@@ -76,6 +76,9 @@ def serialize(obj, kind, request):
             return name
         return request.build_absolute_uri(value.url if hasattr(value, "url") else name)
     data = {"id": obj.pk, "kind": kind, "name": f"{user.first_name} {user.last_name}".strip(), "email": user.email, "phone": user.phone_number, "avatar": image("profile_picture"), "created_at": user.updated_at if kind == "kyc" else obj.created_at}
+    if kind == "active_saver":
+        from .active_saver_views import serialize_request
+        return serialize_request(obj, data)
     if kind == "top_saver":
         from .top_saver_views import QUESTIONS, private_url
         answers = obj.answers or {}
@@ -356,7 +359,7 @@ def requests_list(request):
         return qs.filter(withdrawal_type=withdrawal_filter)
     def ordered(qs, request_kind):
         date_field = "updated_at" if request_kind == "kyc" else "created_at"
-        if sort.startswith("amount") and request_kind not in {"kyc", "phone_change", "influencer", "top_saver"}:
+        if sort.startswith("amount") and request_kind not in {"kyc", "phone_change", "influencer", "top_saver", "active_saver"}:
             return qs.order_by("-amount" if sort == "amount_high" else "amount", "-" + date_field, "-pk")
         return qs.order_by(date_field if sort == "oldest" else "-" + date_field, "pk" if sort == "oldest" else "-pk")
     if kind == "all":
@@ -447,6 +450,12 @@ def request_action(request, kind, pk):
         with transaction.atomic():
             obj = get_object_or_404(TopSaverRecognition.objects.select_for_update(of=("self",)).select_related("user"), pk=pk)
             top_saver_follow_up(obj, request.data.get("action"))
+        return Response(serialize(obj, kind, request))
+    if kind == "active_saver":
+        from .active_saver_views import follow_up
+        with transaction.atomic():
+            obj = get_object_or_404(ActiveSaverInterview.objects.select_for_update(of=("self",)).select_related("user"), pk=pk)
+            follow_up(obj, request.data.get("action"))
         return Response(serialize(obj, kind, request))
     if kind in APPLICATION_KINDS and request.data.get("action") == "remind":
         from .ambassador_decisions import send_draft_reminder

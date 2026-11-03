@@ -1490,6 +1490,49 @@ class TopSaverRecognition(models.Model):
         return f"Top Saver #{self.rank}: {self.user.full_name} ({self.month}/{self.year})"
 
 
+class ActiveSaverInterview(models.Model):
+    """A consistent saver (outside that month's Top 3) invited to share a
+    testimonial at www.myfundmobile.com/activesaver/interview.
+
+    Kept apart from ``TopSaverRecognition`` so the two flows never collide
+    (a Top 3 winner's record, T-shirt and admin queue stay their own), while
+    sharing its signed-link, question and alert plumbing
+    (authentication/active_saver_views.py).
+    """
+
+    STATUS = TopSaverRecognition.STATUS
+
+    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE, related_name="active_saver_interviews")
+    # The month that just ended when they were invited.
+    month = models.PositiveSmallIntegerField()
+    year = models.PositiveSmallIntegerField()
+    # Consecutive months of positive net saving ending that month, and their
+    # leaderboard rank for it, as at the invite.
+    streak_months = models.PositiveSmallIntegerField()
+    rank = models.PositiveIntegerField(null=True, blank=True)
+    status = models.CharField(max_length=12, choices=STATUS, default="invited", db_index=True)
+    answers = models.JSONField(default=dict, blank=True)
+    video_file_id = models.CharField(max_length=255, blank=True)
+    video_path = models.CharField(max_length=500, blank=True)
+    video_name = models.CharField(max_length=255, blank=True)
+    photo_file_id = models.CharField(max_length=255, blank=True)
+    photo_path = models.CharField(max_length=500, blank=True)
+    invited_at = models.DateTimeField(default=timezone.now)
+    started_at = models.DateTimeField(null=True, blank=True)
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    last_reminded_at = models.DateTimeField(null=True, blank=True)
+    reminder_count = models.PositiveSmallIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["user", "month", "year"], name="unique_active_saver_interview_month")]
+        ordering = ["-year", "-month", "-streak_months"]
+
+    def __str__(self):
+        return f"Active Saver ({self.streak_months} months): {self.user.full_name} ({self.month}/{self.year})"
+
+
 class PasswordReset(models.Model):
     user = models.ForeignKey(CustomUser, on_delete=models.CASCADE)
     otp = models.CharField(max_length=6)

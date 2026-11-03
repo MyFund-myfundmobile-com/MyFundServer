@@ -51,6 +51,7 @@ app.conf.task_routes = {
     "authentication.tasks.process_due_scheduled_withdrawals": {"queue": "default"},
     "authentication.tasks.send_birthday_greetings": {"queue": "default"},
     "authentication.tasks.reward_top_savers_of_month": {"queue": "default"},
+    "authentication.tasks.invite_active_savers_of_month": {"queue": "default"},
     "authentication.tasks.process_quarterly_payouts_task": {"queue": "default"},
     "authentication.tasks.autosubmit_missing_ambassador_reports_task": {
         "queue": "default"
@@ -172,6 +173,13 @@ app.conf.beat_schedule = {
         # 00:10 UTC on the 1st: the leaderboard is per UTC month, so the
         # previous month is final by then (01:10 WAT).
         "schedule": crontab(hour=0, minute=10, day_of_month=1),
+    },
+    # Active Saver story invites: 09:00 UTC (10am WAT) on the 1st, a
+    # friendlier hour than the Top Saver run and after quarterly dividends
+    # land at 08:00, so the "dividends earned" line is up to date.
+    "invite-active-savers-monthly": {
+        "task": "authentication.tasks.invite_active_savers_of_month",
+        "schedule": crontab(hour=9, minute=0, day_of_month=1),
     },
     # Birthday Greetings
     "send-birthday-greetings-daily": {
