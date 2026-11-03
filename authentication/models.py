@@ -1533,6 +1533,22 @@ class ActiveSaverInterview(models.Model):
         return f"Active Saver ({self.streak_months} months): {self.user.full_name} ({self.month}/{self.year})"
 
 
+class SaverStoryPromptState(models.Model):
+    """When the app last invited this saver to share their story (the
+    in-app sheet at milestone moments - active_saver_views.prompt), which
+    milestones it already asked about, and any "Not now" pause."""
+
+    user = models.OneToOneField(CustomUser, on_delete=models.CASCADE, related_name="saver_story_prompt")
+    last_shown_at = models.DateTimeField(null=True, blank=True)
+    snoozed_until = models.DateTimeField(null=True, blank=True)
+    # e.g. ["goal100:12", "streak:3", "dividend:Dividends: Q4 2026 ROI"]
+    asked_keys = models.JSONField(default=list, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Saver story prompts for {self.user.email}"
+
+
 class PasswordReset(models.Model):
     user = models.ForeignKey(CustomUser, on_delete=models.CASCADE)
     otp = models.CharField(max_length=6)

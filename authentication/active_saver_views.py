@@ -597,3 +597,118 @@ def serialize_request(obj, data):
                  else ["invite_video", "close"] if obj.status == "submitted" else []),
     )
     return data
+
+
+# ---- In-app invite at milestone moments ---------------------------------------
+# The app asks GET /api/saver-story/prompt/ when the moment is right (home,
+# Top Savers, after a save). Only motivated moments, and never pushy:
+PROMPT_EVERY_DAYS = 90      # at most one in-app invite per 90 days
+SNOOZE_DAYS = 60            # "Not now" pauses them for 60 days
+STREAK_LEVELS = (12, 6, 3)  # months in a row worth celebrating
+RECENT_DAYS = 21            # a dividend / completed goal counts as "just happened" for this long
+
+
+def _recent_trouble(user, now):
+    """A failed or pending payment, or a withdrawal, in the last 2 days -
+    not the moment to ask."""
+    from django.db.models import Q
+    since = now - datetime.timedelta(days=2)
+    recent = Transaction.objects.filter(user=user, date__gte=since)
+    return recent.filter(Q(status__in=["failed", "pending"]) |
+                         Q(transaction_type="debit", source__in=["SAVINGS", "INVESTMENT"], description__icontains=" > ")).exists()
+
+
+def _milestone(user, now, asked):
+    """(key, title, message) for the best milestone not yet asked about."""
+    from .models import TargetSavingsCompletion
+    first = user.first_name or "there"
+    goals = list(TargetSavings.objects.filter(user=user, target_amount__gt=0))
+    done_recently = set(TargetSavingsCompletion.objects.filter(
+        user=user, status="SUCCESS", completed_date__gte=(now - datetime.timedelta(days=RECENT_DAYS)).date()
+    ).values_list("target_savings_id", flat=True))
+    for goal in goals:
+        if (goal.current_amount >= goal.target_amount and goal.is_active) or goal.pk in done_recently:
+            key = f"goal100:{goal.pk}"
+            if key not in asked:
+                return key, f"🎯 You did it, {first}!", (
+                    f"You reached your {goal.name} goal. That's a story worth telling. Would you share how you did it?")
+    dividend = (Transaction.objects.filter(user=user, transaction_type="credit", status="confirmed",
+                                           description__istartswith="Dividends", date__gte=now - datetime.timedelta(days=RECENT_DAYS))
+                .order_by("-date").first())
+    if dividend and f"dividend:{dividend.description}" not in asked:
+        return f"dividend:{dividend.description}", "💰 Your dividends just landed!", (
+            f"{_naira(dividend.amount)} in dividends, earned by saving with MyFund. "
+            "Tell us what saving has made possible for you.")
+    month, year = previous_month(now)
+    streak = saving_streak(user, month, year)
+    for level in STREAK_LEVELS:
+        if streak >= level:
+            if f"streak:{level}" not in asked:
+                return f"streak:{level}", f"🔥 {streak} months in a row, {first}!", (
+                    f"You've grown your savings {streak} months in a row. We'd love to hear how you keep it up.")
+            break
+    for goal in goals:
+        if goal.is_active and goal.current_amount * 2 >= goal.target_amount and goal.current_amount < goal.target_amount:
+            key = f"goal50:{goal.pk}"
+            if key not in asked:
+                return key, f"🚀 Halfway to your {goal.name} goal!", (
+                    "You're past the halfway mark. Would you share what you're saving for and how it's going?")
+    return None
+
+
+def prompt_for(user, now=None):
+    """What the app should show right now, or None."""
+    from .models import SaverStoryPromptState
+    now = now or timezone.now()
+    if ActiveSaverInterview.objects.filter(user=user, status__in=["submitted", "closed"]).exists():
+        return None  # already told us their story
+    state = SaverStoryPromptState.objects.filter(user=user).first()
+    if state and state.snoozed_until and state.snoozed_until > now:
+        return None
+    if state and state.last_shown_at and state.last_shown_at > now - datetime.timedelta(days=PROMPT_EVERY_DAYS):
+        return None
+    if _recent_trouble(user, now):
+        return None
+    found = _milestone(user, now, set(state.asked_keys if state else []))
+    if not found:
+        return None
+    key, title, message = found
+    return {"key": key, "title": title, "message": message}
+
+
+@api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
+def saver_story_prompt(request):
+    """GET: {show, key, title, message, url} - whether to show the in-app
+    story invite now. POST {action: shown|dismissed, key}: the app showed
+    it (starts the 90-day gap) or they tapped "Not now" (60-day pause)."""
+    from .models import SaverStoryPromptState
+    user = request.user
+    if request.method == "GET":
+        found = prompt_for(user)
+        if not found:
+            return Response({"show": False})
+        interview, _ = open_for(user)
+        return Response({"show": True, **found, "url": interview_link(interview)})
+    action, key = request.data.get("action"), str(request.data.get("key") or "")[:120]
+    if action not in ("shown", "dismissed"):
+        return Response({"error": "action must be shown or dismissed"}, status=400)
+    state, _ = SaverStoryPromptState.objects.get_or_create(user=user)
+    now = timezone.now()
+    if action == "shown":
+        state.last_shown_at = now
+        if key and key not in state.asked_keys:
+            state.asked_keys = [*state.asked_keys, key][-50:]
+    else:
+        state.snoozed_until = now + datetime.timedelta(days=SNOOZE_DAYS)
+    state.save()
+    return Response({"ok": True})
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def saver_story_link(request):
+    """The Top Savers card / menu item: their own story form link, opened
+    straight from the app (already logged in, so no login step)."""
+    interview, _ = open_for(request.user)
+    return Response({"url": interview_link(interview), "submitted": interview.status in {"submitted", "closed"}})
