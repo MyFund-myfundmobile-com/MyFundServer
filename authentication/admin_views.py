@@ -4960,14 +4960,21 @@ def _ambassador_report_data(request, report):
         for field in submitted_fields
     }
     evidence = {}
+    # Every image per type, first one first (evidence keeps just the first
+    # for older app versions).
+    evidence_files = {}
     for field in ("coursera_certificate", "social_media_evidence", "abroad_signups_evidence", "events_evidence", "reshares_evidence"):
         upload = getattr(report, field)
         if upload:
             evidence[field] = request.build_absolute_uri(upload.url)
+            evidence_files[field] = [evidence[field]]
+    for extra in report.extra_evidence.all():
+        if extra.image:
+            evidence_files.setdefault(extra.field, []).append(request.build_absolute_uri(extra.image.url))
     return {
         "id": report.id,
         "month": report.month,
-        "name": report.user.get_full_name() or report.user.email,
+        "name": report.user.full_name or report.user.email,
         "email": report.user.email,
         "status": report.status,
         "stipend_paid": report.stipend_paid,
@@ -4977,6 +4984,7 @@ def _ambassador_report_data(request, report):
         "admin_note": report.admin_note or "",
         "values": values,
         "evidence": evidence,
+        "evidence_files": evidence_files,
     }
 
 
@@ -4987,7 +4995,7 @@ def ambassador_stipends_list(request):
         return Response({"detail": "Permission denied"}, status=403)
     from .models import AmbassadorMonthlyReport
     month = request.GET.get("month", "").strip()
-    reports = AmbassadorMonthlyReport.objects.select_related("user").all()
+    reports = AmbassadorMonthlyReport.objects.select_related("user").prefetch_related("extra_evidence")
     if month:
         reports = reports.filter(month=month)
     return Response({"data": [_ambassador_report_data(request, report) for report in reports[:200]]})

@@ -14671,11 +14671,17 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import (
-    AmbassadorMonthlyReport, AmbassadorPointConfig, first_deposit_referral_counts,
-    confirmed_referral_counts,
+    AmbassadorMonthlyReport, AmbassadorPointConfig, AmbassadorReportEvidence,
+    first_deposit_referral_counts, confirmed_referral_counts,
 )
 from .serializers import AmbassadorMonthlyReportSerializer
 from .tasks import send_ambassador_report_notifications_task
+
+from django import forms as django_forms
+from rest_framework.exceptions import ValidationError as DRFValidationError
+
+# Most extra images per evidence type (on top of the first).
+MAX_EXTRA_EVIDENCE = 9
 
 
 class AmbassadorMonthlyReportCreateView(generics.CreateAPIView):
@@ -14693,6 +14699,17 @@ class AmbassadorMonthlyReportCreateView(generics.CreateAPIView):
         with transaction.atomic():
             report = serializer.save()
             user = request.user
+            # Second image onwards for each evidence type arrives as
+            # "<field>_more" (repeated); the first is the field itself.
+            for field in AmbassadorReportEvidence.FIELDS:
+                if not getattr(report, field):
+                    continue
+                for image in request.FILES.getlist(f"{field}_more")[:MAX_EXTRA_EVIDENCE]:
+                    try:
+                        django_forms.ImageField().clean(image)
+                    except django_forms.ValidationError:
+                        raise DRFValidationError({field: "One of the extra images isn't a valid image. Please choose a photo."})
+                    AmbassadorReportEvidence.objects.create(report=report, field=field, image=image)
 
             transaction.on_commit(
                 lambda: send_ambassador_report_notifications_task.delay(

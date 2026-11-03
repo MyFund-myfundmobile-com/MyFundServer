@@ -4328,6 +4328,27 @@ class AmbassadorMonthlyReport(models.Model):
         ).get(self.user_id, 0)
 
 
+class AmbassadorReportEvidence(models.Model):
+    """Extra proof images for one evidence type on a monthly report (e.g.
+    several Coursera certificates). The first image stays in the report's
+    own field (coursera_certificate, ...) so older app versions and the
+    admin keep working; these are the second image onwards."""
+
+    FIELDS = ("coursera_certificate", "social_media_evidence", "abroad_signups_evidence",
+              "events_evidence", "reshares_evidence")
+
+    report = models.ForeignKey(AmbassadorMonthlyReport, on_delete=models.CASCADE, related_name="extra_evidence")
+    field = models.CharField(max_length=40, choices=[(f, f.replace("_", " ").title()) for f in FIELDS])
+    image = models.ImageField(upload_to="ambassador_reports/")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["field", "id"]
+
+    def __str__(self):
+        return f"{self.get_field_display()} for report {self.report_id}"
+
+
 class AmbassadorAttendanceSubmission(RecommendationReviewMixin):
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,

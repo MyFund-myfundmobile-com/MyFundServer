@@ -16,6 +16,7 @@ from .models import (
     TopSaverHistory,
     TopSaverRecognition,
     ActiveSaverInterview,
+    AmbassadorReportEvidence,
     DailyROIAccrual,
     ROITransaction,
     FinanceMetricSnapshot,
@@ -3009,8 +3010,18 @@ class ReportChangeList(ChangeList):
         return ordering
 
 
+class AmbassadorReportEvidenceInline(admin.TabularInline):
+    model = AmbassadorReportEvidence
+    extra = 0
+    fields = ("field", "image", "created_at")
+    readonly_fields = ("created_at",)
+    verbose_name = "extra evidence image"
+    verbose_name_plural = "Extra evidence images (2nd image onwards)"
+
+
 @admin.register(AmbassadorMonthlyReport)
 class AmbassadorMonthlyReportAdmin(admin.ModelAdmin):
+    inlines = [AmbassadorReportEvidenceInline]
     list_display = (
         "id",
         "formatted_month",
