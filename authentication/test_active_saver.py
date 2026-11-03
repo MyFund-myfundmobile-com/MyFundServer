@@ -125,3 +125,28 @@ class ActiveSaverTests(TestCase):
         self.assertIn("Finish My Story", email.call_args.kwargs["message"])
         res = client.post(f"/api/admin/requests/active_saver/{interview.pk}/action/", {"action": "remind"}, format="json")
         self.assertEqual(res.status_code, 400)  # 48 hours apart
+
+    def test_anyone_can_ask_for_their_form_at_interview(self, push, email):
+        saver = self.user("dayo@x.com")
+        client = APIClient()
+        reply = client.post("/api/active-saver/request/", {"email": "DAYO@x.com"}, format="json")
+        self.assertEqual(reply.status_code, 200)
+        interview = ActiveSaverInterview.objects.get(user=saver)
+        self.assertEqual(interview.streak_months, 0)
+        self.assertEqual(email.call_args.kwargs["subject"], "💜 Dayo, we'd love to hear your MyFund story")
+        self.assertIn(views._token(interview), email.call_args.kwargs["message"])
+
+        # Asking again reuses the same form; unknown emails get the same reply and nothing is sent.
+        client.post("/api/active-saver/request/", {"email": "dayo@x.com"}, format="json")
+        self.assertEqual(ActiveSaverInterview.objects.count(), 1)
+        email.reset_mock()
+        other = client.post("/api/active-saver/request/", {"email": "nobody@x.com"}, format="json")
+        self.assertEqual(other.data, reply.data)
+        email.assert_not_called()
+        self.assertEqual(client.post("/api/active-saver/request/", {"email": "nope"}, format="json").status_code, 400)
+
+    def test_manual_invite_mentions_a_real_streak(self, push, email):
+        saver = self.user("efe@x.com")
+        self.board(saver, 2, rank=40)
+        views.invite_now(saver)
+        self.assertIn("2 months in a row", email.call_args.kwargs["subject"])

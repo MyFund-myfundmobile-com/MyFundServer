@@ -249,8 +249,9 @@ def _alert_team(interview, kind, title, line, details=""):
     from .utils import send_transactional_email
     user = interview.user
     who = user.full_name or user.email
-    summary = f"{who} ({interview.streak_months} months saving in a row) {line}"
-    html = (f"Hi team,<br><br><b>{escape(who)}</b> ({interview.streak_months} months saving in a row) "
+    tag = f"{interview.streak_months} months saving in a row" if interview.streak_months >= 2 else "MyFund saver"
+    summary = f"{who} ({tag}) {line}"
+    html = (f"Hi team,<br><br><b>{escape(who)}</b> ({tag}) "
             f"{escape(line)}<br><br>{details}"
             f"Phone on their MyFund account: {escape(user.phone_number or 'not set')}<br>"
             f"Email: {escape(user.email)}<br><br>"
@@ -433,21 +434,79 @@ def send_invite(interview):
     past = details["past_top_saver"]
     shout = (f"And we haven't forgotten: you were <b>#{past['rank']}</b> on our Top Savers board in {past['month']}. 🏆<br><br>"
              if past else "")
-    subject = f"💜 {first}, {interview.streak_months} months in a row. We'd love to hear your story"
+    streak = interview.streak_months
+    if streak >= 2:
+        subject = f"💜 {first}, {streak} months in a row. We'd love to hear your story"
+        opener = (f"We noticed something special: with {month} done, you've grown your savings with MyFund "
+                  f"<b>{streak} months in a row</b>. {details['cheer']}<br><br>")
+        push_title = f"💜 {streak} months in a row, {first}!"
+        push_body = "You've kept growing your savings. We'd love to hear your story. Tap to share it."
+    else:
+        # Sent by hand (or asked for at /interview) without a streak yet.
+        subject = f"💜 {first}, we'd love to hear your MyFund story"
+        opener = f"Thank you for saving with MyFund. {details['cheer']}<br><br>"
+        push_title = f"💜 We'd love to hear your story, {first}!"
+        push_body = "Tell us about your MyFund journey. It takes about 3 minutes. Tap to share it."
     html = (
         f"Hi {first},<br><br>"
-        f"We noticed something special: with {month} done, you've grown your savings with MyFund "
-        f"<b>{interview.streak_months} months in a row</b>. {details['cheer']}<br><br>"
+        + opener
         + shout +
         "We'd love to hear your story, in your own words. What you're saving for, what's changed, "
         "and anything we can do better. It takes about 3 minutes.<br><br>"
         + _button(link, "Share My Story") +
         "<br><br>Thank you for being part of the MyFund family. 💜<br><br>— <b>MyFund</b>"
     )
-    send_push_notification(user, title=f"💜 {interview.streak_months} months in a row, {first}!", notif_type="SYSTEM",
-                           message="You've kept growing your savings. We'd love to hear your story. Tap to share it.",
+    send_push_notification(user, title=push_title, notif_type="SYSTEM", message=push_body,
                            data={"type": "ACTIVE_SAVER_INVITE", "interview_id": interview.pk, "deep_link": {"url": link}})
     return send_transactional_email(subject=subject, message=html, recipient_list=[user.email], from_email=FROM)
+
+
+def open_for(user):
+    """This month's interview for ``user`` (created if new), for invites
+    sent by hand or asked for at /interview. Reuses one already open."""
+    month, year = previous_month()
+    interview, created = ActiveSaverInterview.objects.get_or_create(
+        user=user, month=month, year=year,
+        defaults={"streak_months": saving_streak(user, month, year),
+                  "rank": TopSaverHistory.objects.filter(user=user, month=month, year=year).values_list("rank", flat=True).first()})
+    return interview, created
+
+
+def invite_now(user):
+    """Send ``user`` their story form straight away (email + push)."""
+    interview, _ = open_for(user)
+    send_invite(interview)
+    return interview
+
+
+@api_view(["POST"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def active_saver_request(request):
+    """www.myfundmobile.com/interview: POST {email} - any MyFund saver can
+    ask for their own story form; it's emailed to them (proves the inbox
+    is theirs, since the form shows their balances). Same reply either way,
+    so it can't be used to look people up."""
+    from .ambassador_application_views import _over_limit, _run_in_background
+
+    email = str(request.data.get("email") or "").strip().lower()
+    if "@" not in email or len(email) > 254:
+        return Response({"error": "Enter the email on your MyFund account."}, status=400)
+    reply = Response({"message": "If that email has a MyFund account, we've sent it a link to your story form."})
+    ip = request.META.get("REMOTE_ADDR", "")
+    if _over_limit(f"activesaver_request_ip:{ip}", 10) or _over_limit(f"activesaver_request_email:{email}", 3):
+        return reply
+    user = CustomUser.objects.filter(email__iexact=email, is_deleted=False, is_active=True, is_banned=False).first()
+    if not user:
+        return reply
+
+    def send():
+        try:
+            invite_now(user)
+        except Exception:
+            logger.exception("Active Saver request failed for %s", user.email)
+    _run_in_background(send)
+    return reply
 
 
 def invite_month(month, year):
