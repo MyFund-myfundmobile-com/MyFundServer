@@ -1249,6 +1249,13 @@ def all_users_list(request):
         serializer = AdminUserListSerializer(
             users, many=True, context={"request": request}
         )
+        # Saving streak / months without saving / Top Saver count, for the
+        # little label on each row - one query for the whole page.
+        from .active_saver_views import saving_summaries
+        rows = serializer.data
+        summaries = saving_summaries([row["id"] for row in rows])
+        for row in rows:
+            row["saving"] = summaries.get(row["id"])
 
         return Response({
             "page": page,
@@ -1256,7 +1263,7 @@ def all_users_list(request):
             "total_count": total_count,
             "total_pages": total_pages,
             "filters_applied": filters_applied,
-            "data": serializer.data
+            "data": rows
         })
 
     except Exception as e:
@@ -1412,8 +1419,9 @@ def admin_user_detail(request, user_id):
     except (ValueError, TypeError):
         return Response({"error": "Invalid user id."}, status=400)
 
+    from .active_saver_views import saving_summaries
     serializer = AdminUserListSerializer(user, context={"request": request})
-    return Response(serializer.data)
+    return Response({**serializer.data, "saving": saving_summaries([user.pk])[user.pk]})
 
 
 # Fields an admin can toggle for a user, same set Django's own /admin/

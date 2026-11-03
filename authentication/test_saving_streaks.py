@@ -1,0 +1,46 @@
+from decimal import Decimal
+
+from django.test import TestCase
+from django.utils import timezone
+from rest_framework.test import APIClient
+
+from authentication.active_saver_views import saving_summaries
+from authentication.models import CustomUser, TopSaverHistory
+
+
+class SavingStreakTests(TestCase):
+    def setUp(self):
+        self.now = timezone.now()
+        self.n = iter(range(100))
+
+    def user(self, email, **extra):
+        return CustomUser.objects.create_user(email=email, password="x", first_name="A", last_name="B",
+                                              phone_number=f"0803500{next(self.n):04d}", **extra)
+
+    def saved(self, user, back, rank=50):
+        """Positive net saving `back` months ago (0 = this month)."""
+        i = self.now.year * 12 + self.now.month - 1 - back
+        TopSaverHistory.objects.create(user=user, month=i % 12 + 1, year=i // 12, rank=rank, total_savings=Decimal("1"))
+
+    def test_streak_gap_and_top_saver_count(self):
+        steady, lapsed, fresh, never = (self.user(e) for e in ("s@x.com", "l@x.com", "f@x.com", "n@x.com"))
+        for back in (1, 2, 3):
+            self.saved(steady, back, rank=back)       # last 3 finished months, Top 3 twice... rank 1,2,3 = 3 times
+        self.saved(lapsed, 4)                          # last saved 4 months ago
+        self.saved(fresh, 0)                           # saved this month only
+        out = saving_summaries([steady.pk, lapsed.pk, fresh.pk, never.pk], self.now)
+        self.assertEqual(out[steady.pk], {"streak_months": 3, "months_without_saving": None, "top_saver_times": 3})
+        self.assertEqual(out[lapsed.pk], {"streak_months": 0, "months_without_saving": 3, "top_saver_times": 0})
+        self.assertEqual(out[fresh.pk]["streak_months"], 1)  # this month counts once they've saved
+        self.assertEqual(out[never.pk], {"streak_months": 0, "months_without_saving": None, "top_saver_times": 0})
+
+    def test_admin_list_and_detail_include_it(self):
+        admin = self.user("boss@x.com", is_staff=True, is_superuser=True)
+        saver = self.user("saver@x.com")
+        self.saved(saver, 1)
+        client = APIClient()
+        client.force_authenticate(admin)
+        rows = client.get("/api/admin/users/list", {"search": "saver@x.com"}).data["data"]
+        self.assertEqual(rows[0]["saving"]["streak_months"], 1)
+        detail = client.get(f"/api/admin/users/{saver.pk}/").data
+        self.assertEqual(detail["saving"]["streak_months"], 1)

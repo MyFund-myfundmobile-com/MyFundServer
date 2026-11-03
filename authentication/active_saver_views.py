@@ -739,3 +739,34 @@ def saver_story_link(request):
     straight from the app (already logged in, so no login step)."""
     interview, _ = open_for(request.user)
     return Response({"url": interview_link(interview), "submitted": interview.status in {"submitted", "closed"}})
+
+
+# ---- Saving streaks for the admin user list / details ---------------------------
+def saving_summaries(user_ids, now=None):
+    """{user_id: {streak_months, months_without_saving, top_saver_times}}.
+    A month counts when they saved more than they withdrew (they're on that
+    month's TopSaverHistory board). The streak runs up to this month if
+    they've already saved this month, else up to last month - this month
+    isn't over, so not having saved yet doesn't break it. When there's no
+    streak, months_without_saving is how many finished months since they
+    last saved (None if they never have)."""
+    now = now or timezone.now()
+    current = _month_index(now.month, now.year)
+    months, top3 = {}, {}
+    for uid, m, y, rank in TopSaverHistory.objects.filter(user_id__in=user_ids).values_list("user_id", "month", "year", "rank"):
+        index = _month_index(m, y)
+        months.setdefault(uid, set()).add(index)
+        if rank <= 3 and index != current:
+            top3.setdefault(uid, set()).add(index)
+    result = {}
+    for uid in user_ids:
+        saved = months.get(uid, set())
+        end = current if current in saved else current - 1
+        streak = 0
+        while end - streak in saved:
+            streak += 1
+        past = [i for i in saved if i < current]
+        without = None if streak or not past else (current - 1) - max(past)
+        result[uid] = {"streak_months": streak, "months_without_saving": without,
+                       "top_saver_times": len(top3.get(uid, ()))}
+    return result
