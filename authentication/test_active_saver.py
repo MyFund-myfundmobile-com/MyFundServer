@@ -71,6 +71,8 @@ class ActiveSaverTests(TestCase):
         self.assertIn("3 months in a row of growing your savings", texts)
         self.assertIn("₦1,250 earned in MyFund dividends so far", texts)
         self.assertEqual(data["past_top_saver"]["rank"], 2)
+        self.assertEqual(data["top_saver"]["times"], 1)
+        self.assertIn("/topsaver/start?token=", data["top_saver"]["link"])
         self.assertIn("/topsaver/start?token=", data["past_top_saver"]["story_link"])  # story still untold
 
         with self.captureOnCommitCallbacks(execute=True):

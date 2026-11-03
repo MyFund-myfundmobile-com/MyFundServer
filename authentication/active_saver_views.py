@@ -192,8 +192,13 @@ def personalization(user, interview):
         cheer = "Month after month, you've kept showing up for your future. That's how real wealth is built."
     else:
         cheer = "Every naira you put away is a vote for your future self, and we see you."
+    # Finished months in the Top 3 (the Top Saver board): "You've been a Top
+    # Saver N times" - to their untold Top Saver story if any, else /topsaver.
+    times = (TopSaverHistory.objects.filter(user=user, rank__lte=3).exclude(month=now.month, year=now.year)
+             .values("month", "year").distinct().count())
+    top_saver = {"times": times, "link": story_link or "https://www.myfundmobile.com/topsaver"} if times else None
     return {"highlights": highlights, "past_top_saver": past_top_saver, "cheer": cheer,
-            "feat": _feat(interview.streak_months, months_with_us, balance, dividends)}
+            "feat": _feat(interview.streak_months, months_with_us, balance, dividends), "top_saver": top_saver}
 
 
 def _span(months):
