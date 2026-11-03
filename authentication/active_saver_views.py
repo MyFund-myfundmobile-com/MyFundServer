@@ -192,7 +192,29 @@ def personalization(user, interview):
         cheer = "Month after month, you've kept showing up for your future. That's how real wealth is built."
     else:
         cheer = "Every naira you put away is a vote for your future self, and we see you."
-    return {"highlights": highlights, "past_top_saver": past_top_saver, "cheer": cheer}
+    return {"highlights": highlights, "past_top_saver": past_top_saver, "cheer": cheer,
+            "feat": _feat(interview.streak_months, months_with_us, balance, dividends)}
+
+
+def _span(months):
+    years, rest = divmod(months, 12)
+    return " and ".join(p for p in (f"{years} year{'s' * (years > 1)}" if years else "",
+                                     f"{rest} month{'s' * (rest > 1)}" if rest else "") if p)
+
+
+def _feat(streak, months_with_us, balance, dividends):
+    """One plain sentence about what they've built - the form's subtitle.
+    None when there's nothing to say yet."""
+    built = f"built {_naira(balance)} with MyFund" if balance > 0 else ""
+    earned = f"earned {_naira(dividends)} in dividends" if dividends > 0 else ""
+    what = " and ".join(p for p in (built, earned) if p)
+    if streak >= 3:
+        return f"You've grown your savings {streak} months in a row" + (f" and {what}." if what else ".")
+    if not what:
+        return None
+    if months_with_us >= 2:
+        return f"In {_span(months_with_us)}, you've {what}."
+    return f"You've {what}."
 
 
 def _serialize(interview, preview=False):

@@ -169,3 +169,11 @@ class ActiveSaverTests(TestCase):
         interview = ActiveSaverInterview.objects.create(user=saver, month=self.month, year=self.year, streak_months=1)
         texts = [h["text"] for h in APIClient().get(f"{URL}?token={views._token(interview)}").data["interview"]["highlights"]]
         self.assertFalse([t for t in texts if "in a row" in t])
+
+    def test_feat_is_one_plain_sentence(self, push, email):
+        self.assertEqual(views._feat(0, 19, Decimal("5622699"), Decimal("963998")),
+                         "In 1 year and 7 months, you've built ₦5,622,699 with MyFund and earned ₦963,998 in dividends.")
+        self.assertEqual(views._feat(5, 19, Decimal("20000"), Decimal("0")),
+                         "You've grown your savings 5 months in a row and built ₦20,000 with MyFund.")
+        self.assertEqual(views._feat(0, 1, Decimal("500"), Decimal("0")), "You've built ₦500 with MyFund.")
+        self.assertIsNone(views._feat(0, 6, Decimal("0"), Decimal("0")))
