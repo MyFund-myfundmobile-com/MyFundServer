@@ -25,12 +25,12 @@ class PersonalityProfileTests(TestCase):
             self.assertIsNone(get_own_personality_profile(self.user(**changes)))
 
     def test_all_confirmed_matches_are_assigned(self):
-        self.assertEqual(len(_RECORDS), 19)
+        self.assertEqual(len(_RECORDS), 20)  # + Taiwo Ayomide (Batch B)
         ids = [row['user_id'] for row in _RECORDS if row['user_id'] is not None]
         self.assertEqual(len(ids), len(set(ids)))
-        self.assertEqual(len(_PROFILES), 19)
+        self.assertEqual(len(_PROFILES), 20)
         self.assertNotIn(None, _PROFILES)
-        for pk, code in [(389, 'ENFJ-A'), (655, 'INFJ'), (1108, 'INTP-A')]:
+        for pk, code in [(389, 'ENFJ-A'), (655, 'INFJ'), (1108, 'INTP-A'), (4056, 'ENTJ-A')]:
             self.assertEqual(get_own_personality_profile(self.user(pk=pk))['type'], code)
         praise = next(row for row in _RECORDS if row['source_name'] == 'Olowookere Praise')
         self.assertEqual(praise['type'], 'INFJ')
