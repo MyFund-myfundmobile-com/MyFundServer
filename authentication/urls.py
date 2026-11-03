@@ -5,7 +5,7 @@ from .first_savings import first_save_guide_event, first_savings_status_view
 from .groupbuy_interest import admin_groupbuy_interests, my_groupbuy_interests, register_groupbuy_interest
 from django.urls import path, include
 from .request_views import requests_list, request_action, ambassador_export_link, ambassador_export, remind_application_drafts
-from .active_saver_views import active_saver_interview, active_saver_mine, active_saver_request, active_saver_upload, saver_story_link, saver_story_prompt
+from .active_saver_views import active_saver_interview, active_saver_mine, active_saver_request, active_saver_upload, my_saving_streak, saver_story_link, saver_story_prompt
 from .top_saver_views import top_saver_interview, top_saver_video, top_saver_claim, top_saver_claim_start, top_saver_stories
 from .foya import foya_today, foya_event, foya_admin, foya_admin_positions
 from . import views
@@ -122,6 +122,7 @@ urlpatterns = [
     path("active-saver/mine/", active_saver_mine, name="active_saver_mine"),
     path("saver-story/prompt/", saver_story_prompt, name="saver_story_prompt"),
     path("saver-story/link/", saver_story_link, name="saver_story_link"),
+    path("saving-streak/", my_saving_streak, name="my_saving_streak"),
     path("admin/requests/", requests_list, name="admin_requests"),
     path("admin/requests/ambassador/export-link/", ambassador_export_link, name="admin_ambassador_export_link"),
     path("admin/requests/ambassador/export/", ambassador_export, name="admin_ambassador_export"),

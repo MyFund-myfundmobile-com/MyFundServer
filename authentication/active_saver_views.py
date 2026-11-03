@@ -770,3 +770,10 @@ def saving_summaries(user_ids, now=None):
         result[uid] = {"streak_months": streak, "months_without_saving": without,
                        "top_saver_times": len(top3.get(uid, ()))}
     return result
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def my_saving_streak(request):
+    """The Top Savers screen's streak chip: this saver's own summary."""
+    return Response(saving_summaries([request.user.pk])[request.user.pk])

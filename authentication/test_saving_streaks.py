@@ -44,3 +44,12 @@ class SavingStreakTests(TestCase):
         self.assertEqual(rows[0]["saving"]["streak_months"], 1)
         detail = client.get(f"/api/admin/users/{saver.pk}/").data
         self.assertEqual(detail["saving"]["streak_months"], 1)
+
+    def test_saver_sees_only_their_own_streak(self):
+        saver = self.user("own@x.com")
+        self.saved(saver, 1)
+        self.saved(saver, 2)
+        client = APIClient()
+        self.assertEqual(client.get("/api/saving-streak/").status_code, 401)
+        client.force_authenticate(saver)
+        self.assertEqual(client.get("/api/saving-streak/").data["streak_months"], 2)
