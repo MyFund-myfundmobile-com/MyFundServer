@@ -69,3 +69,18 @@ class SavingStreakTests(TestCase):
         states = [m["state"] for m in saving_calendar(saver, self.now)]
         self.assertEqual(states[-4:], ["current_saved", "future", "future", "future"])
         self.assertEqual(states[-6:-4], ["missed", "saved"])  # 2 months ago missed, last month saved
+
+    def test_summary_sheet_numbers(self):
+        from datetime import timedelta
+        from authentication.active_saver_views import saving_stats
+        saver = self.user("stats@x.com")
+        CustomUser.objects.filter(pk=saver.pk).update(date_joined=self.now - timedelta(days=200))
+        saver.refresh_from_db()
+        for back in (6, 5, 4, 1):  # 3 in a row, a gap, then last month
+            self.saved(saver, back)
+        stats = saving_stats(saver, self.now)
+        self.assertEqual(stats["longest_streak"], 3)
+        self.assertEqual(stats["months_saved"], 4)
+        self.assertFalse(stats["saved_this_month"])
+        self.assertGreaterEqual(stats["months_missed"], 2)
+        self.assertTrue(stats["month_ends"].endswith(self.now.strftime("%B")))

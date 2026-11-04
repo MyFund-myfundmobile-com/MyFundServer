@@ -798,8 +798,30 @@ def saving_calendar(user, now=None):
     return months
 
 
+def saving_stats(user, now=None):
+    """The streak summary sheet: longest streak, months saved / missed since
+    joining, whether this month counts yet, and when this month ends."""
+    import calendar
+    now = now or timezone.now()
+    current = _month_index(now.month, now.year)
+    joined = _month_index(user.date_joined.month, user.date_joined.year)
+    saved = {_month_index(m, y) for m, y in TopSaverHistory.objects.filter(user=user).values_list("month", "year")}
+    saved = {i for i in saved if joined <= i <= current}
+    longest = run = 0
+    for index in range(joined, current + 1):
+        run = run + 1 if index in saved else 0
+        longest = max(longest, run)
+    last_day = calendar.monthrange(now.year, now.month)[1]
+    return {"longest_streak": longest, "months_saved": len(saved),
+            "months_missed": sum(1 for i in range(joined, current) if i not in saved),
+            "saved_this_month": current in saved,
+            "month_ends": datetime.date(now.year, now.month, last_day).strftime("%-d %B")}
+
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def my_saving_streak(request):
-    """The Top Savers streak strip: this saver's own summary + months."""
-    return Response({**saving_summaries([request.user.pk])[request.user.pk], "months": saving_calendar(request.user)})
+    """The Top Savers streak strip: this saver's own summary + months, and
+    the numbers for the summary sheet that opens when they tap it."""
+    user = request.user
+    return Response({**saving_summaries([user.pk])[user.pk], **saving_stats(user), "months": saving_calendar(user)})
