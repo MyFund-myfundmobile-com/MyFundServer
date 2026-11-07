@@ -261,3 +261,58 @@ class FoyaDailyPushTest(TestCase):
         # Older than 48h -> falls back.
         FoyaPosition.objects.filter(pk=p.pk).update(updated_at=now - timedelta(hours=49))
         self.assertIn("Vote for Founder of the Year.", daily_push_copy(self.c, now)[2])
+
+
+class FoyaAnnouncementTest(TestCase):
+    """Between rounds: a 'Top 3' news line instead of the vote banner."""
+
+    def setUp(self):
+        self.c = campaign(announcement_enabled=True, announcement_title="MyFund made the FOYA Top 3! 🎉",
+                          announcement_body="Thank you, MyFund Family.")
+        self.after = datetime(2026, 11, 7, 12, 0, tzinfo=WAT)
+
+    def test_shown_after_the_vote_closes_but_not_during_it(self):
+        data = today_payload(self.after)
+        self.assertFalse(data["active"])  # older apps keep the banner hidden
+        self.assertEqual(data["announcement"]["title"], "MyFund made the FOYA Top 3! 🎉")
+        self.assertEqual(data["announcement"]["url"], "")
+        live = today_payload(MON_NOON)
+        self.assertTrue(live["active"])
+        self.assertNotIn("announcement", live)
+
+    def test_off_when_disabled_or_campaign_switched_off(self):
+        self.c.announcement_enabled = False
+        self.c.save()
+        self.assertIsNone(today_payload(self.after)["announcement"])
+        self.c.announcement_enabled, self.c.is_active = True, False
+        self.c.save()
+        self.assertIsNone(today_payload(self.after)["announcement"])
+
+    def test_key_changes_when_the_copy_changes(self):
+        first = today_payload(self.after)["announcement"]["key"]
+        self.assertEqual(today_payload(self.after)["announcement"]["key"], first)
+        self.c.announcement_body = "Africa round voting opens soon."
+        self.c.save()
+        self.assertNotEqual(today_payload(self.after)["announcement"]["key"], first)
+
+    def test_staff_can_edit_it_members_cannot(self):
+        staff = CustomUser.objects.create_user(email="staff.news@example.com", password="x", first_name="S", last_name="N", phone_number="08039000001", is_staff=True)
+        member = CustomUser.objects.create_user(email="member.news@example.com", password="x", first_name="M", last_name="N", phone_number="08039000002")
+        client = APIClient()
+        client.force_authenticate(staff)
+        res = client.patch("/api/admin/foya/", {"announcement": {
+            "enabled": True, "title": "  Top 3!  ", "body": "Thanks.", "url": "https://foyaglobal.com/results"}}, format="json")
+        self.assertEqual(res.status_code, 200, res.data)
+        self.c.refresh_from_db()
+        self.assertEqual((self.c.announcement_title, self.c.announcement_url), ("Top 3!", "https://foyaglobal.com/results"))
+        self.assertEqual(res.data["announcement"]["title"], "Top 3!")
+        for bad in ({"url": "javascript:alert(1)"}, {"title": "x" * 81}, {"enabled": "yes"}, {"enabled": True, "title": ""}):
+            self.assertEqual(client.patch("/api/admin/foya/", {"announcement": bad}, format="json").status_code, 400, bad)
+        self.c.refresh_from_db()
+        self.assertEqual(self.c.announcement_title, "Top 3!")  # rejected edits weren't saved
+        client.force_authenticate(member)
+        self.assertEqual(client.patch("/api/admin/foya/", {"announcement": {"enabled": False}}, format="json").status_code, 403)
+
+    def test_news_events_are_accepted(self):
+        res = APIClient().post("/api/foya-campaign/event/", {"event": "news_dismiss", "source": "banner"}, format="json")
+        self.assertEqual(res.status_code, 201)

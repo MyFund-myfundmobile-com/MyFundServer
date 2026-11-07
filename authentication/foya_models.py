@@ -42,6 +42,18 @@ class FoyaCampaign(models.Model):
         default="MyFund has been nominated for the FOYA Global Awards 2026. {standing} {days_left}. Tap to vote for today.",
         help_text="Placeholders: {standing} (\"Now 2nd of 9 for <category>.\" or \"Vote for <category>.\"), {label}, {position}, {field}, {days_left}.",
     )
+    # Between voting rounds: a news line on the Home banner (e.g. "We made
+    # the Top 3") with no countdown or vote button. Shown only while no vote
+    # is live. Closing it hides it for good on that device; editing the
+    # title or text shows it again as new news.
+    announcement_enabled = models.BooleanField(
+        default=False, help_text="Show the announcement on the Home banner while no vote is live.")
+    announcement_title = models.CharField(max_length=80, default="MyFund made the FOYA Top 3! 🎉")
+    announcement_body = models.CharField(
+        max_length=240,
+        default="Thank you, MyFund Family, for every vote. The next round is coming soon.",
+    )
+    announcement_url = models.URLField(blank=True, help_text="Optional: tapping the banner opens this link.")
 
     class Meta:
         verbose_name = "FOYA campaign"
@@ -141,7 +153,8 @@ class FoyaDailyPush(models.Model):
 
 
 class FoyaEvent(models.Model):
-    EVENTS = [(e, e) for e in ("banner_view", "banner_tap", "push_open", "signup_tap", "login_tap", "vote_tap", "dismiss")]
+    EVENTS = [(e, e) for e in ("banner_view", "banner_tap", "push_open", "signup_tap", "login_tap", "vote_tap", "dismiss",
+                                   "news_view", "news_tap", "news_dismiss")]
     SOURCES = [("banner", "Banner"), ("push", "Push")]
     user = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL)
     event = models.CharField(max_length=20, choices=EVENTS, db_index=True)

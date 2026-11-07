@@ -1,8 +1,11 @@
 """FOYA voting campaign: today's category for the Home banner, tap/view
 logging, and the (max 3) campaign pushes - see foya_models.py."""
+import hashlib
 import logging
 import time
 
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.validators import URLValidator
 from django.db import transaction
 from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes, throttle_classes
@@ -48,12 +51,27 @@ def banner_position(campaign, category_key, now=None):
             "is_tied": latest.is_tied, "updated_at": latest.updated_at}
 
 
+def announcement_payload(campaign):
+    """The between-rounds news line, or None. `key` changes whenever the
+    title/text/link change, so an edited announcement shows again on devices
+    that closed the old one."""
+    if not campaign or not campaign.announcement_enabled or not campaign.announcement_title.strip():
+        return None
+    copy = (campaign.announcement_title, campaign.announcement_body, campaign.announcement_url)
+    digest = hashlib.sha1("\n".join(copy).encode()).hexdigest()[:10]
+    return {"key": f"{campaign.id}-{digest}", "title": copy[0], "body": copy[1], "url": copy[2]}
+
+
 def today_payload(now=None):
     now = now or timezone.now()
     campaign = live_campaign(now)
     category = campaign.category_for(now) if campaign else None
     if not category:
-        return {"active": False}
+        # No vote today. `active` stays False so app versions that predate
+        # the announcement keep hiding the banner; newer ones read
+        # `announcement`.
+        latest = FoyaCampaign.objects.filter(is_active=True).order_by("-start_at").first()
+        return {"active": False, "announcement": announcement_payload(latest)}
     return {
         "active": True,
         # banner_body: the banner's line for this category (editable in the
@@ -250,6 +268,11 @@ def admin_state(campaign):
             "recent": [{"date": d.date, "category_key": d.category_key, "title": d.title, "recipients_count": d.recipients_count}
                        for d in campaign.daily_pushes.all()[:7]],
         },
+        "announcement": {
+            "enabled": campaign.announcement_enabled, "title": campaign.announcement_title,
+            "body": campaign.announcement_body, "url": campaign.announcement_url,
+            "showing": campaign.announcement_enabled and today_payload().get("announcement") is not None,
+        },
         "pushes": [{"slot": p.slot, "label": p.get_slot_display(), "title": p.title, "send_at": p.send_at,
                     "status": p.status, "sent_at": p.sent_at, "recipients_count": p.recipients_count}
                    for p in campaign.pushes.order_by("id")],
@@ -263,12 +286,52 @@ def foya_admin(request):
     if not campaign:
         return Response({"error": "No FOYA campaign."}, status=404)
     if request.method == "PATCH":
-        if not isinstance(request.data.get("show_position"), bool):
-            return Response({"error": "show_position must be true or false."}, status=400)
-        campaign.show_position = request.data["show_position"]
-        campaign.save(update_fields=["show_position"])
-        logger.info("FOYA show_position set to %s by %s", campaign.show_position, request.user.email)
+        data = request.data
+        if "show_position" not in data and "announcement" not in data:
+            return Response({"error": "Nothing to update."}, status=400)
+        fields = []
+        if "show_position" in data:
+            if not isinstance(data["show_position"], bool):
+                return Response({"error": "show_position must be true or false."}, status=400)
+            campaign.show_position = data["show_position"]
+            fields.append("show_position")
+        if "announcement" in data:
+            error = _apply_announcement(campaign, data["announcement"], fields)
+            if error:
+                return Response({"error": error}, status=400)
+        campaign.save(update_fields=fields)
+        logger.info("FOYA admin updated %s by %s", ", ".join(fields), request.user.email)
     return Response(admin_state(campaign))
+
+
+def _apply_announcement(campaign, data, fields):
+    """Copy the announcement edits onto the campaign; returns an error or None."""
+    if not isinstance(data, dict):
+        return "announcement must be an object."
+    if "enabled" in data:
+        if not isinstance(data["enabled"], bool):
+            return "enabled must be true or false."
+        campaign.announcement_enabled = data["enabled"]
+        fields.append("announcement_enabled")
+    for key, limit in (("title", 80), ("body", 240), ("url", 200)):
+        if key not in data:
+            continue
+        value = data[key]
+        if not isinstance(value, str):
+            return f"{key} must be text."
+        value = value.strip()
+        if len(value) > limit:
+            return f"{key.capitalize()} must be {limit} characters or fewer."
+        if key == "url" and value:
+            try:
+                URLValidator(schemes=["https"])(value)
+            except DjangoValidationError:
+                return "Link must be a full https:// address."
+        setattr(campaign, f"announcement_{key}", value)
+        fields.append(f"announcement_{key}")
+    if campaign.announcement_enabled and not campaign.announcement_title:
+        return "Add a title before switching the announcement on."
+    return None
 
 
 @api_view(["POST"])
