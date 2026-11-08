@@ -14477,8 +14477,14 @@ class TopReferralsAPIView(APIView):
         confirmed_filter = Q(referral_reward_confirmed_at__gte=start_of_month,
                              referral_reward_confirmed_at__lt=end, referral_reward_granted=True)
         ambassador_view = user.is_ambassador and not user.is_influencer
+        referral_users = CustomUser.objects.filter(referral__isnull=False)
+        if ambassador_view:
+            # Match the programme's point rule: referrals made before a
+            # member joined their ambassador cohort do not count.
+            from .models import _referred_since_ambassador
+            referral_users = referral_users.filter(_referred_since_ambassador())
         ref_stats = (
-            CustomUser.objects.filter(referral__isnull=False)
+            referral_users
             .filter(signup_filter | confirmed_filter)
             .values("referral")
             .annotate(monthly_signups=Count("id", filter=signup_filter),
@@ -14515,10 +14521,39 @@ class TopReferralsAPIView(APIView):
                     "monthly_attendance": AmbassadorAttendanceSubmission.objects.filter(user=ref_user, month__in=months).count(),
                     "is_influencer": ref_user.is_influencer,
                     "is_ambassador": getattr(ref_user, "is_ambassador", False),
+                    "points": "0.00",
                 }
             )
 
-        top_users.sort(key=lambda x: (-x["monthly_confirmed"], -x["monthly_signups"]))
+        # Ambassadors compete on the programme's point rules, not merely on
+        # raw signups. Keep this exactly aligned with the performance report
+        # and the mobile-admin ambassador list.
+        point_scores = {}
+        if ambassador_view:
+            candidates = {
+                row["id"]: ref_users[row["id"]]
+                for row in top_users
+                if row["id"] in ref_users
+            }
+            candidates[user.id] = user
+            config = AmbassadorPointConfig.get_active()
+            scores = _cohort_points_batch(list(candidates.values()), months, config)
+            point_scores = {
+                member_id: sum(scores[member_id].values(), Decimal("0.00"))
+                for member_id in candidates
+            }
+            for row in top_users:
+                row["points"] = str(point_scores.get(row["id"], Decimal("0.00")))
+            top_users.sort(
+                key=lambda row: (
+                    -point_scores.get(row["id"], Decimal("0.00")),
+                    -row["monthly_confirmed"],
+                    -row["monthly_signups"],
+                    row["email"].lower(),
+                )
+            )
+        else:
+            top_users.sort(key=lambda x: (-x["monthly_confirmed"], -x["monthly_signups"]))
 
         # Reading a filtered leaderboard must not mutate a global rank or send
         # milestone alerts. Cohort and overall ranks are different, and the
@@ -14526,6 +14561,8 @@ class TopReferralsAPIView(APIView):
         # Notifications require separately tracked, scoped ranking snapshots.
 
         referrals = CustomUser.objects.filter(referral=user)
+        if ambassador_view:
+            referrals = referrals.filter(_referred_since_ambassador())
         my_signups = referrals.filter(signup_filter)
         my_confirmed = referrals.filter(confirmed_filter)
 
@@ -14541,6 +14578,7 @@ class TopReferralsAPIView(APIView):
             "monthly_confirmed": my_confirmed.count(),
             "monthly_attendance": AmbassadorAttendanceSubmission.objects.filter(user=user, month__in=months).count(),
             "is_ambassador": getattr(user, "is_ambassador", False),
+            "points": str(point_scores.get(user.id, Decimal("0.00"))),
             "rank": next(
                 (
                     i + 1
@@ -14869,19 +14907,35 @@ class AmbassadorPerformanceReportView(APIView):
             return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
         if cohort_start_key:
             month_keys = [k for k in month_keys if k >= cohort_start_key]
+
+        # The headline on the default report is deliberately only the live
+        # current month.  The table beneath it, however, is most useful when
+        # an ambassador can compare that month with the rest of their current
+        # cohort.  Keep `months` and its totals scoped to the selected chip,
+        # and return this additional comparison series for the default view.
+        comparison_month_keys = []
+        if period == "this_month" and cohort:
+            comparison_month_keys = performance_months(
+                "all_time", cohort.start_date or earliest
+            )
+            if cohort_start_key:
+                comparison_month_keys = [
+                    key for key in comparison_month_keys if key >= cohort_start_key
+                ]
+        row_month_keys = sorted(set(month_keys + comparison_month_keys))
         config = AmbassadorPointConfig.get_active()
 
         reports = {
             r.month: r
             for r in AmbassadorMonthlyReport.objects.filter(
-                user=user, month__in=month_keys
+                user=user, month__in=row_month_keys
             )
         }
 
-        months = []
+        all_rows = []
         total_points = Decimal("0.00")
         best = None
-        for key in month_keys:
+        for key in row_month_keys:
             r = reports.get(key)
             live = None
             if not r and not user.is_influencer:
@@ -14915,12 +14969,19 @@ class AmbassadorPerformanceReportView(APIView):
                     user=user, description="Referral Reward", status="confirmed",
                     referral_email__in=confirmed.values("email"),
                 ).aggregate(total=Sum("amount"))["total"] or Decimal("0"))
-            months.append(row)
-            total_points += pts
+            all_rows.append(row)
+            if key in month_keys:
+                total_points += pts
             score = Decimal(row["earned"]) if user.is_influencer else pts
             best_score = Decimal(best["earned"] if user.is_influencer else best["points"]) if best else None
             if (user.is_influencer or r or live) and (best_score is None or score > best_score):
                 best = row
+
+        # `months` remains the range selected by the period chips; this
+        # protects its total from being mistaken for an all-time total.  Only
+        # this-month ambassadors get the extra cross-month comparison table.
+        months = [row for row in all_rows if row["month"] in month_keys]
+        comparison_months = all_rows if comparison_month_keys else []
 
         # Lifetime standing - ALL of this user's reports ever (not just
         # the selected window above), ranked against every other ambassador
@@ -15037,6 +15098,7 @@ class AmbassadorPerformanceReportView(APIView):
             "total_earned": str(sum(Decimal(row.get("earned", "0")) for row in months)),
             "cohort": cohort_data,
             "months": months,
+            "comparison_months": comparison_months,
             "total_points": str(total_points),
             "best_month": best["month_label"] if best else None,
             "rank": rank_data,

@@ -25,6 +25,10 @@ from .models import (
     Employee,
     CxWeeklyReport,
     AmbassadorCohort,
+    AmbassadorMonthlyReport,
+    AmbassadorPointConfig,
+    confirmed_referral_counts,
+    _referred_since_ambassador,
 )
 from .serializers import (
     UserSerializer,
@@ -2021,9 +2025,13 @@ def admin_top_performers(request):
     limit = min(max(limit, 1), 100)
 
     cache_key = f"multipliers:v2:top-performers:{category}:{range_key}:{limit}"
-    cached_data = cache.get(cache_key)
-    if cached_data:
-        return Response(cached_data)
+    # Ambassador progress is used for live follow-up by the admin team. Do
+    # not let a 15-minute cached response hide a signup that is already on
+    # the ambassador leaderboard.
+    if category != "ambassadors":
+        cached_data = cache.get(cache_key)
+        if cached_data:
+            return Response(cached_data)
 
     now = timezone.now()
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -2087,15 +2095,94 @@ def admin_top_performers(request):
             cache.set(cache_key, response_data, 900)
             return Response(response_data)
 
+        if category == "ambassadors":
+            # Use the same month-by-month point engine as the ambassador's
+            # own performance report. An approved monthly report is the
+            # source of truth; otherwise the live signup, confirmation,
+            # first-deposit and attendance estimate is used.
+            from .views import _cohort_points_batch
+
+            members = list(
+                CustomUser.objects.filter(
+                    is_deleted=False, is_ambassador=True,
+                ).order_by("id")
+            )
+            ids = [member.id for member in members]
+            if not members:
+                return Response({"category": category, "range": range_key, "leaderboard": [], "total_people": 0})
+
+            month_start = today_start.replace(day=1)
+            if range_key == "last_month":
+                month_starts = [month_start - relativedelta(months=1)]
+            elif range_key == "month":
+                month_starts = [month_start]
+            elif range_key == "all":
+                first = min(member.date_joined.replace(day=1, hour=0, minute=0, second=0, microsecond=0) for member in members)
+                month_starts = []
+                cursor = first
+                while cursor <= month_start:
+                    month_starts.append(cursor)
+                    cursor += relativedelta(months=1)
+            else:
+                count = {"3months": 3, "6months": 6, "1year": 12}[range_key]
+                month_starts = [month_start - relativedelta(months=offset) for offset in range(count - 1, -1, -1)]
+
+            month_keys = [item.strftime("%Y-%m") for item in month_starts]
+            config = AmbassadorPointConfig.get_active()
+            scores = _cohort_points_batch(members, month_keys, config)
+            reports = {
+                (report.user_id, report.month): report
+                for report in AmbassadorMonthlyReport.objects.filter(user_id__in=ids, month__in=month_keys)
+            }
+            signup_counts, confirmation_counts = {}, {}
+            for key, key_start in zip(month_keys, month_starts):
+                key_end = key_start + relativedelta(months=1)
+                signup_counts[key] = dict(
+                    CustomUser.objects.filter(
+                        referral_id__in=ids,
+                        date_joined__gte=key_start,
+                        date_joined__lt=key_end,
+                    ).filter(_referred_since_ambassador()).values("referral_id")
+                    .annotate(total=Count("id")).values_list("referral_id", "total")
+                )
+                confirmation_counts[key] = confirmed_referral_counts(ids, key)
+
+            leaderboard = []
+            for member in members:
+                signups = confirmed = 0
+                points = Decimal("0.00")
+                for key in month_keys:
+                    report = reports.get((member.id, key))
+                    signups += report.signups_approved if report else signup_counts[key].get(member.id, 0)
+                    confirmed += report.confirmed_approved if report else confirmation_counts[key].get(member.id, 0)
+                    points += scores[member.id][key]
+                leaderboard.append({
+                    "user_id": member.id,
+                    "first_name": member.first_name,
+                    "last_name": member.last_name,
+                    "email": member.email,
+                    "profile_picture": member.profile_picture or "",
+                    "is_ambassador": True,
+                    "signups": signups,
+                    "confirmed": confirmed,
+                    "points": str(points.quantize(Decimal("0.01"))),
+                })
+
+            leaderboard.sort(key=lambda row: (-Decimal(row["points"]), -row["confirmed"], -row["signups"], row["email"].lower()))
+            return Response({
+                "category": category,
+                "range": range_key,
+                "leaderboard": leaderboard[:limit],
+                "total_people": len(leaderboard),
+            })
+
         referred_qs = CustomUser.objects.filter(is_deleted=False, referral__isnull=False)
         if start is not None:
             referred_qs = referred_qs.filter(date_joined__gte=start)
         if end is not None:
             referred_qs = referred_qs.filter(date_joined__lt=end)
 
-        if category == "ambassadors":
-            referred_qs = referred_qs.filter(referral__is_ambassador=True)
-        elif category == "influencers":
+        if category == "influencers":
             referred_qs = referred_qs.filter(referral__is_influencer=True)
 
         confirmed_filter = Q(referral_reward_granted=True)

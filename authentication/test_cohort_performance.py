@@ -50,6 +50,29 @@ class CohortPerformanceTest(TestCase):
         self.assertIsNone(data["certificate"])
         self.assertTrue(all(m["month"] >= self.this_key for m in data["months"]))
 
+    def test_default_breakdown_includes_prior_current_cohort_months(self):
+        """The default headline is current-month only, but its table compares months."""
+        previous = self.cohort.start_date - timedelta(days=1)
+        self.cohort.start_date = previous.replace(day=1)
+        self.cohort.save(update_fields=["start_date"])
+        previous_key = previous.strftime("%Y-%m")
+        AmbassadorMonthlyReport.objects.create(
+            user=self.me, month=previous_key, total_points_awarded=Decimal("7.00")
+        )
+
+        client = APIClient()
+        client.force_authenticate(self.me)
+        data = client.get("/api/ambassador/performance-report/").data
+
+        # The period total/data remains the live current month.
+        self.assertEqual([row["month"] for row in data["months"]], [self.this_key])
+        self.assertEqual(Decimal(data["total_points"]), Decimal("11.00"))
+        # The comparison series gives the UI both months by default.
+        self.assertEqual(
+            [row["month"] for row in data["comparison_months"]],
+            [previous_key, self.this_key],
+        )
+
     def test_batch_ranking_matches_existing_scores_with_fixed_query_count(self):
         from .models import AmbassadorPointConfig
         from .views import _cohort_points_batch, _cohort_month_points
