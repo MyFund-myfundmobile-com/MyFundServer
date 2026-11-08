@@ -7,7 +7,7 @@ from django.urls import path, include
 from .request_views import requests_list, request_action, ambassador_export_link, ambassador_export, remind_application_drafts
 from .active_saver_views import active_saver_interview, active_saver_mine, active_saver_request, active_saver_upload, my_saving_streak, saver_story_link, saver_story_prompt
 from .top_saver_views import top_saver_interview, top_saver_video, top_saver_claim, top_saver_claim_start, top_saver_stories
-from .statement_views import download_savings_statement, verify_savings_statement
+from .statement_views import download_savings_statement, preview_savings_statement, verify_savings_statement
 from .foya import foya_today, foya_event, foya_admin, foya_admin_positions
 from . import views
 from django.conf import settings
@@ -125,6 +125,7 @@ urlpatterns = [
     path("saver-story/link/", saver_story_link, name="saver_story_link"),
     path("saving-streak/", my_saving_streak, name="my_saving_streak"),
     path("savings-statement/", download_savings_statement, name="download_savings_statement"),
+    path("savings-statement/preview/", preview_savings_statement, name="preview_savings_statement"),
     path("savings-statement/verify/<str:code>/", verify_savings_statement, name="verify_savings_statement"),
     path("admin/requests/", requests_list, name="admin_requests"),
     path("admin/requests/ambassador/export-link/", ambassador_export_link, name="admin_ambassador_export_link"),

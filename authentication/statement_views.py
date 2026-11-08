@@ -6,12 +6,16 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle, UserRateThrottle
 
-from .savings_statement import ALLOWED_MONTHS, issue_statement, public_summary, render_pdf
+from .savings_statement import ALLOWED_MONTHS, build_statement, issue_statement, public_summary, render_pdf
 from .statement_models import SavingsStatement
 
 
 class StatementIssueThrottle(UserRateThrottle):
     rate = "20/hour"
+
+
+class StatementPreviewThrottle(UserRateThrottle):
+    rate = "120/hour"
 
 
 class StatementVerifyThrottle(AnonRateThrottle):
@@ -35,6 +39,29 @@ def download_savings_statement(request):
     response = HttpResponse(pdf, content_type="application/pdf")
     response["Content-Disposition"] = f'attachment; filename="MyFund-Statement-{statement.code}.pdf"'
     return response
+
+
+def _months(request):
+    try:
+        months = int(request.GET.get("months", 6))
+    except ValueError:
+        return None
+    return months if months in ALLOWED_MONTHS else None
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+@throttle_classes([StatementPreviewThrottle])
+def preview_savings_statement(request):
+    """GET /api/savings-statement/preview/?months=3|6|12 -> what the PDF
+    will say, for the in-app preview. Issues nothing: no code, no record."""
+    months = _months(request)
+    if not months:
+        return Response({"error": "months must be 3, 6 or 12"}, status=400)
+    data = build_statement(request.user, months)
+    keep = ("name", "period_label", "months", "member_since", "kyc_verified", "balances", "totals", "record",
+            "stage", "tenure", "top_saver_times", "discipline", "highlights", "monthly")
+    return Response({**{k: data[k] for k in keep}, "transaction_count": len(data["transactions"])})
 
 
 @api_view(["GET"])

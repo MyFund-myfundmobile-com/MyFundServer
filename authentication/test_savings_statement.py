@@ -127,3 +127,17 @@ class DisciplineAndStoryTest(TestCase):
         self.assertTrue(data["highlights"][0].startswith("In "))
         self.assertIn("Tolu has built NGN 5,622,699 with MyFund and earned NGN 963,998 in dividends.",
                       data["highlights"][0])
+
+
+class PreviewTest(TestCase):
+    def test_preview_issues_nothing(self):
+        user = CustomUser.objects.create_user(email="p@example.com", phone_number="08000000003", password="x")
+        client = APIClient()
+        client.force_authenticate(user)
+        res = client.get("/api/savings-statement/preview/?months=12")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data["months"], 12)
+        self.assertIn("discipline", res.data)
+        self.assertEqual(len(res.data["monthly"]), 12)
+        self.assertFalse(SavingsStatement.objects.exists())
+        self.assertEqual(client.get("/api/savings-statement/preview/?months=7").status_code, 400)
