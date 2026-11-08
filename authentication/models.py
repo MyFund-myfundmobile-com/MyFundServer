@@ -4624,3 +4624,4 @@ class AmbassadorPerformanceNotificationState(models.Model):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["user", "cohort"], name="unique_ambassador_notification_scope")]
+from .statement_models import SavingsStatement  # noqa: E402,F401
