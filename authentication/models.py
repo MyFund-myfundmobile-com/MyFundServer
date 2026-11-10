@@ -2903,6 +2903,10 @@ class MetricSnapshot(models.Model):
 class AutoSave(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     card = models.ForeignKey(Card, on_delete=models.CASCADE, null=True, blank=True)
+    # Set instead of card when saving from a bank account (Direct Debit).
+    mandate = models.ForeignKey(
+        "authentication.BankMandate", on_delete=models.SET_NULL, null=True, blank=True
+    )
     amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     frequency = models.CharField(
         max_length=10,
@@ -4625,3 +4629,4 @@ class AmbassadorPerformanceNotificationState(models.Model):
     class Meta:
         constraints = [models.UniqueConstraint(fields=["user", "cohort"], name="unique_ambassador_notification_scope")]
 from .statement_models import SavingsStatement  # noqa: E402,F401
+from .direct_debit_models import BankMandate  # noqa: E402,F401

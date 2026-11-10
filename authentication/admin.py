@@ -4228,3 +4228,22 @@ class InfluencerApplicationAdmin(admin.ModelAdmin):
 from . import ambassador_application_admin
 from . import foya_admin
 from . import book_admin
+
+
+from .direct_debit_models import BankMandate  # noqa: E402
+
+
+@admin.register(BankMandate)
+class BankMandateAdmin(admin.ModelAdmin):
+    """Bank accounts linked for card-free AutoSave (Paystack Direct Debit)."""
+    list_display = ("id", "user", "bank_name", "account_last4", "status",
+                    "pending_amount", "pending_frequency", "created_at", "activated_at")
+    list_filter = ("status", "bank_name")
+    search_fields = ("user__email", "reference", "authorization_code", "account_number")
+    readonly_fields = ("reference", "paystack_mandate_id", "authorization_code",
+                       "created_at", "updated_at", "activated_at")
+    raw_id_fields = ("user", "bank_account")
+
+    @admin.display(description="Account")
+    def account_last4(self, obj):
+        return f"•••• {obj.account_number[-4:]}"

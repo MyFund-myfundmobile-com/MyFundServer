@@ -8,6 +8,7 @@ from .request_views import requests_list, request_action, ambassador_export_link
 from .active_saver_views import active_saver_interview, active_saver_mine, active_saver_request, active_saver_upload, my_saving_streak, saver_story_link, saver_story_prompt
 from .top_saver_views import top_saver_interview, top_saver_video, top_saver_claim, top_saver_claim_start, top_saver_stories
 from .statement_views import download_savings_statement, preview_savings_statement, verify_savings_statement
+from .direct_debit import direct_debit_overview, direct_debit_autosave, direct_debit_mandate_status, direct_debit_cancel_mandate
 from .foya import foya_today, foya_event, foya_admin, foya_admin_positions
 from . import views
 from django.conf import settings
@@ -258,6 +259,11 @@ urlpatterns = [
         "activate-autosave/", views.autosave, name="autosave"
     ),  # Make sure to use the correct view function
     path("deactivate-autosave/", views.deactivate_autosave, name="deactivate_autosave"),
+    # AutoSave from a bank account, no card (Paystack Direct Debit)
+    path("direct-debit/", direct_debit_overview, name="direct_debit_overview"),
+    path("direct-debit/autosave/", direct_debit_autosave, name="direct_debit_autosave"),
+    path("direct-debit/mandates/<int:mandate_id>/", direct_debit_mandate_status, name="direct_debit_mandate_status"),
+    path("direct-debit/mandates/<int:mandate_id>/cancel/", direct_debit_cancel_mandate, name="direct_debit_cancel_mandate"),
     path(
         "get-autosave-settings/", views.get_autosave_status, name="get_autosave_status"
     ),

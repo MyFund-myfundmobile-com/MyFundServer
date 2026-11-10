@@ -4713,8 +4713,13 @@ def deactivate_autosave_for_user(user, frequency):
         user.save(update_fields=["autosave_enabled"])
         return "no_active"
 
-    first = active_autosaves.select_related("card").first()
-    card_text = f" on your {_card_label(first.card)}" if first.card_id else ""
+    first = active_autosaves.select_related("card", "mandate").first()
+    if first.card_id:
+        card_text = f" on your {_card_label(first.card)}"
+    elif first.mandate_id:
+        card_text = f" from your {first.mandate.label}"
+    else:
+        card_text = ""
     frequency = (frequency or first.frequency or "").lower()
 
     headers = {
@@ -4833,6 +4838,9 @@ def get_autosave_status(request):
             "active": autosave_enabled,
             "amount": autosave.amount,
             "frequency": autosave.frequency,
+            # "bank" when it debits a linked bank account (Direct Debit).
+            "payment_method": "bank" if autosave.mandate_id else "card",
+            "payment_label": autosave.mandate.label if autosave.mandate_id else _card_label(autosave.card),
         }
 
         # Fetch subscription status from Paystack
@@ -9673,8 +9681,17 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
                 saved_card = None
+                is_direct_debit = payment_channel == "direct_debit"
 
-                if user and authorization:
+                # Bank-account AutoSave (Direct Debit): the authorization is a
+                # mandate, not a card - never save it as one. Only plan
+                # (subscription) debits are expected on it; anything else,
+                # e.g. an activation check, must not be credited as savings.
+                if is_direct_debit and not plan_code:
+                    logger.warning("Direct Debit charge %s without a plan - not credited", reference)
+                    return
+
+                if user and authorization and not is_direct_debit:
                     try:
                         print("========== CARD SAVE DEBUG ==========")
                         print("email:", email)
@@ -9781,10 +9798,13 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                             )
                             transaction.paystack_auth_code = paystack_auth_code
                             transaction.paystack_reference = reference
+                            # "direct_debit" for bank-account AutoSave.
+                            transaction.source_channel = payment_channel
                             transaction.save(
                                 update_fields=[
                                     "paystack_auth_code",
                                     "paystack_reference",
+                                    "source_channel",
                                 ]
                             )
                         else:
@@ -10238,6 +10258,11 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                         user.save()
 
                 print(f"transaction after update: {transaction}")
+                return
+
+            case "direct_debit.authorization.created" | "direct_debit.authorization.active":
+                from .direct_debit import handle_mandate_webhook
+                handle_mandate_webhook(event)
                 return
 
             case "invoice.create":
