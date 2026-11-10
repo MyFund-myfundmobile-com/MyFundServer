@@ -8,6 +8,7 @@ from .request_views import requests_list, request_action, ambassador_export_link
 from .active_saver_views import active_saver_interview, active_saver_mine, active_saver_request, active_saver_upload, my_saving_streak, saver_story_link, saver_story_prompt
 from .top_saver_views import top_saver_interview, top_saver_video, top_saver_claim, top_saver_claim_start, top_saver_stories
 from .statement_views import download_savings_statement, preview_savings_statement, verify_savings_statement
+from .exec_interest import submit_exec_interest
 from .direct_debit import direct_debit_overview, direct_debit_autosave, direct_debit_mandate_status, direct_debit_cancel_mandate
 from .foya import foya_today, foya_event, foya_admin, foya_admin_positions
 from . import views
@@ -613,6 +614,7 @@ urlpatterns = [
         AmbassadorCertificateDismissView.as_view(),
         name="ambassador-certificate-dismiss",
     ),
+    path("ambassador-exec/interest/", submit_exec_interest, name="submit_exec_interest"),
     path(
         "attendance/submit/",
         submit_ambassador_attendance,

@@ -194,6 +194,44 @@ def start_autosave_on_mandate(mandate, amount, frequency):
     return autosave
 
 
+VERIFICATION_AMOUNT = 100
+
+
+def start_bank_verification(mandate):
+    """Debits N100 through the new mandate and puts it in savings - the bank
+    version of the card AutoSave's N100 check: proves debits from this
+    account really work, and the user sees their first saving at once.
+    The pending QuickSave is credited by the charge.success webhook (it
+    isn't instant for bank debits). Failure doesn't block AutoSave."""
+    from .models import Transaction
+
+    user = mandate.user
+    reference = f"MFDDV-{uuid.uuid4().hex[:16]}"
+    tx = Transaction.objects.create(
+        user=user, amount=VERIFICATION_AMOUNT, transaction_type="credit", status="pending",
+        credited_to="SAVINGS", description="QuickSave (Bank verification)",
+        transaction_id=reference, source_channel="direct_debit",
+    )
+    try:
+        res = requests.post(f"{PAYSTACK}/transaction/charge_authorization", json={
+            "authorization_code": mandate.authorization_code,
+            "email": user.email,
+            "amount": VERIFICATION_AMOUNT * 100,
+            "currency": "NGN",
+            "reference": reference,
+            "metadata": {"purpose": "direct_debit_verification", "mandate_id": mandate.id},
+        }, headers=_headers(), timeout=30)
+        body = res.json() if res.content else {}
+        if not res.ok or not body.get("status"):
+            raise ValueError(body.get("message") or res.status_code)
+    except (requests.RequestException, ValueError) as exc:
+        logger.warning("Bank verification debit for mandate %s failed: %s", mandate.pk, exc)
+        tx.status = "failed"
+        tx.save(update_fields=["status"])
+        return None
+    return tx
+
+
 def mark_mandate_active(mandate, authorization_code=""):
     """Idempotent. Activates the mandate and starts the AutoSave the user
     asked for when they set it up."""
@@ -208,6 +246,7 @@ def mark_mandate_active(mandate, authorization_code=""):
         mandate.save(update_fields=["authorization_code", "status", "activated_at", "updated_at"])
 
     user = mandate.user
+    start_bank_verification(mandate)
     if mandate.pending_amount and mandate.pending_frequency:
         try:
             start_autosave_on_mandate(mandate, mandate.pending_amount, mandate.pending_frequency)

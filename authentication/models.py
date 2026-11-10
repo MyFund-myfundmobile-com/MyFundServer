@@ -4630,3 +4630,4 @@ class AmbassadorPerformanceNotificationState(models.Model):
         constraints = [models.UniqueConstraint(fields=["user", "cohort"], name="unique_ambassador_notification_scope")]
 from .statement_models import SavingsStatement  # noqa: E402,F401
 from .direct_debit_models import BankMandate  # noqa: E402,F401
+from .exec_interest_models import ExecutiveInterest  # noqa: E402,F401

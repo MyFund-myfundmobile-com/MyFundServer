@@ -4247,3 +4247,25 @@ class BankMandateAdmin(admin.ModelAdmin):
     @admin.display(description="Account")
     def account_last4(self, obj):
         return f"•••• {obj.account_number[-4:]}"
+
+
+from django.utils.html import format_html  # noqa: E402
+from .exec_interest_models import ExecutiveInterest  # noqa: E402
+
+
+@admin.register(ExecutiveInterest)
+class ExecutiveInterestAdmin(admin.ModelAdmin):
+    """Ambassadors standing for cohort executive roles (web app /lead)."""
+    list_display = ("photo", "user", "role", "cohort", "updated_at")
+    list_filter = ("role", "cohort")
+    search_fields = ("user__email", "user__first_name", "user__last_name")
+    raw_id_fields = ("user",)
+    readonly_fields = ("photo_large", "created_at", "updated_at")
+
+    @admin.display(description="")
+    def photo(self, obj):
+        return format_html('<img src="{}?tr=w-80,h-80" style="width:40px;height:40px;border-radius:50%;object-fit:cover">', obj.photo_url) if obj.photo_url else ""
+
+    @admin.display(description="Photo")
+    def photo_large(self, obj):
+        return format_html('<a href="{0}" target="_blank"><img src="{0}?tr=w-400" style="max-width:240px;border-radius:12px"></a>', obj.photo_url) if obj.photo_url else "-"

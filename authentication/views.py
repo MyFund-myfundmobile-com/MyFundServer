@@ -9685,9 +9685,14 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
 
                 # Bank-account AutoSave (Direct Debit): the authorization is a
                 # mandate, not a card - never save it as one. Only plan
-                # (subscription) debits are expected on it; anything else,
-                # e.g. an activation check, must not be credited as savings.
-                if is_direct_debit and not plan_code:
+                # (subscription) debits and our own N100 bank-verification
+                # QuickSave (a pending transaction we created first, see
+                # direct_debit.start_bank_verification) are expected on it;
+                # anything else must not be credited as savings.
+                if is_direct_debit and not plan_code and not Transaction.objects.filter(
+                    transaction_id=reference, user__email__iexact=email,
+                    description__istartswith="quicksave",
+                ).exists():
                     logger.warning("Direct Debit charge %s without a plan - not credited", reference)
                     return
 
@@ -9988,6 +9993,10 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     if saved_card:
                         transaction.description = "QuickSave (Card)"
                         transaction.paystack_auth_code = saved_card.authorization_code
+                    elif is_direct_debit:
+                        transaction.description = "QuickSave (Bank verification)"
+                        transaction.paystack_auth_code = paystack_auth_code
+                        transaction.source_channel = "direct_debit"
                     else:
                         transaction.description = "QuickSave (Transfer)"
                         transaction.paystack_auth_code = paystack_auth_code

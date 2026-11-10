@@ -41,6 +41,8 @@ def fake_post(url, json=None, **kw):
     if url.endswith("/subscription"):
         return FakeResponse({"status": True, "data": {"id": 77, "subscription_code": "SUB_x",
                                                       "email_token": "tok", "reference": "ref1"}})
+    if url.endswith("/transaction/charge_authorization"):
+        return FakeResponse({"status": True, "data": {"status": "processing", "reference": json["reference"]}})
     if url.endswith("/customer/authorization/deactivate"):
         return FakeResponse({"status": True})
     if url.endswith("/subscription/disable"):
@@ -127,6 +129,20 @@ class DirectDebitTest(TestCase):
         self.assertEqual((auto.mandate_id, auto.card_id, auto.amount, auto.frequency),
                          (m.id, None, 5000, "weekly"))
         self.assertIsNone(m.pending_amount)
+        # N100 verification debit is pending until Paystack confirms it...
+        verify = Transaction.objects.get(user=self.user, description="QuickSave (Bank verification)")
+        self.assertEqual((verify.amount, verify.status), (100, "pending"))
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.savings, 0)
+        # ...then charge.success (no plan) credits it to savings, no card saved.
+        self.webhook("charge.success", reference=verify.transaction_id, channel="direct_debit",
+                     amount=10000, customer=cust,
+                     authorization={"authorization_code": "AUTH_dd1", "channel": "direct_debit"})
+        verify.refresh_from_db()
+        self.user.refresh_from_db()
+        self.assertEqual((verify.status, verify.description), ("confirmed", "QuickSave (Bank verification)"))
+        self.assertEqual(self.user.savings, 100)
+        self.assertFalse(Card.all_objects.filter(user=self.user).exists())
         # A repeat webhook doesn't start a second one.
         self.webhook("direct_debit.authorization.active", authorization_code="AUTH_dd1", customer=cust)
         self.assertEqual(AutoSave.objects.count(), 1)
