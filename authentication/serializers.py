@@ -147,6 +147,7 @@ class UserSerializer(serializers.ModelSerializer):
             "yearly_income",
             "date_of_birth",
             "address",
+            "city",
             "mothers_maiden_name",
             "identification_type",
             "id_upload",

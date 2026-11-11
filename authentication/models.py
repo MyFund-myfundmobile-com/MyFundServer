@@ -323,6 +323,9 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     )
     date_of_birth = models.DateField(default=date(1900, 1, 1))
     address = models.TextField(default="Enter Address")
+    # Town/city of residence (KYC). Banks need it for Direct Debit mandates;
+    # older users only have it inside `address` - see address_utils.guess_city.
+    city = models.CharField(max_length=100, blank=True, default="")
     mothers_maiden_name = models.CharField(max_length=100, default="Enter Name")
     identification_type = models.CharField(
         max_length=50,

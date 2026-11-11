@@ -73,6 +73,16 @@ def _name(user):
     return f"{user.first_name} {user.last_name}".strip() or user.email
 
 
+def notify_started(user, role, cohort):
+    """The role leads the title so it shows on the lock screen."""
+    if role:
+        notify_team(f"{ROLES[role]}: interest started ✍️",
+                    f"{_name(user)} started their form for {ROLES[role]}.", cohort)
+    else:
+        notify_team("Executive interest started ✍️ (no role picked yet)",
+                    f"{_name(user)} started their form but hasn't picked a role yet.", cohort)
+
+
 @api_view(["POST"])
 @authentication_classes([])
 @permission_classes([AllowAny])
@@ -88,9 +98,7 @@ def start_exec_interest(request):
         entry.role = role
         entry.save(update_fields=["role", "updated_at"])
     if created:
-        for_role = f" for {ROLES[entry.role]}" if entry.role else ""
-        notify_team("Executive interest started ✍️",
-                    f"{_name(user)} started their interest form{for_role}.", entry.cohort)
+        notify_started(user, entry.role, entry.cohort)
     return Response({
         "first_name": user.first_name,
         "role": entry.role,
@@ -170,10 +178,9 @@ def submit_exec_interest(request):
     role_name = ROLES[role]
     if not updated:
         if started_now:  # skipped the start step (e.g. page cached) - still count it
-            notify_team("Executive interest started ✍️",
-                        f"{_name(user)} started their interest form for {role_name}.", entry.cohort)
-        notify_team("Executive interest completed ✅",
-                    f"{_name(user)} completed their interest form for {role_name}.", entry.cohort)
+            notify_started(user, role, entry.cohort)
+        notify_team(f"{role_name}: interest completed ✅",
+                    f"{_name(user)} completed their form for {role_name}.", entry.cohort)
     try:
         send_transactional_email(
             subject=f"You're in the running for {role_name} 🎉",

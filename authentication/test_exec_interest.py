@@ -100,20 +100,22 @@ class StartedCompletedAlertsTest(TestCase):
         sent = self.messages(push)
         self.assertEqual({e for e, *_ in sent},
                          {"tolulopeahmed@gmail.com", "janet.adegbenro@gmail.com", "josephgideon95@gmail.com"})
-        self.assertIn("started their interest form for Lead. Started: 1 · Completed: 0", sent[0][2])
+        self.assertEqual(sent[0][1], "Lead: interest started ✍️")
+        self.assertIn("started their form for Lead. Started: 1 · Completed: 0", sent[0][2])
 
         self.start()  # coming back later doesn't re-alert
         self.assertEqual(push.call_count, 3)
 
-        self.start(email="amb2@example.com")
+        self.start(email="amb2@example.com")  # no role picked yet
+        self.assertEqual(self.messages(push)[-1][1], "Executive interest started ✍️ (no role picked yet)")
         self.assertIn("Started: 2 · Completed: 0", self.messages(push)[-1][2])
 
         push.reset_mock()
         self.assertEqual(self.submit().status_code, 201)
         sent = self.messages(push)
         self.assertEqual(len(sent), 3)
-        self.assertEqual(sent[0][1], "Executive interest completed ✅")
-        self.assertIn("completed their interest form for Lead. Started: 2 · Completed: 1", sent[0][2])
+        self.assertEqual(sent[0][1], "Lead: interest completed ✅")
+        self.assertIn("completed their form for Lead. Started: 2 · Completed: 1", sent[0][2])
 
         push.reset_mock()
         self.submit()  # an update doesn't re-alert
@@ -122,8 +124,8 @@ class StartedCompletedAlertsTest(TestCase):
     def test_submit_without_start_counts_both(self, push, *_):
         self.submit()
         titles = [t for _, t, _ in self.messages(push)]
-        self.assertEqual(titles.count("Executive interest started ✍️"), 3)
-        self.assertEqual(titles.count("Executive interest completed ✅"), 3)
+        self.assertEqual(titles.count("Lead: interest started ✍️"), 3)
+        self.assertEqual(titles.count("Lead: interest completed ✅"), 3)
         self.assertIn("Started: 1 · Completed: 1", self.messages(push)[-1][2])
 
     def test_admin_list(self, *_):

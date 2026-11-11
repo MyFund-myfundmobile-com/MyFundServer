@@ -2379,7 +2379,7 @@ def get_user_profile(request):
         # placeholder string.
         kyc_detail_fields = (
             "gender", "relationship_status", "employment_status",
-            "yearly_income", "date_of_birth", "address",
+            "yearly_income", "date_of_birth", "address", "city",
             "mothers_maiden_name", "identification_type",
             "next_of_kin_name", "relationship_with_next_of_kin",
             "next_of_kin_phone_number", "state", "country",
@@ -2388,6 +2388,11 @@ def get_user_profile(request):
             field: (getattr(user, field) if _field_is_completed(field) else None)
             for field in kyc_detail_fields
         }
+        if not kyc_details["city"]:
+            # Did KYC before City had its own field - pre-fill a guess
+            # from their address that they can correct.
+            from .address_utils import guess_city
+            kyc_details["city"] = guess_city(user.address, user.state) or None
 
         profile_data = {
             "profile_completion": profile_completion,

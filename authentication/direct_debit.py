@@ -32,6 +32,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from .address_utils import guess_city
 from .models import AutoSave, BankAccount, BankMandate
 from .utils import send_push_notification, send_transactional_email
 
@@ -365,6 +366,7 @@ def direct_debit_overview(request):
                      BankMandate.objects.filter(user=user).exclude(status="inactive")],
         "address": {
             "street": "" if address in ("", "Enter Address") else address,
+            "city": (user.city or "").strip() or guess_city(address, user.state),
             "state": "" if user.state in ("", "Choose") else user.state,
         },
     })
@@ -464,10 +466,16 @@ def direct_debit_autosave(request):
         transfer_bank_name=transfer.get("bank_name") or "",
         pending_amount=amount, pending_frequency=frequency,
     )
-    # Remember the address for next time, only if we had none.
+    # Remember the address for next time, only filling what we lacked.
+    remember = []
     if (user.address or "").strip() in ("", "Enter Address"):
         user.address = f"{street}, {city}"
-        user.save(update_fields=["address"])
+        remember.append("address")
+    if not (user.city or "").strip():
+        user.city = city[:100]
+        remember.append("city")
+    if remember:
+        user.save(update_fields=remember)
 
     out = {"status": "pending", "mandate": _mandate_json(mandate)}
     if not transfer and data.get("redirect_url"):
