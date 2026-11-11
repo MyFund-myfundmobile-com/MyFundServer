@@ -4256,11 +4256,11 @@ from .exec_interest_models import ExecutiveInterest  # noqa: E402
 @admin.register(ExecutiveInterest)
 class ExecutiveInterestAdmin(admin.ModelAdmin):
     """Ambassadors standing for cohort executive roles (web app /lead)."""
-    list_display = ("photo", "user", "role", "cohort", "updated_at")
-    list_filter = ("role", "cohort")
+    list_display = ("photo", "user", "role", "cohort", "submitted_at", "created_at")
+    list_filter = ("role", "cohort", ("submitted_at", admin.EmptyFieldListFilter))
     search_fields = ("user__email", "user__first_name", "user__last_name")
     raw_id_fields = ("user",)
-    readonly_fields = ("photo_large", "created_at", "updated_at")
+    readonly_fields = ("photo_large", "created_at", "submitted_at", "updated_at")
 
     @admin.display(description="")
     def photo(self, obj):
