@@ -5,7 +5,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from authentication.active_saver_views import saving_summaries
-from authentication.models import CustomUser, TopSaverHistory
+from authentication.models import CustomUser, TopSaverHistory, Transaction
 
 
 class SavingStreakTests(TestCase):
@@ -44,6 +44,45 @@ class SavingStreakTests(TestCase):
         self.assertEqual(rows[0]["saving"]["streak_months"], 1)
         detail = client.get(f"/api/admin/users/{saver.pk}/").data
         self.assertEqual(detail["saving"]["streak_months"], 1)
+
+    def test_admin_can_filter_and_export_first_saving_status(self):
+        admin = self.user("saving-status-admin@x.com", is_staff=True, is_superuser=True)
+        started = self.user("started-saving@x.com")
+        not_started = self.user("not-started-saving@x.com")
+        Transaction.objects.create(
+            user=started,
+            amount=Decimal("1000"),
+            transaction_type="credit",
+            status="confirmed",
+            credited_to="SAVINGS",
+            description="First saving",
+        )
+
+        client = APIClient()
+        client.force_authenticate(admin)
+
+        started_rows = client.get(
+            "/api/admin/users/list", {"saving_status": "started"}
+        ).data["data"]
+        self.assertEqual([row["email"] for row in started_rows], [started.email])
+        self.assertTrue(started_rows[0]["has_started_saving"])
+
+        not_started_rows = client.get(
+            "/api/admin/users/list", {"saving_status": "not_started"}
+        ).data["data"]
+        self.assertIn(not_started.email, [row["email"] for row in not_started_rows])
+        self.assertFalse(
+            next(row for row in not_started_rows if row["email"] == not_started.email)["has_started_saving"]
+        )
+
+        exported = client.get(
+            "/api/admin/users/export/", {"saving_status": "started"}
+        )
+        body = exported.content.decode()
+        self.assertIn("Saving Status", body)
+        self.assertIn("started-saving@x.com", body)
+        self.assertIn("Started Saving", body)
+        self.assertNotIn("not-started-saving@x.com", body)
 
     def test_saver_sees_only_their_own_streak(self):
         saver = self.user("own@x.com")

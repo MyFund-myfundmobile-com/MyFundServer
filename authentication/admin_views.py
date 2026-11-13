@@ -1016,6 +1016,22 @@ def _build_admin_user_queryset(params, exclude_unmailable=False):
         )
         filters_applied["zero_balance"] = True
 
+    # A user has "started saving" once a confirmed credit has landed in
+    # Savings or Investment.  This deliberately matches the definition used
+    # by the signup metrics and first-savings nudges, rather than treating a
+    # wallet top-up or an unsuccessful/pending payment as activation.
+    started_saving_tx = Transaction.objects.filter(
+        user=OuterRef('pk'),
+        credited_to__in=['SAVINGS', 'INVESTMENT'],
+        transaction_type='credit',
+        status='confirmed',
+    )
+    queryset = queryset.annotate(has_started_saving=Exists(started_saving_tx))
+    saving_status = (params.get('saving_status') or '').strip().lower()
+    if saving_status in ('started', 'not_started'):
+        queryset = queryset.filter(has_started_saving=saving_status == 'started')
+        filters_applied['saving_status'] = saving_status
+
     # New-signup age bracket - half-open ranges on date_joined, so the 4
     # brackets never overlap (a user matches exactly one). Replaces the
     # old new_users_months param (2026-09), which used date_joined__gte
@@ -1258,8 +1274,9 @@ def all_users_list(request):
         from .active_saver_views import saving_summaries
         rows = serializer.data
         summaries = saving_summaries([row["id"] for row in rows])
-        for row in rows:
+        for row, user in zip(rows, users):
             row["saving"] = summaries.get(row["id"])
+            row["has_started_saving"] = bool(user.has_started_saving)
 
         return Response({
             "page": page,
@@ -1386,6 +1403,7 @@ def admin_user_export_csv(request):
             "State",
             "Country",
             "KYC Status",
+            "Saving Status",
             "Date Joined",
         ])
         for user in users:
@@ -1398,6 +1416,7 @@ def admin_user_export_csv(request):
                 user.state or "",
                 user.country or "",
                 user.kyc_status or "",
+                "Started Saving" if user.has_started_saving else "Not Started Saving",
                 user.date_joined.strftime('%Y-%m-%d') if user.date_joined else "",
             ])
 
