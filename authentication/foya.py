@@ -77,6 +77,9 @@ def today_payload(now=None):
         # banner_body: the banner's line for this category (editable in the
         # admin categories JSON); **text** marks bold.
         "category": {key: category.get(key) for key in ("key", "label", "url", "banner_body")},
+        # Every category in this round, so the app can name them all
+        # (today's vote still rotates - FOYA allows one free vote a day).
+        "categories": [c.get("label") for c in campaign.categories or [] if c.get("label")],
         "signup_url": campaign.signup_url,
         "login_url": campaign.login_url,
         "end_at": campaign.end_at,
