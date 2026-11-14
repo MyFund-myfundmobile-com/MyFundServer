@@ -2521,6 +2521,14 @@ def send_due_foya_pushes_task():
 from .ambassador_performance_notifications import send_ambassador_performance_updates
 
 @shared_task(queue="default")
+def send_saving_streak_reminders_task():
+    """Month-end streak reminders, 7/3/0 days before month end (see saving_streak_reminders.py)."""
+    from .saving_streak_reminders import send_streak_reminders
+
+    return send_streak_reminders()
+
+
+@shared_task(queue="default")
 def send_first_savings_reminders_task():
     """Day-2 and day-7 first-QuickSave reminders for new users who haven't saved (see first_savings.py)."""
     from .first_savings import send_first_savings_reminders

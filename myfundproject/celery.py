@@ -151,6 +151,13 @@ app.conf.beat_schedule = {
     },
     # New users who haven't saved yet: day-2 / day-7 nudges at 10:00 WAT,
     # ahead of the 12 noon daily-returns run.
+    # Savers about to lose their monthly saving streak: 7, 3 and 0 days
+    # before month end, 10:00 WAT (the task skips every other day).
+    "saving-streak-reminders": {
+        "task": "authentication.tasks.send_saving_streak_reminders_task",
+        "schedule": crontab(hour=9, minute=5),
+        "options": {"queue": "default"},
+    },
     "first-savings-reminders": {
         "task": "authentication.tasks.send_first_savings_reminders_task",
         "schedule": crontab(hour=9, minute=0),

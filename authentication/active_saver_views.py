@@ -742,6 +742,17 @@ def saver_story_link(request):
 
 
 # ---- Saving streaks for the admin user list / details ---------------------------
+def live_savers_this_month(user_ids, now=None):
+    """Which of these users already count for the current month, straight
+    from their transactions. TopSaverHistory's row for the running month is
+    only refreshed when someone opens Top Savers, so it can lag a fresh
+    save by hours - the streak chip and month-end reminders must not."""
+    from .utils import monthly_net_savings
+    now = now or timezone.now()
+    rows = monthly_net_savings(now.month, now.year).filter(user_id__in=list(user_ids))
+    return {row["user_id"] for row in rows}
+
+
 def saving_summaries(user_ids, now=None):
     """{user_id: {streak_months, months_without_saving, top_saver_times}}.
     A month counts when they saved more than they withdrew (they're on that
@@ -758,6 +769,8 @@ def saving_summaries(user_ids, now=None):
         months.setdefault(uid, set()).add(index)
         if rank <= 3 and index != current:
             top3.setdefault(uid, set()).add(index)
+    for uid in live_savers_this_month(user_ids, now):
+        months.setdefault(uid, set()).add(current)
     result = {}
     for uid in user_ids:
         saved = months.get(uid, set())
@@ -784,6 +797,8 @@ def saving_calendar(user, now=None):
     current = _month_index(now.month, now.year)
     joined = _month_index(user.date_joined.month, user.date_joined.year)
     saved = {_month_index(m, y) for m, y in TopSaverHistory.objects.filter(user=user).values_list("month", "year")}
+    if user.pk in live_savers_this_month([user.pk], now):
+        saved.add(current)
     months = []
     for index in range(max(joined, current - PAST_MONTHS), current + FUTURE_MONTHS + 1):
         m, y = index % 12 + 1, index // 12
@@ -806,6 +821,8 @@ def saving_stats(user, now=None):
     current = _month_index(now.month, now.year)
     joined = _month_index(user.date_joined.month, user.date_joined.year)
     saved = {_month_index(m, y) for m, y in TopSaverHistory.objects.filter(user=user).values_list("month", "year")}
+    if user.pk in live_savers_this_month([user.pk], now):
+        saved.add(current)
     saved = {i for i in saved if joined <= i <= current}
     longest = run = 0
     for index in range(joined, current + 1):
@@ -823,5 +840,13 @@ def saving_stats(user, now=None):
 def my_saving_streak(request):
     """The Top Savers streak strip: this saver's own summary + months, and
     the numbers for the summary sheet that opens when they tap it."""
+    import calendar
+    from .models import AutoSave
     user = request.user
-    return Response({**saving_summaries([user.pk])[user.pk], **saving_stats(user), "months": saving_calendar(user)})
+    local = timezone.localtime()
+    days_left = calendar.monthrange(local.year, local.month)[1] - local.day
+    return Response({**saving_summaries([user.pk])[user.pk], **saving_stats(user), "months": saving_calendar(user),
+                     # For the Home streak chip: countdown in the last week,
+                     # and "AutoSave keeps it" instead of a nudge.
+                     "days_left": days_left,
+                     "autosave_on": AutoSave.objects.filter(user=user, active=True).exists()})
