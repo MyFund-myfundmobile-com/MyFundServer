@@ -30,7 +30,7 @@ REMIND_DAYS_LEFT = (7, 3, 0)
 
 
 def _months(n):
-    return f"{n}-month" if n > 1 else "1-month"
+    return f"{n}-month savings"
 
 
 def reminder_copy(days_left, streak, month_name, month_end):
@@ -38,7 +38,7 @@ def reminder_copy(days_left, streak, month_name, month_end):
     send_push_notification."""
     run = _months(streak)
     if days_left == 7:
-        return (f"🔥 Keep your {run} saving streak going",
+        return (f"🔥 Keep your {run} streak going",
                 f"{{first_name}}, save any amount before {month_end} so {month_name} counts too. Tap to QuickSave.")
     if days_left == 3:
         return ("🔥 3 days left to keep your streak",

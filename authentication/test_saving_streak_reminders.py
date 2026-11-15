@@ -51,7 +51,7 @@ class SavingStreakReminderTests(TestCase):
 
         self.assertEqual(send_streak_reminders(self.SEVEN_LEFT), 1)
         push = self.reminders(at_risk).get()
-        self.assertIn("2-month", push.title)
+        self.assertIn("2-month savings streak", push.title)
         self.assertEqual(push.data["deep_link"]["screen_params"]["params"], {"quickSaveModalVisible": True})
         for u in (saved_now, on_autosave, never):
             self.assertFalse(self.reminders(u).exists())
