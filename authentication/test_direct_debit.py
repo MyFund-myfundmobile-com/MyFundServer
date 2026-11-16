@@ -29,7 +29,15 @@ class FakeResponse:
             raise requests.HTTPError(str(self.status_code))
 
 
+SENT = []
+
+
 def fake_post(url, json=None, **kw):
+    SENT.append((url, json))
+    if url.endswith("/transaction/initialize"):
+        return FakeResponse({"status": True, "data": {
+            "authorization_url": "https://checkout.paystack.com/abc123",
+            "access_code": "abc123", "reference": json["reference"]}})
     if url.endswith("/customer/authorization/initialize"):
         return FakeResponse({"status": True, "data": {
             "reference": json["reference"], "mandate": {"id": 3315722, "status": "pending"},
@@ -98,54 +106,76 @@ class DirectDebitTest(TestCase):
         self.assertEqual(self.start(amount="100").status_code, 400)
         self.assertFalse(BankMandate.objects.exists())
 
-    def test_link_returns_activation_transfer_and_reuses_pending(self, *_):
+    def test_link_opens_bank_checkout_with_recurring_filter(self, *_):
+        SENT.clear()
         res = self.start()
         self.assertEqual(res.status_code, 201, res.data)
-        self.assertEqual(res.data["mandate"]["transfer"]["account_number"], "9880218357")
-        again = self.start(amount="7000", frequency="monthly")
-        self.assertEqual(again.status_code, 200)
-        self.assertEqual(BankMandate.objects.count(), 1)
+        self.assertEqual(res.data["authorization_url"], "https://checkout.paystack.com/abc123")
+        url, body = SENT[-1]
+        self.assertTrue(url.endswith("/transaction/initialize"))
+        self.assertEqual(body["channels"], ["bank"])
+        self.assertEqual(body["metadata"]["custom_filters"], {"recurring": True})
+        self.assertEqual(body["amount"], 10000)
         m = BankMandate.objects.get()
-        self.assertEqual((m.pending_amount, m.pending_frequency, m.status), (7000, "monthly", "pending"))
-        self.assertFalse(AutoSave.objects.exists())
+        self.assertEqual((m.pending_amount, m.status, m.reference), (5000, "pending", body["reference"]))
+        self.assertEqual(res.data["mandate"]["checkout_url"], "https://checkout.paystack.com/abc123")
+        tx = Transaction.objects.get(transaction_id=body["reference"])
+        self.assertEqual((tx.amount, tx.status, tx.description), (100, "pending", "QuickSave (Bank setup)"))
+
+    def test_abandoned_checkout_is_replaced_but_approved_one_kept(self, *_):
+        self.start()
+        self.start(amount="7000", frequency="monthly")
+        self.assertEqual(BankMandate.objects.filter(status="pending").count(), 1)
+        self.assertEqual(BankMandate.objects.filter(status="inactive").count(), 1)
+        m = BankMandate.objects.get(status="pending")
+        m.authorization_code = "AUTH_dd1"
+        m.save()
+        again = self.start(amount="9000", frequency="daily")
+        self.assertEqual(again.status_code, 200)
+        m.refresh_from_db()
+        self.assertEqual((m.pending_amount, m.pending_frequency), (9000, "daily"))
+        self.assertEqual(BankMandate.objects.filter(status="pending").count(), 1)
 
     def webhook(self, name, **data):
         from .views import paystack_webhook_processing
         with mock.patch("authentication.views.send_transactional_email"):
             paystack_webhook_processing({"event": name, "data": data}, "1.1.1.1", True, {})
 
-    def test_active_webhook_starts_requested_autosave(self, *_):
-        self.start()
+    def test_checkout_payment_then_active_mandate_starts_autosave(self, *_):
+        ref = self.start().data["mandate"]
+        m = BankMandate.objects.get()
         cust = {"email": self.user.email}
-        self.webhook("direct_debit.authorization.created", authorization_code="AUTH_dd1",
-                     active=False, last4="4821", customer=cust)
-        self.assertEqual(BankMandate.objects.get().authorization_code, "AUTH_dd1")
+        # The N100 at Checkout is credited to savings; no card is saved.
+        with mock.patch("authentication.views.send_push_notification"):
+            self.webhook("charge.success", reference=m.reference, channel="bank", amount=10000,
+                         customer=cust, authorization={"authorization_code": "AUTH_dd1",
+                                                       "channel": "direct_debit", "last4": "4821"})
+        tx = Transaction.objects.get(transaction_id=m.reference)
+        self.user.refresh_from_db()
+        self.assertEqual((tx.status, tx.description, self.user.savings), ("confirmed", "QuickSave (Bank setup)", 100))
+        self.assertFalse(Card.all_objects.filter(user=self.user).exists())
+        m.refresh_from_db()
+        self.assertEqual(m.authorization_code, "AUTH_dd1")
         self.assertFalse(AutoSave.objects.exists())
+        # Bank confirms: AutoSave starts, with no second N100 debit.
         self.webhook("direct_debit.authorization.active", authorization_code="AUTH_dd1",
                      active=True, customer=cust)
-        m = BankMandate.objects.get()
+        m.refresh_from_db()
         self.assertEqual(m.status, "active")
         auto = AutoSave.objects.get()
-        self.assertEqual((auto.mandate_id, auto.card_id, auto.amount, auto.frequency),
-                         (m.id, None, 5000, "weekly"))
-        self.assertIsNone(m.pending_amount)
-        # N100 verification debit is pending until Paystack confirms it...
-        verify = Transaction.objects.get(user=self.user, description="QuickSave (Bank verification)")
-        self.assertEqual((verify.amount, verify.status), (100, "pending"))
-        self.user.refresh_from_db()
-        self.assertEqual(self.user.savings, 0)
-        # ...then charge.success (no plan) credits it to savings, no card saved.
-        self.webhook("charge.success", reference=verify.transaction_id, channel="direct_debit",
-                     amount=10000, customer=cust,
-                     authorization={"authorization_code": "AUTH_dd1", "channel": "direct_debit"})
-        verify.refresh_from_db()
-        self.user.refresh_from_db()
-        self.assertEqual((verify.status, verify.description), ("confirmed", "QuickSave (Bank verification)"))
-        self.assertEqual(self.user.savings, 100)
-        self.assertFalse(Card.all_objects.filter(user=self.user).exists())
-        # A repeat webhook doesn't start a second one.
+        self.assertEqual((auto.mandate_id, auto.amount, auto.frequency), (m.id, 5000, "weekly"))
+        self.assertFalse(Transaction.objects.filter(description="QuickSave (Bank verification)").exists())
         self.webhook("direct_debit.authorization.active", authorization_code="AUTH_dd1", customer=cust)
         self.assertEqual(AutoSave.objects.count(), 1)
+
+    def test_checkout_with_another_account_records_that_account(self, *_):
+        self.start()
+        cust = {"email": self.user.email}
+        self.webhook("direct_debit.authorization.created", authorization_code="AUTH_dd2", active=False,
+                     last4="7777", bank="Access Bank", account_name="ADA OBI", customer=cust)
+        m = BankMandate.objects.get()
+        self.assertEqual((m.authorization_code, m.bank_name, m.account_number[-4:], m.bank_account_id),
+                         ("AUTH_dd2", "Access Bank", "7777", None))
 
     def test_linked_account_starts_immediately(self, *_):
         BankMandate.objects.create(user=self.user, bank_account=self.opay, bank_name="OPay",

@@ -4,10 +4,13 @@ Flow:
   1. The app asks GET /api/direct-debit/ whether it's on, which banks are
      supported, and which of the user's saved accounts qualify.
   2. POST /api/direct-debit/autosave/ with a saved account + amount +
-     frequency + address. If that account already has an active mandate, the
-     AutoSave starts straight away. Otherwise we create a mandate (Paystack
-     Initialize Authorization, non-hosted) and return the one-off activation
-     transfer (usually N50 to "NIBSS DIRECT DEBIT" at Paystack-Titan).
+     frequency. If that account already has an active mandate, the AutoSave
+     starts straight away. Otherwise - as Paystack advised - we initialize a
+     N100 transaction with channels ["bank"] and metadata.custom_filters
+     .recurring, and return its Checkout link: the customer pays the N100
+     (credited to savings) and approves the debit mandate with their bank.
+     (Older mandates were made with Initialize Authorization and a one-off
+     transfer; those still show their transfer details.)
   3. Paystack's webhooks (direct_debit.authorization.created / .active) - or
      the app polling GET /api/direct-debit/mandates/<id>/ - mark it active,
      and the requested AutoSave starts on its own: the mandate's
@@ -43,6 +46,8 @@ BANK_FREQUENCIES = ["daily", "weekly", "monthly"]  # no hourly bank debits
 MIN_AMOUNT = 500
 PENDING_REUSE_DAYS = 7
 BANKS_CACHE_KEY = "paystack_direct_debit_banks"
+# References of mandates set up through Paystack Checkout (bank channel).
+CHECKOUT_PREFIX = "MFDDC-"
 
 
 def _headers():
@@ -114,6 +119,9 @@ def _mandate_json(m):
             "account_name": m.transfer_account_name,
             "bank_name": m.transfer_bank_name,
         } if m.status == "pending" and m.transfer_account_number else None,
+        # Checkout still to finish (not approved yet): the app can reopen it.
+        "checkout_url": m.checkout_url if m.status == "pending" and not m.authorization_code else "",
+        "approved": bool(m.authorization_code),
         "created_at": m.created_at,
         "activated_at": m.activated_at,
     }
@@ -247,7 +255,9 @@ def mark_mandate_active(mandate, authorization_code=""):
         mandate.save(update_fields=["authorization_code", "status", "activated_at", "updated_at"])
 
     user = mandate.user
-    start_bank_verification(mandate)
+    if not mandate.reference.startswith(CHECKOUT_PREFIX):
+        # Checkout set-ups already took the first N100 at approval.
+        start_bank_verification(mandate)
     if mandate.pending_amount and mandate.pending_frequency:
         try:
             start_autosave_on_mandate(mandate, mandate.pending_amount, mandate.pending_frequency)
@@ -278,6 +288,8 @@ def refresh_pending_mandate(mandate):
     """Asks Paystack about a pending mandate, for when a webhook was missed."""
     if mandate.status != "pending":
         return mandate
+    if mandate.reference.startswith(CHECKOUT_PREFIX):
+        return _refresh_checkout_mandate(mandate)
     try:
         res = requests.get(f"{PAYSTACK}/customer/authorization/verify/{mandate.reference}",
                            headers=_headers(), timeout=20)
@@ -293,6 +305,53 @@ def refresh_pending_mandate(mandate):
     if data.get("active") is True or data.get("status") == "active":
         return mark_mandate_active(mandate, code)
     return mandate
+
+
+def _refresh_checkout_mandate(mandate):
+    """A Checkout set-up: the transaction carries the mandate's authorization
+    once the customer approves. Paystack's direct_debit.authorization.active
+    webhook says when it can be charged."""
+    if mandate.authorization_code:
+        return mandate
+    try:
+        res = requests.get(f"{PAYSTACK}/transaction/verify/{mandate.reference}",
+                           headers=_headers(), timeout=20)
+        data = (res.json() or {}).get("data") or {} if res.status_code == 200 else {}
+    except (requests.RequestException, ValueError):
+        return mandate
+    auth = data.get("authorization") or {}
+    if data.get("status") == "success" and auth.get("channel") == "direct_debit" \
+            and auth.get("authorization_code"):
+        _take_account_details(mandate, auth)
+        mandate.authorization_code = auth["authorization_code"]
+        mandate.save()
+    return mandate
+
+
+def _take_account_details(mandate, data):
+    """The customer chooses the account on Checkout, which may not be the
+    one they picked in the app - record the one Paystack reports."""
+    last4 = str(data.get("last4") or "")
+    if last4 and not mandate.account_number.endswith(last4):
+        mandate.account_number = f"******{last4}"
+        mandate.bank_account = None
+        mandate.account_name = data.get("account_name") or ""
+        if data.get("bank"):
+            mandate.bank_name = data["bank"]
+
+
+def note_setup_charge(reference, authorization):
+    """charge.success for a Checkout set-up's N100: keep the mandate's
+    authorization if Paystack put it on the charge."""
+    auth = authorization or {}
+    if auth.get("channel") != "direct_debit" or not auth.get("authorization_code"):
+        return
+    mandate = BankMandate.objects.filter(reference=reference, status="pending",
+                                         authorization_code="").first()
+    if mandate:
+        _take_account_details(mandate, auth)
+        mandate.authorization_code = auth["authorization_code"]
+        mandate.save()
 
 
 # --------------------------------------------------------------------------
@@ -325,6 +384,9 @@ def handle_mandate_webhook(event):
                        data.get("authorization_code"))
         return
     code = data.get("authorization_code") or ""
+    if mandate.status == "pending":
+        _take_account_details(mandate, data)
+        mandate.save()
     if name == "direct_debit.authorization.active" or data.get("active") is True:
         mark_mandate_active(mandate, code)
     elif code and not mandate.authorization_code:
@@ -415,73 +477,72 @@ def direct_debit_autosave(request):
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response({"status": "active", "mandate": _mandate_json(active)})
 
-    # Waiting on the same account's activation: keep it, update the request.
+    # Already approved at checkout and waiting on the bank: keep it, just
+    # update what to start once it's active.
     cutoff = timezone.now() - timezone.timedelta(days=PENDING_REUSE_DAYS)
-    pending = BankMandate.objects.filter(user=user, bank_account=account, status="pending",
-                                         created_at__gte=cutoff).first()
-    if pending and pending.transfer_account_number:
-        pending.pending_amount, pending.pending_frequency = amount, frequency
-        pending.save(update_fields=["pending_amount", "pending_frequency", "updated_at"])
-        return Response({"status": "pending", "mandate": _mandate_json(pending)})
+    waiting = BankMandate.objects.filter(user=user, status="pending", created_at__gte=cutoff) \
+        .exclude(authorization_code="").first()
+    if waiting:
+        waiting.pending_amount, waiting.pending_frequency = amount, frequency
+        waiting.save(update_fields=["pending_amount", "pending_frequency", "updated_at"])
+        return Response({"status": "pending", "mandate": _mandate_json(waiting)})
+    # Never approved (checkout abandoned): a Paystack reference is single-use,
+    # so retire it and start a fresh checkout.
+    BankMandate.objects.filter(user=user, status="pending", authorization_code="") \
+        .update(status="inactive", updated_at=timezone.now())
 
-    street = (d.get("street") or "").strip()
-    city = (d.get("city") or "").strip()
-    state = (d.get("state") or "").strip()
-    if not (street and city and state):
-        return Response({"error": "Enter your street address, city and state."},
-                        status=status.HTTP_400_BAD_REQUEST)
+    # Paystack's advice: set the mandate up through Checkout with the bank
+    # channel and the recurring filter. The customer pays a first N100
+    # (credited to savings, like the card check) and approves the debit
+    # mandate with their bank in the same step.
+    from .models import Transaction
 
-    reference = f"MFDD-{uuid.uuid4().hex[:16]}"
+    reference = f"{CHECKOUT_PREFIX}{uuid.uuid4().hex[:16]}"
     payload = {
         "email": user.email,
-        "channel": "direct_debit",
-        "use_hosted_url": False,
+        "amount": VERIFICATION_AMOUNT * 100,
+        "currency": "NGN",
         "reference": reference,
-        "account": {"number": account.account_number, "bank_code": bank_code},
-        "address": {"street": street, "city": city, "state": state},
+        "channels": ["bank"],
+        "metadata": {
+            "custom_filters": {"recurring": True},
+            "purpose": "direct_debit_setup",
+            "autosave_amount": amount,
+            "autosave_frequency": frequency,
+        },
     }
     try:
-        res = requests.post(f"{PAYSTACK}/customer/authorization/initialize",
+        res = requests.post(f"{PAYSTACK}/transaction/initialize",
                             json=payload, headers=_headers(), timeout=30)
         body = res.json() if res.content else {}
     except (requests.RequestException, ValueError) as exc:
-        logger.error("Direct Debit init failed for %s: %s", user.email, exc)
+        logger.error("Direct Debit checkout init failed for %s: %s", user.email, exc)
         return Response({"error": "Our payment provider didn't respond. Please try again shortly."},
                         status=status.HTTP_502_BAD_GATEWAY)
-    if not res.ok or not body.get("status"):
-        logger.warning("Direct Debit init refused for %s: %s", user.email, body)
+    data = body.get("data") or {}
+    if not res.ok or not body.get("status") or not data.get("authorization_url"):
+        logger.warning("Direct Debit checkout init refused for %s: %s", user.email, body)
         return Response({"error": body.get("message") or "Couldn't link this bank account."},
                         status=status.HTTP_400_BAD_REQUEST)
 
-    data = body.get("data") or {}
-    transfer = data.get("transferDetails") or {}
+    Transaction.objects.create(
+        user=user, amount=VERIFICATION_AMOUNT, transaction_type="credit", status="pending",
+        credited_to="SAVINGS", description="QuickSave (Bank setup)",
+        transaction_id=reference, source_channel="direct_debit",
+    )
+    # The bank and account are confirmed by the webhook - the customer picks
+    # them on Checkout; until then we show the one they chose here.
     mandate = BankMandate.objects.create(
         user=user, bank_account=account, bank_name=account.bank_name, bank_code=bank_code,
         account_number=account.account_number, account_name=account.account_name,
-        reference=data.get("reference") or reference,
-        paystack_mandate_id=str((data.get("mandate") or {}).get("id") or ""),
-        transfer_amount=str(transfer.get("amount") or ""),
-        transfer_account_number=str(transfer.get("account_number") or ""),
-        transfer_account_name=transfer.get("account_name") or "",
-        transfer_bank_name=transfer.get("bank_name") or "",
+        reference=reference, checkout_url=data["authorization_url"],
         pending_amount=amount, pending_frequency=frequency,
     )
-    # Remember the address for next time, only filling what we lacked.
-    remember = []
-    if (user.address or "").strip() in ("", "Enter Address"):
-        user.address = f"{street}, {city}"
-        remember.append("address")
-    if not (user.city or "").strip():
-        user.city = city[:100]
-        remember.append("city")
-    if remember:
-        user.save(update_fields=remember)
-
-    out = {"status": "pending", "mandate": _mandate_json(mandate)}
-    if not transfer and data.get("redirect_url"):
-        # Some banks confirm in their own app/page instead of a transfer.
-        out["redirect_url"] = data["redirect_url"]
-    return Response(out, status=status.HTTP_201_CREATED)
+    return Response({"status": "pending", "mandate": _mandate_json(mandate),
+                     "authorization_url": data["authorization_url"],
+                     # Older app builds open redirect_url.
+                     "redirect_url": data["authorization_url"]},
+                    status=status.HTTP_201_CREATED)
 
 
 @api_view(["GET"])

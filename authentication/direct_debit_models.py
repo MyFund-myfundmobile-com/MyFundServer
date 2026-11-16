@@ -38,6 +38,9 @@ class BankMandate(models.Model):
     transfer_account_number = models.CharField(max_length=20, blank=True)
     transfer_account_name = models.CharField(max_length=100, blank=True)
     transfer_bank_name = models.CharField(max_length=100, blank=True)
+    # Paystack Checkout link (bank channel) where the customer pays the first
+    # N100 and approves the mandate; kept so they can reopen it.
+    checkout_url = models.URLField(max_length=300, blank=True)
 
     # The AutoSave the user asked for; started as soon as the mandate is active.
     pending_amount = models.PositiveIntegerField(null=True, blank=True)

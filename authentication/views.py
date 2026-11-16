@@ -9654,7 +9654,10 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                 # --------------------------------------------------
                 # DVA / bank transfer handling
                 # --------------------------------------------------
-                if payment_channel in ["dedicated_nuban", "bank_transfer", "bank"]:
+                # (Not the N100 that sets up bank-account AutoSave through
+                # Checkout - "MFDDC-" - which is credited below.)
+                if payment_channel in ["dedicated_nuban", "bank_transfer", "bank"] \
+                        and not str(reference or "").startswith("MFDDC-"):
                     process_dva_credit_from_paystack_event(event)
                     return
 
@@ -9686,7 +9689,13 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     return JsonResponse({"status": True}, status=status.HTTP_200_OK)
 
                 saved_card = None
-                is_direct_debit = payment_channel == "direct_debit"
+                # Bank-account AutoSave set up through Checkout (bank channel):
+                # the first N100 - see direct_debit.direct_debit_autosave.
+                is_bank_setup = str(reference or "").startswith("MFDDC-")
+                is_direct_debit = payment_channel == "direct_debit" or is_bank_setup
+                if is_bank_setup:
+                    from .direct_debit import note_setup_charge
+                    note_setup_charge(reference, authorization)
 
                 # Bank-account AutoSave (Direct Debit): the authorization is a
                 # mandate, not a card - never save it as one. Only plan
@@ -9998,6 +10007,10 @@ def paystack_webhook_processing(event, ip_address, ip_is_paystack, header_data):
                     if saved_card:
                         transaction.description = "QuickSave (Card)"
                         transaction.paystack_auth_code = saved_card.authorization_code
+                    elif is_bank_setup:
+                        transaction.description = "QuickSave (Bank setup)"
+                        transaction.paystack_auth_code = paystack_auth_code
+                        transaction.source_channel = "direct_debit"
                     elif is_direct_debit:
                         transaction.description = "QuickSave (Bank verification)"
                         transaction.paystack_auth_code = paystack_auth_code
