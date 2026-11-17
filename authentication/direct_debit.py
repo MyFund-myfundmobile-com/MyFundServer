@@ -103,12 +103,21 @@ def supported_code_for(account, banks):
     return None
 
 
+def _setup_paid(m):
+    """Was the Checkout set-up's N100 paid (credited to savings)?"""
+    if not m.reference.startswith(CHECKOUT_PREFIX):
+        return False
+    from .models import Transaction
+    return Transaction.objects.filter(transaction_id=m.reference, status="confirmed").exists()
+
+
 def _mandate_json(m):
     return {
         "id": m.id,
         "status": m.status,
         "bank_name": m.bank_name,
         "account_last4": m.account_number[-4:],
+        "account_name": m.account_name,
         "label": m.label,
         "bank_account_id": m.bank_account_id,
         "pending_amount": m.pending_amount,
@@ -119,9 +128,14 @@ def _mandate_json(m):
             "account_name": m.transfer_account_name,
             "bank_name": m.transfer_bank_name,
         } if m.status == "pending" and m.transfer_account_number else None,
-        # Checkout still to finish (not approved yet): the app can reopen it.
-        "checkout_url": m.checkout_url if m.status == "pending" and not m.authorization_code else "",
+        # Checkout still to finish (not paid or approved yet): the app can reopen it.
+        "checkout_url": (m.checkout_url if m.status == "pending" and not m.authorization_code
+                         and not _setup_paid(m) else ""),
         "approved": bool(m.authorization_code),
+        # The N100 went through but Paystack set up no mandate (e.g. it was
+        # paid by bank transfer): the app offers to try again.
+        "paid_without_mandate": (m.status == "pending" and not m.authorization_code
+                                 and _setup_paid(m)),
         "created_at": m.created_at,
         "activated_at": m.activated_at,
     }
@@ -329,15 +343,27 @@ def _refresh_checkout_mandate(mandate):
 
 
 def _take_account_details(mandate, data):
-    """The customer chooses the account on Checkout, which may not be the
-    one they picked in the app - record the one Paystack reports."""
-    last4 = str(data.get("last4") or "")
-    if last4 and not mandate.account_number.endswith(last4):
+    """The customer chooses the bank and account on Checkout - record what
+    Paystack reports, and tie it to the matching saved bank account if the
+    user has one (same last 4 digits and bank)."""
+    last4 = str(data.get("last4") or "")[-4:]
+    if not last4.isdigit():
+        return
+    if data.get("bank"):
+        mandate.bank_name = data["bank"][:100]
+    if data.get("account_name"):
+        mandate.account_name = data["account_name"][:100]
+    if not mandate.account_number.endswith(last4):
         mandate.account_number = f"******{last4}"
         mandate.bank_account = None
-        mandate.account_name = data.get("account_name") or ""
-        if data.get("bank"):
-            mandate.bank_name = data["bank"]
+    if not mandate.bank_account_id:
+        wanted = _norm(mandate.bank_name)
+        for acc in BankAccount.objects.filter(user=mandate.user, account_number__endswith=last4):
+            name = _norm(acc.bank_name)
+            if not wanted or name.startswith(wanted[:5]) or wanted.startswith(name[:5]):
+                mandate.bank_account = acc
+                mandate.account_number = acc.account_number
+                break
 
 
 def note_setup_charge(reference, authorization):
@@ -352,6 +378,29 @@ def note_setup_charge(reference, authorization):
         _take_account_details(mandate, auth)
         mandate.authorization_code = auth["authorization_code"]
         mandate.save()
+
+
+def _retire_unpaid_setup_charges(user):
+    """The N100 on Checkout is optional to Paystack - the mandate is made at
+    the account + OTP step, and the customer may leave before paying. Mark
+    those pending set-up QuickSaves failed once Paystack says they were
+    abandoned, so they don't sit as 'pending' in the history."""
+    from .models import Transaction
+
+    stale = Transaction.objects.filter(
+        user=user, status="pending", transaction_id__startswith=CHECKOUT_PREFIX,
+        date__lt=timezone.now() - timezone.timedelta(minutes=30),
+    )[:5]
+    for tx in stale:
+        try:
+            res = requests.get(f"{PAYSTACK}/transaction/verify/{tx.transaction_id}",
+                               headers=_headers(), timeout=15)
+            state = ((res.json() or {}).get("data") or {}).get("status") if res.ok else None
+        except (requests.RequestException, ValueError):
+            return
+        if state in ("abandoned", "failed", "reversed"):
+            tx.status = "failed"
+            tx.save(update_fields=["status"])
 
 
 # --------------------------------------------------------------------------
@@ -417,6 +466,7 @@ def direct_debit_overview(request):
     mandates = BankMandate.objects.filter(user=user).exclude(status="inactive")
     for m in mandates.filter(status="pending"):
         refresh_pending_mandate(m)
+    _retire_unpaid_setup_charges(user)
     address = (user.address or "").strip()
     return Response({
         "enabled": True,
@@ -458,18 +508,25 @@ def direct_debit_autosave(request):
         return Response({"error": f"You already have an active {frequency} AutoSave."},
                         status=status.HTTP_400_BAD_REQUEST)
 
-    account = BankAccount.objects.filter(user=user, id=d.get("bank_account_id")).first()
-    if not account:
-        return Response({"error": "Choose one of your saved bank accounts."},
-                        status=status.HTTP_404_NOT_FOUND)
-    bank_code = supported_code_for(account, supported_banks())
-    if not bank_code:
-        return Response({"error": f"{account.bank_name} doesn't support AutoSave without a card yet. "
-                                  "Use another bank account or a card."},
-                        status=status.HTTP_400_BAD_REQUEST)
-
-    # Already linked: start right away.
-    active = BankMandate.objects.filter(user=user, bank_account=account, status="active").first()
+    # A bank already linked for AutoSave (chosen by mandate_id, or by the
+    # saved account it belongs to - older app builds): start right away.
+    active = None
+    if d.get("mandate_id"):
+        active = BankMandate.objects.filter(user=user, id=d.get("mandate_id"), status="active").first()
+        if not active:
+            return Response({"error": "That bank link isn't active any more. Link your bank again."},
+                            status=status.HTTP_404_NOT_FOUND)
+    # Older app builds send a saved account; the customer now picks the bank
+    # on Paystack, so it's optional.
+    account = None
+    if d.get("bank_account_id"):
+        account = BankAccount.objects.filter(user=user, id=d.get("bank_account_id")).first()
+        if not active and account:
+            active = BankMandate.objects.filter(user=user, bank_account=account, status="active").first()
+            if not active and not supported_code_for(account, supported_banks()):
+                return Response({"error": f"{account.bank_name} doesn't support AutoSave without a card "
+                                          "yet. Use another bank account or a card."},
+                                status=status.HTTP_400_BAD_REQUEST)
     if active:
         try:
             start_autosave_on_mandate(active, amount, frequency)
@@ -530,11 +587,14 @@ def direct_debit_autosave(request):
         credited_to="SAVINGS", description="QuickSave (Bank setup)",
         transaction_id=reference, source_channel="direct_debit",
     )
-    # The bank and account are confirmed by the webhook - the customer picks
-    # them on Checkout; until then we show the one they chose here.
+    # The customer picks the bank and account on Checkout; Paystack's
+    # webhooks fill them in (see _take_account_details).
     mandate = BankMandate.objects.create(
-        user=user, bank_account=account, bank_name=account.bank_name, bank_code=bank_code,
-        account_number=account.account_number, account_name=account.account_name,
+        user=user, bank_account=account,
+        bank_name=account.bank_name if account else "",
+        bank_code=(account.bank_code or "") if account else "",
+        account_number=account.account_number if account else "",
+        account_name=account.account_name if account else "",
         reference=reference, checkout_url=data["authorization_url"],
         pending_amount=amount, pending_frequency=frequency,
     )

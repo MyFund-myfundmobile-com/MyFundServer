@@ -56,7 +56,9 @@ class BankMandate(models.Model):
     @property
     def label(self):
         """'OPay account •••• 4821' for messages."""
-        return f"{self.bank_name} account •••• {self.account_number[-4:]}"
+        if not self.account_number:
+            return f"{self.bank_name} account" if self.bank_name else "bank account"
+        return f"{self.bank_name or 'Bank'} account •••• {self.account_number[-4:]}"
 
     def __str__(self):
         return f"{self.user} - {self.label} ({self.status})"

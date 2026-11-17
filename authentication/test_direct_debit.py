@@ -63,6 +63,8 @@ def fake_post(url, json=None, **kw):
 @mock.patch("authentication.direct_debit.send_transactional_email")
 @mock.patch("authentication.direct_debit.supported_banks", return_value=BANKS)
 @mock.patch("authentication.direct_debit.requests.post", side_effect=fake_post)
+@mock.patch("authentication.direct_debit.requests.get",
+            return_value=FakeResponse({"status": True, "data": {"status": "abandoned"}}))
 @mock.patch.dict("os.environ", {"DIRECT_DEBIT_MODE": "on"})
 class DirectDebitTest(TestCase):
     def setUp(self):
@@ -167,6 +169,53 @@ class DirectDebitTest(TestCase):
         self.assertFalse(Transaction.objects.filter(description="QuickSave (Bank verification)").exists())
         self.webhook("direct_debit.authorization.active", authorization_code="AUTH_dd1", customer=cust)
         self.assertEqual(AutoSave.objects.count(), 1)
+
+    def test_paid_by_transfer_without_mandate_offers_retry(self, *_):
+        self.start()
+        m = BankMandate.objects.get()
+        with mock.patch("authentication.views.send_push_notification"):
+            self.webhook("charge.success", reference=m.reference, channel="bank_transfer", amount=10000,
+                         customer={"email": self.user.email},
+                         authorization={"authorization_code": "AUTH_t", "channel": "bank_transfer",
+                                        "reusable": False})
+        self.assertEqual(Transaction.objects.get(transaction_id=m.reference).status, "confirmed")
+        mj = self.client.get("/api/direct-debit/").data["mandates"][0]
+        self.assertTrue(mj["paid_without_mandate"])
+        self.assertEqual(mj["checkout_url"], "")
+        # Trying again retires it and opens a fresh checkout.
+        self.assertEqual(self.start().status_code, 201)
+        self.assertEqual(BankMandate.objects.filter(status="pending").count(), 1)
+
+    def test_no_saved_account_needed(self, *_):
+        res = self.client.post("/api/direct-debit/autosave/",
+                               {"amount": "5000", "frequency": "weekly"}, format="json")
+        self.assertEqual(res.status_code, 201, res.data)
+        m = BankMandate.objects.get()
+        self.assertEqual((m.bank_name, m.account_number, m.bank_account_id), ("", "", None))
+        # Paystack tells us the bank; it's tied to the saved OPay account (same last 4).
+        self.webhook("direct_debit.authorization.created", authorization_code="AUTH_x", active=False,
+                     last4="4821", bank="OPay Digital Services Limited (OPay)", account_name="ADA OBI",
+                     customer={"email": self.user.email})
+        m.refresh_from_db()
+        self.assertEqual((m.bank_account_id, m.account_number), (self.opay.id, "8123454821"))
+
+    def test_linked_bank_chosen_by_mandate(self, *_):
+        m = BankMandate.objects.create(user=self.user, bank_name="Access Bank", bank_code="044",
+                                       account_number="******1234", reference="r9",
+                                       status="active", authorization_code="AUTH_a")
+        res = self.client.post("/api/direct-debit/autosave/",
+                               {"mandate_id": m.id, "amount": "2000", "frequency": "monthly"}, format="json")
+        self.assertEqual(res.data["status"], "active", res.data)
+        self.assertEqual(AutoSave.objects.get().mandate_id, m.id)
+
+    def test_unpaid_setup_charge_is_retired(self, *_):
+        self.start()
+        tx = Transaction.objects.get(description="QuickSave (Bank setup)")
+        from django.utils import timezone
+        Transaction.objects.filter(pk=tx.pk).update(date=timezone.now() - timezone.timedelta(hours=1))
+        self.client.get("/api/direct-debit/")
+        tx.refresh_from_db()
+        self.assertEqual(tx.status, "failed")
 
     def test_checkout_with_another_account_records_that_account(self, *_):
         self.start()
