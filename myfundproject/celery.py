@@ -188,10 +188,13 @@ app.conf.beat_schedule = {
         "task": "authentication.tasks.invite_active_savers_of_month",
         "schedule": crontab(hour=9, minute=0, day_of_month=1),
     },
-    # Birthday Greetings
+    # Birthday Greetings - hourly so push, email and SMS can reach the
+    # celebrant at different times of day (authentication/birthday.py
+    # CHANNEL_HOURS). Name kept from the old once-daily entry so the
+    # DatabaseScheduler updates that row in place instead of adding a second.
     "send-birthday-greetings-daily": {
         "task": "authentication.tasks.send_birthday_greetings",
-        "schedule": crontab(hour=7, minute=0),
+        "schedule": crontab(minute=5),
     },
     # Scheduled withdrawals - hourly rather than once/day. The model only
     # stores a date (no time), so hourly is already far finer than needed

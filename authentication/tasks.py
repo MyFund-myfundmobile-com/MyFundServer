@@ -930,57 +930,67 @@ def invite_active_savers_of_month():
 
 
 @shared_task
-def send_birthday_greetings():
-    """Send birthday emails and push notifications to users celebrating today"""
+def send_birthday_greetings(only_email=None, channel=None):
+    """Hourly. Personal birthday push, email and SMS for KYC-completed users
+    celebrating today (authentication/birthday.py), each channel at its own
+    time of day and recorded on BirthdayGreeting so none is ever repeated.
+    ``only_email``/``channel`` are for manual sends: one user, and/or force
+    one channel now regardless of the time-of-day schedule."""
+    from django.db import IntegrityError
     from django.utils import timezone
-    from datetime import date
-    from .models import CustomUser
-    from .utils import send_generic_email, send_transactional_email, send_push_notification
+    from .birthday import birthday_email_html, birthday_message, birthday_users, next_channel
+    from .models import BirthdayGreeting
+    from .utils import send_generic_email, send_push_notification, send_sms
 
-    today = date.today()
-    users = CustomUser.objects.filter(
-        is_active=True,
-        is_banned=False,
-        date_of_birth__month=today.month,
-        date_of_birth__day=today.day,
-    )
+    now = timezone.now()
+    today = timezone.localdate()
+    users = birthday_users(today)
+    if only_email:
+        users = users.filter(email__iexact=only_email)
 
-    if not users.exists():
-        return "No birthdays today 🎈"
-
+    counts = {"users": 0, "push": 0, "email": 0, "sms": 0, "failed": 0}
     for user in users:
+        counts["users"] += 1
         try:
-            # 🎉 Email
-            subject = "🎂 Happy Birthday from MyFund!"
-            message = f"""
-            Hi {user.first_name},<br><br>
-            🎉 The entire MyFund team wishes you a wonderful birthday! <br>
-            May your new year bring you growth, success, and more financial wins.<br><br>
-            🥳 Keep saving and keep shining!<br><br>
-            — The MyFund Team
-            """
-            # Was positional (subject, message, from_email, recipients) against
-            # a (subject, message, recipient_list, from_email) signature, so
-            # every birthday email went to the sender address and was dropped.
-            send_generic_email(
-                subject=subject,
-                message=message,
-                recipient_list=[user.email],
-                from_email="MyFund <info@myfundmobile.com>",
-            )
+            greeting, _ = BirthdayGreeting.objects.get_or_create(user=user, year=today.year)
+        except IntegrityError:
+            greeting = BirthdayGreeting.objects.get(user=user, year=today.year)
+        todo = channel if channel and not getattr(greeting, f"{channel}_sent_at") else None
+        todo = todo or (None if channel else next_channel(greeting, now))
+        if not todo:
+            continue
+        # Claim the channel first (conditional update), so overlapping runs
+        # can't both send it.
+        claimed = BirthdayGreeting.objects.filter(pk=greeting.pk, **{f"{todo}_sent_at__isnull": True}) \
+            .update(**{f"{todo}_sent_at": now})
+        if not claimed:
+            continue
 
-            # 🎊 Push notification
-            send_push_notification(
-                user,
-                title=f"🎂 Happy Birthday, {user.first_name}!",
-                message=f"Hi {user.first_name}, the MyFund team wishes you a Happy and memorable Birthday today! Long life and prosperity! 🎉",
-                data={"type": "BIRTHDAY"},
-            )
+        msg = birthday_message(user)
+        try:
+            if todo == "push":
+                send_push_notification(user, title=msg["push_title"], message=msg["push_body"],
+                                       data={"type": "BIRTHDAY"})
+            elif todo == "email":
+                send_generic_email(
+                    subject=msg["subject"],
+                    message=birthday_email_html(msg),
+                    recipient_list=[user.email],
+                    from_email="MyFund <info@myfundmobile.com>",
+                )
+            elif todo == "sms" and user.phone_number:
+                if not send_sms(str(user.phone_number), msg["sms"]):
+                    raise RuntimeError("Payless rejected the SMS")
+            counts[todo] += 1
+        except Exception:
+            # Best effort, like every other greeting channel: a failed send
+            # stays recorded so it isn't retried every hour all day.
+            counts["failed"] += 1
+            logger.exception("Birthday %s to %s failed", todo, user.email)
 
-        except Exception as e:
-            logger.error(f"Failed to send birthday message to {user.email}: {str(e)}")
-
-    return f"🎂 Birthday messages sent to {users.count()} users."
+    if not counts["users"]:
+        return "No birthdays today 🎈"
+    return f"🎂 Birthdays: {counts}"
 
 
 # tasks.py

@@ -1493,6 +1493,25 @@ class TopSaverRecognition(models.Model):
         return f"Top Saver #{self.rank}: {self.user.full_name} ({self.month}/{self.year})"
 
 
+class BirthdayGreeting(models.Model):
+    """One birthday per user per year, with each channel's send time, so the
+    hourly birthday task sends push, email and SMS at different times of
+    the day (see authentication/birthday.py) and never repeats a channel."""
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="birthday_greetings")
+    year = models.PositiveSmallIntegerField()
+    push_sent_at = models.DateTimeField(null=True, blank=True)
+    email_sent_at = models.DateTimeField(null=True, blank=True)
+    sms_sent_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["user", "year"], name="one_birthday_greeting_per_user_year")]
+
+    def __str__(self):
+        return f"{self.user_id} birthday {self.year}"
+
+
 class ActiveSaverInterview(models.Model):
     """A consistent saver (outside that month's Top 3) invited to share a
     testimonial at www.myfundmobile.com/activesaver/interview.
